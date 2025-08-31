@@ -1,10 +1,10 @@
-# Alumina UI
+# Alumina Interface
 
 <img src="doc/screenshot-design.png" width="30%" alt="Design screenshot"/> <img src="doc/screenshot-control.png" width="30%" alt="Control screenshot"/> <img src="doc/screenshot-diagnostics.png" width="30%" alt="Diagnostics screenshot"/>
 
 Alumina is an integrated CAD/CAM, physics simulation, and motion control solution written entirely in Rust.  It is intended to control laser and plasma cutters, 3D printers, CNC routers and mills, and lathes.
 
-Try the [Alumina UI Web Demo](https://timschmidt.github.io/alumina-ui/)
+Try the [Alumina Interface Web Demo](https://timschmidt.github.io/alumina-interface/)
 
 Firmware and UI get linked together at compile time and fit in the onboard flash of a single microcontroller, reducing design complexity, part count, and cost.
  - [Alumina Firmware](https://github.com/timschmidt/alumina-firmware)
