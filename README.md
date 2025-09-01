@@ -75,3 +75,5 @@ trunk serve --open --release
 - get UI building for native so that "cargo bloat" can be used
 - get long-click as right-click working for Design tab Central view, or add button for opening node menu on mobile
 - convert Diagnostics and Design tabs to collapsible tool panels
+- implement settings dialog
+  - automatically re-render on graph change checkbox
