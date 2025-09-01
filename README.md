@@ -74,3 +74,4 @@ trunk serve --open --release
 - figure out improper rendering in Chrome Android Pixel 6a
 - get UI building for native so that "cargo bloat" can be used
 - get long-click as right-click working for Design tab Central view, or add button for opening node menu on mobile
+- convert Diagnostics and Design tabs to collapsible tool panels
