@@ -18,7 +18,7 @@ Alumina Firmware and Interface get linked together at compile time and fit in th
    - performs motion planning and step generation
    - (planned) port to [embassy](https://embassy.dev/) and [FoA](https://github.com/esp32-open-mac/FoA) and [smol](https://github.com/smol-rs/smol/blob/master/examples/simple-server.rs)
    - (planned) port to other embassy hardware targets
- - [Alumina Interface](https://github.com/timschmidt/alumina-ui)
+ - [Alumina Interface](https://github.com/timschmidt/alumina-interface)
    - targets [WebAssembly](https://en.wikipedia.org/wiki/WebAssembly)
    - draws geometry using WebGL and egui
    - works in any browser, desktop or mobile
