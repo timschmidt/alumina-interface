@@ -77,3 +77,17 @@ trunk serve --open --release
 - convert Diagnostics and Design tabs to collapsible tool panels
 - implement settings dialog
   - automatically re-render on graph change checkbox
+  - wifi information
+  - IP information
+  - URI setting
+  - Enable / Disable SD checkbox
+    - Enable / Disable logging to SD checkbox (greyed out when SD is disabled)
+- implement about dialog
+  - device image
+  - pin configuration information
+  - build date
+  - build stats
+  - feature flags
+  - github links
+  - github sponsor link
+  - Licenses notices
