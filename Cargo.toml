@@ -6,8 +6,10 @@ edition = "2024"
 [dependencies]
 eframe = { version = "0.30", default-features = false, features = ["glow"] }
 egui = { version = "0.30", default-features = false, features = ["default_fonts"] }
+egui_extras = { version = "0.30", features = ["all_loaders"] }
 egui_glow = { version = "0.30", default-features = false }
 egui_plot = "0.30.0"
+image = { version = "0.25", features = ["jpeg", "png"] }
 #egui_node_graph2 = { version = "0.7.0", features = ["persistence"] }
 egui_node_graph2 = { git = "https://github.com/trevyn/egui_node_graph2", features = ["persistence"] }
 glow = { version = "0.16", default-features = false }

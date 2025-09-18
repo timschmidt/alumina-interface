@@ -174,6 +174,8 @@ pub struct AluminaApp {
     diag_d0:bool,diag_d1:bool,diag_d2:bool,diag_d3:bool,
     diag_d4:bool,diag_d5:bool,diag_d6:bool,diag_d7:bool,
     diag_d9:bool,diag_d11:bool,diag_d12:bool,diag_d13:bool,
+    board_info_slot: Arc<Mutex<Option<(String /*name*/, String /*image_url*/)>>>,
+    board_info_requested: bool,
     selected_tool: Tool,
     // Laser
     kerf: f32,
@@ -211,6 +213,9 @@ pub struct AluminaApp {
 
 impl AluminaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {		
+		// Enable Uri/Bytes -> Image loading for egui::Image / Ui::image:
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+		
         let mut entry =
             ModelEntry::new("icosahedron", Mesh::<()>::icosahedron(100.0, None).float());
         entry.refresh();
@@ -255,6 +260,8 @@ impl AluminaApp {
             diag_d0:false,diag_d1:false,diag_d2:false,diag_d3:false,
 			diag_d4:false,diag_d5:false,diag_d6:false,diag_d7:false,
 			diag_d9:false,diag_d11:false,diag_d12:false,diag_d13:false,
+			board_info_slot: Arc::new(Mutex::new(None)),
+			board_info_requested: false,
             selected_tool: Tool::Laser, // default
             kerf: 0.1,
             touch_off: true,
@@ -1240,7 +1247,7 @@ impl eframe::App for AluminaApp {
 						gpio_row("D13",&mut self.diag_d13,"d13_high","d13_low",ui);
 					});
 
-                egui::CentralPanel::default().show(ctx, |ui| {
+				egui::CentralPanel::default().show(ctx, |ui| {
 					// Periodic sampler (~5 Hz)
 					if self.diag_poll {
 						if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
@@ -1270,28 +1277,64 @@ impl eframe::App for AluminaApp {
 					// Split the available space into two equal vertical regions
 					let total = ui.available_size();
 					let half_h = total.y / 2.0;
+					
+					// Kick off one-time board info fetch when we first visit Diagnostics
+					if !self.board_info_requested {
+						self.board_info_requested = true;
+						fetch_board_info(Arc::clone(&self.board_info_slot));
+					}
+					
+					// Given a relative URL, return an absolute URL
+					fn absolutize_url(p: &str) -> String {
+						if p.starts_with("http://") || p.starts_with("https://") { return p.to_owned(); }
+						let win = web_sys::window().expect("no window");
+						let origin = win.location().origin().unwrap_or_else(|_| "".into());
+						format!("{origin}{p}")
+					}
+					
+					// Pick up fetched info (if finished)
+					let fetched = { let mut g = self.board_info_slot.lock().unwrap(); g.take() };
+					let mut board_name: Option<String> = None;
+					let mut board_img_url = String::from("/board/image");
+					if let Some((name, url)) = fetched {
+						board_name = Some(name);
+						board_img_url = url;
+					}
 
-					// ─────────────── Top half: graph ───────────────
+					// normalize every frame so it’s always http(s)://...
+					let board_img_url = absolutize_url(&board_img_url);
+					log::warn!("board image uri = {}", board_img_url);
+
+					// ── TOP HALF: two columns (graph | board image)
 					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
-						ui.heading("Graph");
-						ui.add_space(4.0);
-						Plot::new("diag_plot")
-							.width(ui.available_width())
-							.height(ui.available_height())
-							.show(ui, |plot_ui| {
-								// Draw a series per *checked* pin that has data
-								for (name, series) in &self.diag_series {
-									if self.is_pin_checked(name) && !series.is_empty() {
-										let points = PlotPoints::from(series.clone());
-										plot_ui.line(Line::new(points).name(name.clone()));
+						ui.columns(2, |cols| {
+							// left: graph
+							cols[0].heading("Graph");
+							cols[0].add_space(4.0);
+							egui_plot::Plot::new("diag_plot")
+								.width(cols[0].available_width())
+								.height(cols[0].available_height())
+								.show(&mut cols[0], |plot_ui| {
+									for (name, series) in &self.diag_series {
+										if self.is_pin_checked(name) && !series.is_empty() {
+											let points = egui_plot::PlotPoints::from(series.clone());
+											plot_ui.line(egui_plot::Line::new(points).name(name.clone()));
+										}
 									}
-								}
-							});
+								});
+
+							// right: board image (fill column, keep aspect)
+							cols[1].heading(board_name.as_deref().unwrap_or("Board"));
+							cols[1].add_space(4.0);
+							let max = cols[1].available_size();
+							cols[1].add(
+								egui::Image::from_uri(board_img_url.clone())
+									.max_size(max) // use the column's size instead of hard 400px
+							);
+						});
 					});
 
-					ui.add_space(4.0); // optional tiny gap between halves
-
-					// ───────────── Bottom half: console ─────────────
+					// ── BOTTOM HALF: console
 					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
 						ui.horizontal(|ui| {
 							ui.heading("Console");
@@ -1554,6 +1597,37 @@ fn send_queue_command(cmd:&'static str){
         let resp_value=JsFuture::from(window.fetch_with_request(&request)).await;
         if let Ok(val)=resp_value{
             let _resp:Response=val.dyn_into().unwrap();
+        }
+    });
+}
+#[derive(serde::Deserialize)]
+struct BoardResp {
+    name: String,
+    image_mime: String,
+    image_url: String,
+}
+
+fn fetch_board_info(target: Arc<Mutex<Option<(String, String)>>>){
+    execute(async move {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{Request, RequestInit, Window, Response};
+
+        let window: Window = web_sys::window().expect("no window");
+        let mut opts = RequestInit::new();
+        opts.set_method("GET");
+        let request = Request::new_with_str_and_init("/board", &opts).unwrap();
+        request.headers().set("Accept", "application/json").ok();
+
+        let resp_val = JsFuture::from(window.fetch_with_request(&request)).await;
+        if let Ok(val) = resp_val {
+            let resp: Response = val.dyn_into().unwrap();
+            if let Ok(text_js) = JsFuture::from(resp.text().unwrap()).await {
+                let s = text_js.as_string().unwrap_or_default();
+                if let Ok(parsed) = serde_json::from_str::<BoardResp>(&s) {
+                    *target.lock().unwrap() = Some((parsed.name, parsed.image_url));
+                }
+            }
         }
     });
 }
