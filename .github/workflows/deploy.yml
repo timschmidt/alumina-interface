@@ -23,7 +23,7 @@ jobs:
           cargo install wasm-tools
 
       - name: Build
-        run: trunk build --release --public-url /alumina-ui/
+        run: trunk build --release --public-url /alumina-interface/
 
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
