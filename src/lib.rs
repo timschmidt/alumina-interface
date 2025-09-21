@@ -174,8 +174,8 @@ pub struct AluminaApp {
     diag_d0:bool,diag_d1:bool,diag_d2:bool,diag_d3:bool,
     diag_d4:bool,diag_d5:bool,diag_d6:bool,diag_d7:bool,
     diag_d9:bool,diag_d11:bool,diag_d12:bool,diag_d13:bool,
-    board_info_slot: Arc<Mutex<Option<(String /*name*/, String /*image_url*/)>>>,
-    board_info_requested: bool,
+    device_info_slot: Arc<Mutex<Option<(String /*name*/, String /*image_url*/)>>>,
+    device_info_requested: bool,
     selected_tool: Tool,
     // Laser
     kerf: f32,
@@ -261,8 +261,8 @@ impl AluminaApp {
             diag_d0:false,diag_d1:false,diag_d2:false,diag_d3:false,
 			diag_d4:false,diag_d5:false,diag_d6:false,diag_d7:false,
 			diag_d9:false,diag_d11:false,diag_d12:false,diag_d13:false,
-			board_info_slot: Arc::new(Mutex::new(None)),
-			board_info_requested: false,
+			device_info_slot: Arc::new(Mutex::new(None)),
+			device_info_requested: false,
             selected_tool: Tool::Laser, // default
             kerf: 0.1,
             touch_off: true,
@@ -1313,9 +1313,9 @@ impl eframe::App for AluminaApp {
 					let half_h = total.y / 2.0;
 					
 					// Kick off one-time board info fetch when we first visit Diagnostics
-					if !self.board_info_requested {
-						self.board_info_requested = true;
-						fetch_board_info(Arc::clone(&self.board_info_slot));
+					if !self.device_info_requested {
+						self.device_info_requested = true;
+						fetch_board_info(Arc::clone(&self.device_info_slot));
 					}
 					
 					// Given a relative URL, return an absolute URL
@@ -1327,9 +1327,9 @@ impl eframe::App for AluminaApp {
 					}
 					
 					// Pick up fetched info (if finished)
-					let fetched = { let mut g = self.board_info_slot.lock().unwrap(); g.take() };
+					let fetched = { let mut g = self.device_info_slot.lock().unwrap(); g.take() };
 					let mut board_name: Option<String> = None;
-					let mut board_img_url = String::from("/board/image");
+					let mut board_img_url = String::from("/device/image");
 					if let Some((name, url)) = fetched {
 						board_name = Some(name);
 						board_img_url = url;
@@ -1337,13 +1337,13 @@ impl eframe::App for AluminaApp {
 
 					// normalize every frame so it’s always http(s)://...
 					let board_img_url = absolutize_url(&board_img_url);
-					log::warn!("board image uri = {}", board_img_url);
+					log::warn!("device image uri = {}", board_img_url);
 
 					// ── TOP HALF: two columns (graph | board image)
 					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
 						ui.columns(2, |cols| {
 							// left: graph
-							cols[0].heading("Graph");
+							cols[0].heading("IO Status");
 							cols[0].add_space(4.0);
 							egui_plot::Plot::new("diag_plot")
 								.width(cols[0].available_width())
@@ -1358,7 +1358,7 @@ impl eframe::App for AluminaApp {
 								});
 
 							// right: board image (fill column, keep aspect)
-							cols[1].heading(board_name.as_deref().unwrap_or("Board"));
+							cols[1].heading(board_name.as_deref().unwrap_or("Device"));
 							cols[1].add_space(4.0);
 							let max = cols[1].available_size();
 							cols[1].add(
