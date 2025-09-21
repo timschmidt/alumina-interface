@@ -1650,7 +1650,7 @@ fn fetch_board_info(target: Arc<Mutex<Option<(String, String)>>>){
         let window: Window = web_sys::window().expect("no window");
         let mut opts = RequestInit::new();
         opts.set_method("GET");
-        let request = Request::new_with_str_and_init("/board", &opts).unwrap();
+        let request = Request::new_with_str_and_init("/device", &opts).unwrap();
         request.headers().set("Accept", "application/json").ok();
 
         let resp_val = JsFuture::from(window.fetch_with_request(&request)).await;
