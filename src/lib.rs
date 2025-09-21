@@ -174,7 +174,7 @@ pub struct AluminaApp {
     diag_d0:bool,diag_d1:bool,diag_d2:bool,diag_d3:bool,
     diag_d4:bool,diag_d5:bool,diag_d6:bool,diag_d7:bool,
     diag_d9:bool,diag_d11:bool,diag_d12:bool,diag_d13:bool,
-    device_info_slot: Arc<Mutex<Option<(String /*name*/, String /*image_url*/)>>>,
+    device_info_slot: Arc<Mutex<Option<(String /*name*/, String /*display_name*/, String /*image_mime*/, String /*image_url*/)>>>,
     device_info_requested: bool,
     selected_tool: Tool,
     // Laser
@@ -1327,17 +1327,19 @@ impl eframe::App for AluminaApp {
 					}
 					
 					// Pick up fetched info (if finished)
-					let fetched = { let mut g = self.device_info_slot.lock().unwrap(); g.take() };
-					let mut board_name: Option<String> = None;
-					let mut board_img_url = String::from("/device/image");
-					if let Some((name, url)) = fetched {
-						board_name = Some(name);
-						board_img_url = url;
+					let fetched = { let g = self.device_info_slot.lock().unwrap(); g.clone() };
+					let mut device_name: Option<String> = None;
+					let mut device_img_url = String::from("/device/image");
+					let mut device_display_name = String::from("Device");
+					if let Some((name, display_name, image_mime, image_url)) = fetched {
+						device_name = Some(name);
+						device_display_name = display_name;
+						device_img_url = image_url;
 					}
 
 					// normalize every frame so it’s always http(s)://...
-					let board_img_url = absolutize_url(&board_img_url);
-					log::warn!("device image uri = {}", board_img_url);
+					let device_img_url = absolutize_url(&device_img_url);
+					log::warn!("device image uri = {}", device_img_url);
 
 					// ── TOP HALF: two columns (graph | board image)
 					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
@@ -1358,11 +1360,11 @@ impl eframe::App for AluminaApp {
 								});
 
 							// right: board image (fill column, keep aspect)
-							cols[1].heading(board_name.as_deref().unwrap_or("Device"));
+							cols[1].heading(device_display_name);
 							cols[1].add_space(4.0);
 							let max = cols[1].available_size();
 							cols[1].add(
-								egui::Image::from_uri(board_img_url.clone())
+								egui::Image::from_uri(device_img_url.clone())
 									.max_size(max) // use the column's size instead of hard 400px
 							);
 						});
@@ -1635,13 +1637,14 @@ fn send_queue_command(cmd:&'static str){
     });
 }
 #[derive(serde::Deserialize)]
-struct BoardResp {
+struct DeviceResp {
     name: String,
+    display_name: String,
     image_mime: String,
     image_url: String,
 }
 
-fn fetch_board_info(target: Arc<Mutex<Option<(String, String)>>>){
+fn fetch_board_info(target: Arc<Mutex<Option<(String, String, String, String)>>>){
     execute(async move {
         use wasm_bindgen::JsCast;
         use wasm_bindgen_futures::JsFuture;
@@ -1658,8 +1661,8 @@ fn fetch_board_info(target: Arc<Mutex<Option<(String, String)>>>){
             let resp: Response = val.dyn_into().unwrap();
             if let Ok(text_js) = JsFuture::from(resp.text().unwrap()).await {
                 let s = text_js.as_string().unwrap_or_default();
-                if let Ok(parsed) = serde_json::from_str::<BoardResp>(&s) {
-                    *target.lock().unwrap() = Some((parsed.name, parsed.image_url));
+                if let Ok(parsed) = serde_json::from_str::<DeviceResp>(&s) {
+                    *target.lock().unwrap() = Some((parsed.name, parsed.display_name, parsed.image_mime, parsed.image_url));
                 }
             }
         }
