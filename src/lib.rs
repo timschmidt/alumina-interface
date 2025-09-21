@@ -208,7 +208,8 @@ pub struct AluminaApp {
     diag_series: HashMap<String, Vec<[f64;2]>>,
     // Latest sample from /pins (name -> 0.0/1.0)
     diag_last_pins: Arc<Mutex<Option<HashMap<String, f64>>>>,
-	last_poll_ms: f64,
+    diag_poll_delay: f64,
+	next_poll_ms: f64,
 }
 
 impl AluminaApp {
@@ -280,7 +281,8 @@ impl AluminaApp {
             diag_console: String::new(),
 			diag_series: HashMap::new(),
 			diag_last_pins: Arc::new(Mutex::new(None)),
-			last_poll_ms: 0.0,
+			diag_poll_delay: 1.0,
+			next_poll_ms: 0.0,
         }
     }
     
@@ -1216,7 +1218,27 @@ impl eframe::App for AluminaApp {
 							}
 						});
                         ui.separator();
-                        ui.checkbox(&mut self.diag_poll,"Poll");
+                        ui.horizontal(|ui| {
+							if ui.checkbox(&mut self.diag_poll, "Poll").changed() {
+								if self.diag_poll {
+									Self::poll_pins_once(Arc::clone(&self.diag_last_pins));
+									if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
+										let now = perf.now();
+										self.next_poll_ms = now + self.diag_poll_delay * 1000.0;
+									} else {
+										self.next_poll_ms = 0.0;
+									}
+									ctx.request_repaint(); // ensure an immediate frame to show the first result
+								}
+							}
+							ui.label("every");
+							ui.add(
+								egui::DragValue::new(&mut self.diag_poll_delay)
+									.speed(0.1)
+									.range(0.2..=5.0)   // 0.2s .. 5.0s
+									.suffix(" s"),
+							);
+						});
 						if ui.checkbox(&mut self.diag_led,"Status LED").changed(){
 							if self.diag_led { send_queue_command("status_on"); }
 							else { send_queue_command("status_off"); }
@@ -1248,16 +1270,27 @@ impl eframe::App for AluminaApp {
 					});
 
 				egui::CentralPanel::default().show(ctx, |ui| {
-					// Periodic sampler (~5 Hz)
+					// keep the app waking up while polling is on (no user input needed)
+					if self.diag_poll {
+						ctx.request_repaint_after(std::time::Duration::from_secs_f64(self.diag_poll_delay));
+					}
+
 					if self.diag_poll {
 						if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
 							let now = perf.now();
-							if now - self.last_poll_ms > 200.0 {
-								self.last_poll_ms = now;
+							if now >= self.next_poll_ms {
+								// advance by whole periods in case we were late,
+								// so we don't drift or "double wait"
+								let period = self.diag_poll_delay * 1000.0;
+								// Catch up: ensure next_poll_ms is strictly in the future
+								while self.next_poll_ms <= now {
+									self.next_poll_ms += period;
+								}
 								Self::poll_pins_once(Arc::clone(&self.diag_last_pins));
 							}
 						}
 					}
+
 					// Apply the latest sample to series and console
 					if let Some(pins) = { let mut g = self.diag_last_pins.lock().unwrap(); g.take() } {
 						let t = (web_sys::window().and_then(|w| w.performance()).map(|p| p.now()).unwrap_or(0.0)) / 1000.0;
@@ -1272,6 +1305,7 @@ impl eframe::App for AluminaApp {
 						if line.trim() != "t=0.00s" {
 							self.diag_log(line);
 						}
+						ctx.request_repaint();
 					}
 					
 					// Split the available space into two equal vertical regions
