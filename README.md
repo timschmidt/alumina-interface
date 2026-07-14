@@ -1,94 +1,80 @@
 # Alumina Interface
 
-<img src="doc/screenshot-design.png" width="30%" alt="Design screenshot"/> <img src="doc/screenshot-control.png" width="30%" alt="Control screenshot"/> <img src="doc/screenshot-diagnostics.png" width="30%" alt="Diagnostics screenshot"/>
+Alumina Interface is the browser UI for the Alumina CAD/CAM and machine-control
+system. It combines an `egui` application, a `csgrs`-backed node editor, a
+WebGL model viewer, slicing controls, and firmware diagnostics in a WebAssembly
+bundle intended to fit alongside Alumina Firmware on a controller.
 
-Alumina is an integrated CAD/CAM, physics simulation, and motion control solution written entirely in Rust.  It is intended to control laser and plasma cutters, 3D printers, CNC routers and mills, and lathes.
+[Try the web demo](https://timschmidt.github.io/alumina-interface/).
 
-Try the [Alumina Interface Web Demo](https://timschmidt.github.io/alumina-interface/)
+<img src="doc/screenshot-design.png" width="30%" alt="Design graph"/> <img src="doc/screenshot-control.png" width="30%" alt="Machine controls"/> <img src="doc/screenshot-diagnostics.png" width="30%" alt="Controller diagnostics"/>
 
-Alumina Firmware and Interface get linked together at compile time and fit in the onboard flash of a single microcontroller, reducing design complexity, part count, and cost.
- 
- <img src="doc/alumina-diagram.png" width="40%" alt="Diagram"/>
- 
- - [Alumina Firmware](https://github.com/timschmidt/alumina-firmware)
-   - targets the xtensa and risc-v esp32 microcontrollers
-   - sets up a Wifi AP called "Alumina"
-   - serves the Alumina UI via HTTP
-   - responds to commands from the Alumina UI via HTTP
-   - performs motion planning and step generation
-   - (planned) port to [embassy](https://embassy.dev/) and [FoA](https://github.com/esp32-open-mac/FoA) and [smol](https://github.com/smol-rs/smol/blob/master/examples/simple-server.rs)
-   - (planned) port to other embassy hardware targets
- - [Alumina Interface](https://github.com/timschmidt/alumina-interface)
-   - targets [WebAssembly](https://en.wikipedia.org/wiki/WebAssembly)
-   - draws geometry using WebGL and egui
-   - works in any browser, desktop or mobile
-   - CAD using [csgrs](https://github.com/timschmidt/csgrs) and [egui_node_graph2](https://github.com/trevyn/egui_node_graph2)
-   - calculate and display 2D slices of 3D models
-   - Communicates with Alumina Firmware to display diagnostic log, graph, and photo of the controller
-   - Fits in < 4Mb microcontroller flash, including firmware
-   - (planned) multiple controllers in sync
-   - (planned) use [wgmath](https://wgmath.rs/) to move most CAD and geometry and toolpath calculation to the GPU
+## Using the interface
 
-## Community
-[![](https://dcbadge.limes.pink/api/server/https://discord.gg/cCHRjpkPhQ)](https://discord.gg/cCHRjpkPhQ)
+- **Design** builds sketches and meshes as a node graph. Right-click the canvas
+  to add primitives, Boolean operations, transformations, extrusion/revolve/
+  loft/sweep nodes, slicing, text, or lattice operations. Connect a mesh output
+  and select **Apply to model** to send each unconsumed root mesh to the viewer.
+- **Control** imports STL or DXF workpieces and STL, DXF, OBJ, PLY, or AMF model
+  selections, adjusts scale and position, inspects slices, and configures laser,
+  plasma, extrusion, milling, drilling, or DLP/LCD tool parameters.
+- **Diagnostics** sends firmware commands, polls GPIO state, plots selected pins,
+  shows controller metadata, and displays the command queue log.
 
-## HTTP API
-```
-/						GET index.html
-/alumina-ui.js			GET alumina-ui.js
-/alumina-ui.html		GET alumina-ui.html.gz
-/alumina-ui_bg.wasm		GET alumina-ui_bg.wasm.br
-/favicon.ico			GET favaicon.gif
-/time					GET 
-/files					POST 
-/queue					GET, POST 
-/board					GET json: {{"name":"{}","image_mime":"{}","image_url":"/board/image"}}
-/board/image			GET PNG formatted board image
-```
+The WebGL viewer supports orbit, pan, wheel/pinch zoom, standard camera views,
+edges, filled faces, normals, vertices, and the machine work envelope.
+
+## Firmware contract
+
+The interface expects these same-origin endpoints from
+[Alumina Firmware](https://github.com/timschmidt/alumina-firmware):
+
+| Endpoint | Method | Payload |
+| --- | --- | --- |
+| `/queue` | `GET` | Command queue as text |
+| `/queue` | `POST` | One plain-text command |
+| `/pins` | `GET` | JSON object mapping pin names to numeric states |
+| `/device` | `GET` | JSON with `name`, `display_name`, `image_mime`, and `image_url` |
+
+The firmware or static host must also serve the Trunk output (`index.html`, the
+JavaScript loader, WASM bundle, favicon, and any device image URL). The post-build
+hook creates gzip assets and, when `brotli` is installed, a Brotli-compressed WASM
+bundle.
 
 ## Development
-### Set up toolchain
-```shell
+
+Install the Rust WASM target and build tools:
+
+```sh
+rustup target add wasm32-unknown-unknown
 cargo install trunk wasm-opt wasm-tools
 ```
 
-### Run locally
-```shell
+Run a release-mode development server:
+
+```sh
 trunk serve --open --release
 ```
 
-## Todo
-- implement picking for lines and vertices and faces
-- single-click for individuals and click-drag for multiples.
-- https://github.com/JeroenGar/jagua-rs and/or https://github.com/JeroenGar/sparrow for bin packing
-- generate toolpaths from slices
-- send toolpaths to firmware
-- echo sent / received commands in Diagnostics console
-- finish SD card support
-- enable persistence via https://docs.rs/eframe/latest/eframe/
-- implement tweening for snap view
-- ensure font picker in truetype text node works / gets pre-populated
-- ensure pin logging works for OUTPUT and INPUT modes and reports apropriately per-pin
-- add command stream to architecture graphic
-- switch to shift-scroll for zoom, so two-finger scroll can be used for pan in X and Y for mobile
-- figure out improper rendering in Chrome Android Pixel 6a
-- get UI building for native so that "cargo bloat" can be used
-- get long-click as right-click working for Design tab Central view, or add button for opening node menu on mobile
-- rename to Alumina Interface / Alumina Device
-- convert Diagnostics and Design tabs to collapsible tool panels
-- implement settings dialog
-  - automatically re-render on graph change checkbox
-  - wifi information
-  - IP information
-  - URI setting
-  - Enable / Disable SD checkbox
-    - Enable / Disable logging to SD checkbox (greyed out when SD is disabled)
-- implement about dialog
-  - device image
-  - pin configuration information
-  - build date
-  - build stats
-  - feature flags
-  - github links
-  - github sponsor link
-  - Licenses notices
+Produce the deployable bundle without opening a browser:
+
+```sh
+trunk build --release
+```
+
+## Architecture and references
+
+<img src="doc/alumina-diagram.png" width="40%" alt="Alumina firmware and interface architecture"/>
+
+- [`eframe` and `egui`](https://github.com/emilk/egui) provide the application
+  shell and immediate-mode UI.
+- [`egui_node_graph2`](https://github.com/trevyn/egui_node_graph2) provides the
+  visual design graph.
+- [`csgrs`](https://github.com/timschmidt/csgrs) provides sketch, mesh, Boolean,
+  transform, slicing, import, and lattice operations.
+- [`glow`](https://github.com/grovesNL/glow) provides the WebGL rendering API.
+- [Trunk](https://trunkrs.dev/) builds and serves the WebAssembly application.
+- The [Web Storage standard](https://html.spec.whatwg.org/multipage/webstorage.html)
+  defines the browser-local storage used by the TrueType text node.
+
+Community: [Discord](https://discord.gg/cCHRjpkPhQ)

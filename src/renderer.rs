@@ -11,6 +11,8 @@ pub struct GpuLines {
     u_mvp: glow::UniformLocation,
 }
 
+// SAFETY: The type stores GL object names but no context. Unsafe methods require
+// callers to provide the owning context and obey its thread-affinity rules.
 unsafe impl Send for GpuLines {}
 unsafe impl Sync for GpuLines {}
 
@@ -89,7 +91,7 @@ impl GpuLines {
                 glow::STATIC_DRAW,
             );
         }
-        // 6 floats per vertex: xyz rgb
+        // Each vertex contains three position and three color components.
         self.vertex_count = (verts.len() / 6) as i32;
         log::info!(
             "[alumina] GPU upload: {} vertices ({} floats)",
@@ -107,7 +109,7 @@ impl GpuLines {
         }
     }
 
-    /// Same geometry/VAO – but drawn as filled triangles.
+    /// Draw the uploaded vertices as independent filled triangles.
     pub unsafe fn paint_tris(&self, gl: &Context, mvp: Matrix4<f32>) {
         unsafe {
             gl.use_program(Some(self.program));

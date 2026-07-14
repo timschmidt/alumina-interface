@@ -9,7 +9,7 @@ pub struct EmptyUserResponse;
 
 impl UserResponseTrait for EmptyUserResponse {}
 
-/// Ports may carry scalars, vectors, planar **sketches**, or volumetric **meshes**.
+/// Value type accepted by a graph port.
 #[derive(PartialEq, Eq, Copy, Clone)]
 pub enum DType {
     Mesh,
@@ -35,7 +35,7 @@ impl Default for DValue {
     }
 }
 
-/// A node “template” = what appears in the “add node” pop-up.
+/// Node kind shown in the add-node menu.
 #[derive(Copy, Clone, Debug)]
 pub enum Template {
     /* ---- Sketch primitives ---- */
@@ -135,13 +135,12 @@ impl Default for Template {
     }
 }
 
-// Helper: list “root” output sockets of the graph (no consumer attached).
+/// Return output sockets that have no downstream consumer.
 pub fn graph_roots(graph: &GraphT) -> Vec<OutputId> {
     use std::collections::HashSet;
     let mut used = HashSet::<OutputId>::new();
     for input_id in graph.inputs.keys() {
-        // graph.connections returns a Vec of all OutputIds connected to this input.
-        // This is more robust than graph.connection which only works for single connections.
+        // Inputs may accept multiple connections, so inspect every source.
         for src_id in graph.connections(input_id) {
             used.insert(src_id);
         }
@@ -161,7 +160,7 @@ pub struct NodeData {
     pub template: Template,
 }
 
-/// Color & label palette for sockets
+/// Define the color and label used for each socket type.
 impl DataTypeTrait<UserState> for DType {
     fn data_type_color(&self, _u: &mut UserState) -> egui::Color32 {
         match self {
@@ -183,9 +182,7 @@ impl DataTypeTrait<UserState> for DType {
     }
 }
 
-/* ------------------------------------------------------------------------- */
-/*  Builder helpers                                                          */
-/* ------------------------------------------------------------------------- */
+// Node-port builders.
 fn scalar_in(g: &mut Graph<NodeData, DType, DValue>, id: NodeId, name: &str, def: f64) {
     g.add_input_param(
         id,
@@ -248,7 +245,7 @@ fn sketch_out(g: &mut Graph<NodeData, DType, DValue>, id: NodeId, name: &str) {
     g.add_output_param(id, name.into(), DType::Sketch);
 }
 
-/// Node-template plumbing ----------------------------------------------------
+/// Configure menu labels, categories, and ports for each node kind.
 impl NodeTemplateTrait for Template {
     type NodeData = NodeData;
     type DataType = DType;
@@ -357,7 +354,6 @@ impl NodeTemplateTrait for Template {
             | CircleWithFlat | CircleWithTwoFlats | Heart | Crescent | AirfoilNaca4 | TruetypeText => {
                 vec!["2D / Sketch"]
             }
-            //CircleWithFlat|CircleWithTwoFlats|Heart|Crescent|AirfoilNaca4|Text => vec!["2D / Sketch"],
             Cube | Cuboid | Sphere | Cylinder | Frustum | Octahedron | Icosahedron | Torus
             | EggMesh | TeardropMesh | TeardropCylinder | Ellipsoid | Arrow => vec!["3D / Mesh"],
 
@@ -798,16 +794,12 @@ impl NodeTemplateTrait for Template {
                 scalar_in(g, id, "period", 10.0);
                 scalar_in(g, id, "iso_value", 0.0);
                 mesh_out(g, id, "out");
-            } //Text => { /* minimal text node: size only, static font & text string */
-              //    // you can later replace with user-provided bytes
-              //    scalar_in(g,id,"size",20.0);
-              //    sketch_out(g,id,"out");
-              //}
+            }
         }
     }
 }
 
-/// Tell egui-node-graph which templates exist
+/// Enumerate templates available in the add-node menu.
 pub struct AllTemplates;
 impl NodeTemplateIter for AllTemplates {
     type Item = Template;
@@ -839,7 +831,6 @@ impl NodeTemplateIter for AllTemplates {
             Crescent,
             AirfoilNaca4,
             TruetypeText,
-            //Text,
 
             /* mesh */
             Cube,
@@ -898,7 +889,7 @@ impl NodeTemplateIter for AllTemplates {
     }
 }
 
-/// We draw scalars/vec3 widgets exactly like in the sample
+/// Draw constant-value editors for graph inputs.
 impl WidgetValueTrait for DValue {
     type NodeData = NodeData;
     type Response = EmptyUserResponse;
@@ -937,7 +928,7 @@ impl WidgetValueTrait for DValue {
                 ui.label("mesh");
             }
             DValue::Text(s) => {
-                // Plain editor for generic text fields:
+                // All text ports retain a direct editor.
                 let is_truetype = matches!(node_data.template, Template::TruetypeText);
                 let is_family   = is_truetype && name == "font_family";
                 let is_variant  = is_truetype && name == "variant";
@@ -947,25 +938,24 @@ impl WidgetValueTrait for DValue {
                     ui.text_edit_singleline(s);
                 });
 
-                // For truetype: show a persisted-font dropdown (localStorage)
+                // Font-family ports also offer persisted browser fonts.
                 if is_family {
                     #[cfg(target_arch = "wasm32")]
                     {
                         if let Ok(list) = fonts::list_persisted_ttf() {
-                            // Unique, sorted family names:
+                            // Present each family once, filtered by the typed query.
                             let mut families: Vec<String> =
                                 list.into_iter().map(|p| p.family).collect();
                             families.sort();
                             families.dedup();
 
-                            // Filter by the current text (acts as a search query)
                             let query = s.to_ascii_lowercase();
                             let filtered = families.into_iter()
                                 .filter(|f| f.to_ascii_lowercase().contains(&query))
                                 .collect::<Vec<_>>();
 
                             egui::ComboBox::from_id_salt("ttf_family_combo")
-								.selected_text(if s.is_empty() { "(pick font)" } else { s.as_str() }) // <-- &str, not String
+								.selected_text(if s.is_empty() { "(pick font)" } else { s.as_str() })
 								.show_ui(ui, |ui| {
 									for fam in &filtered {
 										if ui.selectable_label(s == fam, fam).clicked() {
@@ -983,13 +973,11 @@ impl WidgetValueTrait for DValue {
                     }
                 }
 
-                // For truetype: offer a common-variant dropdown; default "regular"
+                // Variant ports offer the common Google Fonts variants.
                 if is_variant {
-                    // Offer a small curated list if user hasn't typed anything:
-                    let choices = ["regular", "italic", "700", "700italic"];
                     let current = if s.is_empty() { "regular" } else { s.as_str() };
 					egui::ComboBox::from_id_salt("ttf_variant_combo")
-						.selected_text(current) // &str
+						.selected_text(current)
 						.show_ui(ui, |ui| {
 							for c in ["regular", "italic", "700", "700italic"] {
 								if ui.selectable_label(s == c, c).clicked() {
@@ -1005,7 +993,7 @@ impl WidgetValueTrait for DValue {
     }
 }
 
-/// Only bottom-panel UI (none here)
+/// Nodes do not add a bottom-panel UI.
 impl NodeDataTrait for NodeData {
     type Response = EmptyUserResponse;
     type UserState = UserState;
@@ -1023,13 +1011,12 @@ impl NodeDataTrait for NodeData {
     }
 }
 
-// ---------- evaluation ----------------------------------------------------------------------------------
+// Graph evaluation.
 
 type Cache = std::collections::HashMap<OutputId, DValue>;
 type GraphT = Graph<NodeData, DType, DValue>;
 
-/// --------------------------------------------------------------------------
-/// **Graph evaluation** – returns a 3-D `Mesh<()>` to display.
+/// Evaluate one graph output as the 3D mesh displayed by the viewer.
 pub fn evaluate(graph: &GraphT, root: OutputId) -> anyhow::Result<Mesh<()>> {
     let mut cache = Cache::new();
     let val = eval_rec(graph, root, &mut cache)?;
@@ -1055,12 +1042,10 @@ fn eval_rec(graph: &GraphT, out: OutputId, cache: &mut Cache) -> anyhow::Result<
     let node = &graph[node_id];
     log::warn!("node: {:#?}", node);
 
-    // Helper to fetch (recursively) an input
+    // Resolve a connected input recursively or use its constant value.
     let mut get = |name: &str| -> anyhow::Result<DValue> {
         let in_id = node.get_input(name)?;
-        // Use `connections` (plural) and get the first connected output.
         if let Some(src) = graph.connections(in_id).first() {
-            // `src` is a `&OutputId`, so we dereference it.
             eval_rec(graph, *src, cache)
         } else {
             Ok(graph[in_id].value.clone())
@@ -1259,15 +1244,13 @@ fn eval_rec(graph: &GraphT, out: OutputId, cache: &mut Cache) -> anyhow::Result<
 			let variant = get("variant")?.text()?;
 			let height  = get("height_mm")?.scalar()?;
 
-			// Load persisted bytes for (family, variant)
+			// Resolve the selected font from browser-local storage.
 			#[cfg(target_arch = "wasm32")]
 			{
 				let maybe_bytes = fonts::load_persisted_ttf(&family, &variant)
 					.map_err(|e| anyhow::anyhow!("load_persisted_ttf failed: {:?}", e))?;
 				match maybe_bytes {
 					Some(bytes) => {
-						// Call into csgrs: Sketch::truetype_text(ttf_bytes, text, height_mm, None)
-						// If your csgrs signature differs, adjust here accordingly.
 						DValue::Sketch(Sketch::text(&content, &bytes, height.into(), None))
 					}
 					None => {
@@ -1574,7 +1557,7 @@ fn eval_rec(graph: &GraphT, out: OutputId, cache: &mut Cache) -> anyhow::Result<
             let btm = get("bottom")?.mesh()?;
             let top = get("top")?.mesh()?;
             let caps = as_bool(get("caps")?.scalar()?);
-            // Use polygon[0] convention
+            // Loft the first polygon from each input sketch.
             DValue::Mesh(Sketch::loft(&btm.polygons[0], &top.polygons[0], caps).unwrap())
         }
         Sweep => {
@@ -1623,13 +1606,7 @@ fn eval_rec(graph: &GraphT, out: OutputId, cache: &mut Cache) -> anyhow::Result<
             let period = get("period")?.scalar()?;
             let iso = get("iso_value")?.scalar()?;
             DValue::Mesh(m.schwarz_d(res, period.into(), iso.into(), None))
-        } //,Text => {
-          //    // Supply a font in your project (adjust path)
-          //    const FONT:&[u8]=include_bytes!("../assets/DejaVuSans.ttf");
-          //    let size=get("size")?.scalar()?;
-          //    let sketch=Sketch::text("Hello",FONT,size.into(),None);
-          //    DValue::Sketch(sketch)
-          //}
+        }
     };
 
     cache.insert(out, value.clone());
@@ -1638,7 +1615,7 @@ fn eval_rec(graph: &GraphT, out: OutputId, cache: &mut Cache) -> anyhow::Result<
     Ok(value)
 }
 
-/// Small helpers for type-safe extraction -----------------------------------
+/// Extract typed values while evaluating connected ports.
 trait AsTyped {
     fn scalar(self) -> anyhow::Result<f64>;
     fn vec3(self) -> anyhow::Result<Vector3<f64>>;

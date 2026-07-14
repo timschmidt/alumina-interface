@@ -7,7 +7,6 @@ use crate::design_graph::{AllTemplates, UserState};
 use csgrs::{mesh::Mesh, sketch::Sketch, traits::CSG};
 use eframe::egui;
 use egui_node_graph2::GraphEditorState;
-use egui_plot::{Plot, PlotPoints, Line};
 use futures_channel::oneshot;
 use geo::{Geometry, LineString};
 use glow::HasContext as _;
@@ -61,9 +60,9 @@ impl std::fmt::Display for Tool {
 struct ModelEntry {
     /// File-name or synthesized label shown in the sidebar list.
     name: String,
-    /// Geometry exactly as it came off disk (float-shifted but *not* scaled / offset).
+    /// Imported geometry before per-instance scale and translation.
     base: Mesh<()>,
-    /// Copy actually rendered (base -> scale -> offset).
+    /// Rendered copy after scale and translation.
     mesh: Mesh<()>,
     /// Desired user scale and last-applied scale (so we can lazily rebuild).
     scale: Vector3<f32>,
@@ -81,12 +80,12 @@ impl ModelEntry {
             applied_scale: Vector3::new(1.0, 1.0, 1.0),
             offset: Vector3::zeros(),
             applied_offset: Vector3::zeros(),
-            mesh: base.clone(), // immediately rebuilt below
+            mesh: base.clone(),
             base,
         }
     }
 
-    /// Apply pending scale / offset if the user changed either parameter.
+    /// Rebuild the rendered mesh after a scale or translation change.
     fn refresh(&mut self) {
         if self.scale != self.applied_scale || self.offset != self.applied_offset {
             self.mesh = self
@@ -145,7 +144,7 @@ pub struct AluminaApp {
     zoom: f32,
     /// All user-loaded models (plus the default one).
     models: Vec<ModelEntry>,
-    /// Index of the *currently-selected* model in the sidebar (if any).
+    /// Model currently selected in the sidebar.
     selected_model: Option<usize>,
     workpiece_data: Arc<Mutex<Option<Vec<u8>>>>,
     model_data: Arc<Mutex<Option<Vec<u8>>>>,
@@ -155,14 +154,14 @@ pub struct AluminaApp {
     normals: bool,
     vertices: bool,
     workarea: bool,
-    /// CNC working area dimensions (mm)
-    work_size: Vector3<f32>, // x, y, z
+    /// CNC work-envelope dimensions in millimeters.
+    work_size: Vector3<f32>,
     layer_height: f32,
-    /// Index of the layer currently being inspected (0-based)
+    /// Zero-based index of the layer currently being inspected.
     current_layer: i32,
-    /// `true` while the “tool-path” view is active
+    /// Whether the slice view is active.
     show_slice: bool,
-    /// The last slice that was generated for `current_layer`
+    /// Most recently generated slice for `current_layer`.
     sliced_layer: Option<Sketch<()>>,
     gpu: Option<Arc<Mutex<renderer::GpuLines>>>,
     gpu_faces: Option<Arc<Mutex<renderer::GpuLines>>>,
@@ -170,27 +169,21 @@ pub struct AluminaApp {
     selected_tab: Tab,
     diag_poll: bool,
     diag_led: bool,
-    // Diagnostics – per‑GPIO desired state (false = low)
+    // Desired GPIO states; false means low.
     diag_d0:bool,diag_d1:bool,diag_d2:bool,diag_d3:bool,
     diag_d4:bool,diag_d5:bool,diag_d6:bool,diag_d7:bool,
     diag_d9:bool,diag_d11:bool,diag_d12:bool,diag_d13:bool,
     device_info_slot: Arc<Mutex<Option<(String /*name*/, String /*display_name*/, String /*image_mime*/, String /*image_url*/)>>>,
     device_info_requested: bool,
     selected_tool: Tool,
-    // Laser
     kerf: f32,
-    // Plasma
     touch_off: bool,
-    // Extruder
     perimeters: i32,
     infill_type: InfillType,
-    // Endmill
     endmill_width: f32,
     endmill_length: f32,
-    // Drill
     drill_width: f32,
     drill_length: f32,
-    // DLP / LCD
     pixels_wide: i32,
     pixels_tall: i32,
     layer_delay: f32,
@@ -203,10 +196,10 @@ pub struct AluminaApp {
         UserState,
     >,
     design_user_state: UserState,
-    diag_console: String, // Text console buffer (read-only UI)
-	// Per-pin series: "D0", "D1", ...
+    diag_console: String,
+	// Time series keyed by pin name, such as "D0".
     diag_series: HashMap<String, Vec<[f64;2]>>,
-    // Latest sample from /pins (name -> 0.0/1.0)
+    // Latest `/pins` sample keyed by pin name.
     diag_last_pins: Arc<Mutex<Option<HashMap<String, f64>>>>,
     diag_poll_delay: f64,
 	next_poll_ms: f64,
@@ -214,23 +207,16 @@ pub struct AluminaApp {
 
 impl AluminaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {		
-		// Enable Uri/Bytes -> Image loading for egui::Image / Ui::image:
+		// Register URI and byte loaders used by device images.
         egui_extras::install_image_loaders(&cc.egui_ctx);
 		
         let mut entry =
             ModelEntry::new("icosahedron", Mesh::<()>::icosahedron(100.0, None).float());
         entry.refresh();
 
-        // ------------------------------------------------------------------
-        // Default camera
-        //   • orient like the “Front” toolbar button
-        //   • zoom-in so the work-area almost fills the 60° frustum
-        //
-        //     With the eye placed at 3·radius, the model *exactly* fits when
-        //       zoom = 3 · tan(fov / 2)  ≈ 1.732 …
-        //     Using a touch more distance (1.75) leaves a 2–3 % safety margin.
-        // ------------------------------------------------------------------
-        let front_rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), -FRAC_PI_2); // “Front”
+        // At an eye distance of 3r, zoom 3*tan(30°) fits the work envelope.
+        // Use 1.75 to retain a small margin around the default front view.
+        let front_rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), -FRAC_PI_2);
         let initial_zoom = 1.75_f32;
 
         Self {
@@ -263,7 +249,7 @@ impl AluminaApp {
 			diag_d9:false,diag_d11:false,diag_d12:false,diag_d13:false,
 			device_info_slot: Arc::new(Mutex::new(None)),
 			device_info_requested: false,
-            selected_tool: Tool::Laser, // default
+            selected_tool: Tool::Laser,
             kerf: 0.1,
             touch_off: true,
             perimeters: 2,
@@ -297,20 +283,20 @@ impl AluminaApp {
         }
     }
 
-    /// Refresh *all* models (each entry decides whether it needs to rebuild).
+    /// Refresh every model whose instance transform changed.
     fn refresh_models(&mut self) {
         for m in &mut self.models {
             m.refresh();
         }
     }
 
-    /// Re-builds `sliced_layer` for the current Z level.
+    /// Rebuild `sliced_layer` for the current Z level.
     fn refresh_slice(&mut self) {
         if !self.show_slice {
             return;
         }
 
-        // slice a *union* of all models
+        // Slice the union so overlapping models produce one layer outline.
         let z = self.current_layer as f32 * self.layer_height;
         let plane = csgrs::mesh::plane::Plane::from_normal(Vector3::z(), z.into());
         let mut iter = self.models.iter();
@@ -323,7 +309,7 @@ impl AluminaApp {
         }
     }
 
-    /// Marks `model` as dirty so that next frame will rebuild
+    /// Mark the selected model for rebuilding on the next refresh.
     fn invalidate_selected_model(&mut self) {
         if let Some(m) = self.sel_mut() {
             m.applied_scale = INVALID_SCALE;
@@ -331,7 +317,7 @@ impl AluminaApp {
         }
     }
 
-    /// Replace currently-selected entry’s *base* geometry.
+    /// Replace the selected model's imported geometry.
     fn set_selected_base(&mut self, mesh: Mesh<()>, name: String) {
         if let Some(m) = self.sel_mut() {
             m.base = mesh;
@@ -342,13 +328,13 @@ impl AluminaApp {
         }
     }
 
-    /// convenience: currently-selected entry (mutable)
+    /// Return the selected model for mutation.
     fn sel_mut(&mut self) -> Option<&mut ModelEntry> {
         self.selected_model
             .and_then(move |i| self.models.get_mut(i))
     }
 
-    /// Add a *new* model and make it the selection.
+    /// Add a model and select it.
     fn add_model(&mut self, mesh: Mesh<()>, name: String) {
         let mut e = ModelEntry::new(name, mesh);
         e.refresh();
@@ -365,12 +351,12 @@ impl AluminaApp {
         self.diag_series.entry(name.to_string()).or_default().push([x, y]);
     }
 
-    /// Kick one async GET /pins, store as HashMap<String, f64> in `target`.
+    /// Fetch `/pins` once and store its numeric JSON fields in `target`.
     fn poll_pins_once(target: Arc<Mutex<Option<HashMap<String, f64>>>>) {
         execute(async move {
             match http_get_text("/pins").await {
                 Ok(body) => {
-                    // Expect shape: {"D0":0, "D1":1, ...}
+                    // Firmware may encode states as either JSON integers or floats.
                     let parsed: Result<HashMap<String, f64>, _> = serde_json::from_str::<HashMap<String, serde_json::Value>>(&body)
                         .map(|m| {
                             m.into_iter()
@@ -407,12 +393,12 @@ impl AluminaApp {
 }
 
 impl AluminaApp {
-    /// (Re-)builds the VBO if the model, grid or scale changed.
+    /// Rebuild and upload the line and face buffers for the current scene.
     unsafe fn sync_buffers(&mut self, gl: &glow::Context) {
         self.vertex_storage.clear();
         let mut faces: Vec<f32> = Vec::new();
 
-        // ── 1) grid (10 mm spacing, ±work_size/2) ───────────────────────
+        // Draw a 10 mm XY grid and the remaining work-envelope edges.
         if self.workarea {
             let minor = [0.55, 0.55, 0.55];
             let major = [1.0, 1.0, 1.0];
@@ -421,7 +407,7 @@ impl AluminaApp {
             let hy = self.work_size.y * 0.5;
             let hz = self.work_size.z;
 
-            // vertical (X) lines
+            // Lines at constant X.
             for i in 0..=(self.work_size.x / 10.0) as i32 {
                 let x = -hx + i as f32 * 10.0;
                 let col = if i % 10 == 0 { major } else { minor };
@@ -430,7 +416,7 @@ impl AluminaApp {
                 ]);
             }
 
-            // horizontal (Y) lines
+            // Lines at constant Y.
             for i in 0..=(self.work_size.y / 10.0) as i32 {
                 let y = -hy + i as f32 * 10.0;
                 let col = if i % 10 == 0 { major } else { minor };
@@ -439,10 +425,9 @@ impl AluminaApp {
                 ]);
             }
 
-            // outline the remaining cuboid edges
             let edge = major;
 
-            //  four vertical edges
+            // Four vertical edges.
             for (sx, sy) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
                 let x = sx * hx;
                 let y = sy * hy;
@@ -452,7 +437,7 @@ impl AluminaApp {
                 ]);
             }
 
-            //  top rectangle (Z = hz)
+            // Top rectangle at Z = hz.
             self.vertex_storage.extend_from_slice(&[
                 -hx, -hy, hz, edge[0], edge[1], edge[2], hx, -hy, hz, edge[0], edge[1], edge[2],
                 hx, -hy, hz, edge[0], edge[1], edge[2], hx, hy, hz, edge[0], edge[1], edge[2], hx,
@@ -461,7 +446,7 @@ impl AluminaApp {
             ]);
         }
 
-        // ── 2) model / slice ──────────────────────────────────────────────
+        // Draw either the active slice or the model inspection overlays.
         fn add_line_string(ls: &LineString<f64>, z: f32, col: [f32; 3], out: &mut Vec<f32>) {
             for w in ls.0.windows(2) {
                 let a = w[0];
@@ -489,12 +474,12 @@ impl AluminaApp {
                                 add_line_string(inner, z, PURPLE, &mut self.vertex_storage);
                             }
                         }
-                        _ => {} // ignore points etc.
+                        _ => {}
                     }
                 }
             }
         } else {
-            /* ---------- model wire-frame (edges) ----------------------------- */
+            // Model wireframe.
             if self.edges {
                 const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
                 for model_entry in &self.models {
@@ -520,7 +505,7 @@ impl AluminaApp {
                 }
             }
 
-            /* ---------- model faces (solid) ---------------------------------- */
+            // Filled model faces.
             if self.faces {
                 for model_entry in &self.models {
                     let model = &model_entry.mesh;
@@ -544,7 +529,7 @@ impl AluminaApp {
                 }
             }
 
-            // === Polygon normals ========================================================
+            // Polygon-normal indicators.
             if self.normals {
                 const NORMAL_COL: [f32; 3] = [1.0, 0.0, 0.0]; // red
                 let normal_len = (self.work_size.norm() * 0.04) as f32; // ≈ 4 % of diag
@@ -552,7 +537,7 @@ impl AluminaApp {
                 for model_entry in &self.models {
                     let model = &model_entry.mesh;
                     for p in &model.polygons {
-                        // polygon centroid
+                        // Anchor each normal at its polygon centroid.
                         let mut c = Vector3::zeros();
                         for v in &p.vertices {
                             c += Vector3::new(v.pos.x as f32, v.pos.y as f32, v.pos.z as f32);
@@ -585,12 +570,12 @@ impl AluminaApp {
                 }
             }
 
-            // === Vertex spheres =========================================================
+            // Vertex indicators.
             if self.vertices {
                 const VERT_COL: [f32; 3] = [1.0, 1.0, 0.0]; // yellow
                 let r = (self.work_size.norm() * 0.005) as f32; // ≈ 0.5 % of diag
 
-                // de-dupe identical vertices so we don’t draw the same sphere many times
+                // Quantize positions to avoid drawing duplicate indicators.
                 let mut seen: HashSet<(i64, i64, i64)> = HashSet::new();
                 let quant = 1_000_000.0; // 1 µm grid
 
@@ -614,14 +599,14 @@ impl AluminaApp {
             }
         }
 
-        // ---------- upload / (re-)create VBOs -----------------------------------
+        // Upload the rebuilt buffers.
         if let Some(lines_gpu) = &self.gpu {
             if let Ok(mut g) = lines_gpu.lock() {
                 unsafe { g.upload_vertices(gl, &self.vertex_storage) };
             }
         }
 
-        // Faces VBO is present only while “faces” is checked
+        // Release the optional triangle buffer when it is empty.
         let need_tris = !faces.is_empty();
         if need_tris {
             let faces_gpu = self.gpu_faces.get_or_insert_with(|| {
@@ -648,9 +633,6 @@ impl eframe::App for AluminaApp {
 
         match self.selected_tab {
             Tab::Control => {
-                // ------------------------------------------------------------------
-                // Sidebar
-                // ------------------------------------------------------------------
                 egui::SidePanel::left("side_panel")
                     .resizable(false)
                     .min_width(140.0)
@@ -724,12 +706,9 @@ impl eframe::App for AluminaApp {
                         ui.checkbox(&mut self.vertices, "vertices");
                         ui.checkbox(&mut self.workarea, "Work area");
 
-                        // ────────────── Scale Controls ──────────────
                         ui.separator();
                         ui.collapsing("Model scale", |ui| {
-                            // --- 1. borrow models[idx] once --------------------
                             if let Some(m) = self.sel_mut() {
-                                // Track whether any DragValue changed
                                 let mut changed = false;
 
                                 ui.horizontal(|ui| {
@@ -768,17 +747,15 @@ impl eframe::App for AluminaApp {
                                     changed = true;
                                 }
 
-                                // Invalidate *through the same mutable borrow*.
+                                // Invalidate within the existing mutable borrow.
                                 if changed {
                                     m.applied_scale = INVALID_SCALE;
                                 }
                             } else {
                                 ui.label("No model selected");
                             }
-                            // --- m is dropped here; safe to touch self again if you need to ---
                         });
 
-                        // ────────────── Position Controls ──────────────
                         ui.separator();
                         ui.collapsing("Model position", |ui| {
                             if let Some(m) = self.sel_mut() {
@@ -820,7 +797,7 @@ impl eframe::App for AluminaApp {
                                 }
 
                                 if changed {
-                                    // Same trick: mark dirty without re-borrowing self.
+                                    // Invalidate without taking a second mutable borrow.
                                     m.applied_offset = Vector3::repeat(f32::NAN);
                                 }
                             } else {
@@ -846,7 +823,6 @@ impl eframe::App for AluminaApp {
 
                         ui.separator();
                         ui.collapsing("Tool settings", |ui| {
-                            // ── tool selector ──
                             ui.horizontal(|ui| {
                                 ui.label("Tool:");
                                 egui::ComboBox::from_id_salt("tool_select")
@@ -885,7 +861,6 @@ impl eframe::App for AluminaApp {
                                     });
                             });
 
-                            // ── tool-specific widgets ──
                             match self.selected_tool {
                                 Tool::Laser => {
                                     ui.horizontal(|ui| {
@@ -1046,16 +1021,14 @@ impl eframe::App for AluminaApp {
                             );
                         }
                         if ui.button("send").clicked(){
-							// existing firmware case matches "g0"
+							// `g0` is the firmware's current send command.
 							send_queue_command("g0");
 						}
                         if ui.button("toggle").clicked() {
-                            // Example: toggle wireframe state when this button is pressed
                             self.wireframe = !self.wireframe;
                         }
                     });
 
-                // ── workpiece ────────────────────────────────────────────────
                 let workpiece_bytes_opt = {
                     let mut guard = self.workpiece_data.lock().unwrap();
                     guard.take()
@@ -1069,7 +1042,6 @@ impl eframe::App for AluminaApp {
                     }
                 }
 
-                // ── model ────────────────────────────────────────────────────
                 let model_bytes_opt = {
                     let mut guard = self.model_data.lock().unwrap();
                     guard.take()
@@ -1077,8 +1049,8 @@ impl eframe::App for AluminaApp {
                 if let Some(bytes) = model_bytes_opt {
                     if let Some(mesh) = load_mesh_from_bytes(&bytes) {
                         let name = "model".to_string();
-                        // replace if user had a selection, else add as new model
-                        if let Some(sel) = self.selected_model {
+                        // Replace the selection, or add a model after an Add action.
+                        if self.selected_model.is_some() {
                             self.set_selected_base(mesh.float(), name);
                         } else {
                             self.add_model(mesh.float(), name);
@@ -1089,24 +1061,19 @@ impl eframe::App for AluminaApp {
                     }
                 }
 
-                // Apply scaling if the user changed any of the factors -------------
                 self.refresh_models();
                 self.refresh_slice();
 
-                // ------------------------------------------------------------------
-                // Main viewport
-                // ------------------------------------------------------------------
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.set_min_size(ui.available_size());
                     let (rect, response) =
                         ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
 
-                    // ───── Interaction ─────
                     if response.dragged() {
                         let delta = response.drag_delta();
                         let input = ui.input(|i| i.clone());
                         if input.pointer.primary_down() {
-                            // left‑drag → rotate
+                            // Primary drag rotates the model.
                             let yaw = delta.x * 0.01;
                             let pitch = delta.y * 0.01;
                             self.rotation =
@@ -1114,56 +1081,32 @@ impl eframe::App for AluminaApp {
                                     * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch)
                                     * self.rotation;
                         } else if input.pointer.middle_down() {
-                            // middle‑drag → pan
+                            // Middle drag pans the model.
                             self.translation += -delta;
                         }
                     }
                     
-                    //-------------------------------------------------------------
-					// ✨ 1. Pinch-to-zoom (egui 0.23+ synthesises this for us)
-					//-------------------------------------------------------------
+					// Egui reports pinch gestures as a multiplicative zoom delta.
 					let pinch = ui.input(|i| i.zoom_delta());
-					// `zoom_delta` is multiplicative: 1.0 == no change.
 					if (pinch - 1.0).abs() > f32::EPSILON {
-						// >1  → fingers move apart → zoom-in (move camera closer)
-						// <1  → fingers pinch      → zoom-out
 						self.zoom = (self.zoom / pinch).clamp(0.1, 500.0);
 					}
 
-					//-------------------------------------------------------------
-					// ✨ 2. Two-/three-finger pan
-					//
-					// Track-pads send a “scroll” gesture for multi-finger drags.
-					// We treat that *vector* as a pan.  Mouse-wheel users still
-					// get the existing scroll-to-zoom behaviour because wheels
-					// never generate an X component in practice.
-					//-------------------------------------------------------------
-					//let scroll_vec = ui.input(|i| i.raw_scroll_delta);
-					//if scroll_vec.x.abs() > 0.0 || scroll_vec.y.abs() > 0.0 {
-					//	// For a natural feel, match the finger direction: we invert Y.
-					//	self.translation += egui::vec2(-scroll_vec.x, scroll_vec.y);
-					//}
-
-                    // scroll → zoom
+                    // Vertical scrolling changes camera distance.
                     let scroll = ui.input(|i| i.raw_scroll_delta.y);
                     if scroll.abs() > 0.0 {
                         self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.0, 500.0);
                     }
 
-                    // ------------------------------------------------------------------
-                    // Ask egui for the GL context once per frame
-                    // ------------------------------------------------------------------
                     if let Some(gl) = _frame.gl() {
-                        // ── 1) create once ─────────────────────────────────────────────
                         if self.gpu.is_none() {
                             self.gpu =
                                 Some(Arc::new(Mutex::new(unsafe { renderer::GpuLines::new(gl) })));
                         }
 
-                        // ── 2) keep vertex buffer in sync ─────────────────────────────
                         unsafe { self.sync_buffers(gl) };
 
-                        // ── 3) schedule GL paint right after egui’s own meshes ────────
+                        // Schedule GL painting after egui's meshes.
                         if let Some(lines_gpu) = &self.gpu {
                             let lines_gpu = lines_gpu.clone();
                             let faces_gpu = self.gpu_faces.clone();
@@ -1176,7 +1119,7 @@ impl eframe::App for AluminaApp {
                                     gl.depth_func(glow::LEQUAL);
                                     gl.clear(glow::DEPTH_BUFFER_BIT);
 
-                                    // draw filled faces first (slight offset keeps outlines crisp)
+                                    // Offset filled faces to keep coplanar outlines crisp.
                                     if let Some(faces_gpu) = &faces_gpu {
                                         if let Ok(f) = faces_gpu.lock() {
                                             gl.enable(glow::POLYGON_OFFSET_FILL);
@@ -1185,7 +1128,6 @@ impl eframe::App for AluminaApp {
                                             gl.disable(glow::POLYGON_OFFSET_FILL);
                                         }
                                     }
-                                    // then draw outlines
                                     if let Ok(l) = lines_gpu.lock() {
                                         l.paint(gl, mvp);
                                     }
@@ -1213,7 +1155,7 @@ impl eframe::App for AluminaApp {
 								send_queue_command("scan_wifi");
 							}
 							if ui.button("Set Wi-Fi").clicked() {
-								// current firmware just logs;
+								// The current firmware records this request for later handling.
 								send_queue_command("set_wifi");
 							}
 						});
@@ -1245,7 +1187,7 @@ impl eframe::App for AluminaApp {
 						}
 						ui.separator();
 						ui.label("GPIO pins");
-						let mut gpio_row = |label: &str,
+						let gpio_row = |label: &str,
 											state: &mut bool,
 											high: &'static str,
 											low:  &'static str,
@@ -1270,7 +1212,7 @@ impl eframe::App for AluminaApp {
 					});
 
 				egui::CentralPanel::default().show(ctx, |ui| {
-					// keep the app waking up while polling is on (no user input needed)
+					// Keep producing frames while diagnostics polling is active.
 					if self.diag_poll {
 						ctx.request_repaint_after(std::time::Duration::from_secs_f64(self.diag_poll_delay));
 					}
@@ -1279,10 +1221,8 @@ impl eframe::App for AluminaApp {
 						if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
 							let now = perf.now();
 							if now >= self.next_poll_ms {
-								// advance by whole periods in case we were late,
-								// so we don't drift or "double wait"
+								// Advance by whole periods to avoid drift after a late frame.
 								let period = self.diag_poll_delay * 1000.0;
-								// Catch up: ensure next_poll_ms is strictly in the future
 								while self.next_poll_ms <= now {
 									self.next_poll_ms += period;
 								}
@@ -1291,10 +1231,9 @@ impl eframe::App for AluminaApp {
 						}
 					}
 
-					// Apply the latest sample to series and console
+					// Add the latest sample to selected pin series and the console.
 					if let Some(pins) = { let mut g = self.diag_last_pins.lock().unwrap(); g.take() } {
 						let t = (web_sys::window().and_then(|w| w.performance()).map(|p| p.now()).unwrap_or(0.0)) / 1000.0;
-						// Only track pins the user has "checked"
 						let mut line = format!("t={:.02}s ", t);
 						for (name, val) in pins.iter() {
 							if self.is_pin_checked(name) {
@@ -1308,17 +1247,17 @@ impl eframe::App for AluminaApp {
 						ctx.request_repaint();
 					}
 					
-					// Split the available space into two equal vertical regions
+					// Split diagnostics into equal status and console regions.
 					let total = ui.available_size();
 					let half_h = total.y / 2.0;
 					
-					// Kick off one-time board info fetch when we first visit Diagnostics
+					// Fetch device metadata once on the first diagnostics frame.
 					if !self.device_info_requested {
 						self.device_info_requested = true;
 						fetch_board_info(Arc::clone(&self.device_info_slot));
 					}
 					
-					// Given a relative URL, return an absolute URL
+					// Device images may be returned as same-origin relative URLs.
 					fn absolutize_url(p: &str) -> String {
 						if p.starts_with("http://") || p.starts_with("https://") { return p.to_owned(); }
 						let win = web_sys::window().expect("no window");
@@ -1326,25 +1265,20 @@ impl eframe::App for AluminaApp {
 						format!("{origin}{p}")
 					}
 					
-					// Pick up fetched info (if finished)
+					// Read device metadata without blocking the UI.
 					let fetched = { let g = self.device_info_slot.lock().unwrap(); g.clone() };
-					let mut device_name: Option<String> = None;
 					let mut device_img_url = String::from("/device/image");
 					let mut device_display_name = String::from("Device");
-					if let Some((name, display_name, image_mime, image_url)) = fetched {
-						device_name = Some(name);
+					if let Some((_name, display_name, _image_mime, image_url)) = fetched {
 						device_display_name = display_name;
 						device_img_url = image_url;
 					}
 
-					// normalize every frame so it’s always http(s)://...
 					let device_img_url = absolutize_url(&device_img_url);
 					log::warn!("device image uri = {}", device_img_url);
 
-					// ── TOP HALF: two columns (graph | board image)
 					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
 						ui.columns(2, |cols| {
-							// left: graph
 							cols[0].heading("IO Status");
 							cols[0].add_space(4.0);
 							egui_plot::Plot::new("diag_plot")
@@ -1359,7 +1293,6 @@ impl eframe::App for AluminaApp {
 									}
 								});
 
-							// right: board image (fill column, keep aspect)
 							cols[1].heading(device_display_name);
 							cols[1].add_space(4.0);
 							let max = cols[1].available_size();
@@ -1370,7 +1303,6 @@ impl eframe::App for AluminaApp {
 						});
 					});
 
-					// ── BOTTOM HALF: console
 					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
 						ui.horizontal(|ui| {
 							ui.heading("Console");
@@ -1388,7 +1320,6 @@ impl eframe::App for AluminaApp {
 							}
 						});
 
-						// Make the log fill the remainder of this half
 						egui::ScrollArea::vertical()
 							.stick_to_bottom(true)
 							.show(ui, |ui| {
@@ -1428,14 +1359,14 @@ impl eframe::App for AluminaApp {
                             }
                         }
                         if ui.button("Save .graph").clicked() {
-                            // serialise self.design_state.graph and trigger download …
+                            // Graph serialization is not implemented yet.
                         }
                     });
 
                 egui::CentralPanel::default().show(ctx, |ui| {
 					ui.set_min_size(ui.available_size());
 
-					// Check if the graph is empty before drawing (no nodes/ports yet)
+					// Preserve emptiness before drawing so the editor can show a hint.
 					let graph_is_empty =
 						self.design_state.graph.inputs.is_empty() && self.design_state.graph.outputs.is_empty();
 
@@ -1450,7 +1381,7 @@ impl eframe::App for AluminaApp {
 					);
 					_ = resp;
 
-					// Overlay hint when no nodes are present
+					// Explain how to create the first node.
 					if graph_is_empty {
 						let rect = ui.max_rect();
 						let painter = ui.painter();
@@ -1468,17 +1399,14 @@ impl eframe::App for AluminaApp {
     }
 }
 
-/// Build an MVP matrix that always keeps the entire model in front of the camera.
+/// Build a model-view-projection matrix for the current camera and viewport.
 ///
-/// * `zoom` is interpreted as a dolly factor: 1 = default distance, 2 = half the distance, etc.
-/// * `bounds` is the half-extent of the work area or of the model, whichever is larger.
+/// `zoom` is a dolly factor: 1 is the default distance and 2 halves it.
 fn mvp(app: &AluminaApp, rect: egui::Rect) -> Matrix4<f32> {
-    // ─ 1. camera distance ─
     let radius = app.work_size.norm() * 0.5;
     let base_eye = radius * 3.0;
     let eye = Point3::new(0.0, 0.0, base_eye / app.zoom);
 
-    // ─ 2. matrices ─
     let aspect = rect.width() / rect.height();
     let proj = Perspective3::new(aspect, 60_f32.to_radians(), 0.1, 10_000.0).to_homogeneous();
     let view = nalgebra::Isometry3::look_at_rh(
@@ -1488,7 +1416,7 @@ fn mvp(app: &AluminaApp, rect: egui::Rect) -> Matrix4<f32> {
     )
     .to_homogeneous();
 
-    // screen-pixel panning (same maths as before)
+    // Convert screen-pixel panning into world coordinates.
     let pixels_per_world = rect.height() / (radius * 2.0);
     let pan = Vector3::new(
         -app.translation.x / pixels_per_world,
@@ -1500,9 +1428,9 @@ fn mvp(app: &AluminaApp, rect: egui::Rect) -> Matrix4<f32> {
     proj * view * model
 }
 
-/// Pushes a tiny icosahedron (≈ sphere) into `out`, centred on `c`.
+/// Append an icosahedral vertex marker centered at `c`.
 fn add_vertex_sphere(c: Vector3<f32>, r: f32, col: [f32; 3], out: &mut Vec<f32>) {
-    // golden-ratio icosahedron (12 verts, 20 tris)
+    // Golden-ratio icosahedron: 12 vertices and 20 triangles.
     const PHI: f32 = 1.618_034;
     const V: &[[f32; 3]] = &[
         [-1.0, PHI, 0.0],
@@ -1554,9 +1482,9 @@ fn spawn_file_picker(
     _filter_name: &'static str,
     exts: &'static [&'static str],
 ) {
-    // 100 % non-blocking: the async task lives in the browser’s micro-task queue
+    // The browser event loop owns the asynchronous file dialog workflow.
     execute(async move {
-        // ---1) build an <input type="file"> on the fly --------------------
+        // Create a hidden file input for the requested extensions.
         let document = window()
             .expect("no window")
             .document()
@@ -1568,7 +1496,6 @@ fn spawn_file_picker(
             .unwrap();
         input.set_type("file");
 
-        // Accept filter (".stl,.dxf", etc.)
         let accept = exts
             .iter()
             .map(|e| format!(".{e}"))
@@ -1576,30 +1503,31 @@ fn spawn_file_picker(
             .join(",");
         input.set_accept(&accept);
 
-        input.style().set_property("display", "none").unwrap(); // invisible
+        input.style().set_property("display", "none").unwrap();
         document.body().unwrap().append_child(&input).unwrap();
 
-        // ---2) turn the "change" event into a Future -----------------------
+        // Bridge the browser's change event into an awaitable channel.
         let (tx, rx) = oneshot::channel::<()>();
 
-        // Wrap the Sender so we can *move* it exactly once inside an FnMut closure
+        // The event closure may run repeatedly, but the sender is consumed once.
         let tx_cell = Rc::new(RefCell::new(Some(tx)));
         let tx_handle = Rc::clone(&tx_cell);
 
         let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_e| {
             if let Some(sender) = tx_handle.borrow_mut().take() {
-                let _ = sender.send(()); // 2nd call → already None → no-op
+                let _ = sender.send(());
             }
         }));
         input
             .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
             .unwrap();
-        closure.forget(); // leak => stays alive for the element’s lifetime
+        // Keep the callback alive for the dynamically created element.
+        closure.forget();
 
-        input.click(); // **opens** the browser dialog
-        rx.await.ok(); // wait until the user picked a file
+        input.click();
+        rx.await.ok();
 
-        // ---3) extract bytes with File::arrayBuffer -----------------------
+        // Copy the selected browser file into Rust-owned bytes.
         let files = input.files().unwrap();
         if files.length() == 0 {
             return;
@@ -1612,7 +1540,7 @@ fn spawn_file_picker(
         let mut bytes = vec![0u8; u8_array.length() as usize];
         u8_array.copy_to(&mut bytes);
 
-        *target.lock().unwrap() = Some(bytes); // hand off to the egui thread
+        *target.lock().unwrap() = Some(bytes);
     });
 }
 
@@ -1624,7 +1552,7 @@ fn send_queue_command(cmd:&'static str){
         use wasm_bindgen_futures::JsFuture;
         use web_sys::{Request,RequestInit,Window,Response};
         let window:Window=web_sys::window().expect("no window");
-        let mut opts=RequestInit::new();
+        let opts=RequestInit::new();
         opts.set_method("POST");
         opts.set_body(&JsValue::from_str(cmd));
         let request=Request::new_with_str_and_init("/queue",&opts).unwrap();
@@ -1651,7 +1579,7 @@ fn fetch_board_info(target: Arc<Mutex<Option<(String, String, String, String)>>>
         use web_sys::{Request, RequestInit, Window, Response};
 
         let window: Window = web_sys::window().expect("no window");
-        let mut opts = RequestInit::new();
+        let opts = RequestInit::new();
         opts.set_method("GET");
         let request = Request::new_with_str_and_init("/device", &opts).unwrap();
         request.headers().set("Accept", "application/json").ok();
@@ -1669,7 +1597,7 @@ fn fetch_board_info(target: Arc<Mutex<Option<(String, String, String, String)>>>
     });
 }
 
-/// GET a text endpoint and return the body as String.
+/// Fetch a text endpoint and return its body.
 async fn http_get_text(path: &str) -> Result<String, JsValue> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
@@ -1696,18 +1624,9 @@ fn load_mesh_from_bytes(bytes: &[u8]) -> Option<Mesh<()>> {
 pub async fn start() -> Result<(), JsValue> {
     console_log::init_with_level(Level::Debug).expect("failed to init logger");
 
-	// Optionally fetch the Google Fonts index at startup (or on first use).
-	// Replace with your real API key (read-only metadata).
-	//
-	// let all = fonts::gf_fetch_index("YOUR-API-KEY").await?;
-	// log::info!("[alumina] google fonts: {} families", all.len());
-	// for f in all.iter().take(10) {
-	//     log::debug!("  {}", f.family);
-	// }
-
     let web_options = eframe::WebOptions::default();
 
-    // obtain the canvas element
+    // Bind eframe to the canvas declared in index.html.
     let document = web_sys::window()
         .expect("no window")
         .document()
@@ -1715,9 +1634,8 @@ pub async fn start() -> Result<(), JsValue> {
     let canvas = document
         .get_element_by_id("alumina_canvas")
         .expect("canvas not found")
-        .dyn_into::<HtmlCanvasElement>()?; // ← cast
+        .dyn_into::<HtmlCanvasElement>()?;
 
-    // Pass the element instead of the id
     eframe::WebRunner::new()
         .start(
             canvas,
