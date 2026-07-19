@@ -12,13 +12,12 @@ egui_plot = "0.30.0"
 image = { version = "0.25", features = ["jpeg", "png"] }
 #egui_node_graph2 = { version = "0.7.0", features = ["persistence"] }
 egui_node_graph2 = { git = "https://github.com/trevyn/egui_node_graph2", features = ["persistence"] }
-glow = { version = "0.16", default-features = false }
 wasm-bindgen = { version = "0.2", default-features = false }
 wasm-bindgen-futures = { version = "0.4", default-features = false }
 console_error_panic_hook = { version = "0.1", default-features = false }
 csgrs = { version="0.20.1", default-features = false, features = ["delaunay", "f64", "chull-io", "sdf", "truetype-text", "stl-io", "dxf-io", "amf-io", "ply-io", "obj-io"] }
+hypergraphics = { path = "../hypergraphics", default-features = false }
 uuid = { version = "1.17", default-features = false, features = ["js", "v4"] }
-bytemuck = { version = "1.23.1", default-features = false }
 nalgebra = { version = "0.33.2", default-features = false, features = ["serde-serialize"] }
 geo = { version = "0.29", default-features = false }
 futures-channel = { version = "0.3", default-features = false, features = ["alloc"] }

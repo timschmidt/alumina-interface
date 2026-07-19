@@ -7,9 +7,9 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsValue;
-#[cfg(target_arch = "wasm32")]
 use base64::Engine;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
 
 /// A compact view of what we persist.
 #[cfg(target_arch = "wasm32")]

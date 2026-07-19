@@ -1,15 +1,15 @@
 #![warn(clippy::pedantic)]
 mod design_graph;
-mod renderer;
 mod fonts;
 
 use crate::design_graph::{AllTemplates, UserState};
 use csgrs::{mesh::Mesh, sketch::Sketch, traits::CSG};
-use eframe::egui;
+use eframe::{egui, glow::HasContext as _};
 use egui_node_graph2::GraphEditorState;
 use futures_channel::oneshot;
 use geo::{Geometry, LineString};
-use glow::HasContext as _;
+use hypergraphics::backend::{GpuColoredMesh, UnlitProgram};
+use hypergraphics::{Primitive, Projection64};
 use js_sys::Uint8Array;
 use log::Level;
 use nalgebra::{Matrix4, Perspective3, Point3, Translation3, UnitQuaternion, Vector3};
@@ -26,6 +26,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{Event, HtmlCanvasElement, HtmlInputElement, window};
 
 const INVALID_SCALE: Vector3<f32> = Vector3::new(-1.0, -1.0, -1.0);
+const EGUI_BLUE: [f32; 3] = [0.0, 0.447, 0.741];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -163,17 +164,34 @@ pub struct AluminaApp {
     show_slice: bool,
     /// Most recently generated slice for `current_layer`.
     sliced_layer: Option<Sketch<()>>,
-    gpu: Option<Arc<Mutex<renderer::GpuLines>>>,
-    gpu_faces: Option<Arc<Mutex<renderer::GpuLines>>>,
+    render_resources: Option<Arc<Mutex<RenderResources>>>,
     vertex_storage: Vec<f32>,
     selected_tab: Tab,
     diag_poll: bool,
     diag_led: bool,
     // Desired GPIO states; false means low.
-    diag_d0:bool,diag_d1:bool,diag_d2:bool,diag_d3:bool,
-    diag_d4:bool,diag_d5:bool,diag_d6:bool,diag_d7:bool,
-    diag_d9:bool,diag_d11:bool,diag_d12:bool,diag_d13:bool,
-    device_info_slot: Arc<Mutex<Option<(String /*name*/, String /*display_name*/, String /*image_mime*/, String /*image_url*/)>>>,
+    diag_d0: bool,
+    diag_d1: bool,
+    diag_d2: bool,
+    diag_d3: bool,
+    diag_d4: bool,
+    diag_d5: bool,
+    diag_d6: bool,
+    diag_d7: bool,
+    diag_d9: bool,
+    diag_d11: bool,
+    diag_d12: bool,
+    diag_d13: bool,
+    device_info_slot: Arc<
+        Mutex<
+            Option<(
+                String, /*name*/
+                String, /*display_name*/
+                String, /*image_mime*/
+                String, /*image_url*/
+            )>,
+        >,
+    >,
     device_info_requested: bool,
     selected_tool: Tool,
     kerf: f32,
@@ -197,19 +215,89 @@ pub struct AluminaApp {
     >,
     design_user_state: UserState,
     diag_console: String,
-	// Time series keyed by pin name, such as "D0".
-    diag_series: HashMap<String, Vec<[f64;2]>>,
+    // Time series keyed by pin name, such as "D0".
+    diag_series: HashMap<String, Vec<[f64; 2]>>,
     // Latest `/pins` sample keyed by pin name.
     diag_last_pins: Arc<Mutex<Option<HashMap<String, f64>>>>,
     diag_poll_delay: f64,
-	next_poll_ms: f64,
+    next_poll_ms: f64,
+}
+
+struct RenderResources {
+    program: UnlitProgram,
+    lines: GpuColoredMesh,
+    faces: GpuColoredMesh,
+}
+
+impl RenderResources {
+    unsafe fn new(gl: &eframe::glow::Context) -> hypergraphics::Result<Self> {
+        unsafe {
+            Ok(Self {
+                program: UnlitProgram::new(gl)?,
+                lines: GpuColoredMesh::new(gl, Primitive::Lines)?,
+                faces: GpuColoredMesh::new(gl, Primitive::Triangles)?,
+            })
+        }
+    }
+
+    unsafe fn upload(
+        &mut self,
+        gl: &eframe::glow::Context,
+        lines: &[f32],
+        faces: &[f32],
+    ) -> hypergraphics::Result<()> {
+        unsafe {
+            self.lines.upload_xyz_rgb_f32(gl, lines)?;
+            self.faces.upload_xyz_rgb_f32(gl, faces)?;
+        }
+        Ok(())
+    }
+
+    unsafe fn paint(
+        &self,
+        gl: &eframe::glow::Context,
+        projection: &Projection64,
+    ) -> hypergraphics::Result<()> {
+        unsafe {
+            self.program.bind(gl, projection)?;
+            if !self.faces.is_empty() {
+                gl.enable(eframe::glow::POLYGON_OFFSET_FILL);
+                gl.polygon_offset(1.0, 1.0);
+                self.faces.draw(gl);
+                gl.disable(eframe::glow::POLYGON_OFFSET_FILL);
+            }
+            self.lines.draw(gl);
+        }
+        Ok(())
+    }
+}
+
+fn render_hypergraphics(
+    gl: &eframe::glow::Context,
+    resources: &Arc<Mutex<RenderResources>>,
+    projection: &Projection64,
+) -> hypergraphics::Result<()> {
+    let resources = resources.lock().map_err(|_| {
+        hypergraphics::Error::Backend("render resources mutex poisoned".to_string())
+    })?;
+    unsafe {
+        gl.enable(eframe::glow::DEPTH_TEST);
+        gl.depth_func(eframe::glow::LEQUAL);
+        gl.clear(eframe::glow::DEPTH_BUFFER_BIT);
+    }
+    let result = unsafe { resources.paint(gl, projection) };
+    unsafe {
+        gl.disable(eframe::glow::POLYGON_OFFSET_FILL);
+        gl.disable(eframe::glow::DEPTH_TEST);
+    }
+    result
 }
 
 impl AluminaApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {		
-		// Register URI and byte loaders used by device images.
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Register URI and byte loaders used by device images.
         egui_extras::install_image_loaders(&cc.egui_ctx);
-		
+
         let mut entry =
             ModelEntry::new("icosahedron", Mesh::<()>::icosahedron(100.0, None).float());
         entry.refresh();
@@ -238,17 +326,25 @@ impl AluminaApp {
             current_layer: 0,
             show_slice: false,
             sliced_layer: None,
-            gpu: None,
-            gpu_faces: None,
+            render_resources: None,
             vertex_storage: Vec::new(),
             selected_tab: Tab::Control,
             diag_poll: false,
             diag_led: false,
-            diag_d0:false,diag_d1:false,diag_d2:false,diag_d3:false,
-			diag_d4:false,diag_d5:false,diag_d6:false,diag_d7:false,
-			diag_d9:false,diag_d11:false,diag_d12:false,diag_d13:false,
-			device_info_slot: Arc::new(Mutex::new(None)),
-			device_info_requested: false,
+            diag_d0: false,
+            diag_d1: false,
+            diag_d2: false,
+            diag_d3: false,
+            diag_d4: false,
+            diag_d5: false,
+            diag_d6: false,
+            diag_d7: false,
+            diag_d9: false,
+            diag_d11: false,
+            diag_d12: false,
+            diag_d13: false,
+            device_info_slot: Arc::new(Mutex::new(None)),
+            device_info_requested: false,
             selected_tool: Tool::Laser,
             kerf: 0.1,
             touch_off: true,
@@ -265,13 +361,13 @@ impl AluminaApp {
             design_state: GraphEditorState::default(),
             design_user_state: UserState::default(),
             diag_console: String::new(),
-			diag_series: HashMap::new(),
-			diag_last_pins: Arc::new(Mutex::new(None)),
-			diag_poll_delay: 1.0,
-			next_poll_ms: 0.0,
+            diag_series: HashMap::new(),
+            diag_last_pins: Arc::new(Mutex::new(None)),
+            diag_poll_delay: 1.0,
+            next_poll_ms: 0.0,
         }
     }
-    
+
     /// Ensure `selected_model` is within bounds or `None` if there are no models.
     fn clamp_selection(&mut self) {
         if self.models.is_empty() {
@@ -342,13 +438,18 @@ impl AluminaApp {
         self.selected_model = Some(self.models.len() - 1);
         self.refresh_slice();
     }
-    
+
     fn diag_log(&mut self, line: impl Into<String>) {
-        if !self.diag_console.is_empty() { self.diag_console.push('\n'); }
+        if !self.diag_console.is_empty() {
+            self.diag_console.push('\n');
+        }
         self.diag_console.push_str(&line.into());
     }
     fn diag_push_point_named(&mut self, name: &str, x: f64, y: f64) {
-        self.diag_series.entry(name.to_string()).or_default().push([x, y]);
+        self.diag_series
+            .entry(name.to_string())
+            .or_default()
+            .push([x, y]);
     }
 
     /// Fetch `/pins` once and store its numeric JSON fields in `target`.
@@ -357,14 +458,22 @@ impl AluminaApp {
             match http_get_text("/pins").await {
                 Ok(body) => {
                     // Firmware may encode states as either JSON integers or floats.
-                    let parsed: Result<HashMap<String, f64>, _> = serde_json::from_str::<HashMap<String, serde_json::Value>>(&body)
-                        .map(|m| {
-                            m.into_iter()
-                                .filter_map(|(k, v)| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)).map(|f| (k, f)))
-                                .collect()
-                        });
+                    let parsed: Result<HashMap<String, f64>, _> = serde_json::from_str::<
+                        HashMap<String, serde_json::Value>,
+                    >(&body)
+                    .map(|m| {
+                        m.into_iter()
+                            .filter_map(|(k, v)| {
+                                v.as_f64()
+                                    .or_else(|| v.as_u64().map(|u| u as f64))
+                                    .map(|f| (k, f))
+                            })
+                            .collect()
+                    });
                     match parsed {
-                        Ok(map) => { *target.lock().unwrap() = Some(map); }
+                        Ok(map) => {
+                            *target.lock().unwrap() = Some(map);
+                        }
                         Err(e) => log::error!("parse /pins failed: {:?}", e),
                     }
                 }
@@ -372,29 +481,29 @@ impl AluminaApp {
             }
         });
     }
-    
+
     fn is_pin_checked(&self, name: &str) -> bool {
         match name {
-            "D0"  => self.diag_d0,
-            "D1"  => self.diag_d1,
-            "D2"  => self.diag_d2,
-            "D3"  => self.diag_d3,
-            "D4"  => self.diag_d4,
-            "D5"  => self.diag_d5,
-            "D6"  => self.diag_d6,
-            "D7"  => self.diag_d7,
-            "D9"  => self.diag_d9,
+            "D0" => self.diag_d0,
+            "D1" => self.diag_d1,
+            "D2" => self.diag_d2,
+            "D3" => self.diag_d3,
+            "D4" => self.diag_d4,
+            "D5" => self.diag_d5,
+            "D6" => self.diag_d6,
+            "D7" => self.diag_d7,
+            "D9" => self.diag_d9,
             "D11" => self.diag_d11,
             "D12" => self.diag_d12,
             "D13" => self.diag_d13,
             _ => false,
         }
-	}
+    }
 }
 
 impl AluminaApp {
     /// Rebuild and upload the line and face buffers for the current scene.
-    unsafe fn sync_buffers(&mut self, gl: &glow::Context) {
+    unsafe fn sync_buffers(&mut self, gl: &eframe::glow::Context) -> hypergraphics::Result<()> {
         self.vertex_storage.clear();
         let mut faces: Vec<f32> = Vec::new();
 
@@ -518,9 +627,9 @@ impl AluminaApp {
                                         v.x as f32,
                                         v.y as f32,
                                         v.z as f32,
-                                        renderer::EGUI_BLUE[0],
-                                        renderer::EGUI_BLUE[1],
-                                        renderer::EGUI_BLUE[2],
+                                        EGUI_BLUE[0],
+                                        EGUI_BLUE[1],
+                                        EGUI_BLUE[2],
                                     ]);
                                 }
                             }
@@ -599,25 +708,15 @@ impl AluminaApp {
             }
         }
 
-        // Upload the rebuilt buffers.
-        if let Some(lines_gpu) = &self.gpu {
-            if let Ok(mut g) = lines_gpu.lock() {
-                unsafe { g.upload_vertices(gl, &self.vertex_storage) };
+        if let Some(resources) = &self.render_resources {
+            let mut resources = resources.lock().map_err(|_| {
+                hypergraphics::Error::Backend("render resources mutex poisoned".to_string())
+            })?;
+            unsafe {
+                resources.upload(gl, &self.vertex_storage, &faces)?;
             }
         }
-
-        // Release the optional triangle buffer when it is empty.
-        let need_tris = !faces.is_empty();
-        if need_tris {
-            let faces_gpu = self.gpu_faces.get_or_insert_with(|| {
-                Arc::new(Mutex::new(unsafe { renderer::GpuLines::new(gl) }))
-            });
-            if let Ok(mut g) = faces_gpu.lock() {
-                unsafe { g.upload_vertices(gl, &faces) };
-            }
-        } else {
-            self.gpu_faces = None;
-        }
+        Ok(())
     }
 }
 
@@ -1020,10 +1119,10 @@ impl eframe::App for AluminaApp {
                                 &["stl", "dxf"],
                             );
                         }
-                        if ui.button("send").clicked(){
-							// `g0` is the firmware's current send command.
-							send_queue_command("g0");
-						}
+                        if ui.button("send").clicked() {
+                            // `g0` is the firmware's current send command.
+                            send_queue_command("g0");
+                        }
                         if ui.button("toggle").clicked() {
                             self.wireframe = !self.wireframe;
                         }
@@ -1085,12 +1184,12 @@ impl eframe::App for AluminaApp {
                             self.translation += -delta;
                         }
                     }
-                    
-					// Egui reports pinch gestures as a multiplicative zoom delta.
-					let pinch = ui.input(|i| i.zoom_delta());
-					if (pinch - 1.0).abs() > f32::EPSILON {
-						self.zoom = (self.zoom / pinch).clamp(0.1, 500.0);
-					}
+
+                    // Egui reports pinch gestures as a multiplicative zoom delta.
+                    let pinch = ui.input(|i| i.zoom_delta());
+                    if (pinch - 1.0).abs() > f32::EPSILON {
+                        self.zoom = (self.zoom / pinch).clamp(0.1, 500.0);
+                    }
 
                     // Vertical scrolling changes camera distance.
                     let scroll = ui.input(|i| i.raw_scroll_delta.y);
@@ -1099,45 +1198,46 @@ impl eframe::App for AluminaApp {
                     }
 
                     if let Some(gl) = _frame.gl() {
-                        if self.gpu.is_none() {
-                            self.gpu =
-                                Some(Arc::new(Mutex::new(unsafe { renderer::GpuLines::new(gl) })));
+                        if self.render_resources.is_none() {
+                            match unsafe { RenderResources::new(gl) } {
+                                Ok(resources) => {
+                                    self.render_resources = Some(Arc::new(Mutex::new(resources)));
+                                }
+                                Err(error) => {
+                                    log::error!("hypergraphics setup failed: {error}");
+                                }
+                            }
                         }
 
-                        unsafe { self.sync_buffers(gl) };
+                        if let Err(error) = unsafe { self.sync_buffers(gl) } {
+                            log::error!("hypergraphics upload failed: {error}");
+                        }
 
                         // Schedule GL painting after egui's meshes.
-                        if let Some(lines_gpu) = &self.gpu {
-                            let lines_gpu = lines_gpu.clone();
-                            let faces_gpu = self.gpu_faces.clone();
-                            let mvp = mvp(self, rect); // copy for the closure
+                        if let Some(resources) = &self.render_resources {
+                            match projection64(self, rect) {
+                                Ok(projection) => {
+                                    let resources = Arc::clone(resources);
+                                    let callback =
+                                        egui_glow::CallbackFn::new(move |_info, painter| {
+                                            if let Err(error) = render_hypergraphics(
+                                                painter.gl(),
+                                                &resources,
+                                                &projection,
+                                            ) {
+                                                log::error!("hypergraphics render failed: {error}");
+                                            }
+                                        });
 
-                            let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-                                let gl = painter.gl();
-                                unsafe {
-                                    gl.enable(glow::DEPTH_TEST);
-                                    gl.depth_func(glow::LEQUAL);
-                                    gl.clear(glow::DEPTH_BUFFER_BIT);
-
-                                    // Offset filled faces to keep coplanar outlines crisp.
-                                    if let Some(faces_gpu) = &faces_gpu {
-                                        if let Ok(f) = faces_gpu.lock() {
-                                            gl.enable(glow::POLYGON_OFFSET_FILL);
-                                            gl.polygon_offset(1.0, 1.0);
-                                            f.paint_tris(gl, mvp);
-                                            gl.disable(glow::POLYGON_OFFSET_FILL);
-                                        }
-                                    }
-                                    if let Ok(l) = lines_gpu.lock() {
-                                        l.paint(gl, mvp);
-                                    }
+                                    ui.painter().add(egui::PaintCallback {
+                                        rect,
+                                        callback: Arc::new(callback),
+                                    });
                                 }
-                            });
-
-                            ui.painter().add(egui::PaintCallback {
-                                rect,
-                                callback: Arc::new(callback),
-                            });
+                                Err(error) => {
+                                    log::error!("hypergraphics projection failed: {error}");
+                                }
+                            }
                         }
                     }
                 });
@@ -1151,185 +1251,209 @@ impl eframe::App for AluminaApp {
                         ui.heading("Diagnostics");
                         ui.separator();
                         ui.horizontal(|ui| {
-							if ui.button("Scan Wi-Fi").clicked() {
-								send_queue_command("scan_wifi");
-							}
-							if ui.button("Set Wi-Fi").clicked() {
-								// The current firmware records this request for later handling.
-								send_queue_command("set_wifi");
-							}
-						});
+                            if ui.button("Scan Wi-Fi").clicked() {
+                                send_queue_command("scan_wifi");
+                            }
+                            if ui.button("Set Wi-Fi").clicked() {
+                                // The current firmware records this request for later handling.
+                                send_queue_command("set_wifi");
+                            }
+                        });
                         ui.separator();
                         ui.horizontal(|ui| {
-							if ui.checkbox(&mut self.diag_poll, "Poll").changed() {
-								if self.diag_poll {
-									Self::poll_pins_once(Arc::clone(&self.diag_last_pins));
-									if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
-										let now = perf.now();
-										self.next_poll_ms = now + self.diag_poll_delay * 1000.0;
-									} else {
-										self.next_poll_ms = 0.0;
-									}
-									ctx.request_repaint(); // ensure an immediate frame to show the first result
-								}
-							}
-							ui.label("every");
-							ui.add(
-								egui::DragValue::new(&mut self.diag_poll_delay)
-									.speed(0.1)
-									.range(0.2..=5.0)   // 0.2s .. 5.0s
-									.suffix(" s"),
-							);
-						});
-						if ui.checkbox(&mut self.diag_led,"Status LED").changed(){
-							if self.diag_led { send_queue_command("status_on"); }
-							else { send_queue_command("status_off"); }
-						}
-						ui.separator();
-						ui.label("GPIO pins");
-						let gpio_row = |label: &str,
-											state: &mut bool,
-											high: &'static str,
-											low:  &'static str,
-											ui: &mut egui::Ui| {
-							if ui.checkbox(state, label).changed() {
-								if *state { send_queue_command(high); }
-								else      { send_queue_command(low);  }
-							}
-						};
-						gpio_row("D0",&mut self.diag_d0,"d0_high","d0_low",ui);
-						gpio_row("D1",&mut self.diag_d1,"d1_high","d1_low",ui);
-						gpio_row("D2",&mut self.diag_d2,"d2_high","d2_low",ui);
-						gpio_row("D3",&mut self.diag_d3,"d3_high","d3_low",ui);
-						gpio_row("D4",&mut self.diag_d4,"d4_high","d4_low",ui);
-						gpio_row("D5",&mut self.diag_d5,"d5_high","d5_low",ui);
-						gpio_row("D6",&mut self.diag_d6,"d6_high","d6_low",ui);
-						gpio_row("D7",&mut self.diag_d7,"d7_high","d7_low",ui);
-						gpio_row("D9",&mut self.diag_d9,"d9_high","d9_low",ui);
-						gpio_row("D11",&mut self.diag_d11,"d11_high","d11_low",ui);
-						gpio_row("D12",&mut self.diag_d12,"d12_high","d12_low",ui);
-						gpio_row("D13",&mut self.diag_d13,"d13_high","d13_low",ui);
-					});
+                            if ui.checkbox(&mut self.diag_poll, "Poll").changed() {
+                                if self.diag_poll {
+                                    Self::poll_pins_once(Arc::clone(&self.diag_last_pins));
+                                    if let Some(perf) =
+                                        web_sys::window().and_then(|w| w.performance())
+                                    {
+                                        let now = perf.now();
+                                        self.next_poll_ms = now + self.diag_poll_delay * 1000.0;
+                                    } else {
+                                        self.next_poll_ms = 0.0;
+                                    }
+                                    ctx.request_repaint(); // ensure an immediate frame to show the first result
+                                }
+                            }
+                            ui.label("every");
+                            ui.add(
+                                egui::DragValue::new(&mut self.diag_poll_delay)
+                                    .speed(0.1)
+                                    .range(0.2..=5.0) // 0.2s .. 5.0s
+                                    .suffix(" s"),
+                            );
+                        });
+                        if ui.checkbox(&mut self.diag_led, "Status LED").changed() {
+                            if self.diag_led {
+                                send_queue_command("status_on");
+                            } else {
+                                send_queue_command("status_off");
+                            }
+                        }
+                        ui.separator();
+                        ui.label("GPIO pins");
+                        let gpio_row = |label: &str,
+                                        state: &mut bool,
+                                        high: &'static str,
+                                        low: &'static str,
+                                        ui: &mut egui::Ui| {
+                            if ui.checkbox(state, label).changed() {
+                                if *state {
+                                    send_queue_command(high);
+                                } else {
+                                    send_queue_command(low);
+                                }
+                            }
+                        };
+                        gpio_row("D0", &mut self.diag_d0, "d0_high", "d0_low", ui);
+                        gpio_row("D1", &mut self.diag_d1, "d1_high", "d1_low", ui);
+                        gpio_row("D2", &mut self.diag_d2, "d2_high", "d2_low", ui);
+                        gpio_row("D3", &mut self.diag_d3, "d3_high", "d3_low", ui);
+                        gpio_row("D4", &mut self.diag_d4, "d4_high", "d4_low", ui);
+                        gpio_row("D5", &mut self.diag_d5, "d5_high", "d5_low", ui);
+                        gpio_row("D6", &mut self.diag_d6, "d6_high", "d6_low", ui);
+                        gpio_row("D7", &mut self.diag_d7, "d7_high", "d7_low", ui);
+                        gpio_row("D9", &mut self.diag_d9, "d9_high", "d9_low", ui);
+                        gpio_row("D11", &mut self.diag_d11, "d11_high", "d11_low", ui);
+                        gpio_row("D12", &mut self.diag_d12, "d12_high", "d12_low", ui);
+                        gpio_row("D13", &mut self.diag_d13, "d13_high", "d13_low", ui);
+                    });
 
-				egui::CentralPanel::default().show(ctx, |ui| {
-					// Keep producing frames while diagnostics polling is active.
-					if self.diag_poll {
-						ctx.request_repaint_after(std::time::Duration::from_secs_f64(self.diag_poll_delay));
-					}
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // Keep producing frames while diagnostics polling is active.
+                    if self.diag_poll {
+                        ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                            self.diag_poll_delay,
+                        ));
+                    }
 
-					if self.diag_poll {
-						if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
-							let now = perf.now();
-							if now >= self.next_poll_ms {
-								// Advance by whole periods to avoid drift after a late frame.
-								let period = self.diag_poll_delay * 1000.0;
-								while self.next_poll_ms <= now {
-									self.next_poll_ms += period;
-								}
-								Self::poll_pins_once(Arc::clone(&self.diag_last_pins));
-							}
-						}
-					}
+                    if self.diag_poll {
+                        if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
+                            let now = perf.now();
+                            if now >= self.next_poll_ms {
+                                // Advance by whole periods to avoid drift after a late frame.
+                                let period = self.diag_poll_delay * 1000.0;
+                                while self.next_poll_ms <= now {
+                                    self.next_poll_ms += period;
+                                }
+                                Self::poll_pins_once(Arc::clone(&self.diag_last_pins));
+                            }
+                        }
+                    }
 
-					// Add the latest sample to selected pin series and the console.
-					if let Some(pins) = { let mut g = self.diag_last_pins.lock().unwrap(); g.take() } {
-						let t = (web_sys::window().and_then(|w| w.performance()).map(|p| p.now()).unwrap_or(0.0)) / 1000.0;
-						let mut line = format!("t={:.02}s ", t);
-						for (name, val) in pins.iter() {
-							if self.is_pin_checked(name) {
-								self.diag_push_point_named(name, t as f64, *val);
-								line.push_str(&format!(" {}={}", name, *val as i32));
-							}
-						}
-						if line.trim() != "t=0.00s" {
-							self.diag_log(line);
-						}
-						ctx.request_repaint();
-					}
-					
-					// Split diagnostics into equal status and console regions.
-					let total = ui.available_size();
-					let half_h = total.y / 2.0;
-					
-					// Fetch device metadata once on the first diagnostics frame.
-					if !self.device_info_requested {
-						self.device_info_requested = true;
-						fetch_board_info(Arc::clone(&self.device_info_slot));
-					}
-					
-					// Device images may be returned as same-origin relative URLs.
-					fn absolutize_url(p: &str) -> String {
-						if p.starts_with("http://") || p.starts_with("https://") { return p.to_owned(); }
-						let win = web_sys::window().expect("no window");
-						let origin = win.location().origin().unwrap_or_else(|_| "".into());
-						format!("{origin}{p}")
-					}
-					
-					// Read device metadata without blocking the UI.
-					let fetched = { let g = self.device_info_slot.lock().unwrap(); g.clone() };
-					let mut device_img_url = String::from("/device/image");
-					let mut device_display_name = String::from("Device");
-					if let Some((_name, display_name, _image_mime, image_url)) = fetched {
-						device_display_name = display_name;
-						device_img_url = image_url;
-					}
+                    // Add the latest sample to selected pin series and the console.
+                    if let Some(pins) = {
+                        let mut g = self.diag_last_pins.lock().unwrap();
+                        g.take()
+                    } {
+                        let t = (web_sys::window()
+                            .and_then(|w| w.performance())
+                            .map(|p| p.now())
+                            .unwrap_or(0.0))
+                            / 1000.0;
+                        let mut line = format!("t={:.02}s ", t);
+                        for (name, val) in pins.iter() {
+                            if self.is_pin_checked(name) {
+                                self.diag_push_point_named(name, t as f64, *val);
+                                line.push_str(&format!(" {}={}", name, *val as i32));
+                            }
+                        }
+                        if line.trim() != "t=0.00s" {
+                            self.diag_log(line);
+                        }
+                        ctx.request_repaint();
+                    }
 
-					let device_img_url = absolutize_url(&device_img_url);
-					log::warn!("device image uri = {}", device_img_url);
+                    // Split diagnostics into equal status and console regions.
+                    let total = ui.available_size();
+                    let half_h = total.y / 2.0;
 
-					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
-						ui.columns(2, |cols| {
-							cols[0].heading("IO Status");
-							cols[0].add_space(4.0);
-							egui_plot::Plot::new("diag_plot")
-								.width(cols[0].available_width())
-								.height(cols[0].available_height())
-								.show(&mut cols[0], |plot_ui| {
-									for (name, series) in &self.diag_series {
-										if self.is_pin_checked(name) && !series.is_empty() {
-											let points = egui_plot::PlotPoints::from(series.clone());
-											plot_ui.line(egui_plot::Line::new(points).name(name.clone()));
-										}
-									}
-								});
+                    // Fetch device metadata once on the first diagnostics frame.
+                    if !self.device_info_requested {
+                        self.device_info_requested = true;
+                        fetch_board_info(Arc::clone(&self.device_info_slot));
+                    }
 
-							cols[1].heading(device_display_name);
-							cols[1].add_space(4.0);
-							let max = cols[1].available_size();
-							cols[1].add(
-								egui::Image::from_uri(device_img_url.clone())
-									.max_size(max) // use the column's size instead of hard 400px
-							);
-						});
-					});
+                    // Device images may be returned as same-origin relative URLs.
+                    fn absolutize_url(p: &str) -> String {
+                        if p.starts_with("http://") || p.starts_with("https://") {
+                            return p.to_owned();
+                        }
+                        let win = web_sys::window().expect("no window");
+                        let origin = win.location().origin().unwrap_or_else(|_| "".into());
+                        format!("{origin}{p}")
+                    }
 
-					ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
-						ui.horizontal(|ui| {
-							ui.heading("Console");
-							if ui.button("Clear").clicked() {
-								self.diag_console.clear();
-								self.diag_series.clear();
-							}
-							if ui.button("Refresh queue").clicked() {
-								execute(async {
-									match http_get_text("/queue").await {
-										Ok(s) => log::info!("/queue: {}", s),
-										Err(e) => log::error!("GET /queue failed: {:?}", e),
-									}
-								});
-							}
-						});
+                    // Read device metadata without blocking the UI.
+                    let fetched = {
+                        let g = self.device_info_slot.lock().unwrap();
+                        g.clone()
+                    };
+                    let mut device_img_url = String::from("/device/image");
+                    let mut device_display_name = String::from("Device");
+                    if let Some((_name, display_name, _image_mime, image_url)) = fetched {
+                        device_display_name = display_name;
+                        device_img_url = image_url;
+                    }
 
-						egui::ScrollArea::vertical()
-							.stick_to_bottom(true)
-							.show(ui, |ui| {
-								let te = egui::TextEdit::multiline(&mut self.diag_console)
-									.desired_width(f32::INFINITY)
-									.interactive(false);
-								ui.add_sized(ui.available_size(), te);
-							});
-					});
-				});
+                    let device_img_url = absolutize_url(&device_img_url);
+                    log::warn!("device image uri = {}", device_img_url);
+
+                    ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
+                        ui.columns(2, |cols| {
+                            cols[0].heading("IO Status");
+                            cols[0].add_space(4.0);
+                            egui_plot::Plot::new("diag_plot")
+                                .width(cols[0].available_width())
+                                .height(cols[0].available_height())
+                                .show(&mut cols[0], |plot_ui| {
+                                    for (name, series) in &self.diag_series {
+                                        if self.is_pin_checked(name) && !series.is_empty() {
+                                            let points =
+                                                egui_plot::PlotPoints::from(series.clone());
+                                            plot_ui.line(
+                                                egui_plot::Line::new(points).name(name.clone()),
+                                            );
+                                        }
+                                    }
+                                });
+
+                            cols[1].heading(device_display_name);
+                            cols[1].add_space(4.0);
+                            let max = cols[1].available_size();
+                            cols[1].add(
+                                egui::Image::from_uri(device_img_url.clone()).max_size(max), // use the column's size instead of hard 400px
+                            );
+                        });
+                    });
+
+                    ui.allocate_ui(egui::vec2(total.x, half_h), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.heading("Console");
+                            if ui.button("Clear").clicked() {
+                                self.diag_console.clear();
+                                self.diag_series.clear();
+                            }
+                            if ui.button("Refresh queue").clicked() {
+                                execute(async {
+                                    match http_get_text("/queue").await {
+                                        Ok(s) => log::info!("/queue: {}", s),
+                                        Err(e) => log::error!("GET /queue failed: {:?}", e),
+                                    }
+                                });
+                            }
+                        });
+
+                        egui::ScrollArea::vertical()
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                let te = egui::TextEdit::multiline(&mut self.diag_console)
+                                    .desired_width(f32::INFINITY)
+                                    .interactive(false);
+                                ui.add_sized(ui.available_size(), te);
+                            });
+                    });
+                });
             }
 
             Tab::Design => {
@@ -1364,39 +1488,49 @@ impl eframe::App for AluminaApp {
                     });
 
                 egui::CentralPanel::default().show(ctx, |ui| {
-					ui.set_min_size(ui.available_size());
+                    ui.set_min_size(ui.available_size());
 
-					// Preserve emptiness before drawing so the editor can show a hint.
-					let graph_is_empty =
-						self.design_state.graph.inputs.is_empty() && self.design_state.graph.outputs.is_empty();
+                    // Preserve emptiness before drawing so the editor can show a hint.
+                    let graph_is_empty = self.design_state.graph.inputs.is_empty()
+                        && self.design_state.graph.outputs.is_empty();
 
-					let resp = self.design_state.draw_graph_editor(
-						ui,
-						AllTemplates,
-						&mut self.design_user_state,
-						Vec::<egui_node_graph2::NodeResponse<
-							design_graph::EmptyUserResponse,
-							design_graph::NodeData,
-						>>::new(),
-					);
-					_ = resp;
+                    let resp = self.design_state.draw_graph_editor(
+                        ui,
+                        AllTemplates,
+                        &mut self.design_user_state,
+                        Vec::<
+                            egui_node_graph2::NodeResponse<
+                                design_graph::EmptyUserResponse,
+                                design_graph::NodeData,
+                            >,
+                        >::new(),
+                    );
+                    _ = resp;
 
-					// Explain how to create the first node.
-					if graph_is_empty {
-						let rect = ui.max_rect();
-						let painter = ui.painter();
-						painter.text(
-							rect.center(),
-							egui::Align2::CENTER_CENTER,
-							"Right-click to open menu",
-							egui::FontId::proportional(18.0),
-							ui.visuals().weak_text_color(),
-						);
-					}
-				});
+                    // Explain how to create the first node.
+                    if graph_is_empty {
+                        let rect = ui.max_rect();
+                        let painter = ui.painter();
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Right-click to open menu",
+                            egui::FontId::proportional(18.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                });
             }
         }
     }
+}
+
+/// Build a Hypergraphics projection for the current camera and viewport.
+fn projection64(app: &AluminaApp, rect: egui::Rect) -> hypergraphics::Result<Projection64> {
+    let matrix = mvp(app, rect);
+    let mut values = [0.0; 16];
+    values.copy_from_slice(matrix.as_slice());
+    Projection64::try_from_column_major_f32(values)
 }
 
 /// Build a model-view-projection matrix for the current camera and viewport.
@@ -1545,22 +1679,22 @@ fn spawn_file_picker(
 }
 
 /// POST a simple text command to the firmware `/queue` endpoint.
-fn send_queue_command(cmd:&'static str){
-    execute(async move{
-        use wasm_bindgen::prelude::*;
+fn send_queue_command(cmd: &'static str) {
+    execute(async move {
         use wasm_bindgen::JsCast;
+        use wasm_bindgen::prelude::*;
         use wasm_bindgen_futures::JsFuture;
-        use web_sys::{Request,RequestInit,Window,Response};
-        let window:Window=web_sys::window().expect("no window");
-        let opts=RequestInit::new();
+        use web_sys::{Request, RequestInit, Response, Window};
+        let window: Window = web_sys::window().expect("no window");
+        let opts = RequestInit::new();
         opts.set_method("POST");
         opts.set_body(&JsValue::from_str(cmd));
-        let request=Request::new_with_str_and_init("/queue",&opts).unwrap();
-        request.headers().set("Accept","text/plain").ok();
-        request.headers().set("Content-Type","text/plain").ok();
-        let resp_value=JsFuture::from(window.fetch_with_request(&request)).await;
-        if let Ok(val)=resp_value{
-            let _resp:Response=val.dyn_into().unwrap();
+        let request = Request::new_with_str_and_init("/queue", &opts).unwrap();
+        request.headers().set("Accept", "text/plain").ok();
+        request.headers().set("Content-Type", "text/plain").ok();
+        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await;
+        if let Ok(val) = resp_value {
+            let _resp: Response = val.dyn_into().unwrap();
         }
     });
 }
@@ -1572,11 +1706,11 @@ struct DeviceResp {
     image_url: String,
 }
 
-fn fetch_board_info(target: Arc<Mutex<Option<(String, String, String, String)>>>){
+fn fetch_board_info(target: Arc<Mutex<Option<(String, String, String, String)>>>) {
     execute(async move {
         use wasm_bindgen::JsCast;
         use wasm_bindgen_futures::JsFuture;
-        use web_sys::{Request, RequestInit, Window, Response};
+        use web_sys::{Request, RequestInit, Response, Window};
 
         let window: Window = web_sys::window().expect("no window");
         let opts = RequestInit::new();
@@ -1590,7 +1724,12 @@ fn fetch_board_info(target: Arc<Mutex<Option<(String, String, String, String)>>>
             if let Ok(text_js) = JsFuture::from(resp.text().unwrap()).await {
                 let s = text_js.as_string().unwrap_or_default();
                 if let Ok(parsed) = serde_json::from_str::<DeviceResp>(&s) {
-                    *target.lock().unwrap() = Some((parsed.name, parsed.display_name, parsed.image_mime, parsed.image_url));
+                    *target.lock().unwrap() = Some((
+                        parsed.name,
+                        parsed.display_name,
+                        parsed.image_mime,
+                        parsed.image_url,
+                    ));
                 }
             }
         }

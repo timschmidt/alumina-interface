@@ -72,7 +72,8 @@ trunk build --release
   visual design graph.
 - [`csgrs`](https://github.com/timschmidt/csgrs) provides sketch, mesh, Boolean,
   transform, slicing, import, and lattice operations.
-- [`glow`](https://github.com/grovesNL/glow) provides the WebGL rendering API.
+- [`hypergraphics`](https://github.com/timschmidt/hypergraphics) provides the
+  shared colored-mesh WebGL renderer and primitive-float rendering boundary.
 - [Trunk](https://trunkrs.dev/) builds and serves the WebAssembly application.
 - The [Web Storage standard](https://html.spec.whatwg.org/multipage/webstorage.html)
   defines the browser-local storage used by the TrueType text node.
