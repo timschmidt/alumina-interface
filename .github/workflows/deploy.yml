@@ -3,6 +3,7 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,9 +12,17 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out Alumina Interface
+        uses: actions/checkout@v4
         with:
+          path: alumina-interface
           fetch-depth: 0
+
+      - name: Check out Hypergraphics sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypergraphics
+          path: hypergraphics
 
       - name: Install Rust + Trunk
         run: |
@@ -24,11 +33,12 @@ jobs:
 
       - name: Build
         run: trunk build --release --public-url /alumina-interface/
+        working-directory: alumina-interface
 
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
+          publish_dir: ./alumina-interface/dist
           publish_branch: gh-pages
           force_orphan: true
