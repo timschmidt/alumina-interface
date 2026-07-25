@@ -24,12 +24,15 @@ jobs:
           repository: ${{ github.repository_owner }}/hypergraphics
           path: hypergraphics
 
-      - name: Install Rust + Trunk
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo install trunk
-          cargo install wasm-opt
-          cargo install wasm-tools
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install web build tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14,wasm-opt,wasm-tools
 
       - name: Build
         run: trunk build --release --public-url /alumina-interface/
