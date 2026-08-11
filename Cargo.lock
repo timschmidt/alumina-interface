@@ -54,8 +54,11 @@ dependencies = [
 name = "alumina-interface"
 version = "0.1.0"
 dependencies = [
+ "alumina-clock",
  "alumina-interface-client",
  "alumina-interface-core",
+ "alumina-job",
+ "alumina-machine-ir",
  "alumina-protocol",
  "alumina-storage",
  "console_error_panic_hook",
@@ -73,6 +76,9 @@ dependencies = [
 name = "alumina-interface-client"
 version = "0.1.0"
 dependencies = [
+ "alumina-clock",
+ "alumina-job",
+ "alumina-machine-ir",
  "alumina-net",
  "alumina-protocol",
  "alumina-storage",

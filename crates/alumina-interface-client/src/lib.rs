@@ -10,7 +10,9 @@ use alumina_protocol::{
     Operation, StatusCode,
 };
 
+pub mod clock;
 pub mod http;
+pub mod schedule;
 pub mod upload;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

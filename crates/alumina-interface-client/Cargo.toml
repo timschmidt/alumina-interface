@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+alumina-clock.workspace = true
+alumina-job.workspace = true
 alumina-net.workspace = true
 alumina-protocol.workspace = true
 alumina-storage.workspace = true
@@ -22,6 +24,7 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "Headers",
     "Location",
+    "Performance",
     "Request",
     "RequestCache",
     "RequestCredentials",
@@ -31,4 +34,9 @@ web-sys = { version = "0.3", features = [
     "Response",
     "Url",
     "Window",
+    "WorkerGlobalScope",
+    "WorkerLocation",
 ] }
+
+[dev-dependencies]
+alumina-machine-ir.workspace = true

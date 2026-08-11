@@ -4,15 +4,16 @@ use std::fmt;
 
 use alumina_net::{AUTH_DISCOVERY_CONTENT_LENGTH, AuthenticatedMedia, CorsOrigin};
 use alumina_protocol::Digest;
-use js_sys::{ArrayBuffer, Reflect, Uint8Array};
+use js_sys::{ArrayBuffer, Promise, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Headers, Request, RequestCache, RequestCredentials, RequestInit, RequestMode, RequestRedirect,
-    Url, Window,
+    Headers, Performance, Request, RequestCache, RequestCredentials, RequestInit, RequestMode,
+    RequestRedirect, Url, Window, WorkerGlobalScope,
 };
 
 use crate::Response;
+use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
 use crate::http::{
     AUTHENTICATION_PATH, AuthenticatedHttpSession, AuthenticatedProtocolRequest,
     AuthenticatedProtocolResponse, AuthenticationChallenge, AuthenticationChallengeError,
@@ -21,6 +22,50 @@ use crate::http::{
 use crate::upload::{CacheUploadError, CacheUploadMachine, CacheUploadPhase, UploadSource};
 
 const JSON_MEDIA_TYPE: &str = "application/json";
+
+trait BrowserScope {
+    fn fetch_request(&self, request: &Request) -> Promise;
+    fn calling_origin(&self) -> Result<CorsOrigin, BrowserFetchError>;
+    fn performance_clock(&self) -> Option<Performance>;
+    fn secure_context(&self) -> bool;
+}
+
+impl BrowserScope for Window {
+    fn fetch_request(&self, request: &Request) -> Promise {
+        self.fetch_with_request(request)
+    }
+
+    fn calling_origin(&self) -> Result<CorsOrigin, BrowserFetchError> {
+        let origin = self.location().origin().map_err(javascript_error)?;
+        CorsOrigin::parse(&origin).map_err(|_| BrowserFetchError::DocumentOrigin)
+    }
+
+    fn performance_clock(&self) -> Option<Performance> {
+        self.performance()
+    }
+
+    fn secure_context(&self) -> bool {
+        self.is_secure_context()
+    }
+}
+
+impl BrowserScope for WorkerGlobalScope {
+    fn fetch_request(&self, request: &Request) -> Promise {
+        self.fetch_with_request(request)
+    }
+
+    fn calling_origin(&self) -> Result<CorsOrigin, BrowserFetchError> {
+        CorsOrigin::parse(&self.location().origin()).map_err(|_| BrowserFetchError::DocumentOrigin)
+    }
+
+    fn performance_clock(&self) -> Option<Performance> {
+        self.performance()
+    }
+
+    fn secure_context(&self) -> bool {
+        self.is_secure_context()
+    }
+}
 
 /// Canonical HTTP(S) origin for one directly connected Alumina MCU.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,16 +116,31 @@ pub async fn fetch_authentication_challenge(
     window: &Window,
     origin: &DeviceOrigin,
 ) -> Result<AuthenticationChallenge, BrowserFetchError> {
+    fetch_authentication_challenge_inner(window, origin).await
+}
+
+/// Worker-scope variant of [`fetch_authentication_challenge`].
+pub async fn fetch_authentication_challenge_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+) -> Result<AuthenticationChallenge, BrowserFetchError> {
+    fetch_authentication_challenge_inner(worker, origin).await
+}
+
+async fn fetch_authentication_challenge_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+) -> Result<AuthenticationChallenge, BrowserFetchError> {
     let init = RequestInit::new();
     init.set_method("GET");
     init.set_cache(RequestCache::NoStore);
     init.set_credentials(RequestCredentials::Omit);
     init.set_mode(RequestMode::Cors);
     init.set_redirect(RequestRedirect::Error);
-    annotate_local_address_space(window, &init)?;
+    annotate_local_address_space(scope, &init)?;
     let request = Request::new_with_str_and_init(&origin.authentication_url(), &init)
         .map_err(javascript_error)?;
-    let response = JsFuture::from(window.fetch_with_request(&request))
+    let response = JsFuture::from(scope.fetch_request(&request))
         .await
         .map_err(javascript_error)?
         .dyn_into::<web_sys::Response>()
@@ -119,8 +179,25 @@ pub async fn open_authenticated_session(
     device: &DeviceOrigin,
     config_digest: Digest,
 ) -> Result<AuthenticatedHttpSession, BrowserFetchError> {
-    let calling_origin = document_origin(window)?;
-    let challenge = fetch_authentication_challenge(window, device).await?;
+    open_authenticated_session_inner(window, device, config_digest).await
+}
+
+/// Opens a fresh HMAC session from a worker, bound to its inherited origin.
+pub async fn open_authenticated_session_in_worker(
+    worker: &WorkerGlobalScope,
+    device: &DeviceOrigin,
+    config_digest: Digest,
+) -> Result<AuthenticatedHttpSession, BrowserFetchError> {
+    open_authenticated_session_inner(worker, device, config_digest).await
+}
+
+async fn open_authenticated_session_inner(
+    scope: &impl BrowserScope,
+    device: &DeviceOrigin,
+    config_digest: Digest,
+) -> Result<AuthenticatedHttpSession, BrowserFetchError> {
+    let calling_origin = scope.calling_origin()?;
+    let challenge = fetch_authentication_challenge_inner(scope, device).await?;
     Ok(AuthenticatedHttpSession::new(
         challenge.nonce(),
         config_digest,
@@ -147,20 +224,133 @@ pub async fn fetch_pending_request(
     result
 }
 
-/// Returns the browser-generated calling origin used by the CORS `Origin` header.
-pub fn document_origin(window: &Window) -> Result<CorsOrigin, BrowserFetchError> {
-    let origin = window.location().origin().map_err(javascript_error)?;
-    CorsOrigin::parse(&origin).map_err(|_| BrowserFetchError::DocumentOrigin)
-}
-
-async fn fetch_pending_request_inner(
-    window: &Window,
+/// Worker-scope variant of [`fetch_pending_request`].
+pub async fn fetch_pending_request_in_worker(
+    worker: &WorkerGlobalScope,
     origin: &DeviceOrigin,
     session: &mut AuthenticatedHttpSession,
     request: &AuthenticatedProtocolRequest,
     secret: &[u8],
 ) -> Result<Response, BrowserFetchError> {
-    if document_origin(window)? != session.origin() {
+    let result = fetch_pending_request_inner(worker, origin, session, request, secret).await;
+    if result.is_err() {
+        session.abandon_pending();
+    }
+    result
+}
+
+/// Acquires one authenticated causal clock sample over Wi-Fi.
+///
+/// The first timer read is widened downward before the probe identity is
+/// committed. The second is taken only after the signed response is fully read
+/// and validated, then widened upward. Request construction, browser dispatch,
+/// response buffering, and authentication therefore add uncertainty but can
+/// never make the causal interval spuriously narrow.
+///
+/// # Errors
+///
+/// Rejects browser timing, exact clock state, HMAC request construction, fetch,
+/// response authentication, or heartbeat semantics. Every failed transport
+/// spends both the HTTP counter and clock probe identity.
+pub async fn drive_clock_probe(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut DeviceClockModel,
+    maximum_timer_error_ns: u64,
+    secret: &[u8],
+) -> Result<alumina_clock::ClockObservation, BrowserClockError> {
+    drive_clock_probe_inner(
+        window,
+        origin,
+        session,
+        model,
+        maximum_timer_error_ns,
+        secret,
+    )
+    .await
+}
+
+/// Worker-scope causal heartbeat acquisition isolated from rendering stalls.
+pub async fn drive_clock_probe_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut DeviceClockModel,
+    maximum_timer_error_ns: u64,
+    secret: &[u8],
+) -> Result<alumina_clock::ClockObservation, BrowserClockError> {
+    drive_clock_probe_inner(
+        worker,
+        origin,
+        session,
+        model,
+        maximum_timer_error_ns,
+        secret,
+    )
+    .await
+}
+
+async fn drive_clock_probe_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut DeviceClockModel,
+    maximum_timer_error_ns: u64,
+    secret: &[u8],
+) -> Result<alumina_clock::ClockObservation, BrowserClockError> {
+    let performance = scope
+        .performance_clock()
+        .ok_or(BrowserClockError::PerformanceUnavailable)?;
+    let send = MonotonicTimeBounds::from_milliseconds(performance.now(), maximum_timer_error_ns)?;
+    let probe = model.begin_probe(send.earliest_ns())?;
+    let request = match session.begin_request(probe.operation(), probe.body(), secret) {
+        Ok(request) => request,
+        Err(error) => {
+            model.abandon_pending();
+            return Err(BrowserClockError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            model.abandon_pending();
+            return Err(BrowserClockError::Fetch(error));
+        }
+    };
+    let receive =
+        match MonotonicTimeBounds::from_milliseconds(performance.now(), maximum_timer_error_ns) {
+            Ok(receive) => receive,
+            Err(error) => {
+                model.abandon_pending();
+                return Err(BrowserClockError::Time(error));
+            }
+        };
+    model
+        .accept_response(&response, receive.latest_ns())
+        .map_err(BrowserClockError::Clock)
+}
+
+/// Returns the browser-generated calling origin used by the CORS `Origin` header.
+pub fn document_origin(window: &Window) -> Result<CorsOrigin, BrowserFetchError> {
+    window.calling_origin()
+}
+
+/// Returns the worker-generated calling origin inherited by CORS fetches.
+pub fn worker_origin(worker: &WorkerGlobalScope) -> Result<CorsOrigin, BrowserFetchError> {
+    worker.calling_origin()
+}
+
+async fn fetch_pending_request_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    request: &AuthenticatedProtocolRequest,
+    secret: &[u8],
+) -> Result<Response, BrowserFetchError> {
+    if scope.calling_origin()? != session.origin() {
         return Err(BrowserFetchError::DocumentOrigin);
     }
     let headers = Headers::new().map_err(javascript_error)?;
@@ -189,10 +379,10 @@ async fn fetch_pending_request_inner(
     init.set_credentials(RequestCredentials::Omit);
     init.set_mode(RequestMode::Cors);
     init.set_redirect(RequestRedirect::Error);
-    annotate_local_address_space(window, &init)?;
+    annotate_local_address_space(scope, &init)?;
     let request =
         Request::new_with_str_and_init(&origin.control_url(), &init).map_err(javascript_error)?;
-    let response = JsFuture::from(window.fetch_with_request(&request))
+    let response = JsFuture::from(scope.fetch_request(&request))
         .await
         .map_err(javascript_error)?
         .dyn_into::<web_sys::Response>()
@@ -254,6 +444,29 @@ pub async fn drive_cache_upload_step(
     source: &impl UploadSource,
     secret: &[u8],
 ) -> Result<CacheUploadPhase, BrowserDeliveryError> {
+    drive_cache_upload_step_inner(window, origin, session, upload, source, secret).await
+}
+
+/// Worker-scope variant of [`drive_cache_upload_step`].
+pub async fn drive_cache_upload_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    upload: &mut CacheUploadMachine,
+    source: &impl UploadSource,
+    secret: &[u8],
+) -> Result<CacheUploadPhase, BrowserDeliveryError> {
+    drive_cache_upload_step_inner(worker, origin, session, upload, source, secret).await
+}
+
+async fn drive_cache_upload_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    upload: &mut CacheUploadMachine,
+    source: &impl UploadSource,
+    secret: &[u8],
+) -> Result<CacheUploadPhase, BrowserDeliveryError> {
     let Some(operation) = upload.next_request(source)? else {
         return Ok(CacheUploadPhase::Complete);
     };
@@ -264,9 +477,11 @@ pub async fn drive_cache_upload_step(
             return Err(BrowserDeliveryError::Session(error));
         }
     };
-    let response = match fetch_pending_request(window, origin, session, &request, secret).await {
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
         Ok(response) => response,
         Err(error) => {
+            session.abandon_pending();
             upload.abandon_pending();
             return Err(BrowserDeliveryError::Fetch(error));
         }
@@ -280,10 +495,10 @@ fn javascript_error(value: JsValue) -> BrowserFetchError {
 }
 
 fn annotate_local_address_space(
-    window: &Window,
+    scope: &impl BrowserScope,
     init: &RequestInit,
 ) -> Result<(), BrowserFetchError> {
-    if !window.is_secure_context() {
+    if !scope.secure_context() {
         return Ok(());
     }
     Reflect::set(
@@ -344,6 +559,49 @@ impl fmt::Display for BrowserFetchError {
 }
 
 impl std::error::Error for BrowserFetchError {}
+
+/// One authenticated browser heartbeat acquisition failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserClockError {
+    /// This browsing context did not expose a monotonic `Performance` clock.
+    PerformanceUnavailable,
+    /// The configured timer policy or observed timestamp was not conservative.
+    Time(BrowserTimeError),
+    /// Exact probe construction or heartbeat estimation failed.
+    Clock(ClockProbeError),
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+}
+
+impl From<BrowserTimeError> for BrowserClockError {
+    fn from(value: BrowserTimeError) -> Self {
+        Self::Time(value)
+    }
+}
+
+impl From<ClockProbeError> for BrowserClockError {
+    fn from(value: ClockProbeError) -> Self {
+        Self::Clock(value)
+    }
+}
+
+impl fmt::Display for BrowserClockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PerformanceUnavailable => {
+                formatter.write_str("browser monotonic clock is unavailable")
+            }
+            Self::Time(error) => write!(formatter, "browser clock sampling failed: {error}"),
+            Self::Clock(error) => write!(formatter, "device clock probe failed: {error}"),
+            Self::Session(error) => write!(formatter, "clock request construction failed: {error}"),
+            Self::Fetch(error) => write!(formatter, "clock fetch failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserClockError {}
 
 /// One-step browser delivery failure with transport versus upload semantics preserved.
 #[derive(Clone, Debug, Eq, PartialEq)]

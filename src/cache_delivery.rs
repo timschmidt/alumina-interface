@@ -100,6 +100,47 @@ pub enum ParticipantCachePhase {
     Complete,
 }
 
+/// Copyable evidence that both exact publications were observed on one MCU.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParticipantCacheReady {
+    device_id: DeviceId,
+    partition: PublishedObject,
+    global_manifest: PublishedObject,
+}
+
+impl ParticipantCacheReady {
+    /// Stable target device whose cache was reconciled.
+    #[must_use]
+    pub const fn device_id(self) -> DeviceId {
+        self.device_id
+    }
+
+    /// Exact executable partition publication observed on that device.
+    #[must_use]
+    pub const fn partition(self) -> PublishedObject {
+        self.partition
+    }
+
+    /// Exact shared global-manifest publication observed afterward.
+    #[must_use]
+    pub const fn global_manifest(self) -> PublishedObject {
+        self.global_manifest
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        device_id: DeviceId,
+        partition: PublishedObject,
+        global_manifest: PublishedObject,
+    ) -> Self {
+        Self {
+            device_id,
+            partition,
+            global_manifest,
+        }
+    }
+}
+
 /// Ordered, retry-safe partition-then-global-manifest delivery for one MCU.
 #[derive(Debug)]
 pub struct ParticipantCacheDelivery {
@@ -164,6 +205,20 @@ impl ParticipantCacheDelivery {
     #[must_use]
     pub const fn publications(&self) -> (PublishedObject, PublishedObject) {
         (self.partition.publication(), self.manifest.publication())
+    }
+
+    /// Produces readiness evidence only after both publications are authoritative.
+    #[must_use]
+    pub const fn readiness(&self) -> Option<ParticipantCacheReady> {
+        if matches!(self.phase(), ParticipantCachePhase::Complete) {
+            Some(ParticipantCacheReady {
+                device_id: self.device_id,
+                partition: self.partition.publication(),
+                global_manifest: self.manifest.publication(),
+            })
+        } else {
+            None
+        }
     }
 
     /// Emits the next partition request, then the next global-manifest request.

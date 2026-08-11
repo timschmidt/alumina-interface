@@ -3,6 +3,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod cache_delivery;
+pub mod distributed_schedule;
 
 use std::sync::{Arc, Mutex};
 
