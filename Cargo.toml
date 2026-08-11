@@ -1,49 +1,97 @@
-[package]
-name = "alumina-ui"
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/alumina-interface-client",
+    "crates/alumina-interface-core",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/timschmidt/alumina-interface"
+publish = false
 
-[dependencies]
-eframe = { version = "0.30", default-features = false, features = ["glow"] }
-egui = { version = "0.30", default-features = false, features = ["default_fonts"] }
-egui_extras = { version = "0.30", features = ["all_loaders"] }
-egui_glow = { version = "0.30", default-features = false }
-egui_plot = "0.30.0"
-image = { version = "0.25", features = ["jpeg", "png"] }
-#egui_node_graph2 = { version = "0.7.0", features = ["persistence"] }
-egui_node_graph2 = { git = "https://github.com/trevyn/egui_node_graph2", features = ["persistence"] }
-wasm-bindgen = { version = "0.2", default-features = false }
-wasm-bindgen-futures = { version = "0.4", default-features = false }
-console_error_panic_hook = { version = "0.1", default-features = false }
-csgrs = { version="0.20.1", default-features = false, features = ["delaunay", "f64", "chull-io", "sdf", "truetype-text", "stl-io", "dxf-io", "amf-io", "ply-io", "obj-io"] }
-hypergraphics = { path = "../hypergraphics", default-features = false }
-uuid = { version = "1.17", default-features = false, features = ["js", "v4"] }
-nalgebra = { version = "0.33.2", default-features = false, features = ["serde-serialize"] }
-geo = { version = "0.29", default-features = false }
-futures-channel = { version = "0.3", default-features = false, features = ["alloc"] }
-js-sys  = { version = "0.3", default-features = false }
-web-sys = { version = "0.3", features = [
-    "Window", "Document", "HtmlElement", "HtmlInputElement", "HtmlCanvasElement", "File", "FileList",
-    "Event", "EventTarget", "Blob", "Request", "RequestInit", "Response", "Headers", "CanvasRenderingContext2d",
-    "TextMetrics", "Storage",
-] }
-once_cell = { version = "1.21.3", default-features = false }
-console_log = { version = "1.0.0", default-features = false }
-log = { version = "0.4.27", default-features = false }
-anyhow = "1.0.98"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.141"
-base64 = "0.22.1"
+[workspace.dependencies]
+alumina-interface-client = { path = "crates/alumina-interface-client" }
+alumina-interface-core = { path = "crates/alumina-interface-core" }
+alumina-machine-ir = { path = "../aluminafw/crates/alumina-machine-ir" }
+alumina-protocol = { path = "../aluminafw/crates/alumina-protocol" }
+csgrs = { path = "../csgrs", default-features = false }
+hypergraphics = { path = "../hypergraphics" }
+hyperpath = { path = "../hyperpath", default-features = false }
+hyperreal = { path = "../hyperreal", default-features = false }
+hypersolve = { path = "../hypersolve", default-features = false }
+
+[package]
+name = "alumina-interface"
+description = "Authoritative exact browser CAD/CAM and control interface for Alumina"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+alumina-interface-client.workspace = true
+alumina-interface-core.workspace = true
+alumina-protocol.workspace = true
+hypergraphics.workspace = true
+log = "0.4.27"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.30", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+egui_glow = { version = "0.30", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+eframe = { version = "0.30", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+egui_glow = { version = "0.30", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
 
 [profile.release]
-opt-level = "z"
-lto = "fat"
 codegen-units = 1
-strip = "symbols"
 debug-assertions = false
-overflow-checks = false
-panic = "abort"
 incremental = false
+lto = "fat"
+opt-level = "z"
+overflow-checks = true
+panic = "abort"
+strip = "symbols"
+
+# The checked-out sibling repositories are the development authority. These
+# patches also prevent transitive version requirements from resolving to older
+# published Hyper crates.
+[patch.crates-io]
+hypercurve = { path = "../hypercurve" }
+hypergraphics = { path = "../hypergraphics" }
+hyperlattice = { path = "../hyperlattice" }
+hyperlimit = { path = "../hyperlimit" }
+hypermesh = { path = "../hypermesh" }
+hyperpath = { path = "../hyperpath" }
+hyperphysics = { path = "../hyperphysics" }
+hyperreal = { path = "../hyperreal" }
+hypersolve = { path = "../hypersolve" }
+hypertri = { path = "../hypertri" }

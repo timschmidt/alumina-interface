@@ -1,81 +1,81 @@
 # Alumina Interface
 
-Alumina Interface is the browser UI for the Alumina CAD/CAM and machine-control
-system. It combines an `egui` application, a `csgrs`-backed node editor, a
-WebGL model viewer, slicing controls, and firmware diagnostics in a WebAssembly
-bundle intended to fit alongside Alumina Firmware on a controller.
+Alumina Interface is the greenfield browser/WASM authority for Alumina CAD/CAM,
+machine configuration, job compilation, control, and diagnostics. The current
+checkpoint establishes the exact geometry and protocol foundations; it does not
+preserve the routes, graph files, renderer, or device model of the earlier
+prototype.
 
-[Try the web demo](https://timschmidt.github.io/alumina-interface/).
+## Current baseline
 
-<img src="doc/screenshot-design.png" width="30%" alt="Design graph"/> <img src="doc/screenshot-control.png" width="30%" alt="Machine controls"/> <img src="doc/screenshot-diagnostics.png" width="30%" alt="Controller diagnostics"/>
+- `crates/alumina-interface-core` is window-free and owns exact design/CAM
+  values, bounded unit-bearing measurements, canonical integer machine values,
+  and explicit one-way display projections.
+- `crates/alumina-interface-client` is a headless native protocol client with a
+  deterministic in-memory simulator transport. Browser Wi-Fi transport will use
+  the same canonical frame validation.
+- The native/browser shell composes `ExactScene` and `ExactCamera` values and
+  uploads them through Hypergraphics. It contains no application-owned vertex,
+  normal, grid, camera-matrix, or primitive-float geometry pipeline.
+- CSGRS and every Hyper dependency resolve to sibling repositories in the
+  shared workspace. There is no crates.io CSGRS fallback.
+- CSGRS builds native `TriangleMesh` geometry. Hypergraphics performs the
+  checked expansion into exact scene vertices and owns the only f64/f32 GPU
+  boundary.
 
-## Using the interface
+The selected local revisions and any uncommitted source state are recorded in
+[`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
+valid for development but cannot qualify a reproducible compiler release.
 
-- **Design** builds sketches and meshes as a node graph. Right-click the canvas
-  to add primitives, Boolean operations, transformations, extrusion/revolve/
-  loft/sweep nodes, slicing, text, or lattice operations. Connect a mesh output
-  and select **Apply to model** to send each unconsumed root mesh to the viewer.
-- **Control** imports STL or DXF workpieces and STL, DXF, OBJ, PLY, or AMF model
-  selections, adjusts scale and position, inspects slices, and configures laser,
-  plasma, extrusion, milling, drilling, or DLP/LCD tool parameters.
-- **Diagnostics** sends firmware commands, polls GPIO state, plots selected pins,
-  shows controller metadata, and displays the command queue log.
+## Value domains
 
-The WebGL viewer supports orbit, pan, wheel/pinch zoom, standard camera views,
-edges, filled faces, normals, vertices, and the machine work envelope.
+The core intentionally keeps four domains structurally separate:
 
-## Firmware contract
+1. exact `hyperreal::Real` CAD/CAM values with compile-time units;
+2. bounded measured values expressed as exact rational closed intervals;
+3. canonical firmware values expressed as integer counts/ticks and
+   `alumina-machine-ir` records; and
+4. finite lossy display values produced only by named projection functions.
 
-The interface expects these same-origin endpoints from
-[Alumina Firmware](https://github.com/timschmidt/alumina-firmware):
+There is no conversion from a renderer value into an exact or canonical value.
+A compile-fail documentation test enforces that boundary. The complete policy
+is in [`docs/VALUE-BOUNDARIES.md`](docs/VALUE-BOUNDARIES.md).
 
-| Endpoint | Method | Payload |
-| --- | --- | --- |
-| `/queue` | `GET` | Command queue as text |
-| `/queue` | `POST` | One plain-text command |
-| `/pins` | `GET` | JSON object mapping pin names to numeric states |
-| `/device` | `GET` | JSON with `name`, `display_name`, `image_mime`, and `image_url` |
+## Build and test
 
-The firmware or static host must also serve the Trunk output (`index.html`, the
-JavaScript loader, WASM bundle, favicon, and any device image URL). The post-build
-hook creates gzip assets and, when `brotli` is installed, a Brotli-compressed WASM
-bundle.
-
-## Development
-
-Install the Rust WASM target and build tools:
-
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install trunk wasm-opt wasm-tools
-```
-
-Run a release-mode development server:
+The normal verification path is offline once dependencies are present:
 
 ```sh
-trunk serve --open --release
+cargo test --workspace --offline
+cargo clippy --workspace --all-targets --no-deps --offline -- -D warnings
+cargo check --workspace --target wasm32-unknown-unknown --offline
+scripts/audit-source-policy.sh
+env -u NO_COLOR trunk build --release --locked --offline
 ```
 
-Produce the deployable bundle without opening a browser:
+Run the desktop shell with:
 
 ```sh
-trunk build --release
+cargo run --offline
 ```
 
-## Architecture and references
+Run a browser development server with:
 
-<img src="doc/alumina-diagram.png" width="40%" alt="Alumina firmware and interface architecture"/>
+```sh
+trunk serve --release --offline
+```
 
-- [`eframe` and `egui`](https://github.com/emilk/egui) provide the application
-  shell and immediate-mode UI.
-- [`egui_node_graph2`](https://github.com/trevyn/egui_node_graph2) provides the
-  visual design graph.
-- [`csgrs`](https://github.com/timschmidt/csgrs) provides sketch, mesh, Boolean,
-  transform, slicing, import, and lattice operations.
-- [`hypergraphics`](https://github.com/timschmidt/hypergraphics) provides the
-  shared colored-mesh WebGL renderer and primitive-float rendering boundary.
-- [Trunk](https://trunkrs.dev/) builds and serves the WebAssembly application.
-- The [Web Storage standard](https://html.spec.whatwg.org/multipage/webstorage.html)
-  defines the browser-local storage used by the TrueType text node.
+The production bundle is written to ignored `dist/` and includes compressed
+assets suitable for later embedding in `aluminafw`.
 
-Community: [Discord](https://discord.gg/cCHRjpkPhQ)
+## Scope after this checkpoint
+
+The next interface milestones add current Hypercurve/Hyperpath/Hypersolve CAM,
+capability-generated board configuration, immutable SD job workflows, direct
+Wi-Fi multi-MCU coordination, annotated board photography, bounded telemetry,
+oscilloscope/logic-analyzer views, and the typed timed LabVIEW-style graph. Raw
+G-code remains an optional exact UI importer, never firmware or canonical job
+input.
+
+This repository is MIT licensed. Dependencies are restricted to permissive
+licenses accepted by the Alumina project; GPL-family code is excluded.

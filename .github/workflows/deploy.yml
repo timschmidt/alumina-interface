@@ -24,6 +24,84 @@ jobs:
           repository: ${{ github.repository_owner }}/hypergraphics
           path: hypergraphics
 
+      - name: Check out Alumina firmware protocol sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/aluminafw
+          path: aluminafw
+
+      - name: Check out CSGRS sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/csgrs
+          path: csgrs
+
+      - name: Check out Hypercurve sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypercurve
+          path: hypercurve
+
+      - name: Check out Hyperlattice sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperlattice
+          path: hyperlattice
+
+      - name: Check out Hyperlimit sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperlimit
+          path: hyperlimit
+
+      - name: Check out Hypermesh sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypermesh
+          path: hypermesh
+
+      - name: Check out Hyperpath sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperpath
+          path: hyperpath
+
+      - name: Check out Hyperphysics sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperphysics
+          path: hyperphysics
+
+      - name: Check out Hyperreal sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperreal
+          path: hyperreal
+
+      - name: Check out Hypersdf sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypersdf
+          path: hypersdf
+
+      - name: Check out Hypersolve sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypersolve
+          path: hypersolve
+
+      - name: Check out Hypertri sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypertri
+          path: hypertri
+
+      - name: Check out Hypervoxel sibling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypervoxel
+          path: hypervoxel
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,8 +112,38 @@ jobs:
         with:
           tool: trunk@0.21.14,wasm-opt,wasm-tools
 
+      - name: Install asset compressor
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes brotli
+
+      - name: Test exact and protocol cores
+        run: cargo test --workspace --locked
+        working-directory: alumina-interface
+
+      - name: Lint native interface sources
+        run: cargo clippy --workspace --all-targets --no-deps --locked -- -D warnings
+        working-directory: alumina-interface
+
+      - name: Lint browser interface sources
+        run: cargo clippy --workspace --target wasm32-unknown-unknown --no-deps --locked -- -D warnings
+        working-directory: alumina-interface
+
+      - name: Audit local sources and licenses
+        run: bash scripts/audit-source-policy.sh
+        working-directory: alumina-interface
+
       - name: Build
-        run: trunk build --release --public-url /alumina-interface/
+        run: trunk build --release --locked --public-url /alumina-interface/
+        working-directory: alumina-interface
+
+      - name: Validate production artifacts
+        run: |
+          wasm-tools validate dist/alumina-interface_bg.wasm
+          gzip -t dist/index.html.gz
+          gzip -t dist/alumina-interface.js.gz
+          gzip -t dist/alumina-interface_bg.wasm.gz
+          brotli -t dist/alumina-interface_bg.wasm.br
         working-directory: alumina-interface
 
       - name: Deploy

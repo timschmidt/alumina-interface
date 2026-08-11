@@ -1,0 +1,17 @@
+[package]
+name = "alumina-interface-core"
+description = "Window-free exact CAD/CAM domain and machine-boundary types for Alumina"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+alumina-machine-ir.workspace = true
+csgrs.workspace = true
+hypergraphics.workspace = true
+hyperpath.workspace = true
+hyperreal.workspace = true
+hypersolve.workspace = true

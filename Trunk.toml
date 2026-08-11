@@ -1,39 +1,28 @@
 [build]
 filehash = false
 
-[tools.wasm-bindgen]
-args = [
-  "--target", "web",
-  "--no-typescript",
-  "--omit-default-module-path",
-  "--remove-name-section",
-  "--remove-producers-section",
-]
-
 [[hooks]]
-stage   = "post_build"
+stage = "post_build"
 command = "bash"
 command_arguments = [
   "-c",
   '''
 set -euo pipefail
 
-# Run Binaryen optimiser
-wasm-opt -Oz --vacuum --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int -o "$TRUNK_STAGING_DIR/alumina-ui_bg.wasm" \
-         "$TRUNK_STAGING_DIR/alumina-ui_bg.wasm"
+optimized_wasm="$TRUNK_STAGING_DIR/alumina-interface_bg.wasm.opt"
+wasm-opt \
+  -Oz \
+  --enable-bulk-memory \
+  --enable-nontrapping-float-to-int \
+  "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm" \
+  -o "$optimized_wasm"
+mv "$optimized_wasm" "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm"
 
-# Strip any leftover custom sections
-wasm-tools strip "$TRUNK_STAGING_DIR/alumina-ui_bg.wasm" \
-         -o "$TRUNK_STAGING_DIR/alumina-ui_bg.wasm"
-
-cp "$TRUNK_SOURCE_DIR/favicon.ico" "$TRUNK_STAGING_DIR/favicon.ico"
 gzip -fk -9 "$TRUNK_STAGING_DIR/index.html"
-gzip -fk -9 "$TRUNK_STAGING_DIR/alumina-ui.js"
-
-if command -v brotli >/dev/null; then
-  brotli -q 11 -f \
-       "$TRUNK_STAGING_DIR/alumina-ui_bg.wasm" \
-       -o "$TRUNK_STAGING_DIR/alumina-ui_bg.wasm.br"
-fi
-  '''
+gzip -fk -9 "$TRUNK_STAGING_DIR/alumina-interface.js"
+gzip -fk -9 "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm"
+brotli -q 11 -f \
+  "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm" \
+  -o "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm.br"
+  ''',
 ]
