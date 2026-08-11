@@ -496,7 +496,8 @@ const fn session_must_reopen(error: &BrowserClockError) -> bool {
             | BrowserClockError::Fetch(
                 BrowserFetchError::Session(_)
                     | BrowserFetchError::HttpStatus(_)
-                    | BrowserFetchError::MissingHeader(_),
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
             )
     )
 }

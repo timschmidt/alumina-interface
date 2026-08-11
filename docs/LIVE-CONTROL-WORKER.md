@@ -84,3 +84,16 @@ module loading, explicit worker entry, ready-event decoding, and rendering-realm
 supervision in that browser run. It did not connect to simulated HTTP firmware
 or a physical MCU, and it does not qualify background throttling, AP loss,
 reboot, latency spikes, or authenticated heartbeat traffic.
+
+`tests/browser/worker-clock-harness.html` is the next integration seam. Served
+from the repository root, it creates the production worker without eframe,
+connects it to `alumina-sim-http` on localhost, and marks the DOM `passed` only
+after four authenticated observations yield a qualified exact interval and four
+history records. This makes headless-browser evidence inspectable without
+reading pixels from the canvas.
+
+The fixture can deterministically add clock drift and request/response delay,
+drop one selected control request, drop an initial run of control requests, or
+reboot before a selected control request. The harness has separate qualified
+and conservative-rejection expectations so an excessive causal interval must
+remain unusable instead of being mistaken for successful recovery.

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Alumina worker clock harness</title>
+  </head>
+  <body>
+    <pre id="result" data-status="starting">starting</pre>
+    <script type="module">
+      const output = document.querySelector("#result");
+      const worker = new Worker("/dist/alumina-worker.js", {
+        type: "module",
+        name: "alumina-clock-harness",
+      });
+      let configured = false;
+      let timeout;
+      let latestSnapshot;
+      const eventKinds = [];
+      const expectation =
+        new URLSearchParams(location.search).get("expect") ?? "qualified";
+
+      const finish = (status, detail) => {
+        output.dataset.status = status;
+        output.textContent = JSON.stringify(detail, null, 2);
+        document.title = `Alumina worker clock harness: ${status}`;
+        if (status !== "sampling") {
+          worker.terminate();
+        }
+      };
+
+      worker.onerror = (event) => {
+        clearTimeout(timeout);
+        finish("failed", { error: event.message });
+      };
+
+      worker.onmessage = (message) => {
+        let envelope;
+        try {
+          envelope = JSON.parse(message.data);
+        } catch (error) {
+          clearTimeout(timeout);
+          finish("failed", { error: String(error) });
+          return;
+        }
+        const event = envelope.event;
+        eventKinds.push(event.kind);
+        if (event.kind === "ready" && !configured) {
+          configured = true;
+          timeout = setTimeout(() => {
+            finish("failed", {
+              error: "clock qualification timed out",
+              event_kinds: eventKinds,
+              latest_snapshot: latestSnapshot,
+            });
+          }, 15000);
+          worker.postMessage(
+            JSON.stringify({
+              schema_version: 1,
+              command: {
+                kind: "configure",
+                request: {
+                  connection_id: 1,
+                  label: "authenticated HTTP simulator",
+                  origin: "http://127.0.0.1:8098",
+                  secret: Array.from(
+                    new TextEncoder().encode("alumina-development"),
+                  ),
+                  sampling: {
+                    maximum_round_trip_ns: 1000000000,
+                    maximum_device_processing_cycles: 2000000,
+                    maximum_drift_ppm: 250,
+                    maximum_sample_age_ns: 5000000000,
+                    maximum_schedule_horizon_ns: 30000000000,
+                    minimum_schedule_lead_ns: 500000000,
+                    minimum_samples: 4,
+                    maximum_timer_error_ns: 2000000,
+                    maximum_uncertainty_cycles: 1000000,
+                    heartbeat_interval_ms: 100,
+                  },
+                },
+              },
+            }),
+          );
+          return;
+        }
+        if (event.kind === "snapshot") {
+          const snapshot = event.snapshot;
+          latestSnapshot = snapshot;
+          const qualified =
+            snapshot.phase === "clock_qualified" &&
+            snapshot.accepted_samples >= 4 &&
+            snapshot.estimate !== null &&
+            snapshot.history.length >= 4;
+          const conservativelyRejected =
+            snapshot.rejected_samples >= 3 &&
+            snapshot.accepted_samples === 0 &&
+            snapshot.estimate === null;
+          if (expectation === "qualified" && qualified) {
+            clearTimeout(timeout);
+            finish("passed", { expectation, snapshot });
+          } else if (
+            expectation === "conservative-rejection" &&
+            conservativelyRejected
+          ) {
+            clearTimeout(timeout);
+            finish("passed", { expectation, snapshot });
+          } else {
+            finish("sampling", snapshot);
+          }
+          return;
+        }
+        if (event.kind === "fatal" || event.kind === "command_rejected") {
+          clearTimeout(timeout);
+          finish("failed", event);
+        }
+      };
+    </script>
+  </body>
+</html>

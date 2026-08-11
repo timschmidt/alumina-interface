@@ -199,6 +199,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "alumina-service"
+version = "0.1.0"
+dependencies = [
+ "alumina-net",
+ "alumina-protocol",
+ "alumina-safety",
+ "alumina-storage",
+ "heapless",
+]
+
+[[package]]
 name = "alumina-shift-register"
 version = "0.1.0"
 dependencies = [
@@ -213,8 +224,10 @@ dependencies = [
  "alumina-job",
  "alumina-machine-ir",
  "alumina-motion",
+ "alumina-net",
  "alumina-protocol",
  "alumina-runtime",
+ "alumina-service",
  "alumina-shift-register",
  "alumina-storage",
 ]

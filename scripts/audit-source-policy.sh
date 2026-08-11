@@ -43,12 +43,18 @@ for package in \
 done
 
 for package in \
+  alumina-board \
+  alumina-capability \
   alumina-clock \
+  alumina-config \
   alumina-job \
   alumina-machine-ir \
+  alumina-motion \
   alumina-net \
   alumina-protocol \
   alumina-runtime \
+  alumina-safety \
+  alumina-service \
   alumina-sim \
   alumina-storage; do
   cargo tree --target wasm32-unknown-unknown --offline -i "$package" \
@@ -59,5 +65,13 @@ for package in \
     exit 1
   fi
 done
+
+cargo tree --target wasm32-unknown-unknown --offline -i alumina-shift-register \
+  --prefix none >"$audit_path_inverse"
+if ! rg -q '^alumina-shift-register v[^ ]+ \(.*/aluminafw/drivers/alumina-shift-register\)$' \
+  "$audit_path_inverse"; then
+  echo "alumina-shift-register must resolve from the sibling aluminafw checkout" >&2
+  exit 1
+fi
 
 echo "source policy: local Alumina/CSGRS/Hyper stacks; native and WASM license inventories accepted"
