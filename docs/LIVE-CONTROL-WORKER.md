@@ -85,8 +85,9 @@ supervision in that browser run. It did not connect to simulated HTTP firmware
 or a physical MCU, and it does not qualify background throttling, AP loss,
 reboot, latency spikes, or authenticated heartbeat traffic.
 
-`tests/browser/worker-clock-harness.html` is the next integration seam. Served
-from the repository root, it creates the production worker without eframe,
+`tests/browser/worker-clock-harness.html` is the authenticated integration
+seam. Served from the repository root, it creates the production worker without
+eframe,
 connects it to `alumina-sim-http` on localhost, and marks the DOM `passed` only
 after four authenticated observations yield a qualified exact interval and four
 history records. This makes headless-browser evidence inspectable without
@@ -97,3 +98,11 @@ drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. The harness has separate qualified
 and conservative-rejection expectations so an excessive causal interval must
 remain unusable instead of being mistaken for successful recovery.
+
+At `alumina-interface` commit `0e0a53e` and sibling `aluminafw` simulator commit
+`ba888db`, Chromium runs passed nominal, selected-response-loss, finite-outage,
+reboot, and bounded-delay qualification cases. A deliberately excessive-delay
+case passed only by retaining zero accepted samples and no estimate after three
+round-trip rejections. The complete commands, observations, artifact hashes,
+and deliberately closed claims are recorded in the sibling
+`aluminafw/docs/evidence/M7-BROWSER-AUTH-HTTP-SIM.md` evidence file.
