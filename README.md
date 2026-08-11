@@ -55,6 +55,15 @@ prototype.
   bounded 64-observation history. The UI can add, probe, and disconnect
   diagnostic sessions and never receives credentials. A headless Chromium
   smoke check reaches the worker-ready state without contacting a device.
+- That worker exchanges production-format authenticated heartbeat traffic with
+  the deterministic host MCU fixture and recovers from response loss, a finite
+  outage, and reboot while conservatively rejecting excessive delay.
+- The headless multi-MCU coordinator now retains each authenticated first-output
+  observation, rejects later evidence regression, exactly inverts its
+  boot-scoped device-cycle interval into conservative browser monotonic bounds,
+  and preserves simulator/peripheral/software authority. The repeatable
+  two-device flow proves each known simulated edge is contained and exposes
+  outer edge-spread and shared-epoch-error bounds in the diagnostic UI.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -117,11 +126,10 @@ assets suitable for later embedding in `aluminafw`.
 
 The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
-simulated-HTTP and physical-browser qualification, live cached-job
-prepare/start coordination, annotated board photography, bounded telemetry,
-oscilloscope/logic-analyzer views, and the typed timed LabVIEW-style graph. Raw
-G-code remains an optional exact UI importer, never firmware or canonical job
-input.
+physical-browser/radio qualification, full worker-owned cached-job driving,
+annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
+views, and the typed timed LabVIEW-style graph. Raw G-code remains an optional
+exact UI importer, never firmware or canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.
