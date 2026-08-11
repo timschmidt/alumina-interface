@@ -51,7 +51,9 @@ alumina-clock.workspace = true
 alumina-interface-client.workspace = true
 alumina-interface-core.workspace = true
 alumina-job.workspace = true
+alumina-machine-ir.workspace = true
 alumina-protocol.workspace = true
+alumina-sim = { path = "../aluminafw/crates/alumina-sim" }
 alumina-storage.workspace = true
 hypergraphics.workspace = true
 log = "0.4.27"
@@ -81,9 +83,6 @@ web-sys = { version = "0.3", features = [
     "HtmlCanvasElement",
     "Window",
 ] }
-
-[dev-dependencies]
-alumina-machine-ir.workspace = true
 
 [profile.release]
 codegen-units = 1

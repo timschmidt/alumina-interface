@@ -44,10 +44,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alumina-board"
+version = "0.1.0"
+dependencies = [
+ "alumina-protocol",
+]
+
+[[package]]
+name = "alumina-capability"
+version = "0.1.0"
+dependencies = [
+ "alumina-board",
+ "alumina-protocol",
+ "sha2",
+]
+
+[[package]]
 name = "alumina-clock"
 version = "0.1.0"
 dependencies = [
  "alumina-protocol",
+]
+
+[[package]]
+name = "alumina-config"
+version = "0.1.0"
+dependencies = [
+ "alumina-board",
+ "alumina-capability",
+ "alumina-protocol",
+ "alumina-safety",
+ "alumina-storage",
+ "sha2",
 ]
 
 [[package]]
@@ -60,6 +88,7 @@ dependencies = [
  "alumina-job",
  "alumina-machine-ir",
  "alumina-protocol",
+ "alumina-sim",
  "alumina-storage",
  "console_error_panic_hook",
  "console_log",
@@ -128,6 +157,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "alumina-motion"
+version = "0.1.0"
+dependencies = [
+ "alumina-board",
+ "alumina-config",
+ "alumina-job",
+ "alumina-machine-ir",
+ "alumina-protocol",
+]
+
+[[package]]
 name = "alumina-net"
 version = "0.1.0"
 dependencies = [
@@ -146,6 +186,35 @@ dependencies = [
  "alumina-machine-ir",
  "alumina-protocol",
  "embassy-sync",
+]
+
+[[package]]
+name = "alumina-safety"
+version = "0.1.0"
+dependencies = [
+ "alumina-board",
+ "alumina-protocol",
+]
+
+[[package]]
+name = "alumina-shift-register"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
+name = "alumina-sim"
+version = "0.1.0"
+dependencies = [
+ "alumina-clock",
+ "alumina-job",
+ "alumina-machine-ir",
+ "alumina-motion",
+ "alumina-protocol",
+ "alumina-runtime",
+ "alumina-shift-register",
+ "alumina-storage",
 ]
 
 [[package]]
@@ -810,6 +879,12 @@ dependencies = [
  "futures-sink",
  "heapless",
 ]
+
+[[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
 name = "embedded-io"

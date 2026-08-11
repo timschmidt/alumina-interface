@@ -49,6 +49,7 @@ for package in \
   alumina-net \
   alumina-protocol \
   alumina-runtime \
+  alumina-sim \
   alumina-storage; do
   cargo tree --target wasm32-unknown-unknown --offline -i "$package" \
     --prefix none >"$audit_path_inverse"

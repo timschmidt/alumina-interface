@@ -4,6 +4,7 @@
 
 pub mod cache_delivery;
 pub mod distributed_schedule;
+pub mod m7_simulation;
 
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +17,8 @@ use eframe::egui;
 use eframe::glow::HasContext as _;
 use hypergraphics::backend::{GpuColoredMesh, UnlitProgram};
 use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
+
+use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
 
 struct RenderResources {
     program: Option<UnlitProgram>,
@@ -98,6 +101,7 @@ pub struct AluminaApp {
     representative_program: Option<CanonicalPathProgram2>,
     representative_partition: Option<CanonicalMachinePartition2>,
     representative_global_job: Option<CanonicalGlobalJob2>,
+    representative_m7_simulation: Option<RepresentativeM7SimulationReport>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
 }
@@ -150,6 +154,14 @@ impl AluminaApp {
                 Some(format!("exact representative compilation failed: {error}")),
             ),
         };
+        let (representative_m7_simulation, simulation_error) =
+            match representative_global_job.as_ref() {
+                Some(job) => match run_representative_m7_simulation(job) {
+                    Ok(report) => (Some(report), None),
+                    Err(error) => (None, Some(error.to_string())),
+                },
+                None => (None, None),
+            };
         let (resources, renderer_error) = match creation.gl.as_deref() {
             Some(gl) => match unsafe { RenderResources::upload(gl, &scene) } {
                 Ok(resources) => (Some(Arc::new(Mutex::new(resources))), None),
@@ -166,8 +178,12 @@ impl AluminaApp {
             representative_program,
             representative_partition,
             representative_global_job,
+            representative_m7_simulation,
             resources,
-            setup_error: scene_error.or(compiler_error).or(renderer_error),
+            setup_error: scene_error
+                .or(compiler_error)
+                .or(simulation_error)
+                .or(renderer_error),
         }
     }
 
@@ -310,6 +326,71 @@ impl AluminaApp {
                 global_job.manifest_chunks().len()
             ));
         }
+        self.show_m7_simulation_status(ui);
+    }
+
+    fn show_m7_simulation_status(&self, ui: &mut egui::Ui) {
+        let Some(report) = &self.representative_m7_simulation else {
+            return;
+        };
+        ui.separator();
+        ui.label("M7 deterministic coordinator fixture");
+        ui.label(format!(
+            "Global terminal phase: {:?}",
+            report.terminal_phase
+        ));
+        ui.label(format!("Shared UI epoch: {} ns", report.target_ui_ns));
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Observed phases:");
+            for phase in &report.observed_global_phases {
+                ui.label(format!("{phase:?}"));
+            }
+        });
+        ui.label(format!(
+            "Pre-confirm window: {:?}",
+            report.confirmation_window
+        ));
+        ui.label(format!(
+            "Simulated start-edge spread: {} ns",
+            report.simulated_edge_spread_ns
+        ));
+        ui.label(format!(
+            "Maximum shared-epoch error: {} ns",
+            report.maximum_target_error_ns
+        ));
+        ui.label(format!(
+            "Lost install response reconciled: {}",
+            report.lost_install_reconciled
+        ));
+        for participant in &report.participants {
+            let bytes = participant.device_id.0;
+            ui.collapsing(
+                format!(
+                    "MCU {:02x}{:02x}{:02x}{:02x}…",
+                    bytes[0], bytes[1], bytes[2], bytes[3]
+                ),
+                |ui| {
+                    ui.label(format!(
+                        "clock: {:+} ppm, {} accepted / {} rejected",
+                        participant.rate_adjustment_ppm,
+                        participant.accepted_clock_samples,
+                        participant.rejected_clock_samples
+                    ));
+                    ui.label(format!(
+                        "start: cycle {}, uncertainty ±{} cycles",
+                        participant.scheduled_cycle.0, participant.clock_uncertainty_cycles
+                    ));
+                    ui.label(format!(
+                        "simulated edge: {} ns, phase {:?}",
+                        participant.simulated_start_ui_ns, participant.terminal_phase
+                    ));
+                },
+            );
+        }
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Simulation only — no live device, output, or safety-chain evidence.",
+        );
     }
 
     fn show_status(&self, ui: &mut egui::Ui) {
