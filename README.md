@@ -12,9 +12,11 @@ prototype.
   values, bounded unit-bearing measurements, canonical integer machine values,
   explicit one-way display projections, and the checked Hypercurve-to-Hyperpath
   metric boundary.
-- `crates/alumina-interface-client` is a headless native protocol client with a
-  deterministic in-memory simulator transport. Browser Wi-Fi transport will use
-  the same canonical frame validation.
+- `crates/alumina-interface-client` owns the headless native protocol client,
+  deterministic simulator transport, origin-bound HMAC V2 session, strict boot
+  challenge decoder, retry-safe content-addressed upload reconciliation, and a
+  WASM `fetch` adapter. Browser and native paths share canonical frame and
+  response-proof validation.
 - The native/browser shell composes `ExactScene` and `ExactCamera` values and
   uploads them through Hypergraphics. It contains no application-owned vertex,
   normal, grid, camera-matrix, or primitive-float geometry pipeline.
@@ -42,6 +44,11 @@ prototype.
   canonical global job manifest. Its exact content and participant-set digests
   bind directly to firmware schedule commits, and the same manifest can use an
   independent resumable upload transaction on every MCU.
+- Per-participant delivery now binds both exact publications before I/O,
+  reconciles the executable partition first, then the identical global
+  manifest, and returns to `StorageInspect` after any ambiguous fetch. Browser
+  fetch omits ambient credentials, rejects redirects, disables caching, and
+  binds request/response proofs to the actual document origin.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -52,7 +59,9 @@ The immutable block/cache boundary is in
 [`docs/CACHED-PARTITIONS.md`](docs/CACHED-PARTITIONS.md).
 The global participant/manifest boundary is in
 [`docs/GLOBAL-JOB-MANIFEST.md`](docs/GLOBAL-JOB-MANIFEST.md).
-The latest verified development evidence is in
+The authenticated browser/cache boundary is in
+[`docs/WIFI-CACHE-DELIVERY.md`](docs/WIFI-CACHE-DELIVERY.md).
+The exact-CAM development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
 ## Value domains
@@ -98,10 +107,10 @@ assets suitable for later embedding in `aluminafw`.
 
 ## Scope after this checkpoint
 
-The next interface milestones add certified filled-region meshing, supported
-general-curve metric compilation, capability-derived machine/error policy,
-global multi-MCU manifests, browser SD upload/reconciliation, direct Wi-Fi
-coordination, annotated board photography, bounded telemetry,
+The next interface milestones add supported general-curve metric compilation,
+capability-derived machine/error policy, direct Wi-Fi device/session UI and
+live-browser qualification, cached-job prepare/start coordination, annotated
+board photography, bounded telemetry,
 oscilloscope/logic-analyzer views, and the typed timed LabVIEW-style graph. Raw
 G-code remains an optional exact UI importer, never firmware or canonical job
 input.

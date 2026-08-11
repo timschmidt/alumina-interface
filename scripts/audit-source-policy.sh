@@ -46,6 +46,7 @@ for package in \
   alumina-clock \
   alumina-job \
   alumina-machine-ir \
+  alumina-net \
   alumina-protocol \
   alumina-runtime \
   alumina-storage; do

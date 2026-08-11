@@ -20,10 +20,10 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `6cb75a0546e7b8e7b39838b42b2babd5246f6802` | tracked source modified by concurrent local development; observed between compiling states during this checkpoint |
+| `hypercurve` | `6cbb7e9f0094654fba39f4401fd64e411a0261fb` | tracked source modified by concurrent local development; tracked diff SHA-256 `a812cf2435d5e56ebd2890b6f36c2baacb4c705b9a1269047148a7a5da9da55f` |
 | `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
-| `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development |
-| `hypersolve` | `cdac9bf4e5b88aa050d53667bc2c2244db5ee650` | clean |
+| `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
+| `hypersolve` | `8a578174c5e4400ec77a1607a95264caf4e47807` | clean |
 | `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
 
 ## Qualification rule

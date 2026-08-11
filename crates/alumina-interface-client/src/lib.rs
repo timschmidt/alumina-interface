@@ -10,6 +10,11 @@ use alumina_protocol::{
     Operation, StatusCode,
 };
 
+pub mod http;
+pub mod upload;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 /// Transport-independent maximum accepted by this first headless client.
 pub const MAXIMUM_PAYLOAD_BYTES: u32 = 64 * 1024;
 
@@ -62,61 +67,84 @@ impl<T: Transport> ProtocolClient<T> {
         operation: Operation,
         body: &[u8],
     ) -> Result<Response, ClientError<T::Error>> {
-        let body_len = u32::try_from(body.len()).map_err(|_| ClientError::RequestTooLarge)?;
-        let payload_len = u32::try_from(MessageHeader::WIRE_LEN)
-            .expect("message header length fits u32")
-            .checked_add(body_len)
-            .filter(|length| *length <= MAXIMUM_PAYLOAD_BYTES)
-            .ok_or(ClientError::RequestTooLarge)?;
         let correlation = self.next_correlation;
         let sequence = self.next_sequence;
-        let message = MessageHeader::request(operation, correlation, body_len);
-        message
-            .validate(operation.frame_kind(), payload_len)
-            .map_err(ClientError::Message)?;
-        let frame = FrameHeader::new(
-            operation.frame_kind(),
-            payload_len,
-            sequence,
-            DeviceCycle(0),
-            self.config_digest,
-        );
-        let mut request = Vec::with_capacity(FrameHeader::WIRE_LEN + payload_len as usize);
-        request.extend_from_slice(&frame.encode());
-        request.extend_from_slice(&message.encode());
-        request.extend_from_slice(body);
+        let request = encode_request(operation, body, sequence, correlation, self.config_digest)
+            .map_err(ClientError::Request)?;
 
         let response = self
             .transport
             .exchange(&request)
             .map_err(ClientError::Transport)?;
-        let decoded = decode_response(&response, operation, correlation, self.config_digest)?;
+        let decoded = decode_response(
+            &response,
+            operation,
+            sequence,
+            correlation,
+            self.config_digest,
+        )
+        .map_err(ClientError::Response)?;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.next_correlation = self.next_correlation.wrapping_add(1).max(1);
         Ok(decoded)
     }
 }
 
-fn decode_response<E>(
-    encoded: &[u8],
+fn encode_request(
     operation: Operation,
+    body: &[u8],
+    sequence: u32,
     correlation: u32,
     config_digest: Digest,
-) -> Result<Response, ClientError<E>> {
+) -> Result<Vec<u8>, RequestEncodeError> {
+    let body_len = u32::try_from(body.len()).map_err(|_| RequestEncodeError::RequestTooLarge)?;
+    let payload_len = u32::try_from(MessageHeader::WIRE_LEN)
+        .expect("message header length fits u32")
+        .checked_add(body_len)
+        .filter(|length| *length <= MAXIMUM_PAYLOAD_BYTES)
+        .ok_or(RequestEncodeError::RequestTooLarge)?;
+    let message = MessageHeader::request(operation, correlation, body_len);
+    message
+        .validate(operation.frame_kind(), payload_len)
+        .map_err(RequestEncodeError::Message)?;
+    let frame = FrameHeader::new(
+        operation.frame_kind(),
+        payload_len,
+        sequence,
+        DeviceCycle(0),
+        config_digest,
+    );
+    let mut request = Vec::with_capacity(FrameHeader::WIRE_LEN + payload_len as usize);
+    request.extend_from_slice(&frame.encode());
+    request.extend_from_slice(&message.encode());
+    request.extend_from_slice(body);
+    Ok(request)
+}
+
+fn decode_response(
+    encoded: &[u8],
+    operation: Operation,
+    sequence: u32,
+    correlation: u32,
+    config_digest: Digest,
+) -> Result<Response, ResponseDecodeError> {
     let minimum = FrameHeader::WIRE_LEN + MessageHeader::WIRE_LEN;
     if encoded.len() < minimum {
-        return Err(ClientError::TruncatedResponse);
+        return Err(ResponseDecodeError::TruncatedResponse);
     }
     let frame = FrameHeader::decode(&encoded[..FrameHeader::WIRE_LEN], MAXIMUM_PAYLOAD_BYTES)
-        .map_err(ClientError::Frame)?;
+        .map_err(ResponseDecodeError::Frame)?;
     let expected_len = FrameHeader::WIRE_LEN
         .checked_add(frame.payload_len as usize)
-        .ok_or(ClientError::TruncatedResponse)?;
+        .ok_or(ResponseDecodeError::TruncatedResponse)?;
     if encoded.len() != expected_len {
-        return Err(ClientError::ResponseLength);
+        return Err(ResponseDecodeError::ResponseLength);
+    }
+    if frame.sequence != sequence {
+        return Err(ResponseDecodeError::Sequence);
     }
     if frame.config_digest != config_digest {
-        return Err(ClientError::ConfigurationIdentity);
+        return Err(ResponseDecodeError::ConfigurationIdentity);
     }
     let message_start = FrameHeader::WIRE_LEN;
     let message_end = message_start + MessageHeader::WIRE_LEN;
@@ -125,12 +153,12 @@ fn decode_response<E>(
         frame.kind,
         frame.payload_len,
     )
-    .map_err(ClientError::Message)?;
+    .map_err(ResponseDecodeError::Message)?;
     if message.direction != MessageDirection::Response
         || message.operation != operation
         || message.correlation_id != correlation
     {
-        return Err(ClientError::Correlation);
+        return Err(ResponseDecodeError::Correlation);
     }
     Ok(Response {
         status: message.status,
@@ -138,13 +166,29 @@ fn decode_response<E>(
     })
 }
 
-/// Failure before a response may influence client state.
+/// Failure while constructing a canonical native request frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientError<E> {
-    /// Underlying transport failed.
-    Transport(E),
-    /// Request body exceeded the client budget.
+pub enum RequestEncodeError {
+    /// Request body exceeded the client payload budget.
     RequestTooLarge,
+    /// The typed message header rejected the requested operation/body pairing.
+    Message(MessageError),
+}
+
+impl fmt::Display for RequestEncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestTooLarge => formatter.write_str("request exceeds the payload budget"),
+            Self::Message(error) => write!(formatter, "invalid request message: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for RequestEncodeError {}
+
+/// Failure while validating one exact correlated native response frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResponseDecodeError {
     /// Response did not contain both fixed headers.
     TruncatedResponse,
     /// Outer response length did not match the exact received bytes.
@@ -153,25 +197,49 @@ pub enum ClientError<E> {
     Frame(HeaderError),
     /// Typed message validation failed.
     Message(MessageError),
+    /// Response sequence did not match the exact request.
+    Sequence,
     /// Operation or correlation identity did not match the request.
     Correlation,
     /// Response was compiled or sampled against another configuration.
     ConfigurationIdentity,
 }
 
-impl<E: fmt::Display> fmt::Display for ClientError<E> {
+impl fmt::Display for ResponseDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Transport(error) => write!(formatter, "transport failed: {error}"),
-            Self::RequestTooLarge => formatter.write_str("request exceeds the payload budget"),
             Self::TruncatedResponse => formatter.write_str("response is truncated"),
             Self::ResponseLength => formatter.write_str("response length is not canonical"),
             Self::Frame(error) => write!(formatter, "invalid frame header: {error:?}"),
             Self::Message(error) => write!(formatter, "invalid message header: {error:?}"),
+            Self::Sequence => formatter.write_str("response sequence does not match request"),
             Self::Correlation => formatter.write_str("response correlation does not match request"),
             Self::ConfigurationIdentity => {
                 formatter.write_str("response configuration identity does not match request")
             }
+        }
+    }
+}
+
+impl std::error::Error for ResponseDecodeError {}
+
+/// Failure before a response may influence client state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientError<E> {
+    /// Underlying transport failed.
+    Transport(E),
+    /// Canonical request encoding failed before transport.
+    Request(RequestEncodeError),
+    /// Correlated canonical response validation failed after transport.
+    Response(ResponseDecodeError),
+}
+
+impl<E: fmt::Display> fmt::Display for ClientError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "transport failed: {error}"),
+            Self::Request(error) => write!(formatter, "request encoding failed: {error}"),
+            Self::Response(error) => write!(formatter, "response validation failed: {error}"),
         }
     }
 }

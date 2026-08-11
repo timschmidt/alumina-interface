@@ -2,6 +2,8 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod cache_delivery;
+
 use std::sync::{Arc, Mutex};
 
 use alumina_interface_core::{

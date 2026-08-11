@@ -65,7 +65,9 @@ machine split.
   configuration, compiler/build identity, and retained evidence objects.
 - The compiler does not yet partition axes/resources from one global machine
   graph; the caller currently supplies complete participant packages.
-- Browser Wi-Fi transport, cache reconciliation, prepare receipts, clock fits,
+- Browser Wi-Fi transport now strictly authenticates and reconciles each local
+  partition before publishing this identical manifest on that MCU. Credential
+  UI, live-browser/device qualification, prepare receipts, clock fits,
   commit/confirm/abort orchestration, and recovery UI remain open.
 - The manifest proves identity and exact declared duration, not physical clock
   synchronization, start-edge spread, following error, or safe distributed

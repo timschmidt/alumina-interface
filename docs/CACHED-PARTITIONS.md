@@ -91,8 +91,10 @@ it does not reopen, reinterpret, or concatenate execution records. See
 - The global multi-MCU manifest and owned participant binding now exist, but
   fixture compiler/source/policy/machine/evidence identities remain sentinels
   until their canonical producers land.
-- Wi-Fi upload/retry/finalize, cache reconciliation, prepare/commit/confirm, and
-  browser clock fitting are not implemented by this window-free module.
+- The window-free compiler remains independent of transport. Its artifacts now
+  have a browser Wi-Fi upload/retry/finalize and exact cache-reconciliation
+  consumer, but UI wiring, prepare/commit/confirm, and browser clock fitting
+  remain open.
 - Constant-feed chord scheduling is still the current upstream compiler model;
   kinematics, lookahead, acceleration, jerk, physical calibration, following
   error, and qualified hardware timing remain open.
