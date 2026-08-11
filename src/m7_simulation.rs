@@ -9,8 +9,9 @@ use alumina_interface_client::schedule::ParticipantSchedulePhase;
 use alumina_interface_core::CanonicalGlobalJob2;
 use alumina_job::{
     JOB_COMMIT_ID_BYTES, JobCommitId, JobCommitRequest, JobDescriptor, JobScheduleAction,
-    JobScheduleAdmission, JobScheduleReference, JobStatusReport, PreparedJobSchedule,
-    RealtimeJobReport, RealtimeJobState, ServiceJobReport, ServiceJobState,
+    JobScheduleAdmission, JobScheduleReference, JobStartObservation, JobStartObservationSource,
+    JobStatusReport, PreparedJobSchedule, RealtimeJobReport, RealtimeJobState, ServiceJobReport,
+    ServiceJobState,
 };
 use alumina_machine_ir::StreamTick;
 use alumina_protocol::{DeviceCycle, DeviceId, Digest, Operation, StatusCode};
@@ -28,6 +29,7 @@ use crate::distributed_schedule::{
 const OBSERVATION_UI_NS: u64 = 3_001_000_000;
 const CONFIRM_UI_NS: u64 = 3_100_000_000;
 const TARGET_UI_NS: u64 = 5_000_000_000;
+const RECONCILIATION_UI_NS: u64 = 5_100_000_000;
 const CLOCK_TOLERANCE_CYCLES: u64 = 2_000;
 
 /// One simulated MCU's exact clock and scheduled-start diagnostics.
@@ -47,6 +49,11 @@ pub struct SimulatedParticipantDiagnostic {
     pub scheduled_cycle: DeviceCycle,
     /// Exact simulated UI time at which that local cycle is first reached.
     pub simulated_start_ui_ns: u64,
+    /// Explicit authority carried by the canonical firmware report.
+    pub observation_source: JobStartObservationSource,
+    /// Conservative browser-time replay interval for the reported cycle.
+    pub reconciled_earliest_ui_ns: u64,
+    pub reconciled_latest_ui_ns: u64,
     /// Last exact participant phase reconciled through `JobStatus`.
     pub terminal_phase: ParticipantSchedulePhase,
 }
@@ -68,6 +75,10 @@ pub struct RepresentativeM7SimulationReport {
     pub maximum_target_error_ns: u64,
     /// Difference between earliest and latest simulated participant start edges.
     pub simulated_edge_spread_ns: u64,
+    /// Worst-case spread across the browser-replayed observation intervals.
+    pub maximum_reconciled_edge_spread_ns: u64,
+    /// Largest replay-interval endpoint displacement from the shared epoch.
+    pub maximum_reconciled_target_error_ns: u64,
     /// Sorted participant diagnostics.
     pub participants: Vec<SimulatedParticipantDiagnostic>,
 }
@@ -118,7 +129,7 @@ pub fn run_representative_m7_simulation(
     build_report(
         &coordinator,
         &authorities,
-        &clock_set.models,
+        &inputs,
         &simulated_start_ui_ns,
         observed_global_phases,
         confirmation_window,
@@ -129,12 +140,15 @@ pub fn run_representative_m7_simulation(
 fn build_report(
     coordinator: &DistributedScheduleCoordinator,
     authorities: &[SimulatedAuthority],
-    clock_models: &[DeviceClockModel],
+    inputs: &[ParticipantStartInput<'_>],
     simulated_start_ui_ns: &[u64],
     observed_global_phases: Vec<DistributedSchedulePhase>,
     confirmation_window: DistributedDeadlineWindow,
     lost_install_reconciled: bool,
 ) -> Result<RepresentativeM7SimulationReport, RepresentativeM7SimulationError> {
+    let reconciliation = coordinator
+        .reconcile_start_observations(RECONCILIATION_UI_NS, inputs, 2_000_000)
+        .map_err(|_| stage("reconcile simulated start observations"))?;
     let earliest = simulated_start_ui_ns
         .iter()
         .copied()
@@ -156,10 +170,24 @@ fn build_report(
         .try_reserve_exact(authorities.len())
         .map_err(|_| stage("allocate participant diagnostics"))?;
     for (index, authority) in authorities.iter().enumerate() {
-        let model = &clock_models[index];
+        let model = inputs
+            .iter()
+            .find(|input| input.device_id == authority.device_id)
+            .map(|input| input.clock)
+            .ok_or_else(|| stage("align report clock"))?;
         let commit = authority
             .commit
             .ok_or_else(|| stage("report participant commit"))?;
+        let observed = reconciliation
+            .participants
+            .get(index)
+            .filter(|observed| observed.device_id == authority.device_id)
+            .ok_or_else(|| stage("align reconciled start observation"))?;
+        if !(observed.earliest_ui_ns..=observed.latest_ui_ns)
+            .contains(&simulated_start_ui_ns[index])
+        {
+            return Err(stage("contain exact simulated start in replay interval"));
+        }
         participants.push(SimulatedParticipantDiagnostic {
             device_id: authority.device_id,
             rate_adjustment_ppm: authority.clock.rate_adjustment_ppm,
@@ -168,6 +196,9 @@ fn build_report(
             clock_uncertainty_cycles: commit.clock_uncertainty_cycles,
             scheduled_cycle: commit.local_start_cycle,
             simulated_start_ui_ns: simulated_start_ui_ns[index],
+            observation_source: observed.source,
+            reconciled_earliest_ui_ns: observed.earliest_ui_ns,
+            reconciled_latest_ui_ns: observed.latest_ui_ns,
             terminal_phase: coordinator
                 .participant_phase(authority.device_id)
                 .ok_or_else(|| stage("report participant phase"))?,
@@ -182,6 +213,8 @@ fn build_report(
         lost_install_reconciled,
         maximum_target_error_ns,
         simulated_edge_spread_ns: latest - earliest,
+        maximum_reconciled_edge_spread_ns: reconciliation.maximum_edge_spread_ns,
+        maximum_reconciled_target_error_ns: reconciliation.maximum_target_error_ns,
         participants,
     })
 }
@@ -199,7 +232,7 @@ fn execute_all(
     simulated_start_ui_ns
         .try_reserve_exact(authorities.len())
         .map_err(|_| stage("allocate start observations"))?;
-    for authority in &mut *authorities {
+    for (index, authority) in authorities.iter_mut().enumerate() {
         let commit = authority
             .commit
             .ok_or_else(|| stage("retain installed commit"))?;
@@ -215,6 +248,20 @@ fn execute_all(
                 .ui_ns_at_or_after_cycle(commit.local_start_cycle)
                 .map_err(|_| stage("invert simulated device clock"))?,
         );
+        let output_token = u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| stage("construct simulated output token"))?;
+        authority
+            .schedule
+            .record_start_observation(JobStartObservation {
+                source: JobStartObservationSource::SimulatedLatch,
+                output_token,
+                scheduled_cycle: commit.local_start_cycle,
+                earliest_cycle: commit.local_start_cycle,
+                latest_cycle: commit.local_start_cycle,
+            })
+            .map_err(|_| stage("record simulated start observation"))?;
     }
     reconcile_status_round(coordinator, authorities, false)?;
 
@@ -837,9 +884,12 @@ mod tests {
         assert!(first.lost_install_reconciled);
         assert!(first.maximum_target_error_ns <= 2_000_000);
         assert!(first.simulated_edge_spread_ns <= 4_000_000);
+        assert!(first.maximum_reconciled_target_error_ns <= 2_000_000);
+        assert!(first.maximum_reconciled_edge_spread_ns <= 4_000_000);
         assert!(first.participants.iter().all(|participant| {
             participant.accepted_clock_samples == 3
                 && participant.rejected_clock_samples == 0
+                && participant.observation_source == JobStartObservationSource::SimulatedLatch
                 && participant.terminal_phase == ParticipantSchedulePhase::Complete
         }));
     }

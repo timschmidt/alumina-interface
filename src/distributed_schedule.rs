@@ -9,7 +9,7 @@ use alumina_interface_client::schedule::{
     ParticipantScheduleMachine, ParticipantSchedulePhase, ScheduleControlError, ScheduleOperation,
 };
 use alumina_interface_core::CanonicalGlobalJob2;
-use alumina_job::{JobCommitId, JobCommitRequest};
+use alumina_job::{JobCommitId, JobCommitRequest, JobStartObservationSource};
 use alumina_protocol::DeviceId;
 
 use crate::cache_delivery::ParticipantCacheReady;
@@ -61,6 +61,44 @@ pub struct DistributedScheduleRequest {
     pub device_id: DeviceId,
     /// Exact operation and canonical native body.
     pub request: ScheduleOperation,
+}
+
+/// One participant's authenticated start observation mapped into browser time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParticipantStartReconciliation {
+    /// Stable MCU identity owning the boot, commit, and observation.
+    pub device_id: DeviceId,
+    /// Explicit authority; simulator and software brackets remain distinguishable.
+    pub source: JobStartObservationSource,
+    /// Backend-local nonzero output correlation.
+    pub output_token: u32,
+    /// First job-owned output cycle from the installed commit.
+    pub scheduled_cycle: alumina_protocol::DeviceCycle,
+    /// Conservative device-cycle observation bounds.
+    pub earliest_cycle: alumina_protocol::DeviceCycle,
+    pub latest_cycle: alumina_protocol::DeviceCycle,
+    /// Conservative browser monotonic interval from exact affine inversion.
+    pub earliest_ui_ns: u64,
+    pub midpoint_ui_ns: u64,
+    pub latest_ui_ns: u64,
+    /// Largest distance from the shared target to either mapped endpoint.
+    pub maximum_target_error_ns: u64,
+}
+
+/// Conservative replay of every participant's observed start edge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributedStartReconciliation {
+    /// Shared browser epoch used to construct all installed commits.
+    pub target_ui_ns: u64,
+    /// Outer union of every participant's mapped start interval.
+    pub earliest_ui_ns: u64,
+    pub latest_ui_ns: u64,
+    /// Worst possible participant-to-participant spread within the outer union.
+    pub maximum_edge_spread_ns: u64,
+    /// Largest participant endpoint displacement from the shared target.
+    pub maximum_target_error_ns: u64,
+    /// Canonically device-sorted participant evidence.
+    pub participants: Vec<ParticipantStartReconciliation>,
 }
 
 /// Global browser interpretation of the multi-participant schedule lifecycle.
@@ -307,6 +345,105 @@ impl DistributedScheduleCoordinator {
     #[must_use]
     pub fn participant_commit(&self, device_id: DeviceId) -> Option<JobCommitRequest> {
         self.participant(device_id)?.planned_commit
+    }
+
+    /// Replays authenticated device-cycle start evidence into browser time.
+    ///
+    /// This operation is read-only and preserves each observation authority.
+    /// A simulated latch or software bracket therefore cannot be presented as a
+    /// physical peripheral capture. Every report must match the already bound
+    /// participant, boot, and local start cycle before any aggregate is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the participant set, clock boot, installed commit,
+    /// observation identity, clock freshness, or requested uncertainty bound is
+    /// not exact and complete.
+    pub fn reconcile_start_observations(
+        &self,
+        now_ui_ns: u64,
+        inputs: &[ParticipantStartInput<'_>],
+        maximum_mapping_uncertainty_ns: u64,
+    ) -> Result<DistributedStartReconciliation, DistributedScheduleError> {
+        let target_ui_ns = self.target_ui_ns.ok_or(DistributedScheduleError::State)?;
+        if inputs.len() != self.participants.len() || self.participants.is_empty() {
+            return Err(DistributedScheduleError::ParticipantSet);
+        }
+        let mut order: Vec<usize> = (0..inputs.len()).collect();
+        order.sort_unstable_by_key(|index| inputs[*index].device_id);
+        let mut reconciled = Vec::new();
+        reconciled
+            .try_reserve_exact(self.participants.len())
+            .map_err(|_| DistributedScheduleError::AllocationOverflow)?;
+
+        for (participant, input_index) in self.participants.iter().zip(order) {
+            let input = &inputs[input_index];
+            if input.device_id != participant.device_id
+                || input.clock.boot_id() != Some(participant.control.boot_id())
+            {
+                return Err(DistributedScheduleError::ParticipantSet);
+            }
+            let commit = participant
+                .planned_commit
+                .ok_or(DistributedScheduleError::State)?;
+            let observation = participant
+                .control
+                .report()
+                .and_then(|report| report.schedule)
+                .and_then(|schedule| schedule.start_observation)
+                .ok_or(DistributedScheduleError::StartObservationUnavailable)?;
+            if observation.scheduled_cycle != commit.local_start_cycle {
+                return Err(DistributedScheduleError::StartObservationIdentity);
+            }
+            let estimate = input.clock.estimate_ui_for_cycle_interval(
+                now_ui_ns,
+                observation.earliest_cycle,
+                observation.latest_cycle,
+                maximum_mapping_uncertainty_ns,
+            )?;
+            if estimate.boot_id != participant.control.boot_id() {
+                return Err(DistributedScheduleError::StartObservationIdentity);
+            }
+            reconciled.push(ParticipantStartReconciliation {
+                device_id: participant.device_id,
+                source: observation.source,
+                output_token: observation.output_token,
+                scheduled_cycle: observation.scheduled_cycle,
+                earliest_cycle: observation.earliest_cycle,
+                latest_cycle: observation.latest_cycle,
+                earliest_ui_ns: estimate.earliest_ui_ns,
+                midpoint_ui_ns: estimate.midpoint_ui_ns,
+                latest_ui_ns: estimate.latest_ui_ns,
+                maximum_target_error_ns: estimate
+                    .earliest_ui_ns
+                    .abs_diff(target_ui_ns)
+                    .max(estimate.latest_ui_ns.abs_diff(target_ui_ns)),
+            });
+        }
+
+        let earliest_ui_ns = reconciled
+            .iter()
+            .map(|participant| participant.earliest_ui_ns)
+            .min()
+            .ok_or(DistributedScheduleError::StartObservationUnavailable)?;
+        let latest_ui_ns = reconciled
+            .iter()
+            .map(|participant| participant.latest_ui_ns)
+            .max()
+            .ok_or(DistributedScheduleError::StartObservationUnavailable)?;
+        let maximum_target_error_ns = reconciled
+            .iter()
+            .map(|participant| participant.maximum_target_error_ns)
+            .max()
+            .ok_or(DistributedScheduleError::StartObservationUnavailable)?;
+        Ok(DistributedStartReconciliation {
+            target_ui_ns,
+            earliest_ui_ns,
+            latest_ui_ns,
+            maximum_edge_spread_ns: latest_ui_ns - earliest_ui_ns,
+            maximum_target_error_ns,
+            participants: reconciled,
+        })
     }
 
     /// Conservatively classifies all participant deadlines at one UI instant.
@@ -794,6 +931,10 @@ pub enum DistributedScheduleError {
     ClockUnavailable,
     /// Clock boot, timestamps, or prediction did not match the participant plan.
     ClockIdentity,
+    /// One or more participants have not reported their first output edge.
+    StartObservationUnavailable,
+    /// Start evidence did not match the participant boot or installed cycle.
+    StartObservationIdentity,
     /// Cycle margins, order, duration conversion, or arithmetic were invalid.
     Timing,
     /// Finite lease did not cover the exact manifest duration.
@@ -851,6 +992,12 @@ impl fmt::Display for DistributedScheduleError {
             Self::ConfirmationClosed => formatter.write_str("confirmation deadline has closed"),
             Self::ClockUnavailable => formatter.write_str("participant clock is unavailable"),
             Self::ClockIdentity => formatter.write_str("participant clock identity differs"),
+            Self::StartObservationUnavailable => {
+                formatter.write_str("participant start observation is unavailable")
+            }
+            Self::StartObservationIdentity => {
+                formatter.write_str("participant start observation identity differs")
+            }
             Self::Timing => formatter.write_str("distributed timing policy is invalid"),
             Self::LeaseTooShort { supplied, required } => write!(
                 formatter,
@@ -1157,6 +1304,10 @@ mod tests {
         }
         assert_eq!(confirms, job.participants().len());
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
+        assert!(matches!(
+            coordinator.reconcile_start_observations(3_100_000_000, &inputs, 2_000_000),
+            Err(DistributedScheduleError::StartObservationUnavailable)
+        ));
 
         let status_round = coordinator.begin_status_round().unwrap();
         assert_eq!(status_round.len(), job.participants().len());

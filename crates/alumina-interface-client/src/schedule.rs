@@ -333,6 +333,11 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
         }
         let report = JobStatusReport::decode(&response.body)?;
         self.validate_report(report)?;
+        if let Some(previous) = self.report
+            && !job_report_advances(previous, report)
+        {
+            return Err(ScheduleControlError::Regression);
+        }
         self.report = Some(report);
         self.reconciliation_required = false;
         if response.status != StatusCode::Ok {
@@ -421,6 +426,72 @@ fn schedule_matches_commit(schedule: JobScheduleReport, commit: JobCommitRequest
         && schedule.commit_id == commit.commit_id.as_bytes()
 }
 
+fn job_report_advances(previous: JobStatusReport, next: JobStatusReport) -> bool {
+    match (previous.schedule, next.schedule) {
+        (None, _) => true,
+        (Some(_), None) => {
+            next.service
+                .is_some_and(|service| service.state == ServiceJobState::Cancelled)
+                && next
+                    .realtime
+                    .is_some_and(|realtime| realtime.state == RealtimeJobState::Cancelled)
+        }
+        (Some(previous), Some(next)) => schedule_report_advances(previous, next),
+    }
+}
+
+fn schedule_report_advances(previous: JobScheduleReport, next: JobScheduleReport) -> bool {
+    if previous == next {
+        return true;
+    }
+    if previous.state == JobScheduleState::Running
+        && next.state == JobScheduleState::Running
+        && previous.start_observation.is_none()
+        && next.start_observation.is_some()
+    {
+        let mut without_observation = next;
+        without_observation.start_observation = None;
+        return without_observation == previous;
+    }
+    match previous.state {
+        JobScheduleState::Prepared => next.state != JobScheduleState::Prepared,
+        JobScheduleState::Installed => matches!(
+            next.state,
+            JobScheduleState::Confirmed
+                | JobScheduleState::Priming
+                | JobScheduleState::Primed
+                | JobScheduleState::Running
+                | JobScheduleState::Aborted
+                | JobScheduleState::Expired
+                | JobScheduleState::Faulted
+        ),
+        JobScheduleState::Confirmed => matches!(
+            next.state,
+            JobScheduleState::Priming
+                | JobScheduleState::Primed
+                | JobScheduleState::Running
+                | JobScheduleState::Aborted
+                | JobScheduleState::Faulted
+        ),
+        JobScheduleState::Priming => matches!(
+            next.state,
+            JobScheduleState::Primed | JobScheduleState::Running | JobScheduleState::Faulted
+        ),
+        JobScheduleState::Primed => matches!(
+            next.state,
+            JobScheduleState::Running | JobScheduleState::Faulted
+        ),
+        JobScheduleState::Running => matches!(
+            next.state,
+            JobScheduleState::Complete | JobScheduleState::Faulted
+        ),
+        JobScheduleState::Aborted
+        | JobScheduleState::Expired
+        | JobScheduleState::Complete
+        | JobScheduleState::Faulted => false,
+    }
+}
+
 /// Per-participant schedule construction, state, response, or identity failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScheduleControlError {
@@ -442,6 +513,8 @@ pub enum ScheduleControlError {
     ResponseBody,
     /// Device returned a typed application rejection after report validation.
     DeviceStatus(StatusCode),
+    /// A later authenticated status attempted to erase or regress schedule evidence.
+    Regression,
     /// Descriptor construction or encoding failed.
     Descriptor(JobDescriptorWireError),
     /// Commit/reference construction or schedule report decoding failed.
@@ -490,6 +563,9 @@ impl fmt::Display for ScheduleControlError {
             Self::ForeignCommit => formatter.write_str("device reported an unbound commit"),
             Self::ResponseBody => formatter.write_str("participant status body is missing"),
             Self::DeviceStatus(status) => write!(formatter, "participant returned {status:?}"),
+            Self::Regression => {
+                formatter.write_str("participant schedule report regressed prior evidence")
+            }
             Self::Descriptor(error) => write!(formatter, "job descriptor rejected: {error:?}"),
             Self::Schedule(error) => write!(formatter, "job schedule rejected: {error:?}"),
             Self::Cancel(error) => write!(formatter, "job cancellation rejected: {error:?}"),
@@ -504,7 +580,8 @@ impl std::error::Error for ScheduleControlError {}
 mod tests {
     use alumina_job::{
         JOB_COMMIT_ID_BYTES, JobCommitId, JobNetworkPolicy, JobScheduleAdmission,
-        PreparedJobSchedule, RealtimeJobReport, ServiceJobReport,
+        JobScheduleReferenceAction, JobScheduleState, JobStartObservation,
+        JobStartObservationSource, PreparedJobSchedule, RealtimeJobReport, ServiceJobReport,
     };
     use alumina_machine_ir::{
         BlockValidationLimits, EXECUTION_BLOCK_BYTES, StreamId, StreamTick, ValidationLimits,
@@ -764,6 +841,90 @@ mod tests {
                 .accept_response(&response(StatusCode::Ok, cancelled))
                 .unwrap(),
             ParticipantSchedulePhase::Cancelled
+        );
+    }
+
+    #[test]
+    fn accepted_start_observation_cannot_be_erased_by_later_status() {
+        let descriptor = descriptor();
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+
+        machine.begin_prepare().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let commit = commit(&machine);
+        machine.begin_install(commit).unwrap();
+        authority.install(commit, admission()).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        machine.begin_confirm().unwrap();
+        let confirm =
+            JobScheduleReference::for_commit(JobScheduleReferenceAction::Confirm, commit).unwrap();
+        authority.confirm(confirm, DeviceCycle(4_000_000)).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+
+        assert!(matches!(
+            authority.advance(commit.abort_guard_cycle),
+            alumina_job::JobScheduleAction::PrimeHardware { .. }
+        ));
+        authority
+            .mark_primed(DeviceCycle(commit.abort_guard_cycle.0 + 1))
+            .unwrap();
+        assert!(matches!(
+            authority.advance(commit.local_start_cycle),
+            alumina_job::JobScheduleAction::Start { .. }
+        ));
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Running
+        );
+
+        let observation = JobStartObservation {
+            source: JobStartObservationSource::SimulatedLatch,
+            output_token: 17,
+            scheduled_cycle: commit.local_start_cycle,
+            earliest_cycle: DeviceCycle(commit.local_start_cycle.0 + 3),
+            latest_cycle: DeviceCycle(commit.local_start_cycle.0 + 3),
+        };
+        authority.record_start_observation(observation).unwrap();
+        machine.begin_status().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        assert_eq!(
+            machine
+                .report()
+                .unwrap()
+                .schedule
+                .unwrap()
+                .start_observation,
+            Some(observation)
+        );
+
+        let mut regressed = status(authority.report());
+        regressed.schedule.as_mut().unwrap().start_observation = None;
+        assert_eq!(regressed.schedule.unwrap().state, JobScheduleState::Running);
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine.accept_response(&response(StatusCode::Ok, regressed)),
+            Err(ScheduleControlError::Regression)
+        );
+        assert_eq!(
+            machine
+                .report()
+                .unwrap()
+                .schedule
+                .unwrap()
+                .start_observation,
+            Some(observation)
         );
     }
 }

@@ -5,7 +5,7 @@ use std::fmt;
 use alumina_clock::{
     BootId, CLOCK_HEARTBEAT_REQUEST_BYTES, ClockEstimateError, ClockEstimationPolicy,
     ClockEstimator, ClockHeartbeatRequest, ClockHeartbeatResponse, ClockInstantEstimate,
-    ClockObservation, ClockPrediction, ClockWireError,
+    ClockObservation, ClockPrediction, ClockUiEstimate, ClockWireError,
 };
 use alumina_protocol::{Operation, StatusCode};
 
@@ -291,6 +291,24 @@ impl DeviceClockModel {
             .estimate_at(ui_ns, maximum_uncertainty_cycles)
             .map_err(Into::into)
     }
+
+    /// Maps an observed device-cycle interval back into browser monotonic time.
+    pub fn estimate_ui_for_cycle_interval(
+        &self,
+        now_ui_ns: u64,
+        earliest_cycle: alumina_protocol::DeviceCycle,
+        latest_cycle: alumina_protocol::DeviceCycle,
+        maximum_uncertainty_ns: u64,
+    ) -> Result<ClockUiEstimate, ClockProbeError> {
+        self.estimator
+            .estimate_ui_for_cycle_interval(
+                now_ui_ns,
+                earliest_cycle,
+                latest_cycle,
+                maximum_uncertainty_ns,
+            )
+            .map_err(Into::into)
+    }
 }
 
 /// Heartbeat request, response, boot, or exact-estimation failure.
@@ -501,6 +519,19 @@ mod tests {
         assert!(exact <= prediction.latest_cycle.0);
         assert_eq!(prediction.accepted_samples, 3);
         assert_eq!(model.boot_id(), Some(boot(0x21)));
+
+        let observed_ui_ns = 3_001_000_000;
+        let observed_cycle = 75_000 + observed_ui_ns / 1_000;
+        let inverse = model
+            .estimate_ui_for_cycle_interval(
+                observed_ui_ns,
+                DeviceCycle(observed_cycle),
+                DeviceCycle(observed_cycle),
+                2_000_000,
+            )
+            .unwrap();
+        assert!(inverse.earliest_ui_ns <= observed_ui_ns);
+        assert!(observed_ui_ns <= inverse.latest_ui_ns);
     }
 
     #[test]

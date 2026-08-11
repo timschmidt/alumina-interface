@@ -408,8 +408,16 @@ impl AluminaApp {
             report.simulated_edge_spread_ns
         ));
         ui.label(format!(
+            "Conservative replay spread: <= {} ns",
+            report.maximum_reconciled_edge_spread_ns
+        ));
+        ui.label(format!(
             "Maximum shared-epoch error: {} ns",
             report.maximum_target_error_ns
+        ));
+        ui.label(format!(
+            "Conservative replay target error: <= {} ns",
+            report.maximum_reconciled_target_error_ns
         ));
         ui.label(format!(
             "Lost install response reconciled: {}",
@@ -434,8 +442,14 @@ impl AluminaApp {
                         participant.scheduled_cycle.0, participant.clock_uncertainty_cycles
                     ));
                     ui.label(format!(
-                        "simulated edge: {} ns, phase {:?}",
-                        participant.simulated_start_ui_ns, participant.terminal_phase
+                        "simulated edge: {} ns, source {:?}, phase {:?}",
+                        participant.simulated_start_ui_ns,
+                        participant.observation_source,
+                        participant.terminal_phase
+                    ));
+                    ui.label(format!(
+                        "replayed interval: {}..={} ns",
+                        participant.reconciled_earliest_ui_ns, participant.reconciled_latest_ui_ns
                     ));
                 },
             );
