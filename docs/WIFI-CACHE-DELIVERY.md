@@ -38,6 +38,13 @@ by the session. The device target origin is a separate validated HTTP(S) URL.
 This distinction permits a workspace served by one MCU to address peers without
 mistaking the peer URL for the calling security origin.
 
+The live application now places these sessions in a dedicated module worker.
+Its bounded commands, credential ownership, retry policy, and redacted clock
+snapshots are specified in
+[`LIVE-CONTROL-WORKER.md`](LIVE-CONTROL-WORKER.md). Cache-delivery and
+distributed-schedule machines are worker-capable but are not yet driven from
+the live panel.
+
 ## Retry-safe storage protocol
 
 `CacheUploadMachine` starts every transaction with `StorageInspect` for the
@@ -72,8 +79,7 @@ The complete client and application compile under strict native and WASM
 Clippy. This is code-level browser transport evidence, not a claim that a real
 browser, radio, AP/STA network, SD card, or MCU has exchanged these requests.
 
-Still open are credential entry/storage UX, device discovery and identity
-binding, UI progress/error panels, multi-device concurrency limits, browser
-integration tests against simulated HTTP firmware, live TinyBee/T-Deck Pro
-captures, clock fitting, prepare/commit/confirm, and physical cached-start
-qualification.
+Still open are hardened credential persistence, device discovery and identity
+binding, cache progress/error panels, browser integration tests against
+simulated HTTP firmware, live TinyBee/T-Deck Pro captures, live
+prepare/commit/confirm orchestration, and physical cached-start qualification.

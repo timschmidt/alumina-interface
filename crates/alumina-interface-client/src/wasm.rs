@@ -22,6 +22,7 @@ use crate::http::{
 use crate::upload::{CacheUploadError, CacheUploadMachine, CacheUploadPhase, UploadSource};
 
 const JSON_MEDIA_TYPE: &str = "application/json";
+const COUNTERS_PER_MILLISECOND: u64 = 1_000_000;
 
 trait BrowserScope {
     fn fetch_request(&self, request: &Request) -> Promise;
@@ -198,11 +199,28 @@ async fn open_authenticated_session_inner(
 ) -> Result<AuthenticatedHttpSession, BrowserFetchError> {
     let calling_origin = scope.calling_origin()?;
     let challenge = fetch_authentication_challenge_inner(scope, device).await?;
-    Ok(AuthenticatedHttpSession::new(
+    let initial_counter = browser_counter_seed()?;
+    AuthenticatedHttpSession::starting_at(
         challenge.nonce(),
         config_digest,
         calling_origin,
-    ))
+        initial_counter,
+    )
+    .map_err(BrowserFetchError::Session)
+}
+
+fn browser_counter_seed() -> Result<u64, BrowserFetchError> {
+    let epoch_ms = js_sys::Date::now();
+    if !epoch_ms.is_finite() || epoch_ms.is_sign_negative() {
+        return Err(BrowserFetchError::CounterSeed);
+    }
+    let epoch_ms = epoch_ms.floor() as u64;
+    let entropy = (js_sys::Math::random() * COUNTERS_PER_MILLISECOND as f64).floor() as u64;
+    epoch_ms
+        .checked_mul(COUNTERS_PER_MILLISECOND)
+        .and_then(|prefix| prefix.checked_add(entropy))
+        .filter(|counter| *counter != 0 && *counter != u64::MAX)
+        .ok_or(BrowserFetchError::CounterSeed)
 }
 
 /// Performs one browser fetch and accepts only the exact signed response.
@@ -517,6 +535,8 @@ pub enum BrowserFetchError {
     DeviceOrigin,
     /// Calling document has an opaque/non-HTTP origin or differs from the HMAC session.
     DocumentOrigin,
+    /// Browser wall-clock facts could not seed a reload-safe request counter.
+    CounterSeed,
     /// Browser API rejected construction, fetch, headers, or response bytes.
     Javascript(String),
     /// Device returned an HTTP failure before a signed control response existed.
@@ -540,6 +560,7 @@ impl fmt::Display for BrowserFetchError {
             Self::DocumentOrigin => {
                 formatter.write_str("browser document origin does not match the HMAC session")
             }
+            Self::CounterSeed => formatter.write_str("browser request counter seed is invalid"),
             Self::Javascript(error) => write!(formatter, "browser fetch failed: {error}"),
             Self::HttpStatus(status) => write!(formatter, "device returned HTTP status {status}"),
             Self::MissingHeader(header) => {

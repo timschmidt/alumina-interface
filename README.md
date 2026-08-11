@@ -15,8 +15,9 @@ prototype.
 - `crates/alumina-interface-client` owns the headless native protocol client,
   deterministic simulator transport, origin-bound HMAC V2 session, strict boot
   challenge decoder, retry-safe content-addressed upload reconciliation, and a
-  WASM `fetch` adapter. Browser and native paths share canonical frame and
-  response-proof validation.
+  WASM `fetch` adapter. Its versioned UI/worker contract carries bounded
+  commands and redacted clock snapshots; browser and native paths share
+  canonical frame and response-proof validation.
 - The native/browser shell composes `ExactScene` and `ExactCamera` values and
   uploads them through Hypergraphics. It contains no application-owned vertex,
   normal, grid, camera-matrix, or primitive-float geometry pipeline.
@@ -49,6 +50,11 @@ prototype.
   manifest, and returns to `StorageInspect` after any ambiguous fetch. Browser
   fetch omits ambient credentials, rejects redirects, disables caching, and
   binds request/response proofs to the actual document origin.
+- The browser shell creates one dedicated module worker that owns each device's
+  HMAC secret, HTTP session, causal clock model, automatic retry cadence, and a
+  bounded 64-observation history. The UI can add, probe, and disconnect
+  diagnostic sessions and never receives credentials. A headless Chromium
+  smoke check reaches the worker-ready state without contacting a device.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -61,6 +67,8 @@ The global participant/manifest boundary is in
 [`docs/GLOBAL-JOB-MANIFEST.md`](docs/GLOBAL-JOB-MANIFEST.md).
 The authenticated browser/cache boundary is in
 [`docs/WIFI-CACHE-DELIVERY.md`](docs/WIFI-CACHE-DELIVERY.md).
+The dedicated control-worker boundary is in
+[`docs/LIVE-CONTROL-WORKER.md`](docs/LIVE-CONTROL-WORKER.md).
 The exact-CAM development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
@@ -108,9 +116,9 @@ assets suitable for later embedding in `aluminafw`.
 ## Scope after this checkpoint
 
 The next interface milestones add supported general-curve metric compilation,
-capability-derived machine/error policy, direct Wi-Fi device/session UI and
-live-browser qualification, cached-job prepare/start coordination, annotated
-board photography, bounded telemetry,
+capability-derived machine/error policy, device identity/capability discovery,
+simulated-HTTP and physical-browser qualification, live cached-job
+prepare/start coordination, annotated board photography, bounded telemetry,
 oscilloscope/logic-analyzer views, and the typed timed LabVIEW-style graph. Raw
 G-code remains an optional exact UI importer, never firmware or canonical job
 input.

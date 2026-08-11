@@ -247,6 +247,37 @@ impl AuthenticatedHttpSession {
         }
     }
 
+    /// Starts a fresh boot-scoped session at an explicit caller-selected counter.
+    ///
+    /// Browser workers use an epoch-prefixed seed so an ordinary page reload
+    /// does not restart at counter one inside firmware's boot-global replay
+    /// window. The counter is not a credential; HMAC authentication still
+    /// covers it and every other canonical request fact.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero and `u64::MAX`, which cannot name a request and leave room
+    /// for the next counter respectively.
+    pub const fn starting_at(
+        nonce: BootNonce,
+        config_digest: Digest,
+        origin: CorsOrigin,
+        initial_counter: u64,
+    ) -> Result<Self, HttpSessionError> {
+        if initial_counter == 0 || initial_counter == u64::MAX {
+            return Err(HttpSessionError::CounterSeed);
+        }
+        Ok(Self {
+            nonce,
+            origin,
+            next_http_counter: initial_counter,
+            next_sequence: 0,
+            next_correlation: 1,
+            config_digest,
+            pending: None,
+        })
+    }
+
     /// Whether one request is currently awaiting a response or explicit abandonment.
     pub const fn has_pending_request(&self) -> bool {
         self.pending.is_some()
@@ -397,6 +428,8 @@ pub enum HttpSessionError {
     NoPendingRequest,
     /// The boot-scoped request counter cannot advance without reuse.
     CounterExhausted,
+    /// An explicit session seed was zero or left no room to advance.
+    CounterSeed,
     /// Canonical native request encoding failed.
     Request(RequestEncodeError),
     /// Request/response HMAC syntax or verification failed.
@@ -434,6 +467,7 @@ impl fmt::Display for HttpSessionError {
             Self::RequestPending => formatter.write_str("an HTTP request is already pending"),
             Self::NoPendingRequest => formatter.write_str("no HTTP request is pending"),
             Self::CounterExhausted => formatter.write_str("HTTP request counter is exhausted"),
+            Self::CounterSeed => formatter.write_str("HTTP request counter seed is invalid"),
             Self::Request(error) => write!(formatter, "native request encoding failed: {error}"),
             Self::Authentication(error) => {
                 write!(formatter, "HTTP authentication failed: {error:?}")
@@ -629,5 +663,35 @@ mod tests {
             .unwrap();
         assert_eq!(first.counter(), 1);
         assert_eq!(second.counter(), 2);
+    }
+
+    #[test]
+    fn explicit_counter_seed_advances_across_browser_worker_replacement() {
+        let boot = nonce(0x71);
+        assert!(matches!(
+            AuthenticatedHttpSession::starting_at(boot, Digest::ZERO, origin(), 0),
+            Err(HttpSessionError::CounterSeed)
+        ));
+        assert!(matches!(
+            AuthenticatedHttpSession::starting_at(boot, Digest::ZERO, origin(), u64::MAX),
+            Err(HttpSessionError::CounterSeed)
+        ));
+
+        let mut session = AuthenticatedHttpSession::starting_at(
+            boot,
+            Digest::ZERO,
+            origin(),
+            1_770_000_000_123_456_789,
+        )
+        .unwrap();
+        let first = session
+            .begin_request(Operation::ClockHeartbeat, b"clock", SECRET)
+            .unwrap();
+        assert_eq!(first.counter(), 1_770_000_000_123_456_789);
+        assert!(session.abandon_pending());
+        let second = session
+            .begin_request(Operation::ClockHeartbeat, b"clock", SECRET)
+            .unwrap();
+        assert_eq!(second.counter(), first.counter() + 1);
     }
 }

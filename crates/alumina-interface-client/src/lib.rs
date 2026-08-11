@@ -16,6 +16,7 @@ pub mod schedule;
 pub mod upload;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
+pub mod worker;
 
 /// Transport-independent maximum accepted by this first headless client.
 pub const MAXIMUM_PAYLOAD_BYTES: u32 = 64 * 1024;

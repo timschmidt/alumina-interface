@@ -2,6 +2,8 @@
 
 #![warn(clippy::pedantic)]
 
+#[cfg(target_arch = "wasm32")]
+pub mod browser_worker;
 pub mod cache_delivery;
 pub mod distributed_schedule;
 pub mod m7_simulation;
@@ -18,7 +20,34 @@ use eframe::glow::HasContext as _;
 use hypergraphics::backend::{GpuColoredMesh, UnlitProgram};
 use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 
+#[cfg(target_arch = "wasm32")]
+use crate::browser_worker::{BrowserWorkerSupervisor, SupervisorLifecycle};
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
+#[cfg(target_arch = "wasm32")]
+use alumina_interface_client::worker::{
+    ClockSamplingPolicy, DeviceConnectionRequest, DeviceSessionPhase, DeviceSessionSnapshot,
+    WorkerCommand,
+};
+
+#[cfg(target_arch = "wasm32")]
+struct LiveDeviceForm {
+    label: String,
+    origin: String,
+    secret: String,
+    error: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for LiveDeviceForm {
+    fn default() -> Self {
+        Self {
+            label: "TinyBee bench".to_owned(),
+            origin: "http://192.168.4.1".to_owned(),
+            secret: String::new(),
+            error: None,
+        }
+    }
+}
 
 struct RenderResources {
     program: Option<UnlitProgram>,
@@ -104,6 +133,14 @@ pub struct AluminaApp {
     representative_m7_simulation: Option<RepresentativeM7SimulationReport>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    worker: Option<BrowserWorkerSupervisor>,
+    #[cfg(target_arch = "wasm32")]
+    worker_start_error: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    live_device_form: LiveDeviceForm,
+    #[cfg(target_arch = "wasm32")]
+    next_connection_id: u64,
 }
 
 impl AluminaApp {
@@ -172,6 +209,14 @@ impl AluminaApp {
                 Some("the Hypergraphics glow backend is unavailable".to_owned()),
             ),
         };
+        #[cfg(target_arch = "wasm32")]
+        let (worker, worker_start_error) = match BrowserWorkerSupervisor::new(&creation.egui_ctx) {
+            Ok(worker) => (Some(worker), None),
+            Err(error) => (
+                None,
+                Some(format!("control worker failed to start: {error:?}")),
+            ),
+        };
         Self {
             scene,
             camera: ExactCamera::default(),
@@ -184,6 +229,14 @@ impl AluminaApp {
                 .or(compiler_error)
                 .or(simulation_error)
                 .or(renderer_error),
+            #[cfg(target_arch = "wasm32")]
+            worker,
+            #[cfg(target_arch = "wasm32")]
+            worker_start_error,
+            #[cfg(target_arch = "wasm32")]
+            live_device_form: LiveDeviceForm::default(),
+            #[cfg(target_arch = "wasm32")]
+            next_connection_id: 1,
         }
     }
 
@@ -420,6 +473,217 @@ impl AluminaApp {
             ui.colored_label(egui::Color32::RED, error);
         }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn show_live_control(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Live MCU clocks");
+        ui.label("Dedicated worker; authenticated Wi-Fi heartbeat only");
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Diagnostic connection does not arm outputs or prove physical safety.",
+        );
+        ui.separator();
+
+        let view = self.worker.as_ref().map(BrowserWorkerSupervisor::view);
+        match view.as_ref().map(|view| &view.lifecycle) {
+            Some(SupervisorLifecycle::Starting) => {
+                ui.label("Control worker: starting");
+            }
+            Some(SupervisorLifecycle::Ready { scope_origin }) => {
+                ui.label(format!("Control worker: ready ({scope_origin})"));
+            }
+            Some(SupervisorLifecycle::Failed(error)) => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Control worker failed: {error}"),
+                );
+            }
+            None => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    self.worker_start_error
+                        .as_deref()
+                        .unwrap_or("Control worker is unavailable"),
+                );
+            }
+        }
+
+        self.show_live_connection_form(ui);
+
+        let Some(view) = view else {
+            return;
+        };
+        let mut actions = Vec::new();
+        for snapshot in &view.devices {
+            show_live_device_snapshot(ui, snapshot, &mut actions);
+        }
+        self.apply_live_actions(actions);
+        if !view.diagnostics.is_empty() {
+            ui.separator();
+            ui.collapsing("Worker diagnostics", |ui| {
+                for diagnostic in &view.diagnostics {
+                    ui.colored_label(egui::Color32::LIGHT_RED, diagnostic);
+                }
+            });
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn show_live_connection_form(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Add diagnostic connection", |ui| {
+            ui.label("Label");
+            ui.text_edit_singleline(&mut self.live_device_form.label);
+            ui.label("Device origin");
+            ui.text_edit_singleline(&mut self.live_device_form.origin);
+            ui.label("HMAC/AP passphrase");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.live_device_form.secret)
+                    .password(true)
+                    .hint_text("Development default: alumina-development"),
+            );
+            if ui.button("Connect for clock diagnostics").clicked() {
+                self.connect_live_device();
+            }
+            if let Some(error) = &self.live_device_form.error {
+                ui.colored_label(egui::Color32::RED, error);
+            }
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn apply_live_actions(&mut self, actions: Vec<(u64, bool)>) {
+        for (connection_id, disconnect) in actions {
+            let command = if disconnect {
+                WorkerCommand::Disconnect { connection_id }
+            } else {
+                WorkerCommand::ProbeNow { connection_id }
+            };
+            if let Some(worker) = &self.worker
+                && let Err(error) = worker.send(command)
+            {
+                self.live_device_form.error = Some(error);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn connect_live_device(&mut self) {
+        let Some(worker) = &self.worker else {
+            self.live_device_form.error = Some("control worker is unavailable".to_owned());
+            return;
+        };
+        let request = DeviceConnectionRequest {
+            connection_id: self.next_connection_id,
+            label: self.live_device_form.label.clone(),
+            origin: self.live_device_form.origin.clone(),
+            secret: self.live_device_form.secret.as_bytes().to_vec(),
+            sampling: ClockSamplingPolicy::CONSERVATIVE_WIFI,
+        };
+        if let Err(error) = request.validate() {
+            self.live_device_form.error = Some(error.to_string());
+            return;
+        }
+        match worker.send(WorkerCommand::Configure { request }) {
+            Ok(()) => {
+                let mut secret = std::mem::take(&mut self.live_device_form.secret).into_bytes();
+                secret.fill(0);
+                self.live_device_form.error = None;
+                self.next_connection_id = self.next_connection_id.saturating_add(1).max(1);
+            }
+            Err(error) => self.live_device_form.error = Some(error),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_device_snapshot(
+    ui: &mut egui::Ui,
+    snapshot: &DeviceSessionSnapshot,
+    actions: &mut Vec<(u64, bool)>,
+) {
+    ui.separator();
+    ui.collapsing(
+        format!("{} — {:?}", snapshot.label, snapshot.phase),
+        |ui| {
+            ui.label(format!("origin: {}", snapshot.origin));
+            ui.label(format!("session generation: {}", snapshot.generation));
+            if let Some(boot_id) = snapshot.boot_id {
+                ui.label(format!("boot: {}", encode_hex(&boot_id)));
+            }
+            ui.label(format!(
+                "clock samples: {} accepted / {} rejected",
+                snapshot.accepted_samples, snapshot.rejected_samples
+            ));
+            ui.label(format!(
+                "consecutive failures: {}",
+                snapshot.consecutive_failures
+            ));
+            if let Some(estimate) = snapshot.estimate {
+                ui.label(format!(
+                    "cycle interval @ {} ns: {}..={} (±{})",
+                    estimate.ui_ns,
+                    estimate.earliest_cycle,
+                    estimate.latest_cycle,
+                    estimate.uncertainty_cycles
+                ));
+            }
+            if let Some(latest) = snapshot.history.last() {
+                ui.label(format!(
+                    "latest causal span: {} ns; device work: {} cycles",
+                    latest.causal_span_ns, latest.processing_cycles
+                ));
+                ui.label(format!(
+                    "clock: {} Hz; queue free/depth: {}/{}",
+                    latest.frequency_hz, latest.command_queue_free, latest.work_queue_depth
+                ));
+                ui.label(format!(
+                    "deadline misses: {}; raw flags: 0x{:04x}",
+                    latest.missed_deadlines, latest.flags
+                ));
+            }
+            if snapshot.phase == DeviceSessionPhase::DeviceUnhealthy {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    "Device reports unhealthy deadline or safety state.",
+                );
+            }
+            if let Some(error) = &snapshot.last_error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Probe now").clicked() {
+                    actions.push((snapshot.connection_id, false));
+                }
+                if ui.button("Disconnect").clicked() {
+                    actions.push((snapshot.connection_id, true));
+                }
+            });
+            if snapshot.history.len() > 1 {
+                ui.collapsing("Recent causal spans", |ui| {
+                    for record in snapshot.history.iter().rev().take(8) {
+                        ui.label(format!(
+                            "#{}: {} ns, cycles {}..{}",
+                            record.probe_id,
+                            record.causal_span_ns,
+                            record.receive_cycle,
+                            record.transmit_cycle
+                        ));
+                    }
+                });
+            }
+        },
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing into a string is infallible");
+    }
+    encoded
 }
 
 impl eframe::App for AluminaApp {
@@ -428,6 +692,12 @@ impl eframe::App for AluminaApp {
             .resizable(false)
             .default_width(260.0)
             .show(context, |ui| self.show_status(ui));
+
+        #[cfg(target_arch = "wasm32")]
+        egui::SidePanel::right("live_mcu_status")
+            .resizable(true)
+            .default_width(380.0)
+            .show(context, |ui| self.show_live_control(ui));
 
         egui::CentralPanel::default().show(context, |ui| {
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
@@ -494,8 +764,10 @@ pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
 
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
-    let document = web_sys::window()
-        .ok_or_else(|| wasm_bindgen::JsValue::from_str("browser window is unavailable"))?
+    let Some(window) = web_sys::window() else {
+        return Ok(());
+    };
+    let document = window
         .document()
         .ok_or_else(|| wasm_bindgen::JsValue::from_str("browser document is unavailable"))?;
     let canvas = document
@@ -509,4 +781,23 @@ pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
             Box::new(|creation| Ok(Box::new(AluminaApp::new(creation)))),
         )
         .await
+}
+
+/// Explicitly install the dedicated browser control worker after WASM loading.
+///
+/// The module-worker bootstrap calls this synchronous entry rather than relying
+/// on the asynchronous application start hook, making readiness and bootstrap
+/// failures observable to the rendering realm.
+///
+/// # Errors
+///
+/// Returns a JavaScript error outside a dedicated worker or when its control
+/// timer/origin cannot be installed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start_control_worker() -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast as _;
+
+    let worker = js_sys::global().dyn_into::<web_sys::DedicatedWorkerGlobalScope>()?;
+    browser_worker::install_control_worker(&worker)
 }
