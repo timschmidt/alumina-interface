@@ -74,7 +74,9 @@ version = "0.1.0"
 dependencies = [
  "alumina-machine-ir",
  "csgrs",
+ "hypercurve",
  "hypergraphics",
+ "hyperlimit",
  "hyperpath",
  "hyperreal",
  "hypersolve",
@@ -1171,6 +1173,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glow 0.16.0",
+ "hypercurve",
  "hyperlattice",
  "hyperlimit",
  "hypermesh",

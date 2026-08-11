@@ -4,7 +4,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use alumina_interface_core::{ExactScene, ExactValue, Millimetres, project_for_display};
+use alumina_interface_core::{
+    CanonicalPathProgram2, ExactScene, ExactValue, Millimetres, compile_representative_program,
+    project_for_display,
+};
 use eframe::egui;
 use eframe::glow::HasContext as _;
 use hypergraphics::backend::{GpuColoredMesh, UnlitProgram};
@@ -88,6 +91,7 @@ impl RenderResources {
 pub struct AluminaApp {
     scene: ExactScene,
     camera: ExactCamera,
+    representative_program: Option<CanonicalPathProgram2>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
 }
@@ -103,6 +107,13 @@ impl AluminaApp {
                 Some(format!("exact scene construction failed: {error}")),
             ),
         };
+        let (representative_program, compiler_error) = match compile_representative_program() {
+            Ok(program) => (Some(program), None),
+            Err(error) => (
+                None,
+                Some(format!("exact representative compilation failed: {error}")),
+            ),
+        };
         let (resources, renderer_error) = match creation.gl.as_deref() {
             Some(gl) => match unsafe { RenderResources::upload(gl, &scene) } {
                 Ok(resources) => (Some(Arc::new(Mutex::new(resources))), None),
@@ -116,8 +127,9 @@ impl AluminaApp {
         Self {
             scene,
             camera: ExactCamera::default(),
+            representative_program,
             resources,
-            setup_error: scene_error.or(renderer_error),
+            setup_error: scene_error.or(compiler_error).or(renderer_error),
         }
     }
 
@@ -160,6 +172,90 @@ impl AluminaApp {
         )?;
         self.camera.projection64(viewport, PredicatePolicy::STRICT)
     }
+
+    fn show_status(&self, ui: &mut egui::Ui) {
+        ui.heading("Alumina");
+        ui.label("Greenfield exact CAD/CAM baseline");
+        ui.separator();
+        ui.label(format!(
+            "Exact scene vertices: {}",
+            self.scene.vertex_count()
+        ));
+        ui.label(format!(
+            "Exact scene triangles: {}",
+            self.scene.triangle_count()
+        ));
+        if let Some(evidence) = self.scene.curve_display_evidence() {
+            ui.label(format!(
+                "Certified curve display chords: {}",
+                evidence.chord_segment_count()
+            ));
+            ui.label(format!(
+                "Curve display bound: {} mm",
+                evidence.max_source_chord_error()
+            ));
+            ui.label(format!(
+                "Retained source fragments: {}",
+                evidence.source_fragment_count()
+            ));
+        }
+        if let Some(evidence) = self.scene.region_display_evidence() {
+            ui.label(format!(
+                "Certified region loops: {} material / {} hole",
+                evidence.material_loop_count(),
+                evidence.hole_loop_count()
+            ));
+            ui.label(format!(
+                "Certified region display chords: {}",
+                evidence.chord_segment_count()
+            ));
+        }
+        if let Some(program) = &self.representative_program {
+            ui.separator();
+            ui.label(format!(
+                "Canonical motion segments: {}",
+                program.segments().len()
+            ));
+            ui.label(format!(
+                "Motion chord bound: {} mm",
+                program.evidence().maximum_source_chord_error_mm()
+            ));
+            ui.label(format!(
+                "Curve-to-command-chord bound: {} mm",
+                program
+                    .evidence()
+                    .maximum_curve_to_canonical_chord_error_mm()
+            ));
+            ui.label(format!(
+                "Canonical end tick: {}",
+                program
+                    .time_boundaries()
+                    .last()
+                    .expect("compiled path retains its terminal boundary")
+                    .tick()
+                    .get()
+            ));
+        }
+        ui.label(format!(
+            "Protocol schema: {}",
+            alumina_protocol::PROTOCOL_VERSION
+        ));
+        let tenth =
+            ExactValue::<Millimetres>::parse_decimal("0.1").expect("static exact decimal is valid");
+        let display =
+            project_for_display(&tenth).expect("small exact value has a finite display projection");
+        ui.label(format!(
+            "Explicit display projection: {:.3} {}",
+            display.get(),
+            ExactValue::<Millimetres>::unit_symbol()
+        ));
+        ui.separator();
+        ui.label("Drag to orbit. Scroll or pinch to zoom.");
+        ui.label("Geometry, CAM, and machine values never originate from this GPU view.");
+        if let Some(error) = &self.setup_error {
+            ui.colored_label(egui::Color32::RED, error);
+        }
+    }
 }
 
 impl eframe::App for AluminaApp {
@@ -167,38 +263,7 @@ impl eframe::App for AluminaApp {
         egui::SidePanel::left("exact_stack_status")
             .resizable(false)
             .default_width(260.0)
-            .show(context, |ui| {
-                ui.heading("Alumina");
-                ui.label("Greenfield exact CAD/CAM baseline");
-                ui.separator();
-                ui.label(format!(
-                    "Exact scene vertices: {}",
-                    self.scene.vertex_count()
-                ));
-                ui.label(format!(
-                    "Exact scene triangles: {}",
-                    self.scene.triangle_count()
-                ));
-                ui.label(format!(
-                    "Protocol schema: {}",
-                    alumina_protocol::PROTOCOL_VERSION
-                ));
-                let tenth = ExactValue::<Millimetres>::parse_decimal("0.1")
-                    .expect("static exact decimal is valid");
-                let display = project_for_display(&tenth)
-                    .expect("small exact value has a finite display projection");
-                ui.label(format!(
-                    "Explicit display projection: {:.3} {}",
-                    display.get(),
-                    ExactValue::<Millimetres>::unit_symbol()
-                ));
-                ui.separator();
-                ui.label("Drag to orbit. Scroll or pinch to zoom.");
-                ui.label("Geometry, CAM, and machine values never originate from this GPU view.");
-                if let Some(error) = &self.setup_error {
-                    ui.colored_label(egui::Color32::RED, error);
-                }
-            });
+            .show(context, |ui| self.show_status(ui));
 
         egui::CentralPanel::default().show(context, |ui| {
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());

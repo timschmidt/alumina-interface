@@ -8,13 +8,24 @@
 #![warn(missing_docs)]
 
 pub mod boundary;
+pub mod compiler;
 pub mod scene;
+pub mod toolpath;
 
 pub use boundary::{
     BoundaryError, BoundedMeasurement, CanonicalCycle, CanonicalStep, DisplayScalar, ExactValue,
     Millimetres, Seconds, Unit, canonical_motion_segment, project_for_display,
 };
-pub use scene::ExactScene;
+pub use compiler::{
+    CanonicalPathPoint2, CanonicalPathProgram2, CanonicalTimeBoundary, MachineCompileError,
+    MachineCompileResult, MotionApproximationEvidence2, MotionCompilePolicy2,
+    compile_certified_chord_program, compile_representative_program,
+};
+pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
+pub use toolpath::{
+    ToolpathError, ToolpathResult, promote_metric_path, representative_curve_path,
+    representative_curve_region, representative_feed_certificate, representative_metric_path,
+};
 
 /// The current local path-planning carrier selected for authoritative CAM.
 pub use hyperpath::FeedPathElement;

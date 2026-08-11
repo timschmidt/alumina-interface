@@ -11,7 +11,9 @@ publish.workspace = true
 [dependencies]
 alumina-machine-ir.workspace = true
 csgrs.workspace = true
+hypercurve.workspace = true
 hypergraphics.workspace = true
+hyperlimit.workspace = true
 hyperpath.workspace = true
 hyperreal.workspace = true
 hypersolve.workspace = true

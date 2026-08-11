@@ -10,7 +10,8 @@ prototype.
 
 - `crates/alumina-interface-core` is window-free and owns exact design/CAM
   values, bounded unit-bearing measurements, canonical integer machine values,
-  and explicit one-way display projections.
+  explicit one-way display projections, and the checked Hypercurve-to-Hyperpath
+  metric boundary.
 - `crates/alumina-interface-client` is a headless native protocol client with a
   deterministic in-memory simulator transport. Browser Wi-Fi transport will use
   the same canonical frame validation.
@@ -19,13 +20,27 @@ prototype.
   normal, grid, camera-matrix, or primitive-float geometry pipeline.
 - CSGRS and every Hyper dependency resolve to sibling repositories in the
   shared workspace. There is no crates.io CSGRS fallback.
-- CSGRS builds native `TriangleMesh` geometry. Hypergraphics performs the
-  checked expansion into exact scene vertices and owns the only f64/f32 GPU
-  boundary.
+- CSGRS builds native `TriangleMesh` geometry. Hypergraphics performs checked
+  mesh expansion and certified Hypercurve chord subdivision into exact scene
+  vertices, and owns the only f64/f32 GPU boundary.
+- The baseline renders an exact line/arc/cubic source path with retained chord
+  evidence. Exact lines and circular arcs promote losslessly to Hyperpath; a
+  general cubic fails with a typed metric blocker instead of borrowing its
+  display chords. The retained line/semicircle fixture certifies the symbolic
+  path length `4 + 2*pi` through Hyperpath and Hypersolve.
+- A separate motion-specific compiler certifies source chords, rounds every
+  coordinate and cumulative time with Hyperreal's certified integer boundary,
+  replays half-lattice/half-tick bounds through Hyperlimit, and emits the real
+  `alumina-machine-ir::ExecutionSegment` type. The deterministic fixture uses
+  80 steps/mm, 1 MHz ticks, 10 mm/s, and a `1/1024 mm` source-chord budget.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
 valid for development but cannot qualify a reproducible compiler release.
+The current curve and metric contract is in
+[`docs/EXACT-TOOLPATH.md`](docs/EXACT-TOOLPATH.md).
+The latest verified development evidence is in
+[`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
 ## Value domains
 
@@ -70,7 +85,8 @@ assets suitable for later embedding in `aluminafw`.
 
 ## Scope after this checkpoint
 
-The next interface milestones add current Hypercurve/Hyperpath/Hypersolve CAM,
+The next interface milestones add certified filled-region meshing, supported
+general-curve metric compilation, explicit machine-resolution quantization,
 capability-generated board configuration, immutable SD job workflows, direct
 Wi-Fi multi-MCU coordination, annotated board photography, bounded telemetry,
 oscilloscope/logic-analyzer views, and the typed timed LabVIEW-style graph. Raw

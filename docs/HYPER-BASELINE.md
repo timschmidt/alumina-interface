@@ -20,18 +20,18 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `a7cb2f91a79406a0a98fcb58815fc2e4e3e3da41` | `src/bezier_offset.rs` modified by concurrent local development |
+| `hypercurve` | `6cb75a0546e7b8e7b39838b42b2babd5246f6802` | clean |
 | `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development |
 | `hypersolve` | `cdac9bf4e5b88aa050d53667bc2c2244db5ee650` | clean |
-| `hypergraphics` | `b7f197dfe8ddac5112a4411db33815598905f973` | clean; includes checked native Hypermesh adapter |
+| `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
 
 ## Qualification rule
 
 The working trees, rather than a published CSGRS release, are the development
 authority. A release/job compiler identity must include a coherently reviewed
 revision set plus source-tree digests. Any tracked modification, including the
-current Hypercurve and Hyperphysics work, makes this table a development
+current Hyperphysics work, makes this table a development
 snapshot rather than a reproducible release pin. Untracked fuzz corpora and
 build executables are
 excluded from Cargo package sources but must still be removed or explicitly
@@ -44,10 +44,15 @@ local checkout is temporarily between compiling states.
 
 ## Verified dependency boundary
 
-The root manifest directly selects local CSGRS, Hypergraphics, Hyperpath,
-Hyperreal, and Hypersolve where they have a concrete I0 role. CSGRS and those
-crates bring the mutually compatible local Hypercurve, Hyperlattice, Hyperlimit,
-Hypermesh, and Hypertri packages transitively. The exact core also uses the
-local Hyperphysics package transitively. The exact core also uses the local
-`alumina-machine-ir` and protocol crates, so canonical firmware values are the
-firmware's real integer/tick types rather than a UI duplicate.
+The root manifest directly selects local CSGRS, Hypercurve, Hypergraphics,
+Hyperlimit, Hyperpath, Hyperreal, and Hypersolve where they have a concrete
+interface-core role. Those crates bring the mutually compatible local
+Hyperlattice, Hypermesh, Hyperphysics, and Hypertri packages transitively. The
+exact core also uses the local `alumina-machine-ir` and protocol crates, so
+canonical firmware values are the firmware's real integer/tick types rather
+than a UI duplicate.
+
+Hypercurve owns the exact line/arc/Bezier source path and certified chord
+subdivision. Hypergraphics retains that certificate for one-way presentation.
+The interface promotes only losslessly supported line and explicit-arc source
+objects into Hyperpath metric carriers; it does not promote a renderer mesh.
