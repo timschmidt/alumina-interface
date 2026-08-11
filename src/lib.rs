@@ -5,9 +5,9 @@
 use std::sync::{Arc, Mutex};
 
 use alumina_interface_core::{
-    CanonicalMachinePartition2, CanonicalPathProgram2, ExactScene, ExactValue, Millimetres,
-    compile_representative_program, package_canonical_program, project_for_display,
-    representative_partition_policy,
+    CanonicalGlobalJob2, CanonicalMachinePartition2, CanonicalPathProgram2, ExactScene, ExactValue,
+    Millimetres, compile_representative_global_job, compile_representative_program,
+    package_canonical_program, project_for_display, representative_partition_policy,
 };
 use eframe::egui;
 use eframe::glow::HasContext as _;
@@ -94,6 +94,7 @@ pub struct AluminaApp {
     camera: ExactCamera,
     representative_program: Option<CanonicalPathProgram2>,
     representative_partition: Option<CanonicalMachinePartition2>,
+    representative_global_job: Option<CanonicalGlobalJob2>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
 }
@@ -109,24 +110,43 @@ impl AluminaApp {
                 Some(format!("exact scene construction failed: {error}")),
             ),
         };
-        let (representative_program, representative_partition, compiler_error) =
-            match compile_representative_program() {
-                Ok(program) => match representative_partition_policy()
+        let (
+            representative_program,
+            representative_partition,
+            representative_global_job,
+            compiler_error,
+        ) = match compile_representative_program() {
+            Ok(program) => {
+                let (partition, partition_error) = match representative_partition_policy()
                     .and_then(|policy| package_canonical_program(&program, policy))
                 {
-                    Ok(partition) => (Some(program), Some(partition), None),
+                    Ok(partition) => (Some(partition), None),
                     Err(error) => (
-                        Some(program),
                         None,
                         Some(format!("canonical partition packaging failed: {error}")),
                     ),
-                },
-                Err(error) => (
-                    None,
-                    None,
-                    Some(format!("exact representative compilation failed: {error}")),
-                ),
-            };
+                };
+                let (global_job, global_error) = match compile_representative_global_job(&program) {
+                    Ok(global_job) => (Some(global_job), None),
+                    Err(error) => (
+                        None,
+                        Some(format!("global job compilation failed: {error}")),
+                    ),
+                };
+                (
+                    Some(program),
+                    partition,
+                    global_job,
+                    partition_error.or(global_error),
+                )
+            }
+            Err(error) => (
+                None,
+                None,
+                None,
+                Some(format!("exact representative compilation failed: {error}")),
+            ),
+        };
         let (resources, renderer_error) = match creation.gl.as_deref() {
             Some(gl) => match unsafe { RenderResources::upload(gl, &scene) } {
                 Ok(resources) => (Some(Arc::new(Mutex::new(resources))), None),
@@ -142,6 +162,7 @@ impl AluminaApp {
             camera: ExactCamera::default(),
             representative_program,
             representative_partition,
+            representative_global_job,
             resources,
             setup_error: scene_error.or(compiler_error).or(renderer_error),
         }
@@ -187,10 +208,7 @@ impl AluminaApp {
         self.camera.projection64(viewport, PredicatePolicy::STRICT)
     }
 
-    fn show_status(&self, ui: &mut egui::Ui) {
-        ui.heading("Alumina");
-        ui.label("Greenfield exact CAD/CAM baseline");
-        ui.separator();
+    fn show_scene_status(&self, ui: &mut egui::Ui) {
         ui.label(format!(
             "Exact scene vertices: {}",
             self.scene.vertex_count()
@@ -224,6 +242,9 @@ impl AluminaApp {
                 evidence.chord_segment_count()
             ));
         }
+    }
+
+    fn show_motion_status(&self, ui: &mut egui::Ui) {
         if let Some(program) = &self.representative_program {
             ui.separator();
             ui.label(format!(
@@ -250,6 +271,9 @@ impl AluminaApp {
                     .get()
             ));
         }
+    }
+
+    fn show_cached_job_status(&self, ui: &mut egui::Ui) {
         if let Some(partition) = &self.representative_partition {
             ui.label(format!(
                 "Cached execution blocks: {}",
@@ -268,6 +292,30 @@ impl AluminaApp {
                 partition.maximum_observed_block_ticks()
             ));
         }
+        if let Some(global_job) = &self.representative_global_job {
+            ui.separator();
+            ui.label(format!(
+                "Global job participants: {}",
+                global_job.participants().len()
+            ));
+            ui.label(format!(
+                "Canonical global manifest: {} bytes",
+                global_job.manifest_bytes().len()
+            ));
+            ui.label(format!(
+                "Global manifest chunks: {}",
+                global_job.manifest_chunks().len()
+            ));
+        }
+    }
+
+    fn show_status(&self, ui: &mut egui::Ui) {
+        ui.heading("Alumina");
+        ui.label("Greenfield exact CAD/CAM baseline");
+        ui.separator();
+        self.show_scene_status(ui);
+        self.show_motion_status(ui);
+        self.show_cached_job_status(ui);
         ui.label(format!(
             "Protocol schema: {}",
             alumina_protocol::PROTOCOL_VERSION

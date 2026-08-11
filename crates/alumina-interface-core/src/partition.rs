@@ -175,6 +175,7 @@ pub struct CanonicalMachinePartition2 {
     block_count: u32,
     maximum_segments_per_block: usize,
     maximum_observed_block_ticks: u64,
+    local_timer_hz: u64,
     initial_position: [i64; 2],
     final_position: [i64; 2],
     terminal_progress: MotionStreamProgress<2>,
@@ -237,6 +238,11 @@ impl CanonicalMachinePartition2 {
     /// Return the longest block horizon observed in this partition.
     pub const fn maximum_observed_block_ticks(&self) -> u64 {
         self.maximum_observed_block_ticks
+    }
+
+    /// Return the exact timer frequency used to compile stream-relative ticks.
+    pub const fn local_timer_hz(&self) -> u64 {
+        self.local_timer_hz
     }
 
     /// Return the exact absolute machine-lattice start position.
@@ -463,6 +469,7 @@ pub fn package_canonical_program(
         block_count,
         maximum_segments_per_block,
         maximum_observed_block_ticks,
+        local_timer_hz: program.policy().timer_ticks_per_second(),
         initial_position,
         final_position,
         terminal_progress,
@@ -476,10 +483,35 @@ pub fn package_canonical_program(
 /// Production callers must replace them with authenticated capability and
 /// active-configuration identities before compiling executable work.
 pub fn representative_partition_policy() -> MachinePartitionResult<MachinePartitionPolicy2> {
+    representative_partition_policy_for(1)
+}
+
+/// Construct a distinct deterministic participant policy for global-job
+/// fixtures. Participant numbers begin at one.
+pub fn representative_partition_policy_for(
+    participant: u8,
+) -> MachinePartitionResult<MachinePartitionPolicy2> {
+    if participant == 0 {
+        return Err(MachinePartitionError::InvalidPolicy(
+            "fixture participant number must be nonzero",
+        ));
+    }
+    let stream = 0x10_u8
+        .checked_add(participant)
+        .ok_or(MachinePartitionError::CounterOverflow)?;
+    let capability = 0x21_u8
+        .checked_add(participant)
+        .ok_or(MachinePartitionError::CounterOverflow)?;
+    let config = 0x32_u8
+        .checked_add(participant)
+        .ok_or(MachinePartitionError::CounterOverflow)?;
+    let upload_id = 0x0102_0304_0506_0708_u64
+        .checked_add(u64::from(participant - 1))
+        .ok_or(MachinePartitionError::CounterOverflow)?;
     MachinePartitionPolicy2::try_new(
-        [0x11; 16],
-        Digest([0x22; 32]),
-        Digest([0x33; 32]),
+        [stream; 16],
+        Digest([capability; 32]),
+        Digest([config; 32]),
         BlockValidationLimits {
             maximum_block_ticks: 450_000,
             segment: ValidationLimits {
@@ -487,7 +519,7 @@ pub fn representative_partition_policy() -> MachinePartitionResult<MachinePartit
                 maximum_steps_per_segment: 1_000,
             },
         },
-        UploadId(0x0102_0304_0506_0708),
+        UploadId(upload_id),
         700,
         CacheLimits {
             maximum_object_bytes: 4 * 1024 * 1024,

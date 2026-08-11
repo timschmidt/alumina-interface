@@ -3,7 +3,8 @@
 use std::fmt::Write as _;
 
 use alumina_interface_core::{
-    compile_representative_program, package_canonical_program, representative_partition_policy,
+    compile_representative_global_job, compile_representative_program, package_canonical_program,
+    representative_partition_policy,
 };
 
 fn hexadecimal(bytes: &[u8]) -> String {
@@ -35,6 +36,8 @@ fn main() {
         representative_partition_policy().expect("representative partition policy must pass"),
     )
     .expect("representative partition packaging must pass");
+    let global_job = compile_representative_global_job(&program)
+        .expect("representative global job compilation must pass");
 
     println!("source_curves={}", program.source().curves().len());
     println!(
@@ -99,5 +102,26 @@ fn main() {
     println!(
         "terminal_block_sha256={}",
         hexadecimal(&partition.terminal_progress().block_digest.0)
+    );
+    println!("global_participants={}", global_job.participants().len());
+    println!(
+        "global_manifest_bytes={}",
+        global_job.manifest_bytes().len()
+    );
+    println!(
+        "global_manifest_chunks={}",
+        global_job.manifest_chunks().len()
+    );
+    println!(
+        "global_job_sha256={}",
+        hexadecimal(&global_job.global_job_digest().0)
+    );
+    println!(
+        "participant_set_sha256={}",
+        hexadecimal(&global_job.participant_set_digest().0)
+    );
+    println!(
+        "global_chunk_manifest_sha256={}",
+        hexadecimal(&global_job.publication().manifest.digest.0)
     );
 }

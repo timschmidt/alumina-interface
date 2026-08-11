@@ -9,6 +9,7 @@
 
 pub mod boundary;
 pub mod compiler;
+pub mod global_job;
 pub mod partition;
 pub mod scene;
 pub mod toolpath;
@@ -22,10 +23,15 @@ pub use compiler::{
     MachineCompileResult, MotionApproximationEvidence2, MotionCompilePolicy2,
     compile_certified_chord_program, compile_representative_program,
 };
+pub use global_job::{
+    CanonicalGlobalJob2, CanonicalGlobalManifestChunk, GlobalJobCompileError,
+    GlobalJobCompilePolicy, GlobalJobCompileResult, MachineJobParticipantPackage2,
+    compile_global_job, compile_representative_global_job,
+};
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
     MachinePartitionPolicy2, MachinePartitionResult, package_canonical_program,
-    representative_partition_policy,
+    representative_partition_policy, representative_partition_policy_for,
 };
 pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
 pub use toolpath::{

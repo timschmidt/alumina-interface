@@ -53,6 +53,12 @@ identities and a later boot-local `alumina-job::JobDescriptor`. Storage chunks
 may cross block boundaries; neither storage hashing nor packaging reconstructs
 geometry or changes the exact-CAM error report. See `CACHED-PARTITIONS.md`.
 
+Owned local artifacts then enter the shared `alumina-job` global manifest
+schema. Stable-device sorting, participant-set hashing, exact rational duration
+agreement, and independent decode bind each named partition to the same source,
+compiler, policy, machine, coordinate, safety, and synchronization identities.
+See `GLOBAL-JOB-MANIFEST.md`.
+
 ## Deterministic fixture
 
 The window-free test fixture is a four-unit axis-aligned line followed by a
@@ -90,7 +96,8 @@ from line-mesh winding.
 - promote supported PH curves and replace chord-feed approximation where an
   exact or tighter certified source-curve metric is available;
 - add machine capabilities and bounded physical calibration inputs;
-- add the canonical global multi-MCU manifest and participant partition map;
+- derive every global/participant identity from canonical source, configuration,
+  compiler, resource, and evidence objects rather than fixture sentinels;
 - quantify geometric, timing, and actuator error at configured machine
   resolution before emitting `alumina-machine-ir`;
 - certify lookahead, acceleration, jerk, and multi-axis scheduling against the

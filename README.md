@@ -38,6 +38,10 @@ prototype.
   512-byte block is independently replayed before `alumina-storage` creates the
   real resumable upload, chunk-manifest, publication, and later boot-local
   `alumina-job::JobDescriptor` bytes.
+- Owned per-MCU artifacts are sorted by stable device identity into the real
+  canonical global job manifest. Its exact content and participant-set digests
+  bind directly to firmware schedule commits, and the same manifest can use an
+  independent resumable upload transaction on every MCU.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -46,6 +50,8 @@ The current curve and metric contract is in
 [`docs/EXACT-TOOLPATH.md`](docs/EXACT-TOOLPATH.md).
 The immutable block/cache boundary is in
 [`docs/CACHED-PARTITIONS.md`](docs/CACHED-PARTITIONS.md).
+The global participant/manifest boundary is in
+[`docs/GLOBAL-JOB-MANIFEST.md`](docs/GLOBAL-JOB-MANIFEST.md).
 The latest verified development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 

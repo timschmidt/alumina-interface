@@ -78,14 +78,19 @@ begin/verify/record/finalize/publication lifecycle and through arbitrary-split
 block assembly. These are deterministic native development facts; renewed WASM
 and production-bundle evidence is recorded separately.
 
+Two owned partition fixtures now feed the shared canonical global manifest.
+That later boundary preserves these local object/manifest/terminal identities;
+it does not reopen, reinterpret, or concatenate execution records. See
+`GLOBAL-JOB-MANIFEST.md`.
+
 ## Still outside this boundary
 
 - Fixture capability/configuration IDs are explicit sentinels, not device facts.
   Executable production work must use authenticated capability and durably
   active configuration digests.
-- A global multi-MCU job manifest, participant partition map, compiler/source
-  identity, schedule policy, and deterministic global coordinate epoch remain
-  to be defined in the canonical firmware workspace schema.
+- The global multi-MCU manifest and owned participant binding now exist, but
+  fixture compiler/source/policy/machine/evidence identities remain sentinels
+  until their canonical producers land.
 - Wi-Fi upload/retry/finalize, cache reconciliation, prepare/commit/confirm, and
   browser clock fitting are not implemented by this window-free module.
 - Constant-feed chord scheduling is still the current upstream compiler model;
