@@ -16,6 +16,8 @@ Hypercurve source path
     └─ motion-specific certified subdivision ─> exact chord metric
                                                 ─> step/timer lattices
                                                 ─> alumina-machine-ir
+                                                ─> chained execution blocks
+                                                ─> content-addressed SD artifact
 ```
 
 The paths are intentionally one-way and disjoint. A display chord remains an
@@ -42,6 +44,14 @@ it invokes Hypercurve subdivision itself with a motion policy, computes the
 exact length of the resulting chord path, and schedules constant feed against
 that compiled path. This does not claim a lossless general-Bezier metric or
 reuse the Hypergraphics output.
+
+After canonical quantization, `partition.rs` queries the firmware schema's exact
+per-block record capacity, applies the caller's firmware horizon bound, and
+encodes real chained `ExecutionBlock` values. It independently replays the
+complete stream before constructing real `alumina-storage` upload/chunk/manifest
+identities and a later boot-local `alumina-job::JobDescriptor`. Storage chunks
+may cross block boundaries; neither storage hashing nor packaging reconstructs
+geometry or changes the exact-CAM error report. See `CACHED-PARTITIONS.md`.
 
 ## Deterministic fixture
 
@@ -80,6 +90,7 @@ from line-mesh winding.
 - promote supported PH curves and replace chord-feed approximation where an
   exact or tighter certified source-curve metric is available;
 - add machine capabilities and bounded physical calibration inputs;
+- add the canonical global multi-MCU manifest and participant partition map;
 - quantify geometric, timing, and actuator error at configured machine
   resolution before emitting `alumina-machine-ir`;
 - certify lookahead, acceleration, jerk, and multi-axis scheduling against the

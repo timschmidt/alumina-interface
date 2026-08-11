@@ -42,4 +42,20 @@ for package in \
   fi
 done
 
-echo "source policy: local CSGRS/Hyper stack; native and WASM license inventories accepted"
+for package in \
+  alumina-clock \
+  alumina-job \
+  alumina-machine-ir \
+  alumina-protocol \
+  alumina-runtime \
+  alumina-storage; do
+  cargo tree --target wasm32-unknown-unknown --offline -i "$package" \
+    --prefix none >"$audit_path_inverse"
+  if ! rg -q "^${package} v[^ ]+ \(.*/aluminafw/crates/${package}\)$" \
+    "$audit_path_inverse"; then
+    echo "$package must resolve from the sibling aluminafw checkout" >&2
+    exit 1
+  fi
+done
+
+echo "source policy: local Alumina/CSGRS/Hyper stacks; native and WASM license inventories accepted"

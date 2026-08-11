@@ -44,6 +44,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alumina-clock"
+version = "0.1.0"
+dependencies = [
+ "alumina-protocol",
+]
+
+[[package]]
 name = "alumina-interface"
 version = "0.1.0"
 dependencies = [
@@ -72,7 +79,10 @@ dependencies = [
 name = "alumina-interface-core"
 version = "0.1.0"
 dependencies = [
+ "alumina-job",
  "alumina-machine-ir",
+ "alumina-protocol",
+ "alumina-storage",
  "csgrs",
  "hypercurve",
  "hypergraphics",
@@ -80,6 +90,18 @@ dependencies = [
  "hyperpath",
  "hyperreal",
  "hypersolve",
+]
+
+[[package]]
+name = "alumina-job"
+version = "0.1.0"
+dependencies = [
+ "alumina-clock",
+ "alumina-machine-ir",
+ "alumina-protocol",
+ "alumina-runtime",
+ "alumina-storage",
+ "embassy-sync",
 ]
 
 [[package]]
@@ -93,6 +115,23 @@ dependencies = [
 [[package]]
 name = "alumina-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "alumina-runtime"
+version = "0.1.0"
+dependencies = [
+ "alumina-machine-ir",
+ "alumina-protocol",
+ "embassy-sync",
+]
+
+[[package]]
+name = "alumina-storage"
+version = "0.1.0"
+dependencies = [
+ "alumina-protocol",
+ "sha2",
+]
 
 [[package]]
 name = "android-activity"
@@ -270,6 +309,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteorder-lite"
@@ -478,6 +523,12 @@ checksum = "a97769d94ddab943e4510d138150169a2758b5ef3eb191a9ee688de3e23ef7b3"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-utils"
@@ -723,6 +774,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "embassy-sync"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73974a3edbd0bd286759b3d483540f0ebef705919a5f56f4fc7709066f71689b"
+dependencies = [
+ "cfg-if",
+ "critical-section",
+ "embedded-io-async",
+ "futures-core",
+ "futures-sink",
+ "heapless",
+]
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
+name = "embedded-io-async"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ff09972d4073aa8c299395be75161d582e7629cd663171d62af73c8d50dba3f"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
 name = "epaint"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,6 +914,12 @@ name = "futures-core"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+
+[[package]]
+name = "futures-sink"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e34418ac499d6305c2fb5ad0ed2f6ac998c5f8ca209b4510f7f94242c647e307"
 
 [[package]]
 name = "futures-task"
@@ -1134,6 +1220,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1142,6 +1237,16 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
 ]
 
 [[package]]

@@ -20,7 +20,7 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `6cb75a0546e7b8e7b39838b42b2babd5246f6802` | clean |
+| `hypercurve` | `6cb75a0546e7b8e7b39838b42b2babd5246f6802` | tracked source modified by concurrent local development; observed between compiling states during this checkpoint |
 | `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development |
 | `hypersolve` | `cdac9bf4e5b88aa050d53667bc2c2244db5ee650` | clean |
@@ -31,7 +31,7 @@ That package label is not permission to substitute the old published release.
 The working trees, rather than a published CSGRS release, are the development
 authority. A release/job compiler identity must include a coherently reviewed
 revision set plus source-tree digests. Any tracked modification, including the
-current Hyperphysics work, makes this table a development
+current Hypercurve and Hyperphysics work, makes this table a development
 snapshot rather than a reproducible release pin. Untracked fuzz corpora and
 build executables are
 excluded from Cargo package sources but must still be removed or explicitly
@@ -48,9 +48,10 @@ The root manifest directly selects local CSGRS, Hypercurve, Hypergraphics,
 Hyperlimit, Hyperpath, Hyperreal, and Hypersolve where they have a concrete
 interface-core role. Those crates bring the mutually compatible local
 Hyperlattice, Hypermesh, Hyperphysics, and Hypertri packages transitively. The
-exact core also uses the local `alumina-machine-ir` and protocol crates, so
-canonical firmware values are the firmware's real integer/tick types rather
-than a UI duplicate.
+exact core also uses the sibling Alumina protocol, machine IR, job, storage,
+clock, and runtime crates. The source audit now requires all of those packages
+to resolve from the same `aluminafw` checkout, so block, cache, and `JobPrepare`
+bytes cannot silently resolve to a registry or UI duplicate.
 
 Hypercurve owns the exact line/arc/Bezier source path and certified chord
 subdivision. Hypergraphics retains that certificate for one-way presentation.

@@ -5,8 +5,9 @@
 use std::sync::{Arc, Mutex};
 
 use alumina_interface_core::{
-    CanonicalPathProgram2, ExactScene, ExactValue, Millimetres, compile_representative_program,
-    project_for_display,
+    CanonicalMachinePartition2, CanonicalPathProgram2, ExactScene, ExactValue, Millimetres,
+    compile_representative_program, package_canonical_program, project_for_display,
+    representative_partition_policy,
 };
 use eframe::egui;
 use eframe::glow::HasContext as _;
@@ -92,6 +93,7 @@ pub struct AluminaApp {
     scene: ExactScene,
     camera: ExactCamera,
     representative_program: Option<CanonicalPathProgram2>,
+    representative_partition: Option<CanonicalMachinePartition2>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
 }
@@ -107,13 +109,24 @@ impl AluminaApp {
                 Some(format!("exact scene construction failed: {error}")),
             ),
         };
-        let (representative_program, compiler_error) = match compile_representative_program() {
-            Ok(program) => (Some(program), None),
-            Err(error) => (
-                None,
-                Some(format!("exact representative compilation failed: {error}")),
-            ),
-        };
+        let (representative_program, representative_partition, compiler_error) =
+            match compile_representative_program() {
+                Ok(program) => match representative_partition_policy()
+                    .and_then(|policy| package_canonical_program(&program, policy))
+                {
+                    Ok(partition) => (Some(program), Some(partition), None),
+                    Err(error) => (
+                        Some(program),
+                        None,
+                        Some(format!("canonical partition packaging failed: {error}")),
+                    ),
+                },
+                Err(error) => (
+                    None,
+                    None,
+                    Some(format!("exact representative compilation failed: {error}")),
+                ),
+            };
         let (resources, renderer_error) = match creation.gl.as_deref() {
             Some(gl) => match unsafe { RenderResources::upload(gl, &scene) } {
                 Ok(resources) => (Some(Arc::new(Mutex::new(resources))), None),
@@ -128,6 +141,7 @@ impl AluminaApp {
             scene,
             camera: ExactCamera::default(),
             representative_program,
+            representative_partition,
             resources,
             setup_error: scene_error.or(compiler_error).or(renderer_error),
         }
@@ -234,6 +248,24 @@ impl AluminaApp {
                     .expect("compiled path retains its terminal boundary")
                     .tick()
                     .get()
+            ));
+        }
+        if let Some(partition) = &self.representative_partition {
+            ui.label(format!(
+                "Cached execution blocks: {}",
+                partition.block_count()
+            ));
+            ui.label(format!(
+                "Immutable partition bytes: {}",
+                partition.bytes().len()
+            ));
+            ui.label(format!(
+                "Content-addressed chunks: {}",
+                partition.chunks().len()
+            ));
+            ui.label(format!(
+                "Longest block horizon: {} ticks",
+                partition.maximum_observed_block_ticks()
             ));
         }
         ui.label(format!(

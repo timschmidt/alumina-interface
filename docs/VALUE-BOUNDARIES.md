@@ -72,6 +72,14 @@ timer-boundary budgets separately. Discrete step-event, calibration, following,
 and control errors remain future inputs and are not silently treated as zero in
 a release certificate.
 
+Canonical segments then move through another one-way boundary without becoming
+geometry again. The interface queries the real machine-IR record capacity,
+encodes chained fixed-size blocks, and independently replays their identities,
+limits, timing, displacement, and terminal digest. The same bytes become a real
+content-addressed `alumina-storage` object and later a real
+`alumina-job::JobDescriptor`. GPU values cannot enter this path, and cached
+machine bytes cannot be promoted back into design intent.
+
 ## Display and GPU
 
 `project_for_display` is explicitly lossy and returns only a finite

@@ -33,12 +33,19 @@ prototype.
   replays half-lattice/half-tick bounds through Hyperlimit, and emits the real
   `alumina-machine-ir::ExecutionSegment` type. The deterministic fixture uses
   80 steps/mm, 1 MHz ticks, 10 mm/s, and a `1/1024 mm` source-chord budget.
+- Canonical segments are deterministically partitioned using the firmware's
+  queried record capacity and caller-owned horizon limits. Every chained
+  512-byte block is independently replayed before `alumina-storage` creates the
+  real resumable upload, chunk-manifest, publication, and later boot-local
+  `alumina-job::JobDescriptor` bytes.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
 valid for development but cannot qualify a reproducible compiler release.
 The current curve and metric contract is in
 [`docs/EXACT-TOOLPATH.md`](docs/EXACT-TOOLPATH.md).
+The immutable block/cache boundary is in
+[`docs/CACHED-PARTITIONS.md`](docs/CACHED-PARTITIONS.md).
 The latest verified development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
@@ -86,9 +93,9 @@ assets suitable for later embedding in `aluminafw`.
 ## Scope after this checkpoint
 
 The next interface milestones add certified filled-region meshing, supported
-general-curve metric compilation, explicit machine-resolution quantization,
-capability-generated board configuration, immutable SD job workflows, direct
-Wi-Fi multi-MCU coordination, annotated board photography, bounded telemetry,
+general-curve metric compilation, capability-derived machine/error policy,
+global multi-MCU manifests, browser SD upload/reconciliation, direct Wi-Fi
+coordination, annotated board photography, bounded telemetry,
 oscilloscope/logic-analyzer views, and the typed timed LabVIEW-style graph. Raw
 G-code remains an optional exact UI importer, never firmware or canonical job
 input.

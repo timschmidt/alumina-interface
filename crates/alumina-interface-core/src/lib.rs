@@ -9,6 +9,7 @@
 
 pub mod boundary;
 pub mod compiler;
+pub mod partition;
 pub mod scene;
 pub mod toolpath;
 
@@ -20,6 +21,11 @@ pub use compiler::{
     CanonicalPathPoint2, CanonicalPathProgram2, CanonicalTimeBoundary, MachineCompileError,
     MachineCompileResult, MotionApproximationEvidence2, MotionCompilePolicy2,
     compile_certified_chord_program, compile_representative_program,
+};
+pub use partition::{
+    CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
+    MachinePartitionPolicy2, MachinePartitionResult, package_canonical_program,
+    representative_partition_policy,
 };
 pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
 pub use toolpath::{
