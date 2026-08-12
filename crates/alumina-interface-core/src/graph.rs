@@ -20,9 +20,10 @@ mod wire;
 pub use analysis::{
     ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
     GRAPH_CHANNEL_ENVELOPE_BYTES, GraphAnalysis, GraphAnalysisError, GraphAnalysisLimits,
-    GraphChannelAllocation, GraphNodeRegistry, InputConnectionRequirement,
-    NodeInputChannelContract, NodeInputChannelKind, NodeOutputDependency, NodeParameterContract,
-    NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, analyze_graph,
+    GraphChannelAllocation, GraphClockRate, GraphNodeRegistry, GraphRateTransition,
+    InputConnectionRequirement, NodeInputChannelContract, NodeInputChannelKind,
+    NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract, NodeRegistryError,
+    NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind, analyze_graph,
 };
 pub use document::{
     ClockDefinition, ClockKind, ExecutionDomain, GraphDocument, GraphDocumentError, GraphNodeId,

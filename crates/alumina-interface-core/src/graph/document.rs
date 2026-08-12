@@ -93,7 +93,8 @@ impl ExecutionDomain {
     }
 }
 
-/// Clock source and exact integer rate relationship.
+/// Clock source and exact integer rate relationship. Distinct root clocks have
+/// no static phase/offset relationship, even when their frequencies match.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClockKind {
     /// Host monotonic counter at an explicit integer frequency.
@@ -108,7 +109,8 @@ pub enum ClockKind {
         /// Counter ticks per SI second.
         ticks_per_second: u64,
     },
-    /// Exact rational tick-rate derivation from another registered clock.
+    /// Exact rational tick-rate derivation from another registered clock. Its
+    /// tick zero is coincident with the source clock's tick zero.
     Derived {
         /// Source clock.
         source: GraphClockId,

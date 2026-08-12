@@ -46,10 +46,13 @@ This field states requested placement only. It does not admit an opaque node to
 firmware or prove fixed memory, WCET, resource ownership, or safety behavior.
 
 Clocks are explicit host monotonic counters, physical-device cycle counters, or
-reduced rational derivations. Missing, zero-rate, nonreduced, and recursive
-clocks reject. Event/stream type clocks must resolve in the complete document.
-Ports are canonicalized by local ID. Wires must begin at an output, end at an
-input of the identical registered type, and uniquely own the input.
+reduced rational derivations. Each HostMonotonic or DeviceCycle clock is an
+independent root with no implied offset/phase relation to another root, even at
+the same frequency. A Derived clock shares its source's tick-zero epoch.
+Missing, zero-rate, nonreduced, and recursive clocks reject. Event/stream type
+clocks must resolve in the complete document. Ports are canonicalized by local
+ID. Wires must begin at an output, end at an input of the identical registered
+type, and uniquely own the input.
 
 ## Audited semantic admission
 
@@ -110,6 +113,40 @@ retained in canonical node/port order. This is the host analysis/storage
 contract; firmware bridge and queue layouts must later match or conservatively
 exceed it before deployment.
 
+### Exact rate transitions
+
+Every cross-clock current-tick dependency between runtime ports is explicit.
+The first admitted transition is Stream-to-Stream with an identical registered
+sample type and a required bounded input queue. `LatestAtOrBeforeSourceFirst`
+consumes all source samples due at or before each target tick, emits the newest,
+and orders the source first when the two tick grids coincide at run start. A
+missing contract, optional transition input, Event/Stream-family change, sample
+type change, or gratuitous same-clock transition rejects during registry
+construction.
+
+The transition contract is audited registry authority selected by the saved
+node kind/version; it is not another unchecked field in `ALGR` V1. The document
+continues to retain the clocks, runtime port types, node identity, and wires
+needed to reproduce admission, while the separately reviewed registry supplies
+the audited semantic meaning. It still supplies no implementation opcode.
+
+Analysis resolves every clock to an exact `hyperreal::Rational` frequency and
+its independent root. Transition clocks must share that tick-zero root; equal
+frequencies on independent roots do not pass. The reduced source/target
+frequency ratio gives the smallest repeating schedule directly. For example,
+1,000 Hz to 600 Hz is exactly 5 source ticks to 3 target ticks, never a float
+approximation. The required input capacity is `ceil(5 / 3) = 2` samples between
+target evaluations. Both pattern dimensions and transition count are bounded.
+
+Latest-at-or-before also retains one complete typed sample independently of the
+transport queue, which is necessary when a target runs faster than its source.
+That canonical sample ceiling and its graph total have a separate admission
+limit. The report retains clock/root identities, exact clock frequencies,
+source/target pattern ticks, queue requirement, transition policy, and retained
+sample bytes in canonical order. Runtime scheduling, transport, missed-deadline
+behavior, and a fixed implementation layout remain later compiler/lowering
+proofs.
+
 ## Canonical bytes and replay
 
 `ALGR` format V1 uses fixed-width little-endian integers, length-prefixed UTF-8
@@ -142,9 +179,9 @@ families. Its graph digest is
 ## Deliberately open
 
 V1 remains non-executable. Subgraphs/components, general feedback structures,
-queue/backpressure semantics, rate transitions, cases/loops/state machines,
-front panels, resource claims, implementation/opcode admission, static
-firmware runtime-layout proof, fixed-memory lowering, WCET/deadline analysis,
-protocol bridges, firmware opcodes, and deterministic graph simulation remain
-later M9 slices. No arbitrary graph document is sent to or interpreted by
-firmware.
+queue runtime/timeout behavior, additional resampling/window policies,
+cases/loops/state machines, front panels, resource claims,
+implementation/opcode admission, static firmware runtime-layout proof,
+fixed-memory lowering, WCET/deadline analysis, protocol bridges, firmware
+opcodes, and deterministic graph simulation remain later M9 slices. No
+arbitrary graph document is sent to or interpreted by firmware.

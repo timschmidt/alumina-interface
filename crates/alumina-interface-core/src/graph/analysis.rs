@@ -3,12 +3,15 @@
 //! A structural [`super::GraphDocument`] deliberately preserves opaque node
 //! kinds. This module is the separate semantic boundary: a node becomes known
 //! only through an exact registry entry that declares its full shape, allowed
-//! execution domains, per-output current-tick feedthrough, and optional
-//! read-before-write state boundary. Admission here remains host-side analysis;
-//! it emits no firmware opcode and grants no real-time authority.
+//! execution domains, per-output current-tick feedthrough, bounded input
+//! delivery, explicit rate transitions, and optional read-before-write state
+//! boundary. Admission here remains host-side analysis; it emits no firmware
+//! opcode and grants no real-time authority.
 
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
+
+use hyperreal::Rational;
 
 use super::storage::{analyze_type_storage, literal_storage_bytes};
 use super::{
@@ -88,6 +91,12 @@ pub struct GraphAnalysisLimits {
     pub maximum_channel_bytes_per_input: u64,
     /// Maximum combined canonical input-channel bytes.
     pub maximum_total_channel_bytes: u64,
+    /// Maximum admitted rate-transition instances in one graph.
+    pub maximum_rate_transitions: usize,
+    /// Maximum source or target ticks in one exact repeating rate pattern.
+    pub maximum_rate_pattern_ticks: u64,
+    /// Maximum combined canonical latest-sample retention for rate transitions.
+    pub maximum_total_rate_transition_state_bytes: u64,
 }
 
 impl GraphAnalysisLimits {
@@ -102,6 +111,9 @@ impl GraphAnalysisLimits {
             maximum_queue_items_per_input: 4_096,
             maximum_channel_bytes_per_input: 64 * 1024 * 1024,
             maximum_total_channel_bytes: 256 * 1024 * 1024,
+            maximum_rate_transitions: 8_192,
+            maximum_rate_pattern_ticks: 1_000_000,
+            maximum_total_rate_transition_state_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -113,10 +125,13 @@ impl GraphAnalysisLimits {
             self.maximum_state_bytes_per_node,
             self.maximum_total_state_bytes,
             self.maximum_queue_items_per_input,
+            self.maximum_rate_transitions,
         ]
         .contains(&0)
             || self.maximum_channel_bytes_per_input == 0
             || self.maximum_total_channel_bytes == 0
+            || self.maximum_rate_pattern_ticks == 0
+            || self.maximum_total_rate_transition_state_bytes == 0
         {
             Err(NodeRegistryError::ZeroLimit)
         } else {
@@ -250,6 +265,49 @@ impl NodeInputChannelContract {
     }
 }
 
+/// Deterministic first-release resampling semantics between two Stream clocks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RateTransitionKind {
+    /// At each target tick, consume all source samples due at or before that
+    /// instant and emit the newest. Coincident run-start ticks process the
+    /// source sample first, so no implicit initial value exists.
+    LatestAtOrBeforeSourceFirst,
+}
+
+/// Audited cross-clock dependency between one Stream input and Stream output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodeRateTransitionContract {
+    input: GraphPortId,
+    output: GraphPortId,
+    kind: RateTransitionKind,
+}
+
+impl NodeRateTransitionContract {
+    /// Construct one explicit Stream rate transition.
+    pub const fn new(input: GraphPortId, output: GraphPortId, kind: RateTransitionKind) -> Self {
+        Self {
+            input,
+            output,
+            kind,
+        }
+    }
+
+    /// Return the source Stream input.
+    pub const fn input(self) -> GraphPortId {
+        self.input
+    }
+
+    /// Return the target Stream output.
+    pub const fn output(self) -> GraphPortId {
+        self.output
+    }
+
+    /// Return the complete deterministic sample-selection policy.
+    pub const fn kind(self) -> RateTransitionKind {
+        self.kind
+    }
+}
+
 /// Complete current-tick input dependency set for one output.
 ///
 /// Every declared output must have exactly one such entry. An empty input list
@@ -338,7 +396,7 @@ impl NodeStateContract {
         self.current_output
     }
 
-    /// Return the declared storage ceiling. Static type-size proof is later work.
+    /// Return the declared storage ceiling, checked during graph analysis.
     pub const fn declared_storage_bytes(self) -> u32 {
         self.declared_storage_bytes
     }
@@ -354,6 +412,7 @@ pub struct NodeSchema {
     outputs: Vec<PortDefinition>,
     parameters: Vec<NodeParameterContract>,
     output_dependencies: Vec<NodeOutputDependency>,
+    rate_transitions: Vec<NodeRateTransitionContract>,
     state: Option<NodeStateContract>,
 }
 
@@ -371,6 +430,7 @@ impl NodeSchema {
         outputs: Vec<PortDefinition>,
         parameters: Vec<NodeParameterContract>,
         output_dependencies: Vec<NodeOutputDependency>,
+        rate_transitions: Vec<NodeRateTransitionContract>,
         state: Option<NodeStateContract>,
     ) -> Self {
         Self {
@@ -381,6 +441,7 @@ impl NodeSchema {
             outputs,
             parameters,
             output_dependencies,
+            rate_transitions,
             state,
         }
     }
@@ -418,6 +479,11 @@ impl NodeSchema {
     /// Borrow complete per-output feedthrough declarations.
     pub fn output_dependencies(&self) -> &[NodeOutputDependency] {
         &self.output_dependencies
+    }
+
+    /// Borrow explicit cross-clock dependencies in canonical output/input order.
+    pub fn rate_transitions(&self) -> &[NodeRateTransitionContract] {
+        &self.rate_transitions
     }
 
     /// Return the optional explicit state boundary.
@@ -460,6 +526,9 @@ impl GraphNodeRegistry {
             schema
                 .output_dependencies
                 .sort_unstable_by_key(NodeOutputDependency::output);
+            schema
+                .rate_transitions
+                .sort_unstable_by_key(|transition| (transition.output, transition.input));
             for dependency in &mut schema.output_dependencies {
                 dependency.inputs.sort_unstable();
             }
@@ -637,6 +706,7 @@ fn validate_node_schema(
             previous_input = Some(*input);
         }
     }
+    validate_rate_transition_contracts(schema, context_schema)?;
     if let Some(state) = schema.state {
         let storage = usize::try_from(state.declared_storage_bytes)
             .map_err(|_| invalid_schema(schema, "state storage"))?;
@@ -678,6 +748,131 @@ fn validate_node_schema(
             .find(|dependency| dependency.output == state.current_output);
         if !matches!(current_dependency, Some(dependency) if dependency.inputs.is_empty()) {
             return Err(invalid_schema(schema, "state output feedthrough"));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimePortKind {
+    Event,
+    Stream,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimePort {
+    kind: RuntimePortKind,
+    payload: GraphTypeId,
+    clock: GraphClockId,
+}
+
+fn runtime_port(schema: &GraphSchema, port: &PortDefinition) -> Option<RuntimePort> {
+    match schema.value_type(port.value_type())?.kind() {
+        TypeKind::Event { payload, clock } => Some(RuntimePort {
+            kind: RuntimePortKind::Event,
+            payload: *payload,
+            clock: *clock,
+        }),
+        TypeKind::Stream { sample, clock, .. } => Some(RuntimePort {
+            kind: RuntimePortKind::Stream,
+            payload: *sample,
+            clock: *clock,
+        }),
+        _ => None,
+    }
+}
+
+fn validate_rate_transition_contracts(
+    schema: &NodeSchema,
+    context_schema: &GraphSchema,
+) -> Result<(), NodeRegistryError> {
+    let mut pairs = BTreeSet::new();
+    for transition in &schema.rate_transitions {
+        if transition.input.get() == 0
+            || transition.output.get() == 0
+            || !pairs.insert((transition.output, transition.input))
+        {
+            return Err(invalid_schema(schema, "rate transition identity"));
+        }
+        let Some(input) = schema
+            .inputs
+            .iter()
+            .find(|port| port.id() == transition.input)
+        else {
+            return Err(invalid_schema(schema, "rate transition input"));
+        };
+        let Some(output) = schema
+            .outputs
+            .iter()
+            .find(|port| port.id() == transition.output)
+        else {
+            return Err(invalid_schema(schema, "rate transition output"));
+        };
+        let Some(source) = runtime_port(context_schema, input) else {
+            return Err(invalid_schema(schema, "rate transition input type"));
+        };
+        let Some(target) = runtime_port(context_schema, output) else {
+            return Err(invalid_schema(schema, "rate transition output type"));
+        };
+        if source.kind != RuntimePortKind::Stream
+            || target.kind != RuntimePortKind::Stream
+            || source.payload != target.payload
+            || source.clock == target.clock
+        {
+            return Err(invalid_schema(schema, "rate transition type"));
+        }
+        let input_channel = schema
+            .input_channels
+            .iter()
+            .find(|channel| channel.port == transition.input);
+        if !matches!(
+            input_channel,
+            Some(NodeInputChannelContract {
+                requirement: InputConnectionRequirement::Required,
+                kind: NodeInputChannelKind::StreamQueue { .. },
+                ..
+            })
+        ) {
+            return Err(invalid_schema(schema, "rate transition input delivery"));
+        }
+        let dependency = schema
+            .output_dependencies
+            .iter()
+            .find(|dependency| dependency.output == transition.output);
+        if !matches!(dependency, Some(dependency) if dependency.inputs.contains(&transition.input))
+        {
+            return Err(invalid_schema(schema, "rate transition dependency"));
+        }
+    }
+
+    for dependency in &schema.output_dependencies {
+        let output = schema
+            .outputs
+            .iter()
+            .find(|port| port.id() == dependency.output)
+            .ok_or_else(|| invalid_schema(schema, "output dependency coverage"))?;
+        let Some(target) = runtime_port(context_schema, output) else {
+            continue;
+        };
+        for input_id in &dependency.inputs {
+            let input = schema
+                .inputs
+                .iter()
+                .find(|port| port.id() == *input_id)
+                .ok_or_else(|| invalid_schema(schema, "output dependency input"))?;
+            let Some(source) = runtime_port(context_schema, input) else {
+                continue;
+            };
+            if source.clock == target.clock {
+                continue;
+            }
+            if source.kind != RuntimePortKind::Stream
+                || target.kind != RuntimePortKind::Stream
+                || source.payload != target.payload
+                || !pairs.contains(&(dependency.output, *input_id))
+            {
+                return Err(invalid_schema(schema, "cross-clock dependency"));
+            }
         }
     }
     Ok(())
@@ -806,7 +1001,7 @@ impl NodeStateAllocation {
         self.value_type
     }
 
-    /// Return declared bytes; static representability remains a later proof.
+    /// Return declared bytes, validated against canonical type storage.
     pub const fn declared_storage_bytes(self) -> u32 {
         self.declared_storage_bytes
     }
@@ -854,7 +1049,105 @@ impl GraphChannelAllocation {
     }
 }
 
-/// Successful semantic shape/domain/state/cycle analysis report.
+/// One registered clock's exact frequency and shared tick-zero root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphClockRate {
+    clock: GraphClockId,
+    root: GraphClockId,
+    ticks_per_second: Rational,
+}
+
+impl GraphClockRate {
+    /// Return the resolved clock.
+    pub const fn clock(&self) -> GraphClockId {
+        self.clock
+    }
+
+    /// Return the independent HostMonotonic or DeviceCycle root clock.
+    pub const fn root(&self) -> GraphClockId {
+        self.root
+    }
+
+    /// Borrow the exact positive rational frequency in ticks per SI second.
+    pub const fn ticks_per_second(&self) -> &Rational {
+        &self.ticks_per_second
+    }
+}
+
+/// One admitted exact repeating Stream-rate transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphRateTransition {
+    node: GraphNodeId,
+    input: GraphPortId,
+    output: GraphPortId,
+    kind: RateTransitionKind,
+    source_clock: GraphClockId,
+    target_clock: GraphClockId,
+    root_clock: GraphClockId,
+    source_ticks_per_pattern: u64,
+    target_ticks_per_pattern: u64,
+    required_input_capacity: u64,
+    retained_sample_bytes: u64,
+}
+
+impl GraphRateTransition {
+    /// Return the admitted node instance.
+    pub const fn node(self) -> GraphNodeId {
+        self.node
+    }
+
+    /// Return the source Stream input port.
+    pub const fn input(self) -> GraphPortId {
+        self.input
+    }
+
+    /// Return the target Stream output port.
+    pub const fn output(self) -> GraphPortId {
+        self.output
+    }
+
+    /// Return exact sample-selection and coincident-tick ordering semantics.
+    pub const fn kind(self) -> RateTransitionKind {
+        self.kind
+    }
+
+    /// Return the source Stream clock.
+    pub const fn source_clock(self) -> GraphClockId {
+        self.source_clock
+    }
+
+    /// Return the target Stream clock.
+    pub const fn target_clock(self) -> GraphClockId {
+        self.target_clock
+    }
+
+    /// Return the shared tick-zero clock root.
+    pub const fn root_clock(self) -> GraphClockId {
+        self.root_clock
+    }
+
+    /// Return exact source ticks in one smallest repeating schedule pattern.
+    pub const fn source_ticks_per_pattern(self) -> u64 {
+        self.source_ticks_per_pattern
+    }
+
+    /// Return exact target ticks in one smallest repeating schedule pattern.
+    pub const fn target_ticks_per_pattern(self) -> u64 {
+        self.target_ticks_per_pattern
+    }
+
+    /// Return the minimum input queue items needed between target evaluations.
+    pub const fn required_input_capacity(self) -> u64 {
+        self.required_input_capacity
+    }
+
+    /// Return one complete canonical latest-sample retention ceiling.
+    pub const fn retained_sample_bytes(self) -> u64 {
+        self.retained_sample_bytes
+    }
+}
+
+/// Successful semantic shape/domain/state/channel/rate/cycle analysis report.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphAnalysis {
     admitted_nodes: usize,
@@ -865,6 +1158,9 @@ pub struct GraphAnalysis {
     type_storage_bounds: Vec<GraphTypeStorageBound>,
     total_channel_bytes: u64,
     channel_allocations: Vec<GraphChannelAllocation>,
+    clock_rates: Vec<GraphClockRate>,
+    rate_transitions: Vec<GraphRateTransition>,
+    total_rate_transition_state_bytes: u64,
 }
 
 impl GraphAnalysis {
@@ -906,6 +1202,29 @@ impl GraphAnalysis {
     /// Borrow connected input allocations in canonical node/port order.
     pub fn channel_allocations(&self) -> &[GraphChannelAllocation] {
         &self.channel_allocations
+    }
+
+    /// Borrow exact clock frequencies in canonical clock-ID order.
+    pub fn clock_rates(&self) -> &[GraphClockRate] {
+        &self.clock_rates
+    }
+
+    /// Resolve one exact clock-rate report.
+    pub fn clock_rate(&self, clock: GraphClockId) -> Option<&GraphClockRate> {
+        self.clock_rates
+            .binary_search_by_key(&clock, |rate| rate.clock)
+            .ok()
+            .map(|index| &self.clock_rates[index])
+    }
+
+    /// Borrow admitted rate transitions in canonical node/output/input order.
+    pub fn rate_transitions(&self) -> &[GraphRateTransition] {
+        &self.rate_transitions
+    }
+
+    /// Return summed latest-sample retention for all rate transitions.
+    pub const fn total_rate_transition_state_bytes(&self) -> u64 {
+        self.total_rate_transition_state_bytes
     }
 }
 
@@ -959,6 +1278,41 @@ pub enum GraphAnalysisError {
     },
     /// Type-storage class contradicted an already validated input channel kind.
     ChannelStorageMismatch(WireEndpoint),
+    /// A rate transition referenced clocks without one shared tick-zero root.
+    RateTransitionRootMismatch {
+        /// Exact node instance.
+        node: GraphNodeId,
+        /// Source Stream input.
+        input: GraphPortId,
+        /// Target Stream output.
+        output: GraphPortId,
+        /// Independent source root.
+        source_root: GraphClockId,
+        /// Independent target root.
+        target_root: GraphClockId,
+    },
+    /// A rate transition's smallest exact schedule exceeded admission policy.
+    RateTransitionPatternTooLarge {
+        /// Exact node instance.
+        node: GraphNodeId,
+        /// Source Stream input.
+        input: GraphPortId,
+        /// Target Stream output.
+        output: GraphPortId,
+    },
+    /// The declared Stream input queue cannot retain one worst-case interval.
+    RateTransitionQueueTooSmall {
+        /// Exact node instance.
+        node: GraphNodeId,
+        /// Source Stream input.
+        input: GraphPortId,
+        /// Declared queue item capacity.
+        declared: u32,
+        /// Proven minimum item capacity.
+        required: u64,
+    },
+    /// A validated clock reference could not be resolved during analysis.
+    ClockResolution(GraphClockId),
     /// Dependency or declared-state policy was exceeded.
     LimitExceeded(&'static str),
     /// Internal DFS ancestry could not reproduce a detected cycle.
@@ -1012,6 +1366,36 @@ impl fmt::Display for GraphAnalysisError {
                 formatter,
                 "graph input {endpoint:?} channel contradicts its storage class"
             ),
+            Self::RateTransitionRootMismatch {
+                node,
+                input,
+                output,
+                source_root,
+                target_root,
+            } => write!(
+                formatter,
+                "graph node {node:?} rate transition {input:?}->{output:?} crosses independent clock roots {source_root:?} and {target_root:?}"
+            ),
+            Self::RateTransitionPatternTooLarge {
+                node,
+                input,
+                output,
+            } => write!(
+                formatter,
+                "graph node {node:?} rate transition {input:?}->{output:?} exceeds exact pattern policy"
+            ),
+            Self::RateTransitionQueueTooSmall {
+                node,
+                input,
+                declared,
+                required,
+            } => write!(
+                formatter,
+                "graph node {node:?} rate input {input:?} declares {declared} queue items but requires {required}"
+            ),
+            Self::ClockResolution(clock) => {
+                write!(formatter, "graph clock {clock:?} could not be resolved")
+            }
             Self::LimitExceeded(name) => write!(formatter, "graph analysis {name} exceeds policy"),
             Self::InvalidCycleWitness => {
                 formatter.write_str("graph analysis could not reconstruct a cycle witness")
@@ -1034,7 +1418,7 @@ impl From<GraphStorageError> for GraphAnalysisError {
 }
 
 /// Resolve every opaque node through an audited schema, verify exact instance
-/// shape/domain/state facts, and reject current-tick combinational cycles.
+/// shape/domain/state/channel/rate facts, and reject current-tick cycles.
 pub fn analyze_graph(
     document: &GraphDocument,
     registry: &GraphNodeRegistry,
@@ -1045,6 +1429,7 @@ pub fn analyze_graph(
         return Err(GraphAnalysisError::SemanticContextMismatch);
     }
     let type_storage_bounds = analyze_type_storage(document.schema())?;
+    let clock_rates = resolve_clock_rates(document)?;
     let connections: BTreeMap<_, _> = document
         .wires()
         .iter()
@@ -1056,6 +1441,8 @@ pub fn analyze_graph(
     let mut total_required_state_bytes = 0_u64;
     let mut channel_allocations = Vec::new();
     let mut total_channel_bytes = 0_u64;
+    let mut rate_transitions = Vec::new();
+    let mut total_rate_transition_state_bytes = 0_u64;
     for node in document.nodes() {
         let schema =
             registry
@@ -1110,6 +1497,33 @@ pub fn analyze_graph(
                 maximum_total_bytes,
             });
         }
+        for transition in &schema.rate_transitions {
+            if rate_transitions.len() >= registry.limits.maximum_rate_transitions {
+                return Err(GraphAnalysisError::LimitExceeded("rate transition count"));
+            }
+            let analyzed = analyze_rate_transition(
+                document,
+                node,
+                schema,
+                *transition,
+                &clock_rates,
+                &type_storage_bounds,
+                registry.limits.maximum_rate_pattern_ticks,
+            )?;
+            total_rate_transition_state_bytes = total_rate_transition_state_bytes
+                .checked_add(analyzed.retained_sample_bytes)
+                .ok_or(GraphAnalysisError::LimitExceeded(
+                    "rate transition state bytes",
+                ))?;
+            if total_rate_transition_state_bytes
+                > registry.limits.maximum_total_rate_transition_state_bytes
+            {
+                return Err(GraphAnalysisError::LimitExceeded(
+                    "rate transition state bytes",
+                ));
+            }
+            rate_transitions.push(analyzed);
+        }
         if let Some(state) = schema.state {
             let bytes = usize::try_from(state.declared_storage_bytes)
                 .map_err(|_| GraphAnalysisError::LimitExceeded("state byte count"))?;
@@ -1156,7 +1570,184 @@ pub fn analyze_graph(
         type_storage_bounds,
         total_channel_bytes,
         channel_allocations,
+        clock_rates,
+        rate_transitions,
+        total_rate_transition_state_bytes,
     })
+}
+
+fn resolve_clock_rates(
+    document: &GraphDocument,
+) -> Result<Vec<GraphClockRate>, GraphAnalysisError> {
+    let mut rates = Vec::with_capacity(document.clocks().len());
+    for clock in document.clocks() {
+        let mut current = clock.id();
+        let mut multiplier = Rational::one();
+        let mut remaining = document.clocks().len().saturating_add(1);
+        let (root, ticks_per_second) = loop {
+            if remaining == 0 {
+                return Err(GraphAnalysisError::ClockResolution(clock.id()));
+            }
+            remaining -= 1;
+            let definition = document
+                .clock(current)
+                .ok_or(GraphAnalysisError::ClockResolution(current))?;
+            match definition.kind() {
+                super::ClockKind::HostMonotonic { ticks_per_second }
+                | super::ClockKind::DeviceCycle {
+                    ticks_per_second, ..
+                } => {
+                    break (current, Rational::from(ticks_per_second) * multiplier);
+                }
+                super::ClockKind::Derived {
+                    source,
+                    numerator,
+                    denominator,
+                } => {
+                    multiplier =
+                        multiplier * Rational::from(numerator) / Rational::from(denominator);
+                    current = source;
+                }
+            }
+        };
+        rates.push(GraphClockRate {
+            clock: clock.id(),
+            root,
+            ticks_per_second,
+        });
+    }
+    Ok(rates)
+}
+
+fn analyze_rate_transition(
+    document: &GraphDocument,
+    node: &NodeDefinition,
+    schema: &NodeSchema,
+    transition: NodeRateTransitionContract,
+    clock_rates: &[GraphClockRate],
+    type_storage_bounds: &[GraphTypeStorageBound],
+    maximum_pattern_ticks: u64,
+) -> Result<GraphRateTransition, GraphAnalysisError> {
+    let input = schema
+        .inputs
+        .iter()
+        .find(|port| port.id() == transition.input)
+        .ok_or(GraphAnalysisError::NodeShape {
+            node: node.id(),
+            aspect: "rate transition input",
+        })?;
+    let output = schema
+        .outputs
+        .iter()
+        .find(|port| port.id() == transition.output)
+        .ok_or(GraphAnalysisError::NodeShape {
+            node: node.id(),
+            aspect: "rate transition output",
+        })?;
+    let source = runtime_port(document.schema(), input).ok_or(GraphAnalysisError::NodeShape {
+        node: node.id(),
+        aspect: "rate transition input type",
+    })?;
+    let target = runtime_port(document.schema(), output).ok_or(GraphAnalysisError::NodeShape {
+        node: node.id(),
+        aspect: "rate transition output type",
+    })?;
+    let source_rate = clock_rate(clock_rates, source.clock)?;
+    let target_rate = clock_rate(clock_rates, target.clock)?;
+    if source_rate.root != target_rate.root {
+        return Err(GraphAnalysisError::RateTransitionRootMismatch {
+            node: node.id(),
+            input: transition.input,
+            output: transition.output,
+            source_root: source_rate.root,
+            target_root: target_rate.root,
+        });
+    }
+    let ratio = source_rate.ticks_per_second.clone() / target_rate.ticks_per_second.clone();
+    let source_ticks = u64::try_from(ratio.numerator().clone()).map_err(|_| {
+        GraphAnalysisError::RateTransitionPatternTooLarge {
+            node: node.id(),
+            input: transition.input,
+            output: transition.output,
+        }
+    })?;
+    let target_ticks = u64::try_from(ratio.denominator().clone()).map_err(|_| {
+        GraphAnalysisError::RateTransitionPatternTooLarge {
+            node: node.id(),
+            input: transition.input,
+            output: transition.output,
+        }
+    })?;
+    if source_ticks > maximum_pattern_ticks || target_ticks > maximum_pattern_ticks {
+        return Err(GraphAnalysisError::RateTransitionPatternTooLarge {
+            node: node.id(),
+            input: transition.input,
+            output: transition.output,
+        });
+    }
+    let required_input_capacity =
+        source_ticks / target_ticks + u64::from(source_ticks % target_ticks != 0);
+    let declared = schema
+        .input_channels
+        .iter()
+        .find(|channel| channel.port == transition.input)
+        .and_then(|channel| match channel.kind {
+            NodeInputChannelKind::StreamQueue { capacity, .. } => Some(capacity),
+            NodeInputChannelKind::Synchronous | NodeInputChannelKind::EventQueue { .. } => None,
+        })
+        .ok_or(GraphAnalysisError::ChannelStorageMismatch(WireEndpoint {
+            node: node.id(),
+            port: transition.input,
+        }))?;
+    if u64::from(declared) < required_input_capacity {
+        return Err(GraphAnalysisError::RateTransitionQueueTooSmall {
+            node: node.id(),
+            input: transition.input,
+            declared,
+            required: required_input_capacity,
+        });
+    }
+    let retained_sample_bytes = type_storage_bounds
+        .binary_search_by_key(&input.value_type(), |bound| bound.value_type())
+        .ok()
+        .map(|index| type_storage_bounds[index].kind())
+        .and_then(|kind| match kind {
+            GraphTypeStorageKind::StreamSample {
+                maximum_sample_bytes,
+                ..
+            } => Some(maximum_sample_bytes),
+            GraphTypeStorageKind::Literal { .. } | GraphTypeStorageKind::EventPayload { .. } => {
+                None
+            }
+        })
+        .ok_or(GraphAnalysisError::ChannelStorageMismatch(WireEndpoint {
+            node: node.id(),
+            port: transition.input,
+        }))?;
+    Ok(GraphRateTransition {
+        node: node.id(),
+        input: transition.input,
+        output: transition.output,
+        kind: transition.kind,
+        source_clock: source.clock,
+        target_clock: target.clock,
+        root_clock: source_rate.root,
+        source_ticks_per_pattern: source_ticks,
+        target_ticks_per_pattern: target_ticks,
+        required_input_capacity,
+        retained_sample_bytes,
+    })
+}
+
+fn clock_rate(
+    rates: &[GraphClockRate],
+    clock: GraphClockId,
+) -> Result<&GraphClockRate, GraphAnalysisError> {
+    rates
+        .binary_search_by_key(&clock, |rate| rate.clock)
+        .ok()
+        .map(|index| &rates[index])
+        .ok_or(GraphAnalysisError::ClockResolution(clock))
 }
 
 fn channel_storage(
@@ -1484,6 +2075,7 @@ mod tests {
             vec![port(1, "value")],
             Vec::new(),
             vec![dependency(1, &[])],
+            Vec::new(),
             None,
         )
     }
@@ -1497,6 +2089,7 @@ mod tests {
             vec![port(3, "sum")],
             Vec::new(),
             vec![dependency(3, &[2, 1])],
+            Vec::new(),
             None,
         )
     }
@@ -1510,6 +2103,7 @@ mod tests {
             vec![port(2, "current")],
             vec![NodeParameterContract::new(1, "initial", EXACT)],
             vec![dependency(2, &[])],
+            Vec::new(),
             Some(NodeStateContract::new(
                 CLOCK,
                 EXACT,
@@ -1527,6 +2121,7 @@ mod tests {
             ExecutionDomainSet::HOST_EXACT,
             vec![port(1, "value")],
             vec![required_sync(1)],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1663,6 +2258,15 @@ mod tests {
         assert_eq!(report.total_declared_state_bytes(), 64);
         assert_eq!(report.total_required_state_bytes(), 45);
         assert_eq!(report.total_channel_bytes(), 180);
+        assert_eq!(report.clock_rates().len(), 1);
+        assert_eq!(report.clock_rates()[0].clock(), CLOCK);
+        assert_eq!(report.clock_rates()[0].root(), CLOCK);
+        assert_eq!(
+            report.clock_rates()[0].ticks_per_second(),
+            &Rational::from(1_000_u64)
+        );
+        assert!(report.rate_transitions().is_empty());
+        assert_eq!(report.total_rate_transition_state_bytes(), 0);
         assert_eq!(report.channel_allocations().len(), 4);
         assert!(report.channel_allocations().iter().all(|allocation| {
             allocation.kind() == NodeInputChannelKind::Synchronous
@@ -1846,6 +2450,7 @@ mod tests {
             vec![port(2, "current")],
             vec![NodeParameterContract::new(1, "initial", EXACT)],
             vec![dependency(2, &[1])],
+            Vec::new(),
             Some(NodeStateContract::new(
                 CLOCK,
                 EXACT,
@@ -1944,6 +2549,7 @@ mod tests {
             vec![port(2, "current")],
             vec![NodeParameterContract::new(1, "initial", EXACT)],
             vec![dependency(2, &[])],
+            Vec::new(),
             Some(NodeStateContract::new(
                 CLOCK,
                 EXACT,
@@ -2008,6 +2614,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
         );
         let optional_registry = GraphNodeRegistry::try_new(
@@ -2053,6 +2660,7 @@ mod tests {
             ExecutionDomainSet::SERVICE,
             vec![port(1, "value")],
             vec![required_sync(1)],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2141,6 +2749,7 @@ mod tests {
             vec![event_port(1, "events"), stream_port(2, "samples")],
             Vec::new(),
             vec![dependency(1, &[]), dependency(2, &[])],
+            Vec::new(),
             None,
         );
         let sink_schema = NodeSchema::new(
@@ -2165,6 +2774,7 @@ mod tests {
                     },
                 ),
             ],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2251,5 +2861,321 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn rate_transition_fixture(
+        shared_root: bool,
+        queue_capacity: u32,
+    ) -> (GraphDocument, NodeSchema, NodeSchema) {
+        const BOOL: GraphTypeId = GraphTypeId::new(1);
+        const SOURCE_STREAM: GraphTypeId = GraphTypeId::new(2);
+        const TARGET_STREAM: GraphTypeId = GraphTypeId::new(3);
+        const ROOT: GraphClockId = GraphClockId::new(1);
+        const SOURCE: GraphClockId = GraphClockId::new(2);
+        const TARGET: GraphClockId = GraphClockId::new(3);
+
+        let schema = GraphSchema::try_new(
+            GraphLimits::interactive(),
+            Vec::new(),
+            vec![
+                TypeDefinition::new(BOOL, "core.bool", TypeKind::Boolean),
+                TypeDefinition::new(
+                    SOURCE_STREAM,
+                    "stream.source-bool",
+                    TypeKind::Stream {
+                        sample: BOOL,
+                        clock: SOURCE,
+                        capacity: 8,
+                    },
+                ),
+                TypeDefinition::new(
+                    TARGET_STREAM,
+                    "stream.target-bool",
+                    TypeKind::Stream {
+                        sample: BOOL,
+                        clock: TARGET,
+                        capacity: 8,
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        let target_clock = if shared_root {
+            ClockDefinition::new(
+                TARGET,
+                "host.target-600hz",
+                ClockKind::Derived {
+                    source: ROOT,
+                    numerator: 1,
+                    denominator: 2,
+                },
+            )
+        } else {
+            ClockDefinition::new(
+                TARGET,
+                "host.independent-600hz",
+                ClockKind::HostMonotonic {
+                    ticks_per_second: 600,
+                },
+            )
+        };
+        let clocks = vec![
+            ClockDefinition::new(
+                ROOT,
+                "host.root-1200hz",
+                ClockKind::HostMonotonic {
+                    ticks_per_second: 1_200,
+                },
+            ),
+            ClockDefinition::new(
+                SOURCE,
+                "host.source-1000hz",
+                ClockKind::Derived {
+                    source: ROOT,
+                    numerator: 5,
+                    denominator: 6,
+                },
+            ),
+            target_clock,
+        ];
+        let source_port = |id, name| PortDefinition::new(GraphPortId::new(id), name, SOURCE_STREAM);
+        let target_port = |id, name| PortDefinition::new(GraphPortId::new(id), name, TARGET_STREAM);
+        let source_node = NodeDefinition::new(
+            GraphNodeId::new(1),
+            NodeKind::new("test.rate-source", 1),
+            "rate source",
+            ExecutionDomain::HostExact,
+            Vec::new(),
+            vec![source_port(1, "samples")],
+            Vec::new(),
+        );
+        let transition_node = NodeDefinition::new(
+            GraphNodeId::new(2),
+            NodeKind::new("test.rate-transition", 1),
+            "rate transition",
+            ExecutionDomain::HostExact,
+            vec![source_port(1, "source")],
+            vec![target_port(2, "target")],
+            Vec::new(),
+        );
+        let document = GraphDocument::try_new(
+            0,
+            schema,
+            clocks,
+            vec![source_node, transition_node],
+            vec![wire(1, (1, 1), (2, 1))],
+        )
+        .unwrap();
+        let source_schema = NodeSchema::new(
+            NodeKind::new("test.rate-source", 1),
+            ExecutionDomainSet::HOST_EXACT,
+            Vec::new(),
+            Vec::new(),
+            vec![source_port(1, "samples")],
+            Vec::new(),
+            vec![dependency(1, &[])],
+            Vec::new(),
+            None,
+        );
+        let transition_schema = NodeSchema::new(
+            NodeKind::new("test.rate-transition", 1),
+            ExecutionDomainSet::HOST_EXACT,
+            vec![source_port(1, "source")],
+            vec![NodeInputChannelContract::new(
+                GraphPortId::new(1),
+                InputConnectionRequirement::Required,
+                NodeInputChannelKind::StreamQueue {
+                    capacity: queue_capacity,
+                    full_policy: ChannelFullPolicy::Fault,
+                },
+            )],
+            vec![target_port(2, "target")],
+            Vec::new(),
+            vec![dependency(2, &[1])],
+            vec![NodeRateTransitionContract::new(
+                GraphPortId::new(1),
+                GraphPortId::new(2),
+                RateTransitionKind::LatestAtOrBeforeSourceFirst,
+            )],
+            None,
+        );
+        (document, source_schema, transition_schema)
+    }
+
+    #[test]
+    fn exact_rate_transition_reports_smallest_pattern_and_queue_requirement() {
+        let (document, source_schema, transition_schema) = rate_transition_fixture(true, 2);
+        let registry = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &document,
+            vec![transition_schema, source_schema],
+        )
+        .unwrap();
+        let report = analyze_graph(&document, &registry).unwrap();
+        assert_eq!(report.clock_rates().len(), 3);
+        assert_eq!(
+            report.clock_rates()[0].ticks_per_second(),
+            &Rational::from(1_200_u64)
+        );
+        assert_eq!(
+            report.clock_rates()[1].ticks_per_second(),
+            &Rational::from(1_000_u64)
+        );
+        assert_eq!(
+            report.clock_rates()[2].ticks_per_second(),
+            &Rational::from(600_u64)
+        );
+        assert!(
+            report
+                .clock_rates()
+                .iter()
+                .all(|rate| rate.root() == GraphClockId::new(1))
+        );
+        assert_eq!(report.rate_transitions().len(), 1);
+        let transition = report.rate_transitions()[0];
+        assert_eq!(transition.node(), GraphNodeId::new(2));
+        assert_eq!(transition.input(), GraphPortId::new(1));
+        assert_eq!(transition.output(), GraphPortId::new(2));
+        assert_eq!(transition.source_clock(), GraphClockId::new(2));
+        assert_eq!(transition.target_clock(), GraphClockId::new(3));
+        assert_eq!(transition.root_clock(), GraphClockId::new(1));
+        assert_eq!(transition.source_ticks_per_pattern(), 5);
+        assert_eq!(transition.target_ticks_per_pattern(), 3);
+        assert_eq!(transition.required_input_capacity(), 2);
+        assert_eq!(transition.retained_sample_bytes(), 5);
+        assert_eq!(report.total_rate_transition_state_bytes(), 5);
+        assert_eq!(
+            transition.kind(),
+            RateTransitionKind::LatestAtOrBeforeSourceFirst
+        );
+    }
+
+    #[test]
+    fn rate_transitions_reject_implicit_clocks_small_queues_and_large_patterns() {
+        let (document, source_schema, transition_schema) = rate_transition_fixture(true, 2);
+        let mut implicit = transition_schema.clone();
+        implicit.rate_transitions.clear();
+        assert!(matches!(
+            GraphNodeRegistry::try_new(
+                GraphAnalysisLimits::interactive(),
+                &document,
+                vec![implicit, source_schema.clone()]
+            ),
+            Err(NodeRegistryError::InvalidSchema {
+                aspect: "cross-clock dependency",
+                ..
+            })
+        ));
+
+        let (small_document, small_source, small_transition) = rate_transition_fixture(true, 1);
+        let small_registry = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &small_document,
+            vec![small_transition, small_source],
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&small_document, &small_registry),
+            Err(GraphAnalysisError::RateTransitionQueueTooSmall {
+                node: GraphNodeId::new(2),
+                input: GraphPortId::new(1),
+                declared: 1,
+                required: 2,
+            })
+        );
+
+        let mut pattern_limits = GraphAnalysisLimits::interactive();
+        pattern_limits.maximum_rate_pattern_ticks = 4;
+        let pattern_registry = GraphNodeRegistry::try_new(
+            pattern_limits,
+            &document,
+            vec![transition_schema.clone(), source_schema.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&document, &pattern_registry),
+            Err(GraphAnalysisError::RateTransitionPatternTooLarge {
+                node: GraphNodeId::new(2),
+                input: GraphPortId::new(1),
+                output: GraphPortId::new(2),
+            })
+        );
+
+        let mut doubled_nodes = document.nodes().to_vec();
+        doubled_nodes.push(NodeDefinition::new(
+            GraphNodeId::new(3),
+            NodeKind::new("test.rate-transition", 1),
+            "second rate transition",
+            ExecutionDomain::HostExact,
+            vec![PortDefinition::new(
+                GraphPortId::new(1),
+                "source",
+                GraphTypeId::new(2),
+            )],
+            vec![PortDefinition::new(
+                GraphPortId::new(2),
+                "target",
+                GraphTypeId::new(3),
+            )],
+            Vec::new(),
+        ));
+        let mut doubled_wires = document.wires().to_vec();
+        doubled_wires.push(wire(2, (1, 1), (3, 1)));
+        let doubled_document = GraphDocument::try_new(
+            document.revision(),
+            document.schema().clone(),
+            document.clocks().to_vec(),
+            doubled_nodes,
+            doubled_wires,
+        )
+        .unwrap();
+        let mut count_limits = GraphAnalysisLimits::interactive();
+        count_limits.maximum_rate_transitions = 1;
+        let count_registry = GraphNodeRegistry::try_new(
+            count_limits,
+            &doubled_document,
+            vec![transition_schema.clone(), source_schema.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&doubled_document, &count_registry),
+            Err(GraphAnalysisError::LimitExceeded("rate transition count"))
+        );
+
+        let mut state_limits = GraphAnalysisLimits::interactive();
+        state_limits.maximum_total_rate_transition_state_bytes = 4;
+        let state_registry = GraphNodeRegistry::try_new(
+            state_limits,
+            &document,
+            vec![transition_schema, source_schema],
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&document, &state_registry),
+            Err(GraphAnalysisError::LimitExceeded(
+                "rate transition state bytes"
+            ))
+        );
+    }
+
+    #[test]
+    fn rate_transition_rejects_independent_clock_roots() {
+        let (document, source_schema, transition_schema) = rate_transition_fixture(false, 2);
+        let registry = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &document,
+            vec![transition_schema, source_schema],
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&document, &registry),
+            Err(GraphAnalysisError::RateTransitionRootMismatch {
+                node: GraphNodeId::new(2),
+                input: GraphPortId::new(1),
+                output: GraphPortId::new(2),
+                source_root: GraphClockId::new(1),
+                target_root: GraphClockId::new(3),
+            })
+        );
     }
 }

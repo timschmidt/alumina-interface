@@ -84,6 +84,10 @@ prototype.
   from bounded event/stream queues with explicit full behavior. Exact reports
   include timestamp/sequence envelopes and reject scalar cross-domain sharing,
   stream over-capacity, and per-input/total allocation overflow.
+- Cross-clock Stream feedthrough requires an audited latest-at-or-before
+  transition. Exact clock resolution proves a shared tick-zero root, the
+  smallest rational schedule pattern, minimum input capacity, and separately
+  bounded held-sample state; implicit or independent-root transitions reject.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
