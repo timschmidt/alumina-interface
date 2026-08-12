@@ -21,3 +21,7 @@ hyperlimit.workspace = true
 hyperpath.workspace = true
 hyperreal.workspace = true
 hypersolve.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+alumina-runtime.workspace = true
+critical-section = { version = "1.2.0", features = ["std"] }

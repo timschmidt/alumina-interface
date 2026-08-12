@@ -215,12 +215,16 @@ separate nonzero executor/queue budget; both must fit the period. This is a
 static compiler bound, not measured target WCET evidence.
 
 Audited channel reports lower to fixed arenas. The Boolean Stream item is
-exactly 21 bytes: five canonical typed-value bytes plus one `u64` source tick
-and one `u64` sequence. The representative source→transition queue has capacity
-two and reserves 42 Service-to-Realtime bytes; the transition→sink queue
-reserves 21 Realtime bytes. `BooleanLatest` separately reserves its proven
-five-byte retained sample, for 68 total runtime bytes before executor/package
-storage.
+exactly 21 bytes: a four-byte little-endian deployment-local Boolean tag `1`,
+one canonical `0`/`1` byte, one `u64` source-schedule tick, and one `u64`
+sequence. The deployment tag is not the document-local `GraphTypeId`; `ALDI`
+binds that schema while fixed firmware opcodes use one independently decodable
+runtime type. The representative source→transition queue has capacity two and
+reserves 42 Service-to-Realtime bytes; the transition→sink queue reserves 21
+Realtime bytes. `BooleanLatest` separately reserves its five-byte retained
+sample, for 68 selected payload bytes. Fixed package, queue-cursor, adjacency,
+mutex, fault-mailbox, and executor metadata are additional compile-time storage
+and are reported by the concrete firmware runtime rather than hidden in 68.
 
 `lower_graph_deployment` builds the sibling `alumina-graph-ir` 4,096-byte
 `ALGRIR01` package and immediately passes it through that `no_std`,
@@ -231,9 +235,15 @@ ownership, capacity, full policy, and aggregate totals. The representative
 lowered package has SHA-256 identity
 `802d6a2f9b8d2958055532aecdec7b6dbed602c44fb3f80a1755d8f8412aca67`.
 
-No API installs or executes this package yet. It has no resource claim, GPIO or
-motor opcode, safety effect, protocol route, firmware arena owner, deadline
-monitor, or physical timing evidence.
+One native cross-repository test passes those exact bytes and identities into
+the sibling `FixedGraphRuntime<0, 5, 0, 21, 42>`. It transactionally admits the
+package, primes Service release tick zero before core-1 ownership, splits unique
+Service/Realtime state and queues, then executes the 1 kHz constant and 500 Hz
+latest/sink releases with exact expected values and no fault. This proves the
+portable compiler/runtime contract, not a live firmware route or target timing.
+There is still no authenticated upload/core transfer, active/candidate
+replacement, composed board task, resource claim, GPIO or motor opcode,
+deadline monitor, or physical timing evidence.
 
 ## Canonical bytes and replay
 
@@ -267,10 +277,11 @@ families. Its graph digest is
 ## Deliberately open
 
 V1 now has one fixed host-executable Stream/rate subset and one fixed
-resource-free Service/Realtime lowering, but arbitrary documents remain
-non-executable. Subgraphs/components, general feedback structures, queue runtime
-and timeout behavior, additional resampling/window policies, cases/loops/state
-machines, front panels, resource claims, general host implementation admission,
-firmware arena installation, executor semantics, measured WCET/deadline
-analysis, protocol routes, and resource opcodes remain later M9 slices. No
-arbitrary graph document is sent to or interpreted by firmware.
+resource-free Service/Realtime lowering plus portable execution, but arbitrary
+documents remain non-executable. Subgraphs/components, general feedback
+structures, queue timeouts and additional policies, cases/loops/state machines,
+front panels, resource claims, general host implementation admission,
+authenticated firmware installation/core transfer, live task composition,
+replacement lifecycle, measured WCET/deadline analysis, protocol routes, and
+resource opcodes remain later M9 slices. No arbitrary graph document is sent to
+or interpreted by firmware.

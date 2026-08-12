@@ -20,7 +20,7 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `dc7aff02fd483fb532765c7e539cfeeddba7d57b` | tracked source modified by concurrent local development; tracked diff SHA-256 `3c5765f7c7c7d07935a3aa0a86e95e66597828c6846efc947758e29cdd6e1d9e` |
+| `hypercurve` | `dc7aff02fd483fb532765c7e539cfeeddba7d57b` | tracked source modified by concurrent local development; tracked diff SHA-256 `c7f6c3c567b05646f1b1582b75ce42239539f75004c6721d4f5e6cd848b273b8` |
 | `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
 | `hypersolve` | `d8bfa6b113020d1588ce2b0e549235d1bb9bc205` | clean |

@@ -145,7 +145,9 @@ dependencies = [
  "alumina-job",
  "alumina-machine-ir",
  "alumina-protocol",
+ "alumina-runtime",
  "alumina-storage",
+ "critical-section",
  "csgrs",
  "hypercurve",
  "hypergraphics",
@@ -202,6 +204,7 @@ version = "0.1.0"
 name = "alumina-runtime"
 version = "0.1.0"
 dependencies = [
+ "alumina-graph-ir",
  "alumina-machine-ir",
  "alumina-protocol",
  "embassy-sync",

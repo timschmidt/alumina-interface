@@ -103,6 +103,11 @@ prototype.
   capabilities, and configuration; proves integer device-cycle periods plus
   executor reserve, topological order, and exact state/channel/bridge arenas;
   then requires the allocation-free firmware decoder to replay the package.
+- A native cross-repository fixture sends those exact compiler bytes directly
+  into the sibling portable firmware runtime. Exact identity/capacity admission,
+  safety-gated Service tick-zero priming, unique Service/Realtime owners, and
+  1 kHz→500 Hz queue/latest/sink execution reproduce the expected Boolean
+  samples without a graph-document interpreter or physical side effect.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -170,9 +175,9 @@ capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
 views, additional deterministic host graph behaviors, and fixed-memory
-Service/Realtime installation/execution, resource opcodes, and capability-driven
-graph palettes. Raw G-code remains an optional exact UI importer, never firmware
-or canonical job input.
+authenticated Service/Realtime upload/core transfer and task composition,
+resource opcodes, and capability-driven graph palettes. Raw G-code remains an
+optional exact UI importer, never firmware or canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.

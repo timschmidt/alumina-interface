@@ -237,8 +237,11 @@ impl GraphDeploymentReport {
         &self.package
     }
 
-    /// Return all fixed state plus channel bytes, excluding package storage.
-    pub fn fixed_runtime_bytes(&self) -> Result<u32, GraphDeploymentError> {
+    /// Return selected state plus queue-arena payload bytes.
+    ///
+    /// Package, cursor, adjacency, bridge-lock, fault, and executor metadata
+    /// belong to the concrete firmware runtime's separate static footprint.
+    pub fn arena_payload_bytes(&self) -> Result<u32, GraphDeploymentError> {
         self.package
             .header()
             .total_state_bytes
@@ -1545,7 +1548,7 @@ mod tests {
         .unwrap();
         let replay = GraphIrPackage::from_slice(report.package().bytes()).unwrap();
         assert_eq!(&replay, report.package());
-        assert_eq!(report.fixed_runtime_bytes().unwrap(), 68);
+        assert_eq!(report.arena_payload_bytes().unwrap(), 68);
         assert_eq!(
             report.package().header().service_schedule.period_cycles,
             1_000
@@ -1619,6 +1622,55 @@ mod tests {
                 0x41, 0x2a, 0xca, 0x67,
             ])
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lowered_package_executes_in_the_portable_split_runtime() {
+        use alumina_protocol::DeviceCycle;
+        use alumina_runtime::graph::{FixedGraphRuntime, GraphRuntimeAuthority};
+
+        let (document, registry) = fixture(1, 1_000, 2, 40);
+        let target = target();
+        let report = lower_graph_deployment(
+            &document,
+            &registry,
+            target,
+            GraphDeploymentLimits::interactive(),
+        )
+        .unwrap();
+        let mut runtime = FixedGraphRuntime::<0, 5, 0, 21, 42>::new();
+        let installed = runtime
+            .install(
+                report.package().bytes(),
+                report.package().digest(),
+                GraphRuntimeAuthority {
+                    device_id: target.device_id,
+                    capability_digest: target.capability_digest,
+                    config_digest: target.config_digest,
+                    implementation_digest: report.implementation_digest(),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(installed.package_digest, report.package().digest());
+        assert_eq!(installed.usage.payload_bytes(), Ok(68));
+        let start = runtime.prepare_start(DeviceCycle(10_000), true).unwrap();
+        assert_eq!(start.primed_service_release.unwrap().items_emitted, 1);
+
+        let (mut service, mut realtime) = runtime.split().unwrap();
+        let first = realtime.release(DeviceCycle(10_000), true).unwrap();
+        assert_eq!(first.release_tick, 0);
+        assert_eq!(first.items_consumed, 2);
+        assert_eq!(first.last_sink_value, Some(true));
+        service.release(DeviceCycle(11_000), true).unwrap();
+        service.release(DeviceCycle(12_000), true).unwrap();
+        let second = realtime.release(DeviceCycle(12_000), true).unwrap();
+        assert_eq!(second.release_tick, 1);
+        assert_eq!(second.items_consumed, 3);
+        assert_eq!(second.last_sink_value, Some(true));
+        assert_eq!(service.fault_after(0), None);
+        assert_eq!(realtime.fault_after(0), None);
     }
 
     #[test]
