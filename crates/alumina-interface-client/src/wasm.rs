@@ -14,7 +14,10 @@ use web_sys::{
 
 use crate::Response;
 use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
-use crate::graph::{GraphInstallError, GraphInstallMachine, GraphInstallPhase};
+use crate::graph::{
+    GraphInstallError, GraphInstallMachine, GraphInstallPhase, GraphRunError, GraphRunMachine,
+    GraphRunPhase,
+};
 use crate::http::{
     AUTHENTICATION_PATH, AuthenticatedHttpSession, AuthenticatedProtocolRequest,
     AuthenticatedProtocolResponse, AuthenticationChallenge, AuthenticationChallengeError,
@@ -566,6 +569,63 @@ async fn drive_graph_install_step_inner(
     Ok(install.phase())
 }
 
+/// Drives exactly one retry-safe graph start, status poll, or stop over Wi-Fi.
+///
+/// A returned [`GraphRunPhase::Running`] means both pinned-core actors and the
+/// bridge report the exact run. Call [`GraphRunMachine::request_stop`] before
+/// calling this again to begin normal stop; execution faults select stop
+/// automatically and remain available through [`GraphRunMachine::fault_report`].
+pub async fn drive_graph_run_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    run: &mut GraphRunMachine,
+    secret: &[u8],
+) -> Result<GraphRunPhase, BrowserGraphRunError> {
+    drive_graph_run_step_inner(window, origin, session, run, secret).await
+}
+
+/// Worker-scope variant of [`drive_graph_run_step`].
+pub async fn drive_graph_run_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    run: &mut GraphRunMachine,
+    secret: &[u8],
+) -> Result<GraphRunPhase, BrowserGraphRunError> {
+    drive_graph_run_step_inner(worker, origin, session, run, secret).await
+}
+
+async fn drive_graph_run_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    run: &mut GraphRunMachine,
+    secret: &[u8],
+) -> Result<GraphRunPhase, BrowserGraphRunError> {
+    let Some(operation) = run.next_request()? else {
+        return Ok(run.phase());
+    };
+    let request = match session.begin_request(operation.operation, &operation.body, secret) {
+        Ok(request) => request,
+        Err(error) => {
+            run.abandon_pending();
+            return Err(BrowserGraphRunError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            run.abandon_pending();
+            return Err(BrowserGraphRunError::Fetch(error));
+        }
+    };
+    run.accept_response(&response)?;
+    Ok(run.phase())
+}
+
 fn javascript_error(value: JsValue) -> BrowserFetchError {
     BrowserFetchError::Javascript(format!("{value:?}"))
 }
@@ -739,3 +799,32 @@ impl fmt::Display for BrowserGraphInstallError {
 }
 
 impl std::error::Error for BrowserGraphInstallError {}
+
+/// One-step browser graph-run failure with exact epoch authority preserved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserGraphRunError {
+    /// Graph execution state rejected the local request or device report.
+    Run(GraphRunError),
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+}
+
+impl From<GraphRunError> for BrowserGraphRunError {
+    fn from(value: GraphRunError) -> Self {
+        Self::Run(value)
+    }
+}
+
+impl fmt::Display for BrowserGraphRunError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Run(error) => write!(formatter, "graph run failed: {error}"),
+            Self::Session(error) => write!(formatter, "request construction failed: {error}"),
+            Self::Fetch(error) => write!(formatter, "device fetch failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserGraphRunError {}
