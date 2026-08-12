@@ -30,13 +30,16 @@ pub use global_job::{
     compile_global_job, compile_representative_global_job,
 };
 pub use graph::{
-    BaseDimensions, CanonicalGraphEncoding, ClockDefinition, ClockKind, ExecutionDomain,
-    GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GraphClockId, GraphDocument, GraphDocumentError,
-    GraphLimits, GraphNodeId, GraphPortId, GraphReplay, GraphSchema, GraphSchemaError, GraphTypeId,
-    GraphValue, GraphValueKind, GraphWireError, GraphWireId, JobGraphHandle, NodeDefinition,
-    NodeKind, NodeParameter, PortDefinition, RecordField, RecordFieldId, RecordValueField,
+    BaseDimensions, CanonicalGraphEncoding, ClockDefinition, ClockKind, CombinationalCycle,
+    DependencyLink, ExecutionDomain, ExecutionDomainSet, GRAPH_DOCUMENT_MAGIC,
+    GRAPH_DOCUMENT_VERSION, GraphAnalysis, GraphAnalysisError, GraphAnalysisLimits, GraphClockId,
+    GraphDocument, GraphDocumentError, GraphLimits, GraphNodeId, GraphNodeRegistry, GraphPortId,
+    GraphReplay, GraphSchema, GraphSchemaError, GraphTypeId, GraphValue, GraphValueKind,
+    GraphWireError, GraphWireId, JobGraphHandle, NodeDefinition, NodeKind, NodeOutputDependency,
+    NodeParameter, NodeParameterContract, NodeRegistryError, NodeSchema, NodeStateAllocation,
+    NodeStateContract, PortDefinition, RecordField, RecordFieldId, RecordValueField,
     ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue,
-    UnitDefinition, UnitId, WireDefinition, WireEndpoint, encode_graph_document,
+    UnitDefinition, UnitId, WireDefinition, WireEndpoint, analyze_graph, encode_graph_document,
     replay_graph_document,
 };
 pub use partition::{

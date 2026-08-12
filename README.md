@@ -71,6 +71,12 @@ prototype.
   independent admission policy, rebuild through the validators, require exact
   byte replay, and derive a SHA-256 graph identity. This is structural graph
   authority only; no arbitrary graph interpreter or firmware lowering exists.
+- A separately bounded node registry resolves opaque kinds only when exact
+  port/parameter shapes, allowed domain families, complete current-tick
+  feedthrough, and optional read-before-write state are declared against the
+  document's exact type/clock context. Iterative port-level analysis accepts
+  deliberate delayed feedback and returns exact wire/feedthrough witnesses for
+  forbidden combinational cycles; it emits no executable implementation.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is

@@ -12,9 +12,15 @@ use std::collections::BTreeSet;
 use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
+mod analysis;
 mod document;
 mod wire;
 
+pub use analysis::{
+    CombinationalCycle, DependencyLink, ExecutionDomainSet, GraphAnalysis, GraphAnalysisError,
+    GraphAnalysisLimits, GraphNodeRegistry, NodeOutputDependency, NodeParameterContract,
+    NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, analyze_graph,
+};
 pub use document::{
     ClockDefinition, ClockKind, ExecutionDomain, GraphDocument, GraphDocumentError, GraphNodeId,
     GraphPortId, GraphWireId, NodeDefinition, NodeKind, NodeParameter, PortDefinition,

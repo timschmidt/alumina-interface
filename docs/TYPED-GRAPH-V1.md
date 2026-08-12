@@ -51,6 +51,36 @@ clocks reject. Event/stream type clocks must resolve in the complete document.
 Ports are canonicalized by local ID. Wires must begin at an output, end at an
 input of the identical registered type, and uniquely own the input.
 
+## Audited semantic admission
+
+Opaque node identity remains saveable data until a separate
+`GraphNodeRegistry` resolves the exact name/version. Each audited `NodeSchema`
+declares the complete input, output, and parameter shape; allowed HostExact,
+Service, and/or Realtime domain families; and a dependency entry for every
+output. The dependency entry lists every input that can affect that output in
+the current tick. Omitting an output dependency is an invalid schema rather
+than an implicit assumption.
+
+An optional `NodeStateContract` names one state type, deterministic run-start
+parameter, next-state input, prior-state output, update clock, and declared
+storage ceiling. The prior-state output must have no current-tick feedthrough;
+updates are read-before-write. Declared bytes are bounded and reported, but are
+not yet a static proof that every value of the type fits that storage.
+
+The registry is bound to the complete canonical unit/type registry and clock
+set from the document that established its authority. Analysis rejects a
+different context before interpreting any document-local ID. It then rejects
+unresolved kinds, shape or domain contradictions, state-policy overflow, and
+all current-tick combinational cycles. Cycle analysis is iterative and bounded
+over exact port vertices. Its witness identifies every structural wire and
+audited input-to-output feedthrough in deterministic traversal order. A cycle
+through an explicit read-before-write state output is accepted because there is
+no current-tick input-to-output edge.
+
+This is still host-side semantic analysis. A Realtime domain in a passing
+report is not a firmware opcode, implementation binding, WCET proof, resource
+claim, deployment package, or authority to execute.
+
 ## Canonical bytes and replay
 
 `ALGR` format V1 uses fixed-width little-endian integers, length-prefixed UTF-8
@@ -82,9 +112,9 @@ families. Its graph digest is
 
 ## Deliberately open
 
-V1 is structural, not executable. Subgraphs/components, explicit state and
-feedback, queue/backpressure semantics, rate transitions, cases/loops/state
-machines, front panels, resource claims, node admission, combinational-cycle
-analysis, fixed-memory lowering, WCET/deadline analysis, protocol bridges,
-firmware opcodes, and deterministic graph simulation remain later M9 slices.
-No arbitrary graph document is sent to or interpreted by firmware.
+V1 remains non-executable. Subgraphs/components, general feedback structures,
+queue/backpressure semantics, rate transitions, cases/loops/state machines,
+front panels, resource claims, implementation/opcode admission, static
+type-to-storage proof, fixed-memory lowering, WCET/deadline analysis, protocol
+bridges, firmware opcodes, and deterministic graph simulation remain later M9
+slices. No arbitrary graph document is sent to or interpreted by firmware.
