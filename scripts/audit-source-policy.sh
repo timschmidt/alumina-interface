@@ -48,6 +48,7 @@ for package in \
   alumina-clock \
   alumina-config \
   alumina-foc \
+  alumina-graph-ir \
   alumina-job \
   alumina-machine-ir \
   alumina-motion \

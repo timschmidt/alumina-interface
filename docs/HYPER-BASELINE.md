@@ -1,6 +1,6 @@
 # Local CSGRS/Hyper baseline
 
-Snapshot: 2026-08-11, from the shared workspace at
+Snapshot: 2026-08-12, from the shared workspace at
 `/home/tim/Documents/GitHub/workspace`.
 
 This interface does not resolve CSGRS or any Hyper crate from crates.io. Direct
@@ -20,7 +20,7 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `dc7aff02fd483fb532765c7e539cfeeddba7d57b` | tracked source modified by concurrent local development; tracked diff SHA-256 `18fd2bf12bd0a2b726f43a3a7f81b15729a7a2c5af1b0a9fb7423631276b4d22` |
+| `hypercurve` | `dc7aff02fd483fb532765c7e539cfeeddba7d57b` | tracked source modified by concurrent local development; tracked diff SHA-256 `3c5765f7c7c7d07935a3aa0a86e95e66597828c6846efc947758e29cdd6e1d9e` |
 | `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
 | `hypersolve` | `d8bfa6b113020d1588ce2b0e549235d1bb9bc205` | clean |

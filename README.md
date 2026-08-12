@@ -70,7 +70,7 @@ prototype.
   wires, and a canonical bounded `ALGR` V1 codec. Untrusted loads enforce an
   independent admission policy, rebuild through the validators, require exact
   byte replay, and derive a SHA-256 graph identity. This is structural graph
-  authority only; no arbitrary graph interpreter or firmware lowering exists.
+  authority only; it never becomes an arbitrary firmware graph interpreter.
 - A separately bounded node registry resolves opaque kinds only when exact
   port/parameter shapes, allowed domain families, complete current-tick
   feedthrough, and optional read-before-write state are declared against the
@@ -97,6 +97,12 @@ prototype.
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
   byte to match; it grants no firmware or deployment authority.
+- A separate deployment registry lowers one resource-free Boolean Stream subset
+  into the sibling firmware's canonical 4 KiB `ALGRIR01` package. The compiler
+  binds the complete audited semantics, fixed opcodes/WCET, graph, target MCU,
+  capabilities, and configuration; proves integer device-cycle periods plus
+  executor reserve, topological order, and exact state/channel/bridge arenas;
+  then requires the allocation-free firmware decoder to replay the package.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -164,8 +170,9 @@ capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
 views, additional deterministic host graph behaviors, and fixed-memory
-Service/Realtime graph lowering. Raw G-code remains an optional exact UI
-importer, never firmware or canonical job input.
+Service/Realtime installation/execution, resource opcodes, and capability-driven
+graph palettes. Raw G-code remains an optional exact UI importer, never firmware
+or canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.

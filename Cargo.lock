@@ -87,6 +87,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "alumina-graph-ir"
+version = "0.1.0"
+dependencies = [
+ "alumina-protocol",
+ "sha2",
+]
+
+[[package]]
 name = "alumina-interface"
 version = "0.1.0"
 dependencies = [
@@ -133,6 +141,7 @@ dependencies = [
 name = "alumina-interface-core"
 version = "0.1.0"
 dependencies = [
+ "alumina-graph-ir",
  "alumina-job",
  "alumina-machine-ir",
  "alumina-protocol",

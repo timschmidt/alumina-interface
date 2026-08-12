@@ -186,6 +186,55 @@ re-encodes the entire result, and requires byte-for-byte equality. The
 representative 1,000 Hz to 600 Hz trace is 658 bytes with SHA-256 identity
 `4e0dbaec5495e96a1f472c218a83e8f441118c8a68c4bd94b77516b2d61b773a`.
 
+## First fixed Service/Realtime lowering
+
+`GraphDeploymentRegistry` is a third explicit authority. It binds reviewed
+kind/versions to one fixed firmware opcode, schedule clock, and nonzero WCET.
+Its `ALDI` V1 identity covers the canonical graph digest, host lowering limits,
+complete audited semantic registry, and canonical implementation bindings. A
+changed port, domain family, channel/full policy, dependency, rate transition,
+state contract, opcode, clock, WCET, or host limit therefore changes identity.
+
+The first resource-free subset is intentionally smaller than the future graph
+system:
+
+- a Service-domain Boolean Stream constant with one exact Boolean parameter;
+- a Realtime Boolean `LatestAtOrBeforeSourceFirst` transition; and
+- a Realtime Boolean Stream sink with no side effect.
+
+Every structural node must have one reviewed implementation, and every node
+must target the same nonzero `DeviceId`. HostExact nodes, foreign devices,
+explicit graph state, Event/synchronous channels, Realtime-to-Service edges,
+lossy realtime queues, and all resource operations reject. The structural wires
+must topologically order; firmware never receives `ALGR` bytes.
+
+Each active domain uses one exact graph clock. Its independent root must be the
+target MCU's `DeviceCycle` clock, and the clock period must be an exact integer
+number of device cycles. The compiler sums reviewed node WCET and reserves a
+separate nonzero executor/queue budget; both must fit the period. This is a
+static compiler bound, not measured target WCET evidence.
+
+Audited channel reports lower to fixed arenas. The Boolean Stream item is
+exactly 21 bytes: five canonical typed-value bytes plus one `u64` source tick
+and one `u64` sequence. The representative source→transition queue has capacity
+two and reserves 42 Service-to-Realtime bytes; the transition→sink queue
+reserves 21 Realtime bytes. `BooleanLatest` separately reserves its proven
+five-byte retained sample, for 68 total runtime bytes before executor/package
+storage.
+
+`lower_graph_deployment` builds the sibling `alumina-graph-ir` 4,096-byte
+`ALGRIR01` package and immediately passes it through that `no_std`,
+allocation-free independent decoder. The package binds graph, implementation,
+device, capability, and configuration digests and retains topological nodes,
+integer schedules/WCET/reserve, contiguous state/channel offsets, bridge
+ownership, capacity, full policy, and aggregate totals. The representative
+lowered package has SHA-256 identity
+`802d6a2f9b8d2958055532aecdec7b6dbed602c44fb3f80a1755d8f8412aca67`.
+
+No API installs or executes this package yet. It has no resource claim, GPIO or
+motor opcode, safety effect, protocol route, firmware arena owner, deadline
+monitor, or physical timing evidence.
+
 ## Canonical bytes and replay
 
 `ALGR` format V1 uses fixed-width little-endian integers, length-prefixed UTF-8
@@ -217,11 +266,11 @@ families. Its graph digest is
 
 ## Deliberately open
 
-V1 now has one fixed host-executable Stream/rate subset, but arbitrary documents
-remain non-executable. Subgraphs/components, general feedback structures, queue
-runtime/timeout behavior, additional resampling/window policies,
-cases/loops/state machines, front panels, resource claims, general host
-implementation admission, static firmware runtime-layout proof, fixed-memory
-lowering, WCET/deadline analysis, protocol bridges, and firmware opcodes remain
-later M9 slices. No arbitrary graph document is sent to or interpreted by
-firmware.
+V1 now has one fixed host-executable Stream/rate subset and one fixed
+resource-free Service/Realtime lowering, but arbitrary documents remain
+non-executable. Subgraphs/components, general feedback structures, queue runtime
+and timeout behavior, additional resampling/window policies, cases/loops/state
+machines, front panels, resource claims, general host implementation admission,
+firmware arena installation, executor semantics, measured WCET/deadline
+analysis, protocol routes, and resource opcodes remain later M9 slices. No
+arbitrary graph document is sent to or interpreted by firmware.

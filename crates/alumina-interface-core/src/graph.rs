@@ -13,6 +13,7 @@ use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
 mod analysis;
+mod deployment;
 mod document;
 mod simulation;
 mod storage;
@@ -26,6 +27,11 @@ pub use analysis::{
     InputConnectionRequirement, NodeInputChannelContract, NodeInputChannelKind,
     NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract, NodeRegistryError,
     NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind, analyze_graph,
+};
+pub use deployment::{
+    GraphDeploymentError, GraphDeploymentImplementation, GraphDeploymentLimits,
+    GraphDeploymentNodeKind, GraphDeploymentRegistry, GraphDeploymentReport, GraphDeploymentTarget,
+    lower_graph_deployment,
 };
 pub use document::{
     ClockDefinition, ClockKind, ExecutionDomain, GraphDocument, GraphDocumentError, GraphNodeId,

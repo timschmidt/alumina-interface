@@ -35,6 +35,8 @@ pub use graph::{
     ExecutionDomainSet, ExternalStreamSample, GRAPH_CHANNEL_ENVELOPE_BYTES, GRAPH_DOCUMENT_MAGIC,
     GRAPH_DOCUMENT_VERSION, GRAPH_TRACE_MAGIC, GRAPH_TRACE_VERSION, GraphAnalysis,
     GraphAnalysisError, GraphAnalysisLimits, GraphChannelAllocation, GraphClockId, GraphClockRate,
+    GraphDeploymentError, GraphDeploymentImplementation, GraphDeploymentLimits,
+    GraphDeploymentNodeKind, GraphDeploymentRegistry, GraphDeploymentReport, GraphDeploymentTarget,
     GraphDocument, GraphDocumentError, GraphLimits, GraphNodeId, GraphNodeRegistry, GraphPortId,
     GraphRateTransition, GraphReplay, GraphSchema, GraphSchemaError, GraphSimulation,
     GraphSimulationError, GraphSimulationHorizon, GraphSimulationImplementation,
@@ -47,8 +49,8 @@ pub use graph::{
     NodeStateAllocation, NodeStateContract, PortDefinition, RateTransitionKind, RecordField,
     RecordFieldId, RecordValueField, ResourceClassId, ResourceGraphHandle, TypeDefinition,
     TypeKind, TypedGraphValue, UnitDefinition, UnitId, WireDefinition, WireEndpoint, analyze_graph,
-    encode_graph_document, encode_graph_trace, replay_graph_document, replay_graph_trace,
-    simulate_graph,
+    encode_graph_document, encode_graph_trace, lower_graph_deployment, replay_graph_document,
+    replay_graph_trace, simulate_graph,
 };
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
