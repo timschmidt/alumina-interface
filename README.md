@@ -108,6 +108,10 @@ prototype.
   safety-gated Service tick-zero priming, unique Service/Realtime owners, and
   1 kHz→500 Hz queue/latest/sink execution reproduce the expected Boolean
   samples without a graph-document interpreter or physical side effect.
+- The headless and WASM clients publish that fixed package, reconcile independent
+  dual-core installation, and drive exact future start/stop epochs. Running is
+  reported only after both permanent actors and the shared bridge agree; the
+  first execution fault is retained while an exact stop is reconciled.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is

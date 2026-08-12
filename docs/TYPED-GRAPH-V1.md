@@ -240,10 +240,15 @@ the sibling `FixedGraphRuntime<0, 5, 0, 21, 42>`. It transactionally admits the
 package, primes Service release tick zero before core-1 ownership, splits unique
 Service/Realtime state and queues, then executes the 1 kHz constant and 500 Hz
 latest/sink releases with exact expected values and no fault. This proves the
-portable compiler/runtime contract, not a live firmware route or target timing.
-There is still no authenticated upload/core transfer, active/candidate
-replacement, composed board task, resource claim, GPIO or motor opcode,
-deadline monitor, or physical timing evidence.
+portable compiler/runtime contract. The same fixed package can now be published
+to SD, independently admitted by both live firmware cores, and installed into
+permanent core-local actors. `GraphRunMachine` sends one authenticated exact
+future epoch, treats request acceptance separately from both actors reporting
+Running, reconciles exact stop, rejects foreign run identity, and retains the
+first fault report across firmware-latch reset. The pinned Embassy tasks enforce
+the declared release reserve as a lateness boundary. This remains resource-free
+functional execution: there is no durable active selector, resource claim, GPIO
+or motor opcode, measured deadline/WCET result, or physical timing evidence.
 
 ## Canonical bytes and replay
 
