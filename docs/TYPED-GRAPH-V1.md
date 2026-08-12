@@ -211,11 +211,24 @@ is `5, 5, 4, 2, 3, 3` mm, and dropping permit forces the final trace to
 `5, 5, 4, 0, 0, 0` mm. Reversing every caller sample reproduces the same
 simulation, and `ALGT` replay regenerates the complete trace byte for byte.
 The canonical fixture graph identity is
-`cd99124ff57d181830c71e0a79ed0d1f030e319f73e8bfe93569d41b2cb5a921`;
+`fb173fb30bc5e04269caea439dea8fa455050142fac3a4afc78f5fd16e7ac59a`;
 its fixed semantic/implementation registry identity is
 `6bb6f814941b632ac5c9858fbbfe599fe8febb3a04b4dcc7bf4fbc8ac2f61537`.
 The 7,836-byte trace has SHA-256
-`9ad6e174717880b9c7e522c8f4b1cf69c905444dc1c19bd4c1518253762dddb9`.
+`4d9b63633be3afc658cac8d6475d6ede602568ab084de005ac5dd2dfcb7542a3`.
+
+The fixture is one fallible public core construction shared by its regression
+test and the native/WASM application; the UI does not reproduce its values or
+topology. The initial inspector independently caps presentation at 256 nodes,
+1,024 wires, and 4,096 points per selected series. It ranks nodes from audited
+current-tick dependencies, excludes only declared next-state captures from that
+acyclic rank, and routes those captures visibly as feedback. Node selection
+exposes kind/version, typed ports, exact parameters, and explicit state facts.
+Four traces show error, integral prior state, clamped controller, and
+permit-gated output. Egui coordinates and plot labels are named display
+projections from certified finite `f64` enclosures; the hover cursor displays
+the retained exact rational. A headless full-frame test exercises the same
+native/browser render path.
 
 The fixed host subset still does not model resource handles, physical side
 effects, Service/Realtime execution, deadlines, or firmware layout.

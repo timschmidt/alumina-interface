@@ -13,6 +13,7 @@ use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
 mod analysis;
+mod control_fixture;
 mod deployment;
 mod document;
 mod simulation;
@@ -27,6 +28,10 @@ pub use analysis::{
     InputConnectionRequirement, NodeInputChannelContract, NodeInputChannelKind,
     NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract, NodeRegistryError,
     NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind, analyze_graph,
+};
+pub use control_fixture::{
+    RepresentativeControlSignal, RepresentativeExactControlError, RepresentativeExactControlGraph,
+    compile_representative_exact_control_graph,
 };
 pub use deployment::{
     GraphDeploymentError, GraphDeploymentImplementation, GraphDeploymentLimits,

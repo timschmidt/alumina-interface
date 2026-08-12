@@ -5,6 +5,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod browser_worker;
 pub mod cache_delivery;
+mod control_graph_ui;
 pub mod distributed_schedule;
 pub mod m7_simulation;
 
@@ -22,6 +23,7 @@ use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 
 #[cfg(target_arch = "wasm32")]
 use crate::browser_worker::{BrowserWorkerSupervisor, SupervisorLifecycle};
+use crate::control_graph_ui::ExactControlWorkspace;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
 #[cfg(target_arch = "wasm32")]
 use alumina_interface_client::worker::{
@@ -52,6 +54,12 @@ impl Default for LiveDeviceForm {
 struct RenderResources {
     program: Option<UnlitProgram>,
     meshes: Vec<GpuColoredMesh>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceView {
+    Geometry,
+    ExactControl,
 }
 
 impl RenderResources {
@@ -123,16 +131,29 @@ impl RenderResources {
     }
 }
 
+fn initialize_exact_control_workspace() -> (Option<ExactControlWorkspace>, Option<String>) {
+    match ExactControlWorkspace::try_new() {
+        Ok(workspace) => (Some(workspace), None),
+        Err(error) => (
+            None,
+            Some(format!("exact control workspace failed: {error}")),
+        ),
+    }
+}
+
 /// Minimal exact-stack application used by native and browser runners.
 pub struct AluminaApp {
+    workspace_view: WorkspaceView,
     scene: ExactScene,
     camera: ExactCamera,
     representative_program: Option<CanonicalPathProgram2>,
     representative_partition: Option<CanonicalMachinePartition2>,
     representative_global_job: Option<CanonicalGlobalJob2>,
     representative_m7_simulation: Option<RepresentativeM7SimulationReport>,
+    exact_control: Option<ExactControlWorkspace>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
+    exact_control_error: Option<String>,
     #[cfg(target_arch = "wasm32")]
     worker: Option<BrowserWorkerSupervisor>,
     #[cfg(target_arch = "wasm32")]
@@ -199,6 +220,7 @@ impl AluminaApp {
                 },
                 None => (None, None),
             };
+        let (exact_control, exact_control_error) = initialize_exact_control_workspace();
         let (resources, renderer_error) = match creation.gl.as_deref() {
             Some(gl) => match unsafe { RenderResources::upload(gl, &scene) } {
                 Ok(resources) => (Some(Arc::new(Mutex::new(resources))), None),
@@ -218,17 +240,20 @@ impl AluminaApp {
             ),
         };
         Self {
+            workspace_view: WorkspaceView::ExactControl,
             scene,
             camera: ExactCamera::default(),
             representative_program,
             representative_partition,
             representative_global_job,
             representative_m7_simulation,
+            exact_control,
             resources,
             setup_error: scene_error
                 .or(compiler_error)
                 .or(simulation_error)
                 .or(renderer_error),
+            exact_control_error,
             #[cfg(target_arch = "wasm32")]
             worker,
             #[cfg(target_arch = "wasm32")]
@@ -460,31 +485,95 @@ impl AluminaApp {
         );
     }
 
-    fn show_status(&self, ui: &mut egui::Ui) {
+    fn show_status(&mut self, ui: &mut egui::Ui) {
         ui.heading("Alumina");
-        ui.label("Greenfield exact CAD/CAM baseline");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.workspace_view,
+                WorkspaceView::Geometry,
+                "Exact geometry",
+            );
+            ui.selectable_value(
+                &mut self.workspace_view,
+                WorkspaceView::ExactControl,
+                "Control graph",
+            );
+        });
         ui.separator();
-        self.show_scene_status(ui);
-        self.show_motion_status(ui);
-        self.show_cached_job_status(ui);
+        match self.workspace_view {
+            WorkspaceView::Geometry => {
+                ui.label("Greenfield exact CAD/CAM baseline");
+                self.show_scene_status(ui);
+                self.show_motion_status(ui);
+                self.show_cached_job_status(ui);
+            }
+            WorkspaceView::ExactControl => match &self.exact_control {
+                Some(workspace) => workspace.show_sidebar(ui),
+                None => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        self.exact_control_error
+                            .as_deref()
+                            .unwrap_or("exact control workspace is unavailable"),
+                    );
+                }
+            },
+        }
+        ui.separator();
         ui.label(format!(
             "Protocol schema: {}",
             alumina_protocol::PROTOCOL_VERSION
         ));
-        let tenth =
-            ExactValue::<Millimetres>::parse_decimal("0.1").expect("static exact decimal is valid");
-        let display =
-            project_for_display(&tenth).expect("small exact value has a finite display projection");
-        ui.label(format!(
-            "Explicit display projection: {:.3} {}",
-            display.get(),
-            ExactValue::<Millimetres>::unit_symbol()
-        ));
-        ui.separator();
-        ui.label("Drag to orbit. Scroll or pinch to zoom.");
-        ui.label("Geometry, CAM, and machine values never originate from this GPU view.");
-        if let Some(error) = &self.setup_error {
-            ui.colored_label(egui::Color32::RED, error);
+        match self.workspace_view {
+            WorkspaceView::Geometry => {
+                let tenth = ExactValue::<Millimetres>::parse_decimal("0.1")
+                    .expect("static exact decimal is valid");
+                let display = project_for_display(&tenth)
+                    .expect("small exact value has a finite display projection");
+                ui.label(format!(
+                    "Explicit display projection: {:.3} {}",
+                    display.get(),
+                    ExactValue::<Millimetres>::unit_symbol()
+                ));
+                ui.separator();
+                ui.label("Drag to orbit. Scroll or pinch to zoom.");
+                ui.label("Geometry, CAM, and machine values never originate from this GPU view.");
+                if let Some(error) = &self.setup_error {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+            }
+            WorkspaceView::ExactControl => {
+                ui.label("Scroll the graph canvas; hover the trace to inspect an exact tick.");
+                ui.label("No graph node shown here can arm or command firmware.");
+            }
+        }
+    }
+
+    fn show_geometry_workspace(&mut self, ui: &mut egui::Ui) {
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+        self.update_camera(ui, &response);
+
+        let Some(resources) = &self.resources else {
+            return;
+        };
+        match self.projection(rect) {
+            Ok(projection) => {
+                let resources = Arc::clone(resources);
+                let callback = egui_glow::CallbackFn::new(move |_info, painter| {
+                    let Ok(resources) = resources.lock() else {
+                        log::error!("render-resource lock was poisoned");
+                        return;
+                    };
+                    if let Err(error) = unsafe { resources.paint(painter.gl(), &projection) } {
+                        log::error!("Hypergraphics paint failed: {error}");
+                    }
+                });
+                ui.painter().add(egui::PaintCallback {
+                    rect,
+                    callback: Arc::new(callback),
+                });
+            }
+            Err(error) => log::warn!("camera projection rejected: {error}"),
         }
     }
 
@@ -713,32 +802,26 @@ impl eframe::App for AluminaApp {
             .default_width(380.0)
             .show(context, |ui| self.show_live_control(ui));
 
-        egui::CentralPanel::default().show(context, |ui| {
-            let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
-            self.update_camera(ui, &response);
-
-            let Some(resources) = &self.resources else {
-                return;
-            };
-            match self.projection(rect) {
-                Ok(projection) => {
-                    let resources = Arc::clone(resources);
-                    let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-                        let Ok(resources) = resources.lock() else {
-                            log::error!("render-resource lock was poisoned");
-                            return;
-                        };
-                        if let Err(error) = unsafe { resources.paint(painter.gl(), &projection) } {
-                            log::error!("Hypergraphics paint failed: {error}");
-                        }
-                    });
-                    ui.painter().add(egui::PaintCallback {
-                        rect,
-                        callback: Arc::new(callback),
+        egui::CentralPanel::default().show(context, |ui| match self.workspace_view {
+            WorkspaceView::Geometry => self.show_geometry_workspace(ui),
+            WorkspaceView::ExactControl => match self.exact_control.as_mut() {
+                Some(workspace) => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("exact_control_workspace_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| workspace.show(ui));
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            self.exact_control_error
+                                .as_deref()
+                                .unwrap_or("exact control workspace is unavailable"),
+                        );
                     });
                 }
-                Err(error) => log::warn!("camera projection rejected: {error}"),
-            }
+            },
         });
     }
 

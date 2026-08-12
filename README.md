@@ -96,6 +96,12 @@ prototype.
   hidden controller state. The bounded simulator uses exact rational clock
   time and unit scales, orders every coincident source tick first, and produces
   the same canonical result regardless of caller sample order.
+- The native and browser shells construct that same fallible core fixture and
+  open a bounded inspector by default: semantic current-tick layers, explicit feedback
+  routes, typed ports, exact parameters/state, and four control traces. Plot
+  coordinates come only from certified `f64` enclosures; the cursor retains
+  and displays the exact rational sample. This is an inspector, not deployment
+  or an arbitrary graph editor.
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
@@ -188,7 +194,8 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, broader deterministic host graph behaviors, and fixed-memory
+views, editable general graph/front-panel workflows, broader deterministic host
+graph behaviors, and fixed-memory
 authenticated Service/Realtime upload/core transfer and task composition,
 additional resource opcodes and capability-generated graph nodes, and physical
 input/timing qualification. Raw G-code remains an optional exact UI importer,
