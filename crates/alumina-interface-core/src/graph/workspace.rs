@@ -12,8 +12,9 @@ use alumina_protocol::Digest;
 use alumina_storage::sha256;
 
 use super::{
-    CanonicalGraphEncoding, GraphDocument, GraphDocumentError, GraphLimits, GraphNodeId,
-    GraphWireError, GraphWireId, WireDefinition, WireEndpoint, encode_graph_document,
+    CanonicalGraphEncoding, ExecutionDomain, GraphDocument, GraphDocumentError, GraphLimits,
+    GraphNodeId, GraphTypeId, GraphWireError, GraphWireId, NodeDefinition, NodeKind, NodeParameter,
+    PortDefinition, TypedGraphValue, WireDefinition, WireEndpoint, encode_graph_document,
     replay_graph_document,
 };
 
@@ -95,6 +96,84 @@ impl GraphNodePlacement {
     /// Return the signed vertical logical-point coordinate.
     pub const fn y(self) -> i32 {
         self.y
+    }
+}
+
+/// Complete node shape supplied to the workspace before it assigns a stable
+/// graph-local identity. A palette should derive these ports and parameter
+/// contracts from an audited [`super::NodeSchema`]; structural workspace
+/// admission deliberately remains independent of that semantic authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphNodePrototype {
+    kind: NodeKind,
+    label: String,
+    domain: ExecutionDomain,
+    inputs: Vec<PortDefinition>,
+    outputs: Vec<PortDefinition>,
+    parameters: Vec<NodeParameter>,
+}
+
+impl GraphNodePrototype {
+    /// Construct a node prototype. The complete candidate graph validates its
+    /// names, domain, ports, parameter values, and bounds transactionally.
+    pub fn new(
+        kind: NodeKind,
+        label: impl Into<String>,
+        domain: ExecutionDomain,
+        inputs: Vec<PortDefinition>,
+        outputs: Vec<PortDefinition>,
+        parameters: Vec<NodeParameter>,
+    ) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            domain,
+            inputs,
+            outputs,
+            parameters,
+        }
+    }
+
+    /// Return the opaque versioned behavior identity.
+    pub const fn kind(&self) -> &NodeKind {
+        &self.kind
+    }
+
+    /// Return the proposed user-facing label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Return requested execution ownership.
+    pub const fn domain(&self) -> ExecutionDomain {
+        self.domain
+    }
+
+    /// Borrow exact proposed input ports.
+    pub fn inputs(&self) -> &[PortDefinition] {
+        &self.inputs
+    }
+
+    /// Borrow exact proposed output ports.
+    pub fn outputs(&self) -> &[PortDefinition] {
+        &self.outputs
+    }
+
+    /// Borrow exact proposed parameters.
+    pub fn parameters(&self) -> &[NodeParameter] {
+        &self.parameters
+    }
+
+    fn into_node(self, id: GraphNodeId) -> NodeDefinition {
+        NodeDefinition::new(
+            id,
+            self.kind,
+            self.label,
+            self.domain,
+            self.inputs,
+            self.outputs,
+            self.parameters,
+        )
     }
 }
 
@@ -226,6 +305,186 @@ impl GraphWorkspaceDocument {
             self.next_wire_id,
             self.graph.clone(),
             placements,
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally create one node at an integer canvas position. The
+    /// workspace, not the caller, assigns the monotonic stable node identity.
+    pub fn create_node(
+        &mut self,
+        prototype: GraphNodePrototype,
+        x: i32,
+        y: i32,
+    ) -> Result<GraphNodeId, GraphWorkspaceError> {
+        validate_coordinate(x, self.limits)?;
+        validate_coordinate(y, self.limits)?;
+        let node_value = u32::try_from(self.next_node_id)
+            .map_err(|_| GraphWorkspaceError::IdentifierExhausted("node"))?;
+        let following_node_id = self
+            .next_node_id
+            .checked_add(1)
+            .filter(|value| *value <= EXHAUSTED_U32_CURSOR)
+            .ok_or(GraphWorkspaceError::IdentifierExhausted("node"))?;
+        let graph_revision = self
+            .graph
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("graph"))?;
+        let workspace_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
+        let id = GraphNodeId::new(node_value);
+        let mut nodes = self.graph.nodes().to_vec();
+        nodes.push(prototype.into_node(id));
+        let graph = GraphDocument::try_new(
+            graph_revision,
+            self.graph.schema().clone(),
+            self.graph.clocks().to_vec(),
+            nodes,
+            self.graph.wires().to_vec(),
+        )?;
+        let mut placements = self.placements.clone();
+        placements.push(GraphNodePlacement::new(id, x, y));
+        let candidate = Self::try_new(
+            self.limits,
+            workspace_revision,
+            following_node_id,
+            self.next_wire_id,
+            graph,
+            placements,
+        )?;
+        *self = candidate;
+        Ok(id)
+    }
+
+    /// Transactionally remove one node, its placement, and all incident wires.
+    /// Neither the node nor wire allocation cursor is rewound.
+    pub fn delete_node(&mut self, id: GraphNodeId) -> Result<usize, GraphWorkspaceError> {
+        if self.graph.node(id).is_none() {
+            return Err(GraphWorkspaceError::UnknownNode(id));
+        }
+        let graph_revision = self
+            .graph
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("graph"))?;
+        let workspace_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
+        let nodes = self
+            .graph
+            .nodes()
+            .iter()
+            .filter(|node| node.id() != id)
+            .cloned()
+            .collect();
+        let wires: Vec<_> = self
+            .graph
+            .wires()
+            .iter()
+            .copied()
+            .filter(|wire| wire.source().node != id && wire.target().node != id)
+            .collect();
+        let removed_wires = self.graph.wires().len() - wires.len();
+        let graph = GraphDocument::try_new(
+            graph_revision,
+            self.graph.schema().clone(),
+            self.graph.clocks().to_vec(),
+            nodes,
+            wires,
+        )?;
+        let placements = self
+            .placements
+            .iter()
+            .copied()
+            .filter(|placement| placement.node != id)
+            .collect();
+        let candidate = Self::try_new(
+            self.limits,
+            workspace_revision,
+            self.next_node_id,
+            self.next_wire_id,
+            graph,
+            placements,
+        )?;
+        *self = candidate;
+        Ok(removed_wires)
+    }
+
+    /// Transactionally replace one exact parameter value while preserving its
+    /// stable ID, name, and registered root type.
+    pub fn set_parameter(
+        &mut self,
+        node_id: GraphNodeId,
+        parameter_id: u32,
+        value: TypedGraphValue,
+    ) -> Result<(), GraphWorkspaceError> {
+        let node = self
+            .graph
+            .node(node_id)
+            .ok_or(GraphWorkspaceError::UnknownNode(node_id))?;
+        let mut parameters = node.parameters().to_vec();
+        let parameter = parameters
+            .iter_mut()
+            .find(|parameter| parameter.id() == parameter_id)
+            .ok_or(GraphWorkspaceError::UnknownParameter {
+                node: node_id,
+                parameter: parameter_id,
+            })?;
+        let expected = parameter.value().value_type();
+        let received = value.value_type();
+        if expected != received {
+            return Err(GraphWorkspaceError::ParameterTypeMismatch { expected, received });
+        }
+        *parameter = NodeParameter::new(parameter.id(), parameter.name(), value);
+        let replacement = NodeDefinition::new(
+            node.id(),
+            node.kind().clone(),
+            node.label(),
+            node.domain(),
+            node.inputs().to_vec(),
+            node.outputs().to_vec(),
+            parameters,
+        );
+        let graph_revision = self
+            .graph
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("graph"))?;
+        let workspace_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
+        let nodes = self
+            .graph
+            .nodes()
+            .iter()
+            .map(|node| {
+                if node.id() == node_id {
+                    replacement.clone()
+                } else {
+                    node.clone()
+                }
+            })
+            .collect();
+        let graph = GraphDocument::try_new(
+            graph_revision,
+            self.graph.schema().clone(),
+            self.graph.clocks().to_vec(),
+            nodes,
+            self.graph.wires().to_vec(),
+        )?;
+        let candidate = Self::try_new(
+            self.limits,
+            workspace_revision,
+            self.next_node_id,
+            self.next_wire_id,
+            graph,
+            self.placements.clone(),
         )?;
         *self = candidate;
         Ok(())
@@ -398,6 +657,20 @@ pub enum GraphWorkspaceError {
     IdentifierExhausted(&'static str),
     /// A requested wire did not exist.
     UnknownWire(GraphWireId),
+    /// A requested node-local parameter did not exist.
+    UnknownParameter {
+        /// Owning node identity.
+        node: GraphNodeId,
+        /// Node-local parameter identity.
+        parameter: u32,
+    },
+    /// A parameter edit attempted to change its registered root type.
+    ParameterTypeMismatch {
+        /// Retained parameter type.
+        expected: GraphTypeId,
+        /// Proposed parameter type.
+        received: GraphTypeId,
+    },
     /// A graph or workspace revision could not advance.
     RevisionOverflow(&'static str),
     /// Embedded `ALGR` encoding/replay failed.
@@ -464,6 +737,18 @@ impl fmt::Display for GraphWorkspaceError {
             }
             Self::UnknownWire(wire) => {
                 write!(formatter, "graph workspace wire {wire:?} is unknown")
+            }
+            Self::UnknownParameter { node, parameter } => {
+                write!(
+                    formatter,
+                    "graph workspace node {node:?} parameter {parameter} is unknown"
+                )
+            }
+            Self::ParameterTypeMismatch { expected, received } => {
+                write!(
+                    formatter,
+                    "graph workspace parameter type {received:?} does not match {expected:?}"
+                )
             }
             Self::RevisionOverflow(kind) => {
                 write!(formatter, "graph workspace {kind} revision is exhausted")
@@ -782,9 +1067,10 @@ impl<'a> Decoder<'a> {
 mod tests {
     use super::*;
     use crate::graph::{
-        GraphPortId, RepresentativeControlSignal, analyze_graph,
+        GraphPortId, GraphValue, RepresentativeControlSignal, analyze_graph,
         compile_representative_exact_control_graph,
     };
+    use hyperreal::Rational;
 
     fn placements(graph: &GraphDocument) -> Vec<GraphNodePlacement> {
         graph
@@ -809,6 +1095,17 @@ mod tests {
             placements(fixture.document()),
         )
         .unwrap()
+    }
+
+    fn prototype(node: &NodeDefinition, label: &str) -> GraphNodePrototype {
+        GraphNodePrototype::new(
+            node.kind().clone(),
+            label,
+            node.domain(),
+            node.inputs().to_vec(),
+            node.outputs().to_vec(),
+            node.parameters().to_vec(),
+        )
     }
 
     #[test]
@@ -917,6 +1214,163 @@ mod tests {
             fixture.simulation().graph_digest()
         );
         analyze_graph(workspace.graph(), fixture.registry().semantic_registry()).unwrap();
+    }
+
+    #[test]
+    fn node_creation_and_deletion_are_atomic_and_never_reuse_identities() {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let mut workspace = workspace();
+        let retained = workspace.clone();
+        assert_eq!(
+            workspace
+                .create_node(
+                    prototype(
+                        fixture.document().node(GraphNodeId::new(8)).unwrap(),
+                        "New scale"
+                    ),
+                    i32::MAX,
+                    0,
+                )
+                .unwrap_err(),
+            GraphWorkspaceError::LimitExceeded("canvas coordinate")
+        );
+        assert_eq!(workspace, retained);
+
+        let created = workspace
+            .create_node(
+                prototype(
+                    fixture.document().node(GraphNodeId::new(8)).unwrap(),
+                    "New scale",
+                ),
+                6_000,
+                40,
+            )
+            .unwrap();
+        assert_eq!(created, GraphNodeId::new(20));
+        assert_eq!(workspace.next_node_id(), 21);
+        assert_eq!(workspace.next_wire_id(), 23);
+        assert_eq!(workspace.graph().revision(), 2);
+        assert_eq!(workspace.revision(), 8);
+        assert_eq!(
+            workspace.placement(created),
+            Some(GraphNodePlacement::new(created, 6_000, 40))
+        );
+
+        assert_eq!(workspace.delete_node(GraphNodeId::new(18)).unwrap(), 3);
+        assert!(workspace.graph().node(GraphNodeId::new(18)).is_none());
+        assert_eq!(workspace.graph().wires().len(), 19);
+        assert_eq!(workspace.next_node_id(), 21);
+        assert_eq!(workspace.next_wire_id(), 23);
+        assert_eq!(workspace.graph().revision(), 3);
+        assert_eq!(workspace.revision(), 9);
+
+        let retained = workspace.clone();
+        assert_eq!(
+            workspace.delete_node(GraphNodeId::new(99)).unwrap_err(),
+            GraphWorkspaceError::UnknownNode(GraphNodeId::new(99))
+        );
+        assert_eq!(workspace, retained);
+        let encoding = encode_graph_workspace(&workspace).unwrap();
+        assert_eq!(
+            replay_graph_workspace(
+                encoding.bytes(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &workspace
+        );
+    }
+
+    #[test]
+    fn exact_parameter_edits_preserve_contract_type_and_fail_transactionally() {
+        let mut workspace = workspace();
+        let factor_type = workspace
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let exact = TypedGraphValue::try_new(
+            workspace.graph().schema(),
+            factor_type,
+            GraphValue::ExactRational(Rational::fraction(3, 2).unwrap()),
+        )
+        .unwrap();
+        workspace
+            .set_parameter(GraphNodeId::new(8), 1, exact)
+            .unwrap();
+        assert_eq!(workspace.graph().revision(), 2);
+        assert_eq!(workspace.revision(), 8);
+        assert_eq!(
+            workspace
+                .graph()
+                .node(GraphNodeId::new(8))
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value(),
+            &GraphValue::ExactRational(Rational::fraction(3, 2).unwrap())
+        );
+
+        let retained = workspace.clone();
+        let other_type = workspace
+            .graph()
+            .node(GraphNodeId::new(9))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let wrong_type = TypedGraphValue::try_new(
+            workspace.graph().schema(),
+            other_type,
+            GraphValue::ExactRational(Rational::from(4)),
+        )
+        .unwrap();
+        assert_eq!(
+            workspace
+                .set_parameter(GraphNodeId::new(8), 1, wrong_type)
+                .unwrap_err(),
+            GraphWorkspaceError::ParameterTypeMismatch {
+                expected: factor_type,
+                received: other_type,
+            }
+        );
+        assert_eq!(workspace, retained);
+        assert_eq!(
+            workspace
+                .set_parameter(
+                    GraphNodeId::new(8),
+                    99,
+                    workspace
+                        .graph()
+                        .node(GraphNodeId::new(8))
+                        .unwrap()
+                        .parameters()[0]
+                        .value()
+                        .clone(),
+                )
+                .unwrap_err(),
+            GraphWorkspaceError::UnknownParameter {
+                node: GraphNodeId::new(8),
+                parameter: 99,
+            }
+        );
+        assert_eq!(workspace, retained);
+
+        let encoding = encode_graph_workspace(&workspace).unwrap();
+        assert_eq!(
+            replay_graph_workspace(
+                encoding.bytes(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &workspace
+        );
     }
 
     #[test]

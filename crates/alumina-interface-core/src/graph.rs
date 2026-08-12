@@ -60,8 +60,8 @@ pub use wire::{
 };
 pub use workspace::{
     CanonicalGraphWorkspaceEncoding, GRAPH_WORKSPACE_MAGIC, GRAPH_WORKSPACE_VERSION,
-    GraphNodePlacement, GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits,
-    GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
+    GraphNodePlacement, GraphNodePrototype, GraphWorkspaceDocument, GraphWorkspaceError,
+    GraphWorkspaceLimits, GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
 };
 
 /// Stable identifier for one registered physical unit.

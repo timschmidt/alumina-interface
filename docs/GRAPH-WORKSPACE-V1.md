@@ -49,37 +49,60 @@ It embeds graph identity
 
 ## Transactional editing
 
-`GraphWorkspaceDocument` currently exposes three edits:
+`GraphWorkspaceDocument` exposes six transactional edits:
 
 - move one node, advancing only workspace revision;
-- connect one typed output to one unowned input with the monotonic wire ID; and
-- disconnect one existing wire without rewinding the ID cursor.
+- create one complete node prototype and placement with the monotonic node ID;
+- delete one node, its placement, and every incident wire without rewinding
+  either ID cursor;
+- connect one typed output to one unowned input with the monotonic wire ID;
+- disconnect one existing wire without rewinding the ID cursor; and
+- replace one exact parameter value while preserving its stable parameter ID,
+  name, and registered root type.
 
 Each operation constructs and validates a complete candidate before replacing
 the prior document. Rejected coordinates, missing IDs, exhausted counters,
-wrong port direction/type, duplicate target ownership, or revision overflow
-leave the workspace byte-for-byte unchanged. Structural wire edits also advance
-the embedded graph revision and therefore change its canonical digest.
+wrong port direction/type, duplicate target ownership, parameter type drift, or
+revision overflow leave the workspace byte-for-byte unchanged. Node, wire, and
+parameter edits also advance the embedded graph revision and therefore change
+its canonical digest.
 
 The native/WASM control workspace initializes one canonical `ALGW` from the
-audited deterministic layout. Nodes can be dragged, an output then input can be
-clicked to connect, and an input can be secondary-clicked to disconnect. The UI
-rebuilds semantic layering and reruns audited analysis after each candidate. A
-temporarily disconnected required input is retained as an explicit semantic
-blocker rather than hidden or repaired. A current-tick combinational cycle that
-cannot be laid out is rejected without mutation.
+audited deterministic layout. Its 11-entry palette is derived from the fixed
+simulation registry: kind/version, ports, and parameter contracts come from
+the audited node schema, while each exact initial parameter value comes from
+the lowest-ID reviewed representative instance of that kind. A kind without a
+fixed implementation or reviewed default prevents the palette from opening.
+The palette never manufactures an implicit resource, device domain, parameter,
+or port.
+
+Nodes can be created, selected, deleted, and dragged; an output then input can
+be clicked to connect, and an input can be secondary-clicked to disconnect.
+The first parameter surface accepts bounded Boolean, exact-rational,
+measurement-interval, canonical signed/unsigned lattice-count, and text
+literals. Every current representative-control parameter is exact rational.
+Hyperreal parses the bounded text exactly, the graph schema validates the
+result, and canonical `ALGR` encoding stores the normalized value without a
+floating-point conversion. Composite and identity-bearing literal shapes
+remain visibly read-only.
+
+The UI rebuilds semantic layering and reruns audited analysis after each
+candidate. A newly created or disconnected required input is retained as an
+explicit semantic blocker rather than hidden or repaired. A current-tick
+combinational cycle that cannot be laid out is rejected without mutation. An
+empty draft remains renderable and can accept a new palette node.
 
 The existing `ALGT` reference trace remains visible after placement-only edits
-because its embedded `ALGR` digest is unchanged. Any structural edit detaches
-and hides that trace: trace bytes are never relabeled as evidence for a graph
-they did not simulate. Reset reconstructs the reviewed reference graph and
-layout.
+because its embedded `ALGR` digest is unchanged. Any node, wire, or parameter
+edit detaches and hides that trace: trace bytes are never relabeled as evidence
+for a graph they did not simulate. Reset reconstructs the reviewed reference
+graph and layout.
 
 ## Current exclusions
 
-The workspace is currently in memory. File download/upload, browser persistence,
-undo/redo history, node insertion/deletion, parameter editing, selection sets,
-groups/comments, subgraphs/components, front panels, and collaborative diffs
-remain later slices. `ALGW` grants no semantic admission, implementation,
-Service/Realtime opcode, resource, deployment, safety, or physical-output
-authority.
+The workspace is currently in memory. File download/upload, browser
+persistence, undo/redo history, node label/domain editing, composite and
+identity-bearing parameter editors, selection sets, groups/comments,
+subgraphs/components, front panels, and collaborative diffs remain later
+slices. `ALGW` grants no semantic admission, implementation, Service/Realtime
+opcode, resource, deployment, safety, or physical-output authority.

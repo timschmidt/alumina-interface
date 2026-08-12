@@ -232,17 +232,25 @@ topology. The initial workspace independently caps presentation at 256 nodes,
 current-tick dependencies, excludes only declared next-state captures from that
 acyclic rank, and routes those captures visibly as feedback. Its canonical
 `ALGW` envelope retains one bounded integer position per node and monotonic
-identity cursors. Node drags and typed wire connect/disconnect operations replace
-the draft only after complete candidate validation; structural edits detach the
-reference trace because its `ALGT` identity still binds the reviewed graph.
+identity cursors. An 11-entry palette derives kind/version and port/parameter
+shape from the fixed audited schemas and exact defaults from reviewed fixture
+instances. Monotonic node creation, atomic node/incident-wire deletion, node
+drags, typed wire connect/disconnect, and exact scalar parameter replacement
+replace the draft only after complete candidate validation. Any embedded graph
+edit detaches the reference trace because its `ALGT` identity still binds the
+reviewed graph; placement-only edits preserve it.
 The initial 3,396-byte workspace has SHA-256
 `d7d4ef9e27359a474b59f48cdbcb604b3d4d16f2a768a65f12c95dde8aee9799`.
 Node selection exposes kind/version, typed ports, exact parameters, and explicit
-state facts. Four traces show error, integral prior state, clamped controller,
-and permit-gated output. Egui coordinates and plot labels are named display
-projections from certified finite `f64` enclosures; the hover cursor displays
-the retained exact rational. Headless core-edit and full-frame tests exercise
-the same native/browser paths.
+state facts. Current exact-rational parameters can be entered as bounded
+Hyperreal text and are normalized into the canonical graph with no floating
+conversion; Boolean, measurement-interval, canonical integer, and text scalar
+shapes share that editor boundary, while composite and identity-bearing values
+remain read-only. Four traces show error, integral prior state, clamped
+controller, and permit-gated output. Egui coordinates and plot labels are named
+display projections from certified finite `f64` enclosures; the hover cursor
+displays the retained exact rational. Headless core-edit and full-frame tests
+exercise the same native/browser paths.
 
 The fixed host subset still does not model resource handles, physical side
 effects, Service/Realtime execution, deadlines, or firmware layout.
@@ -373,7 +381,8 @@ deployed graph IR V2 has one capability-bound Service/Realtime lowering and
 portable executor; arbitrary documents remain non-executable.
 Subgraphs/components, multi-value state records, queue timeouts and additional
 policies, cases/loops/state machines, front panels, capability-generated editor
-nodes, broader resource claims, general host implementation admission, measured
-WCET/deadline analysis, physical HIL, output and motion opcodes, and
-protocol-resource nodes remain later M9 slices. No arbitrary graph document is
-sent to or interpreted by firmware.
+nodes, composite/identity-bearing parameter and label/domain editors, workspace
+history/persistence, broader resource claims, general host implementation
+admission, measured WCET/deadline analysis, physical HIL, output and motion
+opcodes, and protocol-resource nodes remain later M9 slices. No arbitrary graph
+document is sent to or interpreted by firmware.

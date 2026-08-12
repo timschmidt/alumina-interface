@@ -8,12 +8,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use alumina_interface_core::graph::{
     CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphDocument, GraphNodeId,
-    GraphNodePlacement, GraphSimulationRegistry, GraphTraceEntryKind, GraphValue, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceLimits, NodeDefinition, RepresentativeControlSignal,
-    RepresentativeExactControlGraph, TypeKind, WireEndpoint, analyze_graph,
+    GraphNodePlacement, GraphNodePrototype, GraphSimulationRegistry, GraphTraceEntryKind,
+    GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceLimits,
+    NodeDefinition, NodeParameter, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    TypeKind, TypedGraphValue, WireEndpoint, analyze_graph,
     compile_representative_exact_control_graph, encode_graph_workspace,
 };
 use eframe::egui;
+use hyperreal::Rational;
 
 const MAXIMUM_VISIBLE_NODES: usize = 256;
 const MAXIMUM_VISIBLE_WIRES: usize = 1_024;
@@ -24,6 +26,10 @@ const NODE_GAP: f32 = 24.0;
 const CANVAS_MARGIN: f32 = 28.0;
 const NODE_HEADER_HEIGHT: f32 = 48.0;
 const PORT_ROW_HEIGHT: f32 = 20.0;
+const NEW_NODE_X_GAP: i32 = 300;
+const NEW_NODE_ORIGIN: i32 = 28;
+const EMPTY_CANVAS_WIDTH: f32 = 720.0;
+const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
 const SIGNALS: [RepresentativeControlSignal; 4] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
@@ -55,6 +61,12 @@ struct NodeDrag {
     origin: GraphNodePlacement,
 }
 
+#[derive(Clone, Debug)]
+struct NodePaletteEntry {
+    display_name: String,
+    prototype: GraphNodePrototype,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PortEdit {
     SelectOutput(WireEndpoint),
@@ -82,6 +94,9 @@ pub(crate) struct ExactControlWorkspace {
     workspace_encoding: CanonicalGraphWorkspaceEncoding,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
+    palette: Vec<NodePaletteEntry>,
+    palette_index: usize,
+    parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
     selected_node: Option<GraphNodeId>,
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
@@ -95,12 +110,16 @@ impl ExactControlWorkspace {
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let traces = trace_series(&fixture)?;
+        let palette = control_palette(&fixture)?;
         Ok(Self {
             fixture,
             workspace,
             workspace_encoding,
             presentation,
             traces,
+            palette,
+            palette_index: 0,
+            parameter_drafts: BTreeMap::new(),
             selected_node: None,
             pending_source: None,
             drag: None,
@@ -172,7 +191,7 @@ impl ExactControlWorkspace {
                 if trace_current {
                     "canonical reference replay attached"
                 } else {
-                    "draft topology changed; reference replay detached"
+                    "draft graph changed; reference replay detached"
                 },
             );
             if ui.small_button("reset draft").clicked() {
@@ -180,8 +199,9 @@ impl ExactControlWorkspace {
             }
         });
         ui.label(
-            "Drag node headers to record integer canvas positions in the in-memory ALGW draft. Click an output then an input to connect; secondary-click an input to disconnect. Editing never arms or commands firmware.",
+            "Add audited node kinds, drag headers onto the integer canvas, edit exact parameters, and connect typed ports in the in-memory ALGW draft. Secondary-click an input to disconnect. Editing never arms or commands firmware.",
         );
+        self.show_palette(ui);
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(egui::Color32::from_rgb(96, 169, 232), "— exact Stream");
             ui.colored_label(egui::Color32::from_rgb(241, 178, 84), "— Boolean Stream");
@@ -211,6 +231,29 @@ impl ExactControlWorkspace {
                 egui::Color32::YELLOW,
                 "The exact trace is hidden because ALGT binds the unedited reference graph. Reset the draft or simulate a newly reviewed graph before plotting it.",
             );
+        }
+    }
+
+    fn show_palette(&mut self, ui: &mut egui::Ui) {
+        let selected = self
+            .palette
+            .get(self.palette_index)
+            .map_or("palette unavailable", |entry| entry.display_name.as_str());
+        let mut add_requested = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Audited node palette");
+            egui::ComboBox::from_id_salt("exact_control_node_palette")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (index, entry) in self.palette.iter().enumerate() {
+                        ui.selectable_value(&mut self.palette_index, index, &entry.display_name);
+                    }
+                });
+            add_requested = ui.small_button("add node").clicked();
+            ui.weak(format!("{} fixed HostExact kinds", self.palette.len()));
+        });
+        if add_requested {
+            self.add_palette_node();
         }
     }
 
@@ -514,14 +557,120 @@ impl ExactControlWorkspace {
                 self.workspace = workspace;
                 self.workspace_encoding = encoding;
                 self.presentation = presentation;
+                self.selected_node = None;
                 self.pending_source = None;
                 self.drag = None;
+                self.parameter_drafts.clear();
                 "draft reset to the canonical reference graph and layout"
                     .clone_into(&mut self.edit_status);
             }
             Err(error) => {
                 self.edit_status = format!("draft reset failed without mutation: {error}");
             }
+        }
+    }
+
+    fn add_palette_node(&mut self) {
+        let Some(entry) = self.palette.get(self.palette_index).cloned() else {
+            "node creation rejected without mutation: palette selection is unavailable"
+                .clone_into(&mut self.edit_status);
+            return;
+        };
+        let (x, y) = match new_node_position(&self.workspace) {
+            Ok(position) => position,
+            Err(error) => {
+                self.edit_status = format!("node creation rejected without mutation: {error}");
+                return;
+            }
+        };
+        let mut candidate = self.workspace.clone();
+        let id = match candidate.create_node(entry.prototype, x, y) {
+            Ok(id) => id,
+            Err(error) => {
+                self.edit_status = format!("node creation rejected without mutation: {error}");
+                return;
+            }
+        };
+        if self.commit_candidate(
+            candidate,
+            &format!(
+                "created {} as node {} at canonical canvas ({x}, {y})",
+                entry.display_name,
+                id.get()
+            ),
+        ) {
+            self.selected_node = Some(id);
+            self.pending_source = None;
+        }
+    }
+
+    fn delete_selected_node(&mut self, id: GraphNodeId) {
+        let mut candidate = self.workspace.clone();
+        let removed_wires = match candidate.delete_node(id) {
+            Ok(count) => count,
+            Err(error) => {
+                self.edit_status = format!("node deletion rejected without mutation: {error}");
+                return;
+            }
+        };
+        if self.commit_candidate(
+            candidate,
+            &format!(
+                "deleted node {} and {removed_wires} incident wire(s) without reusing identities",
+                id.get()
+            ),
+        ) {
+            self.selected_node = None;
+            self.pending_source = self.pending_source.filter(|source| source.node != id);
+            self.parameter_drafts.retain(|(node, _), _| *node != id);
+        }
+    }
+
+    fn commit_parameter_text(&mut self, node_id: GraphNodeId, parameter_id: u32, text: &str) {
+        let Some(parameter) = self
+            .workspace
+            .graph()
+            .node(node_id)
+            .and_then(|node| {
+                node.parameters()
+                    .iter()
+                    .find(|parameter| parameter.id() == parameter_id)
+            })
+            .cloned()
+        else {
+            self.edit_status = format!(
+                "parameter edit rejected without mutation: node {} parameter {parameter_id} is unavailable",
+                node_id.get()
+            );
+            return;
+        };
+        let value = match parse_parameter_text(
+            self.workspace.graph(),
+            parameter.value().value_type(),
+            text,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.edit_status = format!("parameter edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        let canonical = parameter_edit_text(value.value()).unwrap_or_else(|| text.to_owned());
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.set_parameter(node_id, parameter_id, value) {
+            self.edit_status = format!("parameter edit rejected without mutation: {error}");
+            return;
+        }
+        if self.commit_candidate(
+            candidate,
+            &format!(
+                "set node {} parameter {} to exact canonical {canonical}",
+                node_id.get(),
+                parameter.name()
+            ),
+        ) {
+            self.parameter_drafts
+                .insert((node_id, parameter_id), canonical);
         }
     }
 
@@ -661,6 +810,14 @@ impl ExactControlWorkspace {
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
+        self.selected_node = self
+            .selected_node
+            .filter(|node| self.workspace.graph().node(*node).is_some());
+        self.pending_source = self
+            .pending_source
+            .filter(|source| self.workspace.graph().node(source.node).is_some());
+        self.parameter_drafts
+            .retain(|(node, _), _| self.workspace.graph().node(*node).is_some());
         self.edit_status = format!("{success}; {semantic}");
         true
     }
@@ -673,6 +830,16 @@ impl ExactControlWorkspace {
         let Some(node) = self.workspace.graph().node(id).cloned() else {
             return;
         };
+        let document = self.workspace.graph().clone();
+        let placement = self.workspace.placement(id);
+        let state = self
+            .fixture
+            .registry()
+            .semantic_registry()
+            .schema(node.kind())
+            .and_then(alumina_interface_core::graph::NodeSchema::state);
+        let mut delete_requested = false;
+        let mut parameter_request = None;
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.strong(format!("#{} {}", id.get(), node.label()));
@@ -680,9 +847,10 @@ impl ExactControlWorkspace {
                 if ui.small_button("clear").clicked() {
                     self.selected_node = None;
                 }
+                delete_requested = ui.small_button("delete node + wires").clicked();
             });
             ui.label(format!("Execution domain: {}", domain_label(node.domain())));
-            if let Some(placement) = self.workspace.placement(id) {
+            if let Some(placement) = placement {
                 ui.monospace(format!(
                     "canvas = ({}, {}) logical px · presentation only",
                     placement.x(),
@@ -691,26 +859,43 @@ impl ExactControlWorkspace {
             }
             ui.horizontal_wrapped(|ui| {
                 for port in node.inputs() {
-                    ui.monospace(port_description(self.workspace.graph(), "in", port));
+                    ui.monospace(port_description(&document, "in", port));
                 }
                 for port in node.outputs() {
-                    ui.monospace(port_description(self.workspace.graph(), "out", port));
+                    ui.monospace(port_description(&document, "out", port));
                 }
             });
             for parameter in node.parameters() {
-                ui.monospace(format!(
-                    "{} = {}",
-                    parameter.name(),
-                    typed_value_text(self.workspace.graph(), parameter.value())
-                ));
+                let Some(initial) = parameter_edit_text(parameter.value().value()) else {
+                    ui.monospace(format!(
+                        "{} = {} · read-only literal shape",
+                        parameter.name(),
+                        typed_value_text(&document, parameter.value())
+                    ));
+                    continue;
+                };
+                let maximum = parameter_text_limit(&document, parameter.value().value_type());
+                let draft = self
+                    .parameter_drafts
+                    .entry((id, parameter.id()))
+                    .or_insert(initial);
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(format!("{}:", parameter.name()));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(draft)
+                            .desired_width(180.0)
+                            .char_limit(maximum),
+                    );
+                    let apply = ui.small_button("apply exact").clicked()
+                        || (response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                    ui.weak(typed_value_text(&document, parameter.value()));
+                    if apply {
+                        parameter_request = Some((parameter.id(), draft.clone()));
+                    }
+                });
             }
-            if let Some(state) = self
-                .fixture
-                .registry()
-                .semantic_registry()
-                .schema(node.kind())
-                .and_then(alumina_interface_core::graph::NodeSchema::state)
-            {
+            if let Some(state) = state {
                 ui.label(format!(
                     "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
                     state.clock().get(),
@@ -719,6 +904,11 @@ impl ExactControlWorkspace {
                 ));
             }
         });
+        if delete_requested {
+            self.delete_selected_node(id);
+        } else if let Some((parameter, text)) = parameter_request {
+            self.commit_parameter_text(id, parameter, &text);
+        }
     }
 
     fn show_trace(&mut self, ui: &mut egui::Ui) {
@@ -814,6 +1004,219 @@ impl ExactControlWorkspace {
     }
 }
 
+fn control_palette(
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<Vec<NodePaletteEntry>, String> {
+    let registry = fixture.registry();
+    let semantic = registry.semantic_registry();
+    let mut palette = Vec::with_capacity(semantic.schemas().len());
+    for schema in semantic.schemas() {
+        if registry.implementation(schema.kind()).is_none() {
+            return Err(format!(
+                "audited palette kind {} v{} has no fixed simulation implementation",
+                schema.kind().name(),
+                schema.kind().version()
+            ));
+        }
+        let exemplar = fixture
+            .document()
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == schema.kind())
+            .ok_or_else(|| {
+                format!(
+                    "audited palette kind {} v{} has no reviewed default instance",
+                    schema.kind().name(),
+                    schema.kind().version()
+                )
+            })?;
+        if exemplar.inputs() != schema.inputs()
+            || exemplar.outputs() != schema.outputs()
+            || !schema.allowed_domains().contains(exemplar.domain())
+            || !parameters_match_schema(exemplar.parameters(), schema.parameters())
+        {
+            return Err(format!(
+                "audited palette kind {} v{} disagrees with its reviewed default instance",
+                schema.kind().name(),
+                schema.kind().version()
+            ));
+        }
+        let short = short_kind(schema.kind().name());
+        palette.push(NodePaletteEntry {
+            display_name: format!("{short} v{}", schema.kind().version()),
+            prototype: GraphNodePrototype::new(
+                schema.kind().clone(),
+                format!("New {short}"),
+                exemplar.domain(),
+                schema.inputs().to_vec(),
+                schema.outputs().to_vec(),
+                exemplar.parameters().to_vec(),
+            ),
+        });
+    }
+    if palette.is_empty() {
+        return Err("audited node palette is empty".to_owned());
+    }
+    Ok(palette)
+}
+
+fn parameters_match_schema(
+    parameters: &[NodeParameter],
+    contracts: &[alumina_interface_core::graph::NodeParameterContract],
+) -> bool {
+    parameters.len() == contracts.len()
+        && parameters
+            .iter()
+            .zip(contracts)
+            .all(|(parameter, contract)| {
+                parameter.id() == contract.id()
+                    && parameter.name() == contract.name()
+                    && parameter.value().value_type() == contract.value_type()
+            })
+}
+
+fn new_node_position(workspace: &GraphWorkspaceDocument) -> Result<(i32, i32), String> {
+    let Some(maximum_x) = workspace
+        .placements()
+        .iter()
+        .map(|placement| placement.x())
+        .max()
+    else {
+        return Ok((NEW_NODE_ORIGIN, NEW_NODE_ORIGIN));
+    };
+    let x = maximum_x
+        .checked_add(NEW_NODE_X_GAP)
+        .ok_or_else(|| "node palette position overflowed the canvas lattice".to_owned())?;
+    if x.unsigned_abs() > workspace.limits().maximum_coordinate_magnitude {
+        return Err("node palette position exceeds the canonical canvas policy".to_owned());
+    }
+    let y = workspace
+        .placements()
+        .iter()
+        .map(|placement| placement.y())
+        .min()
+        .unwrap_or(NEW_NODE_ORIGIN);
+    Ok((x, y))
+}
+
+fn parameter_edit_text(value: &GraphValue) -> Option<String> {
+    match value {
+        GraphValue::Boolean(value) => Some(value.to_string()),
+        GraphValue::ExactRational(value) => Some(value.to_string()),
+        GraphValue::MeasurementInterval { lower, upper } => Some(format!("{lower}..{upper}")),
+        GraphValue::CanonicalI64(value) => Some(value.to_string()),
+        GraphValue::CanonicalU64(value) => Some(value.to_string()),
+        GraphValue::Text(value) => Some(value.clone()),
+        GraphValue::Bytes(_)
+        | GraphValue::Array(_)
+        | GraphValue::Record(_)
+        | GraphValue::OptionNone
+        | GraphValue::OptionSome(_)
+        | GraphValue::ResultOk(_)
+        | GraphValue::ResultError(_)
+        | GraphValue::ResourceHandle(_)
+        | GraphValue::JobHandle(_) => None,
+    }
+}
+
+fn parameter_text_limit(document: &GraphDocument, value_type: GraphTypeId) -> usize {
+    let rational_digits = document.schema().limits().maximum_rational_digits;
+    document
+        .schema()
+        .value_type(value_type)
+        .map_or(1, |definition| match definition.kind() {
+            TypeKind::Boolean => 5,
+            TypeKind::ExactRational { .. } => rational_digits.saturating_mul(2).saturating_add(4),
+            TypeKind::MeasurementInterval { .. } => {
+                rational_digits.saturating_mul(4).saturating_add(10)
+            }
+            TypeKind::CanonicalI64 { .. } | TypeKind::CanonicalU64 { .. } => 20,
+            TypeKind::Text { maximum_bytes } => *maximum_bytes as usize,
+            TypeKind::Bytes { .. }
+            | TypeKind::Array { .. }
+            | TypeKind::Record { .. }
+            | TypeKind::Option { .. }
+            | TypeKind::Result { .. }
+            | TypeKind::Event { .. }
+            | TypeKind::Stream { .. }
+            | TypeKind::ResourceHandle { .. }
+            | TypeKind::JobHandle => 1,
+        })
+}
+
+fn parse_parameter_text(
+    document: &GraphDocument,
+    value_type: GraphTypeId,
+    source: &str,
+) -> Result<TypedGraphValue, String> {
+    let maximum = parameter_text_limit(document, value_type);
+    if source.len() > maximum {
+        return Err(format!(
+            "parameter text has {} bytes; this exact type admits at most {maximum}",
+            source.len()
+        ));
+    }
+    let definition = document
+        .schema()
+        .value_type(value_type)
+        .ok_or_else(|| format!("parameter type {} is not registered", value_type.get()))?;
+    let trimmed = source.trim();
+    let value = match definition.kind() {
+        TypeKind::Boolean => match trimmed {
+            "true" => GraphValue::Boolean(true),
+            "false" => GraphValue::Boolean(false),
+            _ => return Err("Boolean parameter must be exactly true or false".to_owned()),
+        },
+        TypeKind::ExactRational { .. } => GraphValue::ExactRational(
+            trimmed
+                .parse::<Rational>()
+                .map_err(|error| format!("exact rational parameter is invalid: {error}"))?,
+        ),
+        TypeKind::MeasurementInterval { .. } => {
+            let (lower, upper) = trimmed
+                .split_once("..")
+                .ok_or_else(|| "measurement interval must use lower..upper".to_owned())?;
+            GraphValue::MeasurementInterval {
+                lower: lower
+                    .trim()
+                    .parse::<Rational>()
+                    .map_err(|error| format!("measurement lower bound is invalid: {error}"))?,
+                upper: upper
+                    .trim()
+                    .parse::<Rational>()
+                    .map_err(|error| format!("measurement upper bound is invalid: {error}"))?,
+            }
+        }
+        TypeKind::CanonicalI64 { .. } => GraphValue::CanonicalI64(
+            trimmed
+                .parse::<i64>()
+                .map_err(|error| format!("canonical signed count is invalid: {error}"))?,
+        ),
+        TypeKind::CanonicalU64 { .. } => GraphValue::CanonicalU64(
+            trimmed
+                .parse::<u64>()
+                .map_err(|error| format!("canonical unsigned count is invalid: {error}"))?,
+        ),
+        TypeKind::Text { .. } => GraphValue::Text(source.to_owned()),
+        TypeKind::Bytes { .. }
+        | TypeKind::Array { .. }
+        | TypeKind::Record { .. }
+        | TypeKind::Option { .. }
+        | TypeKind::Result { .. }
+        | TypeKind::Event { .. }
+        | TypeKind::Stream { .. }
+        | TypeKind::ResourceHandle { .. }
+        | TypeKind::JobHandle => {
+            return Err(format!(
+                "parameter type {} is not editable in this scalar palette slice",
+                definition.name()
+            ));
+        }
+    };
+    TypedGraphValue::try_new(document.schema(), value_type, value)
+        .map_err(|error| format!("exact parameter failed schema validation: {error}"))
+}
+
 fn initial_workspace(
     fixture: &RepresentativeExactControlGraph,
 ) -> Result<
@@ -885,7 +1288,14 @@ fn graph_presentation(
     placements: Option<&[GraphNodePlacement]>,
 ) -> Result<GraphPresentation, String> {
     if document.nodes().is_empty() {
-        return Err("exact control graph has no nodes".to_owned());
+        if placements.is_some_and(|placements| !placements.is_empty()) {
+            return Err("empty exact control graph retained canvas placements".to_owned());
+        }
+        return Ok(GraphPresentation {
+            nodes: BTreeMap::new(),
+            wires: BTreeMap::new(),
+            size: egui::vec2(EMPTY_CANVAS_WIDTH, EMPTY_CANVAS_HEIGHT),
+        });
     }
     if document.nodes().len() > MAXIMUM_VISIBLE_NODES {
         return Err("exact control graph exceeds the visible-node limit".to_owned());
@@ -1394,6 +1804,15 @@ mod tests {
         assert_eq!(replay.document(), &workspace.workspace);
         assert_eq!(replay.encoding(), &workspace.workspace_encoding);
         assert!(workspace.reference_trace_is_current());
+        assert_eq!(workspace.palette.len(), 11);
+        assert!(workspace.palette.iter().all(|entry| {
+            workspace
+                .fixture
+                .registry()
+                .semantic_registry()
+                .schema(entry.prototype.kind())
+                .is_some()
+        }));
     }
 
     #[test]
@@ -1448,6 +1867,97 @@ mod tests {
                 node: GraphNodeId::new(6),
                 port: GraphPortId::new(2),
             })
+        );
+    }
+
+    #[test]
+    fn palette_node_lifecycle_and_exact_parameter_editing_are_transactional() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.palette_index = workspace
+            .palette
+            .iter()
+            .position(|entry| entry.prototype.kind().name() == "control.exact.scale")
+            .unwrap();
+        workspace.add_palette_node();
+        let created = GraphNodeId::new(20);
+        assert_eq!(workspace.selected_node, Some(created));
+        assert_eq!(workspace.workspace.graph().nodes().len(), 20);
+        assert_eq!(workspace.workspace.next_node_id(), 21);
+        assert_eq!(
+            workspace
+                .workspace
+                .graph()
+                .node(created)
+                .unwrap()
+                .kind()
+                .name(),
+            "control.exact.scale"
+        );
+        assert!(!workspace.reference_trace_is_current());
+        assert!(workspace.edit_status.contains("draft semantic blocker"));
+
+        workspace.delete_selected_node(created);
+        assert_eq!(workspace.workspace.graph().nodes().len(), 19);
+        assert_eq!(workspace.workspace.next_node_id(), 21);
+        assert_eq!(workspace.selected_node, None);
+
+        workspace.reset_draft();
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "3/2");
+        assert_eq!(
+            workspace
+                .workspace
+                .graph()
+                .node(GraphNodeId::new(8))
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value(),
+            &GraphValue::ExactRational(Rational::fraction(3, 2).unwrap())
+        );
+        let canonical_three_halves = Rational::fraction(3, 2).unwrap().to_string();
+        assert_eq!(
+            workspace
+                .parameter_drafts
+                .get(&(GraphNodeId::new(8), 1))
+                .map(String::as_str),
+            Some(canonical_three_halves.as_str())
+        );
+        assert!(!workspace.reference_trace_is_current());
+
+        let retained = workspace.workspace.clone();
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "1/0");
+        assert_eq!(workspace.workspace, retained);
+        assert!(workspace.edit_status.contains("rejected without mutation"));
+    }
+
+    #[test]
+    fn empty_draft_remains_renderable_and_can_accept_a_palette_node() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let mut candidate = workspace.workspace.clone();
+        let ids: Vec<_> = candidate
+            .graph()
+            .nodes()
+            .iter()
+            .map(NodeDefinition::id)
+            .collect();
+        for id in ids {
+            candidate.delete_node(id).unwrap();
+        }
+        assert!(workspace.commit_candidate(candidate, "deleted every draft node"));
+        assert!(workspace.workspace.graph().nodes().is_empty());
+        assert_eq!(workspace.presentation.nodes.len(), 0);
+        assert!((workspace.presentation.size.x - EMPTY_CANVAS_WIDTH).abs() < f32::EPSILON);
+
+        workspace.add_palette_node();
+        assert_eq!(workspace.workspace.graph().nodes().len(), 1);
+        assert_eq!(workspace.selected_node, Some(GraphNodeId::new(20)));
+        assert_eq!(
+            workspace.workspace.placement(GraphNodeId::new(20)),
+            Some(GraphNodePlacement::new(
+                GraphNodeId::new(20),
+                NEW_NODE_ORIGIN,
+                NEW_NODE_ORIGIN,
+            ))
         );
     }
 

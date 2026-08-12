@@ -114,6 +114,7 @@ dependencies = [
  "eframe",
  "egui_glow",
  "hypergraphics",
+ "hyperreal",
  "js-sys",
  "log",
  "serde_json",

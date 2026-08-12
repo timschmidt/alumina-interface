@@ -100,8 +100,10 @@ prototype.
   open a bounded workspace by default: semantic current-tick layers, explicit
   feedback routes, typed ports, exact parameters/state, and four control traces.
   Canonical `ALGW` V1 embeds the unchanged `ALGR` plus integer canvas positions
-  and monotonic ID cursors. Node moves and typed wire connect/disconnect edits
-  are transactional; structural edits detach the graph-bound reference trace.
+  and monotonic ID cursors. Its 11-entry fixed-schema palette supports
+  monotonic node creation, atomic node/incident-wire deletion, node moves,
+  typed wire edits, and bounded exact scalar parameter editing. Every edit is
+  transactional; any graph edit detaches the graph-bound reference trace.
   Plot coordinates come only from certified `f64` enclosures, and the cursor
   retains the exact rational sample. This is an in-memory editing foundation,
   not deployment or firmware authority. See
@@ -198,12 +200,13 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, node/palette/parameter/group/component/front-panel editing, workspace
-persistence and history, broader deterministic host graph behaviors, and fixed-memory
-authenticated Service/Realtime upload/core transfer and task composition,
-additional resource opcodes and capability-generated graph nodes, and physical
-input/timing qualification. Raw G-code remains an optional exact UI importer,
-never firmware or canonical job input.
+views, groups/components/front panels, composite/identity-bearing parameter
+editing, label/domain editing, workspace persistence and history, broader
+deterministic host graph behaviors, and fixed-memory authenticated
+Service/Realtime upload/core transfer and task
+composition, additional resource opcodes and capability-generated graph nodes,
+and physical input/timing qualification. Raw G-code remains an optional exact
+UI importer, never firmware or canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.

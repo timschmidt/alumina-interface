@@ -61,6 +61,7 @@ alumina-protocol.workspace = true
 alumina-sim = { path = "../aluminafw/crates/alumina-sim" }
 alumina-storage.workspace = true
 hypergraphics.workspace = true
+hyperreal.workspace = true
 log = "0.4.27"
 serde_json.workspace = true
 
