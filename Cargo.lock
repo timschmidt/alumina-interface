@@ -72,10 +72,18 @@ version = "0.1.0"
 dependencies = [
  "alumina-board",
  "alumina-capability",
+ "alumina-foc",
  "alumina-protocol",
  "alumina-safety",
  "alumina-storage",
  "sha2",
+]
+
+[[package]]
+name = "alumina-foc"
+version = "0.1.0"
+dependencies = [
+ "alumina-protocol",
 ]
 
 [[package]]
@@ -221,6 +229,8 @@ name = "alumina-sim"
 version = "0.1.0"
 dependencies = [
  "alumina-clock",
+ "alumina-config",
+ "alumina-foc",
  "alumina-job",
  "alumina-machine-ir",
  "alumina-motion",

@@ -47,6 +47,7 @@ for package in \
   alumina-capability \
   alumina-clock \
   alumina-config \
+  alumina-foc \
   alumina-job \
   alumina-machine-ir \
   alumina-motion \

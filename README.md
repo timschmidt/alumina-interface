@@ -64,6 +64,13 @@ prototype.
   and preserves simulator/peripheral/software authority. The repeatable
   two-device flow proves each known simulated edge is contained and exposes
   outer edge-spread and shared-epoch-error bounds in the diagnostic UI.
+- The window-free core now owns the first greenfield typed graph document:
+  exact unit/type registries, bounded typed literals, explicit clocks and
+  HostExact/Service/Realtime domains, opaque versioned nodes, typed ports and
+  wires, and a canonical bounded `ALGR` V1 codec. Untrusted loads enforce an
+  independent admission policy, rebuild through the validators, require exact
+  byte replay, and derive a SHA-256 graph identity. This is structural graph
+  authority only; no arbitrary graph interpreter or firmware lowering exists.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -78,6 +85,8 @@ The authenticated browser/cache boundary is in
 [`docs/WIFI-CACHE-DELIVERY.md`](docs/WIFI-CACHE-DELIVERY.md).
 The dedicated control-worker boundary is in
 [`docs/LIVE-CONTROL-WORKER.md`](docs/LIVE-CONTROL-WORKER.md).
+The first typed graph and canonical replay boundary is in
+[`docs/TYPED-GRAPH-V1.md`](docs/TYPED-GRAPH-V1.md).
 The exact-CAM development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
@@ -128,8 +137,9 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, and the typed timed LabVIEW-style graph. Raw G-code remains an optional
-exact UI importer, never firmware or canonical job input.
+views, and executable state/rate/resource semantics on the new typed timed graph
+document. Raw G-code remains an optional exact UI importer, never firmware or
+canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.

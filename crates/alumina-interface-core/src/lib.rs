@@ -10,6 +10,7 @@
 pub mod boundary;
 pub mod compiler;
 pub mod global_job;
+pub mod graph;
 pub mod partition;
 pub mod scene;
 pub mod toolpath;
@@ -27,6 +28,16 @@ pub use global_job::{
     CanonicalGlobalJob2, CanonicalGlobalManifestChunk, GlobalJobCompileError,
     GlobalJobCompilePolicy, GlobalJobCompileResult, MachineJobParticipantPackage2,
     compile_global_job, compile_representative_global_job,
+};
+pub use graph::{
+    BaseDimensions, CanonicalGraphEncoding, ClockDefinition, ClockKind, ExecutionDomain,
+    GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GraphClockId, GraphDocument, GraphDocumentError,
+    GraphLimits, GraphNodeId, GraphPortId, GraphReplay, GraphSchema, GraphSchemaError, GraphTypeId,
+    GraphValue, GraphValueKind, GraphWireError, GraphWireId, JobGraphHandle, NodeDefinition,
+    NodeKind, NodeParameter, PortDefinition, RecordField, RecordFieldId, RecordValueField,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue,
+    UnitDefinition, UnitId, WireDefinition, WireEndpoint, encode_graph_document,
+    replay_graph_document,
 };
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
