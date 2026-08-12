@@ -20,10 +20,10 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `6cbb7e9f0094654fba39f4401fd64e411a0261fb` | tracked source modified by concurrent local development; tracked diff SHA-256 `a812cf2435d5e56ebd2890b6f36c2baacb4c705b9a1269047148a7a5da9da55f` |
+| `hypercurve` | `dc7aff02fd483fb532765c7e539cfeeddba7d57b` | tracked source modified by concurrent local development; tracked diff SHA-256 `18fd2bf12bd0a2b726f43a3a7f81b15729a7a2c5af1b0a9fb7423631276b4d22` |
 | `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
-| `hypersolve` | `8a578174c5e4400ec77a1607a95264caf4e47807` | clean |
+| `hypersolve` | `d8bfa6b113020d1588ce2b0e549235d1bb9bc205` | clean |
 | `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
 
 ## Qualification rule
@@ -36,6 +36,11 @@ snapshot rather than a reproducible release pin. Untracked fuzz corpora and
 build executables are
 excluded from Cargo package sources but must still be removed or explicitly
 excluded before a whole-tree release digest is generated.
+
+The recorded Hypercurve and Hyperphysics tracked-diff digests were identical
+immediately before and after this checkpoint's native, WASM, documentation, and
+optimized-bundle qualification. That establishes the tested development
+snapshot; it does not convert either dirty tree into a release pin.
 
 The baseline is advanced only as one set: update paths/patches if needed, run
 native and WASM compiler fixtures, run the full license scan, update every row,

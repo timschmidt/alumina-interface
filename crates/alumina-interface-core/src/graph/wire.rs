@@ -237,6 +237,31 @@ pub fn replay_graph_document(
     Ok(GraphReplay { document, encoding })
 }
 
+pub(super) fn encode_typed_value_bytes(
+    schema: &GraphSchema,
+    value: &TypedGraphValue,
+) -> Result<Vec<u8>, GraphWireError> {
+    let mut encoder = Encoder::default();
+    encode_typed_value(&mut encoder, schema, value)?;
+    Ok(encoder.0)
+}
+
+pub(super) fn decode_typed_value_bytes(
+    schema: &GraphSchema,
+    bytes: &[u8],
+) -> Result<TypedGraphValue, GraphWireError> {
+    let mut decoder = Decoder::new(bytes);
+    let value = decode_typed_value(&mut decoder, schema)?;
+    if !decoder.is_empty() {
+        return Err(GraphWireError::TrailingBytes);
+    }
+    let canonical = encode_typed_value_bytes(schema, &value)?;
+    if canonical != bytes {
+        return Err(GraphWireError::NonCanonical);
+    }
+    Ok(value)
+}
+
 fn encode_limits(encoder: &mut Encoder, limits: GraphLimits) -> Result<(), GraphWireError> {
     for value in limit_values(limits) {
         encoder

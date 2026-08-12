@@ -67,6 +67,11 @@ impl ExecutionDomainSet {
         self.0 & bit != 0
     }
 
+    /// Return the canonical Host/Service/Realtime membership bitset.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
     const fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -269,8 +274,9 @@ impl NodeInputChannelContract {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RateTransitionKind {
     /// At each target tick, consume all source samples due at or before that
-    /// instant and emit the newest. Coincident run-start ticks process the
-    /// source sample first, so no implicit initial value exists.
+    /// instant and emit the newest. Every coincident source/target tick,
+    /// including run start, processes the source sample first. No implicit
+    /// initial value exists.
     LatestAtOrBeforeSourceFirst,
 }
 

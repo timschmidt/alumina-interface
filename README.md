@@ -88,6 +88,15 @@ prototype.
   transition. Exact clock resolution proves a shared tick-zero root, the
   smallest rational schedule pattern, minimum input capacity, and separately
   bounded held-sample state; implicit or independent-root transitions reject.
+- A separate implementation registry admits only three parameter/state-free
+  `HostExact` simulation behaviors: external Stream source, audited
+  latest-at-or-before transition, and Stream sink. The bounded simulator uses
+  exact rational clock time, orders every coincident source tick first, and
+  produces the same canonical result regardless of caller sample order.
+- Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
+  registry digest, and inclusive root-clock horizon. Replay decodes only the
+  external authority, reruns the fixed simulator, and requires every regenerated
+  byte to match; it grants no firmware or deployment authority.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
@@ -154,9 +163,9 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, and executable state/rate/resource semantics on the new typed timed graph
-document. Raw G-code remains an optional exact UI importer, never firmware or
-canonical job input.
+views, additional deterministic host graph behaviors, and fixed-memory
+Service/Realtime graph lowering. Raw G-code remains an optional exact UI
+importer, never firmware or canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.

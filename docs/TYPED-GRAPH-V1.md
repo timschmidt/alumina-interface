@@ -119,10 +119,10 @@ Every cross-clock current-tick dependency between runtime ports is explicit.
 The first admitted transition is Stream-to-Stream with an identical registered
 sample type and a required bounded input queue. `LatestAtOrBeforeSourceFirst`
 consumes all source samples due at or before each target tick, emits the newest,
-and orders the source first when the two tick grids coincide at run start. A
-missing contract, optional transition input, Event/Stream-family change, sample
-type change, or gratuitous same-clock transition rejects during registry
-construction.
+and orders the source first whenever the two tick grids coincide, including run
+start. A missing contract, optional transition input, Event/Stream-family
+change, sample type change, or gratuitous same-clock transition rejects during
+registry construction.
 
 The transition contract is audited registry authority selected by the saved
 node kind/version; it is not another unchecked field in `ALGR` V1. The document
@@ -146,6 +146,45 @@ source/target pattern ticks, queue requirement, transition policy, and retained
 sample bytes in canonical order. Runtime scheduling, transport, missed-deadline
 behavior, and a fixed implementation layout remain later compiler/lowering
 proofs.
+
+## Fixed deterministic host simulation
+
+`GraphSimulationRegistry` is a second, explicit authority above the audited
+semantic registry. It binds exact node kind/version identities to one of three
+parameter/state-free behaviors:
+
+- caller-supplied external Stream source;
+- the audited `LatestAtOrBeforeSourceFirst` Stream transition; or
+- Stream sink with no modeled side effect.
+
+The registry canonicalizes bindings and hashes the analysis limits, complete
+audited node schemas, and fixed implementation selections as an `ALSI` V1
+identity. Simulation accepts only `HostExact` nodes, requires an implementation
+for every node, and evaluates no firmware resource or device placement.
+
+The caller supplies an inclusive horizon in one independent root clock and
+exact typed samples with source-clock ticks and monotonic sequence numbers.
+External input order is not authority: samples are canonicalized by source,
+tick, and sequence, while duplicate or regressing per-source ticks/sequences
+reject. All scheduling comparisons use `hyperreal::Rational` root time. Each
+target tick consumes all source samples at or before it, so a coincident source
+sample is visible at that target tick; a missing tick-zero value rejects rather
+than creating an implicit initial value. Declared queue capacity is enforced
+against each due interval and the unconsumed horizon tail.
+
+External sample count, generated ticks per transition, total trace entries,
+root-clock horizon, and canonical trace bytes have independent limits. The
+first subset intentionally does not model state, parameters, resource handles,
+side effects, Service/Realtime execution, deadlines, or firmware layout.
+
+`ALGT` V1 is a canonical deterministic trace. Its fixed-width header binds the
+canonical graph digest, the semantic/implementation registry digest, and the
+inclusive root horizon. Every entry retains origin, endpoint, clock, tick,
+sequence, and the canonical typed value. Untrusted replay bounds and decodes the
+trace, extracts only external inputs, independently reruns simulation,
+re-encodes the entire result, and requires byte-for-byte equality. The
+representative 1,000 Hz to 600 Hz trace is 658 bytes with SHA-256 identity
+`4e0dbaec5495e96a1f472c218a83e8f441118c8a68c4bd94b77516b2d61b773a`.
 
 ## Canonical bytes and replay
 
@@ -178,10 +217,11 @@ families. Its graph digest is
 
 ## Deliberately open
 
-V1 remains non-executable. Subgraphs/components, general feedback structures,
-queue runtime/timeout behavior, additional resampling/window policies,
-cases/loops/state machines, front panels, resource claims,
-implementation/opcode admission, static firmware runtime-layout proof,
-fixed-memory lowering, WCET/deadline analysis, protocol bridges, firmware
-opcodes, and deterministic graph simulation remain later M9 slices. No
-arbitrary graph document is sent to or interpreted by firmware.
+V1 now has one fixed host-executable Stream/rate subset, but arbitrary documents
+remain non-executable. Subgraphs/components, general feedback structures, queue
+runtime/timeout behavior, additional resampling/window policies,
+cases/loops/state machines, front panels, resource claims, general host
+implementation admission, static firmware runtime-layout proof, fixed-memory
+lowering, WCET/deadline analysis, protocol bridges, and firmware opcodes remain
+later M9 slices. No arbitrary graph document is sent to or interpreted by
+firmware.
