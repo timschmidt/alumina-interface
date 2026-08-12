@@ -1,4 +1,4 @@
-//! Fixed-memory lowering for the first resource-free Service/Realtime subset.
+//! Capability-bound fixed-memory lowering for the Service/Realtime subset.
 //!
 //! This compiler consumes an already validated structural document and audited
 //! semantic registry. It emits only canonical [`alumina_graph_ir`] packages;
@@ -7,10 +7,19 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
+use alumina_board::{
+    GraphOpcodeDescriptor, GraphResourceAccess, GraphResourceClass, GraphResourceDescriptor,
+    OwnerDomain, SupportLevel,
+};
+use alumina_capability::{
+    CapabilityDocumentError, CapabilityIdentity, decode_graph_execution, decode_resource_id,
+    encode_resource_id,
+};
 use alumina_graph_ir::{
-    BOOLEAN_LATEST_STATE_BYTES, GraphIrChannel, GraphIrChannelOwner, GraphIrDomain, GraphIrError,
-    GraphIrFullPolicy, GraphIrHeader, GraphIrNode, GraphIrOpcode, GraphIrPackage, GraphIrSchedule,
-    MAX_GRAPH_IR_CHANNELS, MAX_GRAPH_IR_NODES,
+    BOOLEAN_LATEST_STATE_BYTES, GRAPH_IR_PACKAGE_BYTES, GRAPH_IR_VERSION, GraphIrChannel,
+    GraphIrChannelOwner, GraphIrDomain, GraphIrError, GraphIrFullPolicy, GraphIrHeader,
+    GraphIrNode, GraphIrOpcode, GraphIrPackage, GraphIrSchedule, MAX_GRAPH_IR_CHANNELS,
+    MAX_GRAPH_IR_NODES, MAX_GRAPH_IR_QUEUE_ITEMS, encode_graph_resource_parameter,
 };
 use alumina_protocol::{DeviceId, Digest};
 use alumina_storage::sha256;
@@ -44,6 +53,13 @@ pub enum GraphDeploymentNodeKind {
     BooleanStreamSink {
         /// Sole Stream input.
         input: GraphPortId,
+    },
+    /// Read one capability-bound fresh debounced safety input on Realtime.
+    StableBooleanInput {
+        /// Sole Stream output.
+        output: GraphPortId,
+        /// Required capability-bound [`GraphValue::ResourceHandle`] parameter.
+        resource_parameter: u32,
     },
 }
 
@@ -145,60 +161,143 @@ impl GraphDeploymentRegistry {
     }
 }
 
-/// Independent host-side lowering limits in addition to graph-IR format bounds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Authenticated device graph limits plus caller-selected scheduling policy.
+///
+/// Device capacities, opcodes, and resources are owned copies decoded from one
+/// complete capability document. There is no production constructor for
+/// guessed or nominal hardware limits.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphDeploymentLimits {
-    /// Maximum nodes in one MCU partition.
-    pub maximum_nodes: usize,
-    /// Maximum channels in one MCU partition.
-    pub maximum_channels: usize,
-    /// Maximum combined Service/Realtime node state.
-    pub maximum_state_bytes: u32,
-    /// Maximum combined channel storage.
-    pub maximum_channel_bytes: u32,
-    /// Maximum one-way Service-to-Realtime bridge storage.
-    pub maximum_bridge_bytes: u32,
-    /// Maximum reviewed WCET for one fixed node invocation.
-    pub maximum_wcet_cycles_per_node: u64,
-    /// Cycles reserved per active domain release for executor and queue overhead.
-    pub executor_reserve_cycles: u64,
+    identity: CapabilityIdentity,
+    maximum_nodes: usize,
+    maximum_channels: usize,
+    maximum_queue_items: u32,
+    service_state_bytes: u32,
+    realtime_state_bytes: u32,
+    service_channel_bytes: u32,
+    realtime_channel_bytes: u32,
+    bridge_channel_bytes: u32,
+    opcodes: Vec<GraphOpcodeDescriptor>,
+    resources: Vec<GraphResourceDescriptor>,
+    maximum_wcet_cycles_per_node: u64,
+    executor_reserve_cycles: u64,
 }
 
 impl GraphDeploymentLimits {
-    /// First resource-free deployment policy.
-    pub const fn interactive() -> Self {
+    /// Decode exact deployment authority from one complete V2 capability
+    /// document and attach explicit host scheduling policy.
+    pub fn from_capability_document(
+        document: &[u8],
+        maximum_wcet_cycles_per_node: u64,
+        executor_reserve_cycles: u64,
+    ) -> Result<Self, GraphDeploymentError> {
+        if maximum_wcet_cycles_per_node == 0 || executor_reserve_cycles == 0 {
+            return Err(GraphDeploymentError::InvalidLimits);
+        }
+        let capability =
+            decode_graph_execution(document).map_err(GraphDeploymentError::CapabilityDocument)?;
+        if capability.ir_version() != GRAPH_IR_VERSION
+            || usize::try_from(capability.package_bytes()).ok() != Some(GRAPH_IR_PACKAGE_BYTES)
+            || usize::from(capability.maximum_nodes()) > MAX_GRAPH_IR_NODES
+            || usize::from(capability.maximum_channels()) > MAX_GRAPH_IR_CHANNELS
+            || capability.maximum_queue_items() > MAX_GRAPH_IR_QUEUE_ITEMS
+            || capability.support() < SupportLevel::Compiles
+        {
+            return Err(GraphDeploymentError::InvalidLimits);
+        }
+        Ok(Self {
+            identity: capability.identity(),
+            maximum_nodes: usize::from(capability.maximum_nodes()),
+            maximum_channels: usize::from(capability.maximum_channels()),
+            maximum_queue_items: capability.maximum_queue_items(),
+            service_state_bytes: capability.service_state_bytes(),
+            realtime_state_bytes: capability.realtime_state_bytes(),
+            service_channel_bytes: capability.service_channel_bytes(),
+            realtime_channel_bytes: capability.realtime_channel_bytes(),
+            bridge_channel_bytes: capability.bridge_channel_bytes(),
+            opcodes: capability.opcodes().collect(),
+            resources: capability.resources().collect(),
+            maximum_wcet_cycles_per_node,
+            executor_reserve_cycles,
+        })
+    }
+
+    /// Exact complete capability-document identity behind these limits.
+    pub const fn capability_identity(&self) -> CapabilityIdentity {
+        self.identity
+    }
+
+    /// Exact graph-addressable physical resources advertised by the image.
+    pub fn resources(&self) -> &[GraphResourceDescriptor] {
+        &self.resources
+    }
+
+    #[cfg(test)]
+    fn interactive() -> Self {
         Self {
+            identity: CapabilityIdentity {
+                byte_len: 1,
+                digest: Digest([8; 32]),
+            },
             maximum_nodes: MAX_GRAPH_IR_NODES,
             maximum_channels: MAX_GRAPH_IR_CHANNELS,
-            maximum_state_bytes: 64 * 1024,
-            maximum_channel_bytes: 1024 * 1024,
-            maximum_bridge_bytes: 256 * 1024,
+            maximum_queue_items: MAX_GRAPH_IR_QUEUE_ITEMS,
+            service_state_bytes: 64 * 1024,
+            realtime_state_bytes: 64 * 1024,
+            service_channel_bytes: 1024 * 1024,
+            realtime_channel_bytes: 1024 * 1024,
+            bridge_channel_bytes: 256 * 1024,
+            opcodes: vec![
+                GraphOpcodeDescriptor {
+                    opcode: GraphIrOpcode::BooleanStreamConstant.wire_value(),
+                    domain: OwnerDomain::Service,
+                    support: SupportLevel::Compiles,
+                    resource_class: None,
+                    resource_access: None,
+                },
+                GraphOpcodeDescriptor {
+                    opcode: GraphIrOpcode::BooleanLatest.wire_value(),
+                    domain: OwnerDomain::Realtime,
+                    support: SupportLevel::Compiles,
+                    resource_class: None,
+                    resource_access: None,
+                },
+                GraphOpcodeDescriptor {
+                    opcode: GraphIrOpcode::BooleanStreamSink.wire_value(),
+                    domain: OwnerDomain::Realtime,
+                    support: SupportLevel::Compiles,
+                    resource_class: None,
+                    resource_access: None,
+                },
+            ],
+            resources: Vec::new(),
             maximum_wcet_cycles_per_node: 1_000_000,
             executor_reserve_cycles: 100,
         }
     }
 
-    fn validate(self) -> Result<(), GraphDeploymentError> {
+    fn validate(&self, target: GraphDeploymentTarget) -> Result<(), GraphDeploymentError> {
         if self.maximum_nodes == 0
             || self.maximum_nodes > MAX_GRAPH_IR_NODES
             || self.maximum_channels == 0
             || self.maximum_channels > MAX_GRAPH_IR_CHANNELS
-            || self.maximum_state_bytes == 0
-            || self.maximum_channel_bytes == 0
-            || self.maximum_bridge_bytes == 0
+            || self.maximum_queue_items == 0
+            || self.maximum_queue_items > MAX_GRAPH_IR_QUEUE_ITEMS
+            || self.service_state_bytes == 0
+            || self.realtime_state_bytes == 0
+            || self.service_channel_bytes == 0
+            || self.realtime_channel_bytes == 0
+            || self.bridge_channel_bytes == 0
+            || self.opcodes.is_empty()
             || self.maximum_wcet_cycles_per_node == 0
             || self.executor_reserve_cycles == 0
+            || self.identity.digest.is_zero()
+            || self.identity.digest != target.capability_digest
         {
             Err(GraphDeploymentError::InvalidLimits)
         } else {
             Ok(())
         }
-    }
-}
-
-impl Default for GraphDeploymentLimits {
-    fn default() -> Self {
-        Self::interactive()
     }
 }
 
@@ -255,6 +354,8 @@ impl GraphDeploymentReport {
 pub enum GraphDeploymentError {
     /// Lowering policy was zero or exceeded the graph-IR format.
     InvalidLimits,
+    /// Complete board capability bytes did not decode canonically.
+    CapabilityDocument(CapabilityDocumentError),
     /// A target identity was all zero.
     MissingIdentity(&'static str),
     /// Canonical graph encoding failed.
@@ -345,6 +446,9 @@ impl fmt::Display for GraphDeploymentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLimits => formatter.write_str("graph deployment limits are invalid"),
+            Self::CapabilityDocument(error) => {
+                write!(formatter, "graph deployment capability rejected: {error:?}")
+            }
             Self::MissingIdentity(name) => write!(formatter, "graph deployment {name} is missing"),
             Self::Graph(error) => write!(formatter, "graph deployment encoding rejected: {error}"),
             Self::Analysis(error) => {
@@ -421,10 +525,10 @@ pub fn lower_graph_deployment(
     document: &GraphDocument,
     registry: &GraphDeploymentRegistry,
     target: GraphDeploymentTarget,
-    limits: GraphDeploymentLimits,
+    limits: &GraphDeploymentLimits,
 ) -> Result<GraphDeploymentReport, GraphDeploymentError> {
-    limits.validate()?;
     validate_target(target)?;
+    limits.validate(target)?;
     if document.nodes().len() > limits.maximum_nodes {
         return Err(GraphDeploymentError::LimitExceeded("node count"));
     }
@@ -495,7 +599,9 @@ pub fn lower_graph_deployment(
             period,
             implementation.wcet_cycles,
         )?;
-        let (opcode, state_bytes, parameter) = lower_node(node, implementation, &analysis)?;
+        let (opcode, state_bytes, parameter) =
+            lower_node(node, implementation, &analysis, target, limits)?;
+        admit_opcode(limits, node.id(), domain, opcode, parameter)?;
         let state_offset = match domain {
             GraphIrDomain::Service => {
                 let offset = service_state;
@@ -527,8 +633,11 @@ pub fn lower_graph_deployment(
     let total_state = service_state
         .checked_add(realtime_state)
         .ok_or(GraphDeploymentError::Arithmetic)?;
-    if total_state > limits.maximum_state_bytes {
-        return Err(GraphDeploymentError::LimitExceeded("state bytes"));
+    if service_state > limits.service_state_bytes {
+        return Err(GraphDeploymentError::LimitExceeded("service state bytes"));
+    }
+    if realtime_state > limits.realtime_state_bytes {
+        return Err(GraphDeploymentError::LimitExceeded("realtime state bytes"));
     }
 
     let mut ordered_wires = document.wires().to_vec();
@@ -551,16 +660,27 @@ pub fn lower_graph_deployment(
             &topological_indices,
             &mut owner_offsets,
         )?);
+        if channels
+            .last()
+            .is_some_and(|channel| channel.capacity > limits.maximum_queue_items)
+        {
+            return Err(GraphDeploymentError::LimitExceeded("channel queue items"));
+        }
     }
     let channel_storage = owner_offsets
         .iter()
         .try_fold(0_u32, |sum, bytes| sum.checked_add(*bytes))
         .ok_or(GraphDeploymentError::Arithmetic)?;
     let bridge_storage = owner_offsets[2];
-    if channel_storage > limits.maximum_channel_bytes {
-        return Err(GraphDeploymentError::LimitExceeded("channel bytes"));
+    if owner_offsets[0] > limits.service_channel_bytes {
+        return Err(GraphDeploymentError::LimitExceeded("service channel bytes"));
     }
-    if bridge_storage > limits.maximum_bridge_bytes {
+    if owner_offsets[1] > limits.realtime_channel_bytes {
+        return Err(GraphDeploymentError::LimitExceeded(
+            "realtime channel bytes",
+        ));
+    }
+    if bridge_storage > limits.bridge_channel_bytes {
         return Err(GraphDeploymentError::LimitExceeded("bridge bytes"));
     }
     let package = GraphIrPackage::encode(
@@ -658,6 +778,8 @@ fn lower_node(
     node: &super::NodeDefinition,
     implementation: &GraphDeploymentImplementation,
     analysis: &GraphAnalysis,
+    target: GraphDeploymentTarget,
+    limits: &GraphDeploymentLimits,
 ) -> Result<(GraphIrOpcode, u32, u64), GraphDeploymentError> {
     match implementation.behavior {
         GraphDeploymentNodeKind::BooleanStreamConstant { parameter, .. } => {
@@ -708,6 +830,151 @@ fn lower_node(
         GraphDeploymentNodeKind::BooleanStreamSink { .. } => {
             Ok((GraphIrOpcode::BooleanStreamSink, 0, 0))
         }
+        GraphDeploymentNodeKind::StableBooleanInput {
+            resource_parameter, ..
+        } => {
+            let parameter = node
+                .parameters()
+                .iter()
+                .find(|candidate| candidate.id() == resource_parameter)
+                .ok_or(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "safety-input resource parameter",
+                })?;
+            let GraphValue::ResourceHandle(handle) = parameter.value().value() else {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "safety-input resource handle",
+                });
+            };
+            if handle.device_id != target.device_id
+                || handle.board_package_digest != target.capability_digest
+            {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "resource-handle target identity",
+                });
+            }
+            let resource =
+                decode_resource_id(&handle.resource_selector.to_le_bytes()).map_err(|_| {
+                    GraphDeploymentError::InvalidNode {
+                        node: node.id(),
+                        aspect: "canonical typed resource selector",
+                    }
+                })?;
+            let class = GraphResourceClass::new(handle.class.get());
+            let descriptor = unique_opcode(
+                limits,
+                GraphIrOpcode::StableBooleanInput,
+                GraphIrDomain::Realtime,
+            )
+            .ok_or(GraphDeploymentError::InvalidNode {
+                node: node.id(),
+                aspect: "capability opcode palette",
+            })?;
+            if descriptor.resource_class != Some(class)
+                || descriptor.resource_access != Some(GraphResourceAccess::StableBooleanInput)
+                || !limits.resources.iter().any(|candidate| {
+                    candidate.resource == resource
+                        && candidate.class == class
+                        && candidate.access == GraphResourceAccess::StableBooleanInput
+                        && candidate.support >= SupportLevel::Compiles
+                })
+            {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "capability resource palette",
+                });
+            }
+            Ok((
+                GraphIrOpcode::StableBooleanInput,
+                0,
+                encode_graph_resource_parameter(resource),
+            ))
+        }
+    }
+}
+
+fn admit_opcode(
+    limits: &GraphDeploymentLimits,
+    node: GraphNodeId,
+    domain: GraphIrDomain,
+    opcode: GraphIrOpcode,
+    parameter: u64,
+) -> Result<(), GraphDeploymentError> {
+    let descriptor =
+        unique_opcode(limits, opcode, domain).ok_or(GraphDeploymentError::InvalidNode {
+            node,
+            aspect: "capability opcode palette",
+        })?;
+    match opcode {
+        GraphIrOpcode::StableBooleanInput => {
+            let resource =
+                alumina_graph_ir::decode_graph_resource_parameter(parameter).map_err(|_| {
+                    GraphDeploymentError::InvalidNode {
+                        node,
+                        aspect: "canonical typed resource selector",
+                    }
+                })?;
+            let Some(class) = descriptor.resource_class else {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node,
+                    aspect: "capability resource class",
+                });
+            };
+            if descriptor.resource_access != Some(GraphResourceAccess::StableBooleanInput)
+                || !limits.resources.iter().any(|candidate| {
+                    candidate.resource == resource
+                        && candidate.class == class
+                        && candidate.access == GraphResourceAccess::StableBooleanInput
+                        && candidate.support >= SupportLevel::Compiles
+                })
+            {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node,
+                    aspect: "capability resource palette",
+                });
+            }
+        }
+        GraphIrOpcode::BooleanStreamConstant
+        | GraphIrOpcode::BooleanLatest
+        | GraphIrOpcode::BooleanStreamSink => {
+            if descriptor.resource_class.is_some() || descriptor.resource_access.is_some() {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node,
+                    aspect: "resource-free opcode capability",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unique_opcode(
+    limits: &GraphDeploymentLimits,
+    opcode: GraphIrOpcode,
+    domain: GraphIrDomain,
+) -> Option<GraphOpcodeDescriptor> {
+    let mut matches = limits
+        .opcodes
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.opcode == opcode.wire_value());
+    let descriptor = matches.next()?;
+    if matches.next().is_some()
+        || descriptor.domain != owner_domain(domain)
+        || descriptor.support < SupportLevel::Compiles
+    {
+        None
+    } else {
+        Some(descriptor)
+    }
+}
+
+const fn owner_domain(domain: GraphIrDomain) -> OwnerDomain {
+    match domain {
+        GraphIrDomain::Service => OwnerDomain::Service,
+        GraphIrDomain::Realtime => OwnerDomain::Realtime,
     }
 }
 
@@ -971,6 +1238,31 @@ fn validate_implementation(
                 return Err(invalid("Boolean Stream sink shape"));
             }
         }
+        GraphDeploymentNodeKind::StableBooleanInput {
+            output,
+            resource_parameter,
+        } => {
+            if !allows_domain(schema.allowed_domains(), ExecutionDomainSet::REALTIME)
+                || !schema.inputs().is_empty()
+                || schema.outputs().len() != 1
+                || schema.outputs()[0].id() != output
+                || boolean_stream_clock(values, schema.outputs()[0].value_type())
+                    != Some(implementation.schedule_clock)
+                || schema.parameters().len() != 1
+                || schema.parameters()[0].id() != resource_parameter
+                || !matches!(
+                    values
+                        .value_type(schema.parameters()[0].value_type())
+                        .map(super::TypeDefinition::kind),
+                    Some(TypeKind::ResourceHandle { .. })
+                )
+                || schema.output_dependencies().len() != 1
+                || !schema.output_dependencies()[0].inputs().is_empty()
+                || !schema.rate_transitions().is_empty()
+            {
+                return Err(invalid("stable Boolean input shape"));
+            }
+        }
     }
     Ok(())
 }
@@ -1034,7 +1326,8 @@ const fn implementation_domain(behavior: GraphDeploymentNodeKind) -> GraphIrDoma
     match behavior {
         GraphDeploymentNodeKind::BooleanStreamConstant { .. } => GraphIrDomain::Service,
         GraphDeploymentNodeKind::BooleanLatest { .. }
-        | GraphDeploymentNodeKind::BooleanStreamSink { .. } => GraphIrDomain::Realtime,
+        | GraphDeploymentNodeKind::BooleanStreamSink { .. }
+        | GraphDeploymentNodeKind::StableBooleanInput { .. } => GraphIrDomain::Realtime,
     }
 }
 
@@ -1081,24 +1374,47 @@ fn validate_target(target: GraphDeploymentTarget) -> Result<(), GraphDeploymentE
 fn deployment_digest(
     registry: &GraphDeploymentRegistry,
     graph_digest: Digest,
-    limits: GraphDeploymentLimits,
+    limits: &GraphDeploymentLimits,
 ) -> Result<Digest, GraphDeploymentError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"ALDI");
-    put_u16(&mut bytes, 1);
+    put_u16(&mut bytes, 2);
     put_u16(&mut bytes, 0);
     bytes.extend_from_slice(&graph_digest.0);
+    put_u32(&mut bytes, limits.identity.byte_len);
+    bytes.extend_from_slice(&limits.identity.digest.0);
     for value in [
         u64::try_from(limits.maximum_nodes).map_err(|_| GraphDeploymentError::RegistryEncoding)?,
         u64::try_from(limits.maximum_channels)
             .map_err(|_| GraphDeploymentError::RegistryEncoding)?,
-        u64::from(limits.maximum_state_bytes),
-        u64::from(limits.maximum_channel_bytes),
-        u64::from(limits.maximum_bridge_bytes),
+        u64::from(limits.maximum_queue_items),
+        u64::from(limits.service_state_bytes),
+        u64::from(limits.realtime_state_bytes),
+        u64::from(limits.service_channel_bytes),
+        u64::from(limits.realtime_channel_bytes),
+        u64::from(limits.bridge_channel_bytes),
         limits.maximum_wcet_cycles_per_node,
         limits.executor_reserve_cycles,
     ] {
         put_u64(&mut bytes, value);
+    }
+    put_count(&mut bytes, limits.opcodes.len())?;
+    for opcode in &limits.opcodes {
+        bytes.push(opcode.opcode);
+        bytes.push(owner_tag(opcode.domain));
+        bytes.push(support_tag(opcode.support));
+        bytes.push(opcode.resource_access.map_or(0, |access| access as u8));
+        put_u32(
+            &mut bytes,
+            opcode.resource_class.map_or(0, GraphResourceClass::get),
+        );
+    }
+    put_count(&mut bytes, limits.resources.len())?;
+    for resource in &limits.resources {
+        bytes.extend_from_slice(&encode_resource_id(resource.resource));
+        put_u32(&mut bytes, resource.class.get());
+        bytes.push(resource.access as u8);
+        bytes.push(support_tag(resource.support));
     }
     encode_analysis_limits(&mut bytes, registry.semantic.limits())?;
     encode_semantic_registry(&mut bytes, &registry.semantic)?;
@@ -1122,6 +1438,14 @@ fn deployment_digest(
             GraphDeploymentNodeKind::BooleanStreamSink { input } => {
                 bytes.push(2);
                 put_u32(&mut bytes, input.get());
+            }
+            GraphDeploymentNodeKind::StableBooleanInput {
+                output,
+                resource_parameter,
+            } => {
+                bytes.push(3);
+                put_u32(&mut bytes, output.get());
+                put_u32(&mut bytes, resource_parameter);
             }
         }
     }
@@ -1281,6 +1605,22 @@ const fn full_policy_tag(policy: ChannelFullPolicy) -> u8 {
     }
 }
 
+const fn owner_tag(owner: OwnerDomain) -> u8 {
+    match owner {
+        OwnerDomain::Service => 1,
+        OwnerDomain::Realtime => 2,
+    }
+}
+
+const fn support_tag(support: SupportLevel) -> u8 {
+    match support {
+        SupportLevel::Described => 1,
+        SupportLevel::Compiles => 2,
+        SupportLevel::Bench => 3,
+        SupportLevel::Qualified => 4,
+    }
+}
+
 fn compare_kind(left: &NodeKind, right: &NodeKind) -> core::cmp::Ordering {
     left.name()
         .cmp(right.name())
@@ -1289,18 +1629,27 @@ fn compare_kind(left: &NodeKind, right: &NodeKind) -> core::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
-    use alumina_graph_ir::{BOOLEAN_STREAM_ITEM_BYTES, GraphIrChannelOwner};
+    use alumina_board::ResourceId;
+    use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
+    #[cfg(not(target_arch = "wasm32"))]
+    use alumina_graph_ir::graph_ir_content_digest;
+    use alumina_graph_ir::{
+        BOOLEAN_STREAM_ITEM_BYTES, GraphIrChannelOwner, decode_graph_resource_parameter,
+    };
 
     use super::*;
     use crate::graph::{
         ClockDefinition, GraphLimits, GraphPortId, GraphSchema, GraphTypeId, GraphValue,
         GraphWireId, NodeDefinition, NodeInputChannelContract, NodeOutputDependency, NodeParameter,
-        NodeParameterContract, PortDefinition, TypeDefinition, TypedGraphValue, WireEndpoint,
+        NodeParameterContract, PortDefinition, ResourceClassId, ResourceGraphHandle,
+        TypeDefinition, TypedGraphValue, WireEndpoint,
     };
 
     const BOOL: GraphTypeId = GraphTypeId::new(1);
     const SOURCE_STREAM: GraphTypeId = GraphTypeId::new(2);
     const TARGET_STREAM: GraphTypeId = GraphTypeId::new(3);
+    const RESOURCE: GraphTypeId = GraphTypeId::new(4);
+    const SAFETY_INPUT_CLASS: ResourceClassId = ResourceClassId::new(1);
     const ROOT: GraphClockId = GraphClockId::new(1);
     const SOURCE_CLOCK: GraphClockId = GraphClockId::new(2);
     const TARGET_CLOCK: GraphClockId = GraphClockId::new(3);
@@ -1536,6 +1885,318 @@ mod tests {
         }
     }
 
+    fn tinybee_capability_document() -> Vec<u8> {
+        let package = &board_mks_tinybee::PACKAGE;
+        let identity = calculate_identity(package).unwrap();
+        let mut document = vec![0_u8; usize::try_from(identity.byte_len).unwrap()];
+        let mut offset = 0_u32;
+        while offset < identity.byte_len {
+            let start = usize::try_from(offset).unwrap();
+            let remaining = usize::try_from(identity.byte_len - offset).unwrap();
+            let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
+            let read = read_verified_range(package, offset, &mut chunk).unwrap();
+            let count = usize::from(read.byte_len);
+            assert!(count <= remaining);
+            document[start..start + count].copy_from_slice(&chunk[..count]);
+            offset += u32::from(read.byte_len);
+        }
+        document
+    }
+
+    fn input_fixture(resource: ResourceId) -> (GraphDocument, GraphDeploymentRegistry) {
+        let schema = GraphSchema::try_new(
+            GraphLimits::interactive(),
+            Vec::new(),
+            vec![
+                TypeDefinition::new(BOOL, "core.bool", TypeKind::Boolean),
+                TypeDefinition::new(
+                    TARGET_STREAM,
+                    "stream.target",
+                    TypeKind::Stream {
+                        sample: BOOL,
+                        clock: TARGET_CLOCK,
+                        capacity: 1,
+                    },
+                ),
+                TypeDefinition::new(
+                    RESOURCE,
+                    "resource.safety-input",
+                    TypeKind::ResourceHandle {
+                        class: SAFETY_INPUT_CLASS,
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        let resource = TypedGraphValue::try_new(
+            &schema,
+            RESOURCE,
+            GraphValue::ResourceHandle(ResourceGraphHandle {
+                device_id: DEVICE,
+                board_package_digest: board_mks_tinybee::PACKAGE.board.capability_digest,
+                class: SAFETY_INPUT_CLASS,
+                resource_selector: u32::from_le_bytes(encode_resource_id(resource)),
+            }),
+        )
+        .unwrap();
+        let clocks = vec![
+            ClockDefinition::new(
+                ROOT,
+                "device.root",
+                ClockKind::DeviceCycle {
+                    device_id: DEVICE,
+                    ticks_per_second: 1_000_000,
+                },
+            ),
+            ClockDefinition::new(
+                TARGET_CLOCK,
+                "device.target",
+                ClockKind::Derived {
+                    source: ROOT,
+                    numerator: 1,
+                    denominator: 2_000,
+                },
+            ),
+        ];
+        let input = NodeDefinition::new(
+            GraphNodeId::new(10),
+            NodeKind::new("deploy.safety-input", 1),
+            "safety input",
+            ExecutionDomain::Realtime { device_id: DEVICE },
+            Vec::new(),
+            vec![port(1, "samples", TARGET_STREAM)],
+            vec![NodeParameter::new(1, "resource", resource)],
+        );
+        let sink = NodeDefinition::new(
+            GraphNodeId::new(20),
+            NodeKind::new("deploy.sink", 1),
+            "sink",
+            ExecutionDomain::Realtime { device_id: DEVICE },
+            vec![port(1, "samples", TARGET_STREAM)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let document = GraphDocument::try_new(
+            12,
+            schema,
+            clocks,
+            vec![sink, input],
+            vec![WireDefinition::new(
+                GraphWireId::new(1),
+                endpoint(10, 1),
+                endpoint(20, 1),
+            )],
+        )
+        .unwrap();
+        let input_schema = NodeSchema::new(
+            NodeKind::new("deploy.safety-input", 1),
+            ExecutionDomainSet::REALTIME,
+            Vec::new(),
+            Vec::new(),
+            vec![port(1, "samples", TARGET_STREAM)],
+            vec![NodeParameterContract::new(1, "resource", RESOURCE)],
+            vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
+            Vec::new(),
+            None,
+        );
+        let sink_schema = NodeSchema::new(
+            NodeKind::new("deploy.sink", 1),
+            ExecutionDomainSet::REALTIME,
+            vec![port(1, "samples", TARGET_STREAM)],
+            vec![NodeInputChannelContract::new(
+                GraphPortId::new(1),
+                InputConnectionRequirement::Required,
+                NodeInputChannelKind::StreamQueue {
+                    capacity: 1,
+                    full_policy: ChannelFullPolicy::Fault,
+                },
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let semantic = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &document,
+            vec![sink_schema, input_schema],
+        )
+        .unwrap();
+        let registry = GraphDeploymentRegistry::try_new(
+            semantic,
+            vec![
+                GraphDeploymentImplementation::new(
+                    NodeKind::new("deploy.sink", 1),
+                    GraphDeploymentNodeKind::BooleanStreamSink {
+                        input: GraphPortId::new(1),
+                    },
+                    TARGET_CLOCK,
+                    20,
+                ),
+                GraphDeploymentImplementation::new(
+                    NodeKind::new("deploy.safety-input", 1),
+                    GraphDeploymentNodeKind::StableBooleanInput {
+                        output: GraphPortId::new(1),
+                        resource_parameter: 1,
+                    },
+                    TARGET_CLOCK,
+                    20,
+                ),
+            ],
+        )
+        .unwrap();
+        (document, registry)
+    }
+
+    fn tinybee_limits() -> GraphDeploymentLimits {
+        GraphDeploymentLimits::from_capability_document(
+            &tinybee_capability_document(),
+            1_000_000,
+            100,
+        )
+        .unwrap()
+    }
+
+    fn tinybee_target() -> GraphDeploymentTarget {
+        GraphDeploymentTarget {
+            device_id: DEVICE,
+            capability_digest: board_mks_tinybee::PACKAGE.board.capability_digest,
+            config_digest: Digest([9; 32]),
+        }
+    }
+
+    #[test]
+    fn authenticated_tinybee_capability_controls_limits_opcodes_and_resources() {
+        let limits = tinybee_limits();
+        assert_eq!(
+            limits.capability_identity().digest,
+            board_mks_tinybee::PACKAGE.board.capability_digest
+        );
+        assert_eq!(limits.resources().len(), 4);
+        let (document, registry) = input_fixture(ResourceId::Gpio(33));
+        let report =
+            lower_graph_deployment(&document, &registry, tinybee_target(), &limits).unwrap();
+        assert_eq!(
+            report.package().header().service_schedule,
+            GraphIrSchedule::EMPTY
+        );
+        assert_eq!(report.package().summary().realtime_state_bytes, 0);
+        assert_eq!(report.package().summary().channel_storage_bytes, 21);
+        assert_eq!(
+            report
+                .package()
+                .nodes()
+                .map(|node| node.opcode)
+                .collect::<Vec<_>>(),
+            vec![
+                GraphIrOpcode::StableBooleanInput,
+                GraphIrOpcode::BooleanStreamSink,
+            ]
+        );
+        assert_eq!(
+            decode_graph_resource_parameter(report.package().node(0).unwrap().parameter),
+            Ok(ResourceId::Gpio(33))
+        );
+
+        let (not_admitted, not_admitted_registry) = input_fixture(ResourceId::Gpio(34));
+        assert_eq!(
+            lower_graph_deployment(
+                &not_admitted,
+                &not_admitted_registry,
+                tinybee_target(),
+                &limits,
+            ),
+            Err(GraphDeploymentError::InvalidNode {
+                node: GraphNodeId::new(10),
+                aspect: "capability resource palette",
+            })
+        );
+        let mut wrong_target = tinybee_target();
+        wrong_target.capability_digest = Digest([0xa5; 32]);
+        assert_eq!(
+            lower_graph_deployment(&document, &registry, wrong_target, &limits),
+            Err(GraphDeploymentError::InvalidLimits)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lowered_tinybee_input_executes_in_the_firmware_actor_types() {
+        use alumina_protocol::DeviceCycle;
+        use alumina_runtime::graph::{
+            FixedGraphRealtimeActor, FixedGraphServiceActor, GraphRunIdentity,
+            GraphRuntimeAuthority, GraphRuntimeLimits, ReloadableGraphBridge,
+        };
+
+        let limits = tinybee_limits();
+        let target = tinybee_target();
+        let (document, registry) = input_fixture(ResourceId::Gpio(33));
+        let report = lower_graph_deployment(&document, &registry, target, &limits).unwrap();
+        let package = report.package();
+        let bridge = ReloadableGraphBridge::<4_096>::new();
+        let mut service = FixedGraphServiceActor::<2_048, 4_096, 4_096>::new(&bridge);
+        let mut realtime = FixedGraphRealtimeActor::<2_048, 4_096, 4_096>::new(&bridge);
+        let runtime_limits =
+            GraphRuntimeLimits::fixed_with_capabilities::<2_048, 2_048, 4_096, 4_096, 4_096>(
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+            );
+        let authority = GraphRuntimeAuthority {
+            device_id: target.device_id,
+            capability_digest: target.capability_digest,
+            config_digest: target.config_digest,
+            implementation_digest: report.implementation_digest(),
+        };
+        let content_digest = graph_ir_content_digest(package.bytes());
+        service
+            .install(
+                package.bytes(),
+                1,
+                content_digest,
+                package.digest(),
+                authority,
+                runtime_limits,
+                true,
+            )
+            .unwrap();
+        realtime
+            .install(
+                package.bytes(),
+                1,
+                content_digest,
+                package.digest(),
+                authority,
+                runtime_limits,
+                true,
+            )
+            .unwrap();
+        let run = GraphRunIdentity {
+            transaction_id: 1,
+            run_id: 1,
+            content_digest,
+            package_digest: package.digest(),
+            start_cycle: DeviceCycle(10_000),
+        };
+        assert_eq!(
+            service
+                .prepare_start(run, true)
+                .unwrap()
+                .primed_service_release,
+            None
+        );
+        realtime.prepare_start(run, true).unwrap();
+        realtime.activate(run).unwrap();
+        service.observe_realtime_started(run).unwrap();
+        let released = realtime
+            .release(DeviceCycle(10_000), true, |resource| {
+                (resource == ResourceId::Gpio(33)).then_some(false)
+            })
+            .unwrap();
+        assert_eq!(released.nodes_executed, 2);
+        assert_eq!(released.last_sink_value, Some(false));
+    }
+
     #[test]
     fn fixed_service_realtime_graph_lowers_to_replayed_ir() {
         let (document, registry) = fixture(1, 1_000, 2, 40);
@@ -1543,7 +2204,7 @@ mod tests {
             &document,
             &registry,
             target(),
-            GraphDeploymentLimits::interactive(),
+            &GraphDeploymentLimits::interactive(),
         )
         .unwrap();
         let replay = GraphIrPackage::from_slice(report.package().bytes()).unwrap();
@@ -1615,12 +2276,12 @@ mod tests {
             report.implementation_digest()
         );
         assert_eq!(
-            report.package().digest(),
-            Digest([
-                0x80, 0x2d, 0x6a, 0x2f, 0x9b, 0x8d, 0x29, 0x58, 0x05, 0x55, 0x32, 0xae, 0xcd, 0xec,
-                0x7b, 0x6d, 0xbe, 0xd6, 0x02, 0xc4, 0x4f, 0xb3, 0xf8, 0x0a, 0x17, 0x55, 0xd8, 0xf8,
-                0x41, 0x2a, 0xca, 0x67,
-            ])
+            report.package().digest().0,
+            [
+                0x9b, 0x01, 0xfc, 0x82, 0x2a, 0x4a, 0xae, 0x39, 0x7f, 0xc8, 0x76, 0x46, 0xe3, 0x1a,
+                0x61, 0x5f, 0xe1, 0x95, 0x99, 0xf4, 0x99, 0x78, 0x35, 0x48, 0x10, 0xfa, 0xbf, 0xb9,
+                0x72, 0x58, 0xc6, 0x96,
+            ]
         );
     }
 
@@ -1636,7 +2297,7 @@ mod tests {
             &document,
             &registry,
             target,
-            GraphDeploymentLimits::interactive(),
+            &GraphDeploymentLimits::interactive(),
         )
         .unwrap();
         let mut runtime = FixedGraphRuntime::<0, 5, 0, 21, 42>::new();
@@ -1659,13 +2320,17 @@ mod tests {
         assert_eq!(start.primed_service_release.unwrap().items_emitted, 1);
 
         let (mut service, mut realtime) = runtime.split().unwrap();
-        let first = realtime.release(DeviceCycle(10_000), true).unwrap();
+        let first = realtime
+            .release(DeviceCycle(10_000), true, |_| None)
+            .unwrap();
         assert_eq!(first.release_tick, 0);
         assert_eq!(first.items_consumed, 2);
         assert_eq!(first.last_sink_value, Some(true));
         service.release(DeviceCycle(11_000), true).unwrap();
         service.release(DeviceCycle(12_000), true).unwrap();
-        let second = realtime.release(DeviceCycle(12_000), true).unwrap();
+        let second = realtime
+            .release(DeviceCycle(12_000), true, |_| None)
+            .unwrap();
         assert_eq!(second.release_tick, 1);
         assert_eq!(second.items_consumed, 3);
         assert_eq!(second.last_sink_value, Some(true));
@@ -1680,7 +2345,7 @@ mod tests {
             &document,
             &registry,
             target(),
-            GraphDeploymentLimits::interactive(),
+            &GraphDeploymentLimits::interactive(),
         )
         .unwrap();
         let mut implementations = registry.implementations().to_vec();
@@ -1692,7 +2357,7 @@ mod tests {
             &document,
             &rebuilt,
             target(),
-            GraphDeploymentLimits::interactive(),
+            &GraphDeploymentLimits::interactive(),
         )
         .unwrap();
         assert_eq!(first, second);
@@ -1711,14 +2376,14 @@ mod tests {
             &document,
             &registry,
             target(),
-            GraphDeploymentLimits::interactive(),
+            &GraphDeploymentLimits::interactive(),
         )
         .unwrap();
         let broad = lower_graph_deployment(
             &broad_document,
             &broad_registry,
             target(),
-            GraphDeploymentLimits::interactive(),
+            &GraphDeploymentLimits::interactive(),
         )
         .unwrap();
         assert_ne!(first.implementation_digest(), broad.implementation_digest());
@@ -1733,7 +2398,7 @@ mod tests {
                 &document,
                 &registry,
                 target(),
-                GraphDeploymentLimits::interactive(),
+                &GraphDeploymentLimits::interactive(),
             ),
             Err(GraphDeploymentError::InvalidSchedule {
                 node,
@@ -1747,7 +2412,7 @@ mod tests {
                 &document,
                 &registry,
                 target(),
-                GraphDeploymentLimits::interactive(),
+                &GraphDeploymentLimits::interactive(),
             ),
             Err(GraphDeploymentError::WcetExceeded(GraphIrDomain::Realtime))
         );
@@ -1760,23 +2425,23 @@ mod tests {
                 &document,
                 &registry,
                 foreign,
-                GraphDeploymentLimits::interactive(),
+                &GraphDeploymentLimits::interactive(),
             ),
             Err(GraphDeploymentError::UnsupportedDomain { node, .. })
                 if node == GraphNodeId::new(10)
         ));
 
         let mut limits = GraphDeploymentLimits::interactive();
-        limits.maximum_bridge_bytes = 41;
+        limits.bridge_channel_bytes = 41;
         assert_eq!(
-            lower_graph_deployment(&document, &registry, target(), limits),
+            lower_graph_deployment(&document, &registry, target(), &limits),
             Err(GraphDeploymentError::LimitExceeded("bridge bytes"))
         );
         let mut limits = GraphDeploymentLimits::interactive();
-        limits.maximum_state_bytes = 4;
+        limits.realtime_state_bytes = 4;
         assert_eq!(
-            lower_graph_deployment(&document, &registry, target(), limits),
-            Err(GraphDeploymentError::LimitExceeded("state bytes"))
+            lower_graph_deployment(&document, &registry, target(), &limits),
+            Err(GraphDeploymentError::LimitExceeded("realtime state bytes"))
         );
     }
 
@@ -1797,7 +2462,7 @@ mod tests {
                 &document,
                 &partial,
                 target(),
-                GraphDeploymentLimits::interactive(),
+                &GraphDeploymentLimits::interactive(),
             ),
             Err(GraphDeploymentError::UnimplementedNode { node, .. })
                 if node == GraphNodeId::new(30)

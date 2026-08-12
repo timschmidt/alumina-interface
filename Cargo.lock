@@ -90,6 +90,8 @@ dependencies = [
 name = "alumina-graph-ir"
 version = "0.1.0"
 dependencies = [
+ "alumina-board",
+ "alumina-capability",
  "alumina-protocol",
  "alumina-storage",
  "sha2",
@@ -144,12 +146,15 @@ dependencies = [
 name = "alumina-interface-core"
 version = "0.1.0"
 dependencies = [
+ "alumina-board",
+ "alumina-capability",
  "alumina-graph-ir",
  "alumina-job",
  "alumina-machine-ir",
  "alumina-protocol",
  "alumina-runtime",
  "alumina-storage",
+ "board-mks-tinybee",
  "critical-section",
  "csgrs",
  "hypercurve",
@@ -207,6 +212,7 @@ version = "0.1.0"
 name = "alumina-runtime"
 version = "0.1.0"
 dependencies = [
+ "alumina-board",
  "alumina-graph-ir",
  "alumina-machine-ir",
  "alumina-protocol",
@@ -415,6 +421,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c132eebf10f5cad5289222520a4a058514204aed6d791f1cf4fe8088b82d15f"
 dependencies = [
  "objc2 0.5.2",
+]
+
+[[package]]
+name = "board-mks-tinybee"
+version = "0.1.0"
+dependencies = [
+ "alumina-board",
+ "alumina-protocol",
 ]
 
 [[package]]

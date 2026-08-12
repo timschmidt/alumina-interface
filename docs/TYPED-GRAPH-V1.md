@@ -190,23 +190,34 @@ representative 1,000 Hz to 600 Hz trace is 658 bytes with SHA-256 identity
 
 `GraphDeploymentRegistry` is a third explicit authority. It binds reviewed
 kind/versions to one fixed firmware opcode, schedule clock, and nonzero WCET.
-Its `ALDI` V1 identity covers the canonical graph digest, host lowering limits,
+Its `ALDI` V2 identity covers the canonical graph digest, host lowering limits,
 complete audited semantic registry, and canonical implementation bindings. A
 changed port, domain family, channel/full policy, dependency, rate transition,
 state contract, opcode, clock, WCET, or host limit therefore changes identity.
 
-The first resource-free subset is intentionally smaller than the future graph
-system:
+The deployed V2 subset is intentionally smaller than the future graph system:
 
 - a Service-domain Boolean Stream constant with one exact Boolean parameter;
 - a Realtime Boolean `LatestAtOrBeforeSourceFirst` transition; and
-- a Realtime Boolean Stream sink with no side effect.
+- a Realtime Boolean Stream sink with no side effect; and
+- a Realtime stable Boolean input whose parameter is one typed resource handle.
 
 Every structural node must have one reviewed implementation, and every node
 must target the same nonzero `DeviceId`. HostExact nodes, foreign devices,
 explicit graph state, Event/synchronous channels, Realtime-to-Service edges,
-lossy realtime queues, and all resource operations reject. The structural wires
-must topologically order; firmware never receives `ALGR` bytes.
+and lossy realtime queues reject. The one admitted resource operation requires
+the handle's exact device ID, board-package digest, class, and selector to match
+an authenticated target capability entry with `StableBooleanInput` access. The
+structural wires must topologically order; firmware never receives `ALGR` bytes.
+
+`GraphDeploymentLimits::from_capability_document` is the production authority
+for package size, record/queue bounds, all five split arenas, and the exact
+opcode and graph-resource palettes. Lowering also requires the target's
+capability digest to equal the independently parsed document identity. There is
+no production default that guesses a board's graph limits. The `ALDI` V2
+implementation identity binds the complete capability document identity and
+all of those exact limits and palettes before the audited semantics and opcode
+bindings.
 
 Each active domain uses one exact graph clock. Its independent root must be the
 target MCU's `DeviceCycle` clock, and the clock period must be an exact integer
@@ -227,13 +238,13 @@ mutex, fault-mailbox, and executor metadata are additional compile-time storage
 and are reported by the concrete firmware runtime rather than hidden in 68.
 
 `lower_graph_deployment` builds the sibling `alumina-graph-ir` 4,096-byte
-`ALGRIR01` package and immediately passes it through that `no_std`,
+`ALGRIR02` package and immediately passes it through that `no_std`,
 allocation-free independent decoder. The package binds graph, implementation,
 device, capability, and configuration digests and retains topological nodes,
 integer schedules/WCET/reserve, contiguous state/channel offsets, bridge
 ownership, capacity, full policy, and aggregate totals. The representative
 lowered package has SHA-256 identity
-`802d6a2f9b8d2958055532aecdec7b6dbed602c44fb3f80a1755d8f8412aca67`.
+`9b01fc822a4aae397fc87646e31a615fe19599f49978354810fabfb97258c696`.
 
 One native cross-repository test passes those exact bytes and identities into
 the sibling `FixedGraphRuntime<0, 5, 0, 21, 42>`. It transactionally admits the
@@ -246,9 +257,15 @@ permanent core-local actors. `GraphRunMachine` sends one authenticated exact
 future epoch, treats request acceptance separately from both actors reporting
 Running, reconciles exact stop, rejects foreign run identity, and retains the
 first fault report across firmware-latch reset. The pinned Embassy tasks enforce
-the declared release reserve as a lateness boundary. This remains resource-free
-functional execution: there is no durable active selector, resource claim, GPIO
-or motor opcode, measured deadline/WCET result, or physical timing evidence.
+the declared release reserve as a lateness boundary. A second cross-repository
+fixture builds the complete TinyBee 8 MiB capability document, lowers a typed
+GPIO33 handle to `StableBooleanInput`, and executes the emitted package through
+the firmware's permanent actor types with a supplied debounced value. GPIO34,
+which is a general board resource but not in the graph palette, and a foreign
+capability digest reject before deployment. Firmware runtime admission rechecks
+the exact opcode, resource class, access, and selector. The physical read path
+still has no connected-board HIL or measured deadline/WCET evidence, and no
+graph opcode can drive a GPIO or motor.
 
 ## Canonical bytes and replay
 
@@ -281,12 +298,12 @@ families. Its graph digest is
 
 ## Deliberately open
 
-V1 now has one fixed host-executable Stream/rate subset and one fixed
-resource-free Service/Realtime lowering plus portable execution, but arbitrary
-documents remain non-executable. Subgraphs/components, general feedback
-structures, queue timeouts and additional policies, cases/loops/state machines,
-front panels, resource claims, general host implementation admission,
-authenticated firmware installation/core transfer, live task composition,
-replacement lifecycle, measured WCET/deadline analysis, protocol routes, and
-resource opcodes remain later M9 slices. No arbitrary graph document is sent to
-or interpreted by firmware.
+V1 now has one fixed host-executable Stream/rate subset, while deployed graph IR
+V2 has one capability-bound Service/Realtime lowering and portable executor;
+arbitrary documents remain non-executable. Subgraphs/components, general
+feedback structures, queue timeouts and additional policies, cases/loops/state
+machines, front panels, capability-generated editor nodes, broader resource
+claims, general host implementation admission, measured WCET/deadline analysis,
+physical HIL, output and motion opcodes, and protocol-resource nodes remain
+later M9 slices. No arbitrary graph document is sent to or interpreted by
+firmware.

@@ -17,6 +17,8 @@ publish = false
 [workspace.dependencies]
 alumina-interface-client = { path = "crates/alumina-interface-client" }
 alumina-interface-core = { path = "crates/alumina-interface-core" }
+alumina-board = { path = "../aluminafw/crates/alumina-board" }
+alumina-capability = { path = "../aluminafw/crates/alumina-capability" }
 alumina-clock = { path = "../aluminafw/crates/alumina-clock" }
 alumina-graph-ir = { path = "../aluminafw/crates/alumina-graph-ir" }
 alumina-job = { path = "../aluminafw/crates/alumina-job" }
@@ -25,6 +27,7 @@ alumina-net = { path = "../aluminafw/crates/alumina-net" }
 alumina-protocol = { path = "../aluminafw/crates/alumina-protocol" }
 alumina-runtime = { path = "../aluminafw/crates/alumina-runtime" }
 alumina-storage = { path = "../aluminafw/crates/alumina-storage" }
+board-mks-tinybee = { path = "../aluminafw/boards/mks-tinybee" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 csgrs = { path = "../csgrs", default-features = false }

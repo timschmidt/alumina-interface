@@ -97,17 +97,24 @@ prototype.
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
   byte to match; it grants no firmware or deployment authority.
-- A separate deployment registry lowers one resource-free Boolean Stream subset
-  into the sibling firmware's canonical 4 KiB `ALGRIR01` package. The compiler
-  binds the complete audited semantics, fixed opcodes/WCET, graph, target MCU,
-  capabilities, and configuration; proves integer device-cycle periods plus
-  executor reserve, topological order, and exact state/channel/bridge arenas;
-  then requires the allocation-free firmware decoder to replay the package.
+- A separate deployment registry lowers one fixed Boolean Stream subset into
+  the sibling firmware's canonical 4 KiB `ALGRIR02` package. Production limits
+  are derived from the complete authenticated target capability document, not
+  guessed defaults. The compiler binds its identity, exact split arenas,
+  opcode/resource palettes, audited semantics, fixed implementations/WCET,
+  graph, target MCU, and configuration; proves integer device-cycle periods,
+  executor reserve, topology, and exact arena use; then requires the
+  allocation-free firmware decoder to replay the package.
 - A native cross-repository fixture sends those exact compiler bytes directly
   into the sibling portable firmware runtime. Exact identity/capacity admission,
   safety-gated Service tick-zero priming, unique Service/Realtime owners, and
   1 kHz→500 Hz queue/latest/sink execution reproduce the expected Boolean
   samples without a graph-document interpreter or physical side effect.
+- A second cross-repository fixture lowers a typed TinyBee GPIO33 resource
+  handle into the first physical opcode and runs it through the firmware actor
+  types. GPIO34 and a mismatched target capability digest fail before package
+  authority; runtime admission rechecks the same exact opcode/class/access/
+  selector palette. This is host functional evidence, not physical input HIL.
 - The headless and WASM clients publish that fixed package, reconcile independent
   dual-core installation, and drive exact future start/stop epochs. Running is
   reported only after both permanent actors and the shared bridge agree; the
@@ -180,8 +187,9 @@ physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
 views, additional deterministic host graph behaviors, and fixed-memory
 authenticated Service/Realtime upload/core transfer and task composition,
-resource opcodes, and capability-driven graph palettes. Raw G-code remains an
-optional exact UI importer, never firmware or canonical job input.
+additional resource opcodes and capability-generated graph nodes, and physical
+input/timing qualification. Raw G-code remains an optional exact UI importer,
+never firmware or canonical job input.
 
 This repository is MIT licensed. Dependencies are restricted to permissive
 licenses accepted by the Alumina project; GPL-family code is excluded.
