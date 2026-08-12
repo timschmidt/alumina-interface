@@ -18,8 +18,10 @@ mod storage;
 mod wire;
 
 pub use analysis::{
-    CombinationalCycle, DependencyLink, ExecutionDomainSet, GraphAnalysis, GraphAnalysisError,
-    GraphAnalysisLimits, GraphNodeRegistry, NodeOutputDependency, NodeParameterContract,
+    ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
+    GRAPH_CHANNEL_ENVELOPE_BYTES, GraphAnalysis, GraphAnalysisError, GraphAnalysisLimits,
+    GraphChannelAllocation, GraphNodeRegistry, InputConnectionRequirement,
+    NodeInputChannelContract, NodeInputChannelKind, NodeOutputDependency, NodeParameterContract,
     NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, analyze_graph,
 };
 pub use document::{

@@ -91,6 +91,25 @@ This is still host-side semantic analysis. A Realtime domain in a passing
 report is not a firmware opcode, implementation binding, WCET proof, resource
 claim, deployment package, or authority to execute.
 
+### Input delivery and queue memory
+
+Every audited input has a canonical delivery contract and is explicitly
+required or optional. A required unconnected input rejects; an optional
+unconnected input allocates nothing. Ordinary literal values use one
+synchronous typed-value slot. Synchronous wires may not cross concrete
+HostExact/Service/Realtime/device ownership, so an apparent scalar bridge cannot
+become invisible shared state.
+
+Event and Stream inputs instead require bounded queues. Their contract fixes
+capacity and one of `Backpressure`, `Fault`, `DropNewest`, or `DropOldest` when
+full. Stream queue capacity may not exceed the registered Stream type's own
+capacity. Each queue item reserves the proven typed payload/sample ceiling plus
+16 canonical analysis bytes: one `u64` source-clock tick and one monotonic `u64`
+sequence. Per-input and total bytes are checked against independent policy and
+retained in canonical node/port order. This is the host analysis/storage
+contract; firmware bridge and queue layouts must later match or conservatively
+exceed it before deployment.
+
 ## Canonical bytes and replay
 
 `ALGR` format V1 uses fixed-width little-endian integers, length-prefixed UTF-8
@@ -125,7 +144,7 @@ families. Its graph digest is
 V1 remains non-executable. Subgraphs/components, general feedback structures,
 queue/backpressure semantics, rate transitions, cases/loops/state machines,
 front panels, resource claims, implementation/opcode admission, static
-runtime-layout and queue-memory proof, fixed-memory lowering, WCET/deadline
-analysis, protocol bridges, firmware opcodes, and deterministic graph simulation
-remain later M9 slices. No arbitrary graph document is sent to or interpreted
-by firmware.
+firmware runtime-layout proof, fixed-memory lowering, WCET/deadline analysis,
+protocol bridges, firmware opcodes, and deterministic graph simulation remain
+later M9 slices. No arbitrary graph document is sent to or interpreted by
+firmware.

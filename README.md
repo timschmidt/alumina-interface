@@ -80,6 +80,10 @@ prototype.
 - Checked recursive storage analysis proves canonical maximum bytes for every
   literal or runtime payload/sample type and rejects state storage smaller than
   its complete exact value domain. It does not claim a firmware runtime layout.
+- Required/optional input contracts distinguish same-owner synchronous slots
+  from bounded event/stream queues with explicit full behavior. Exact reports
+  include timestamp/sequence envelopes and reject scalar cross-domain sharing,
+  stream over-capacity, and per-input/total allocation overflow.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
