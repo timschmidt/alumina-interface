@@ -88,11 +88,14 @@ prototype.
   transition. Exact clock resolution proves a shared tick-zero root, the
   smallest rational schedule pattern, minimum input capacity, and separately
   bounded held-sample state; implicit or independent-root transitions reject.
-- A separate implementation registry admits only three parameter/state-free
-  `HostExact` simulation behaviors: external Stream source, audited
-  latest-at-or-before transition, and Stream sink. The bounded simulator uses
-  exact rational clock time, orders every coincident source tick first, and
-  produces the same canonical result regardless of caller sample order.
+- A separate implementation registry admits nine reviewed `HostExact`
+  simulation behaviors: external Stream source, audited latest-at-or-before
+  transition, Stream sink, exact add/subtract/scale/clamp, explicit
+  read-before-write unit delay, and a fail-safe Boolean permit gate. A visible
+  multi-rate discrete PID/interlock fixture composes those primitives without
+  hidden controller state. The bounded simulator uses exact rational clock
+  time and unit scales, orders every coincident source tick first, and produces
+  the same canonical result regardless of caller sample order.
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
@@ -185,7 +188,7 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, additional deterministic host graph behaviors, and fixed-memory
+views, broader deterministic host graph behaviors, and fixed-memory
 authenticated Service/Realtime upload/core transfer and task composition,
 additional resource opcodes and capability-generated graph nodes, and physical
 input/timing qualification. Raw G-code remains an optional exact UI importer,

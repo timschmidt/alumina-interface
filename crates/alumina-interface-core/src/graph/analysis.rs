@@ -347,6 +347,9 @@ impl NodeOutputDependency {
 /// `current_output` exposes the state captured before the named clock update;
 /// `next_input` supplies the value captured after current-tick combinational
 /// evaluation. `initial_parameter` supplies deterministic run-start state.
+/// Each state port may carry the literal directly or wrap that literal in a
+/// Stream on the same update clock. Storage always holds one literal value,
+/// never the Stream envelope or history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeStateContract {
     clock: GraphClockId,
@@ -743,8 +746,10 @@ fn validate_node_schema(
             .iter()
             .find(|port| port.id() == state.current_output);
         if initial.map(NodeParameterContract::value_type) != Some(state.value_type)
-            || next.map(PortDefinition::value_type) != Some(state.value_type)
-            || current.map(PortDefinition::value_type) != Some(state.value_type)
+            || next.and_then(|port| state_path_value_type(context_schema, state.clock, port))
+                != Some(state.value_type)
+            || current.and_then(|port| state_path_value_type(context_schema, state.clock, port))
+                != Some(state.value_type)
         {
             return Err(invalid_schema(schema, "state value path"));
         }
@@ -757,6 +762,18 @@ fn validate_node_schema(
         }
     }
     Ok(())
+}
+
+fn state_path_value_type(
+    schema: &GraphSchema,
+    state_clock: GraphClockId,
+    port: &PortDefinition,
+) -> Option<GraphTypeId> {
+    match schema.value_type(port.value_type())?.kind() {
+        TypeKind::Stream { sample, clock, .. } if *clock == state_clock => Some(*sample),
+        TypeKind::Stream { .. } | TypeKind::Event { .. } => None,
+        _ => Some(port.value_type()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

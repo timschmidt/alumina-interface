@@ -67,7 +67,9 @@ than an implicit assumption.
 An optional `NodeStateContract` names one state type, deterministic run-start
 parameter, next-state input, prior-state output, update clock, and declared
 storage ceiling. The prior-state output must have no current-tick feedthrough;
-updates are read-before-write.
+updates are read-before-write. A state port may carry the literal directly or
+carry it as a Stream sample on the exact state clock. Only one literal is
+stored; the Stream envelope and history never become hidden state.
 
 Static storage analysis separately derives the maximum canonical byte count for
 every registered literal type by checked recursion over its complete value
@@ -150,17 +152,26 @@ proofs.
 ## Fixed deterministic host simulation
 
 `GraphSimulationRegistry` is a second, explicit authority above the audited
-semantic registry. It binds exact node kind/version identities to one of three
-parameter/state-free behaviors:
+semantic registry. It binds exact node kind/version identities to one of nine
+reviewed behaviors:
 
 - caller-supplied external Stream source;
-- the audited `LatestAtOrBeforeSourceFirst` Stream transition; or
-- Stream sink with no modeled side effect.
+- the audited `LatestAtOrBeforeSourceFirst` Stream transition;
+- Stream sink with no modeled side effect;
+- same-clock exact-rational add and subtract;
+- exact scale by a dimensionless unit-bearing parameter;
+- exact inclusive clamp;
+- an explicit read-before-write unit delay; and
+- an exact-value permit gate whose false branch always selects its declared
+  safe parameter.
 
-The registry canonicalizes bindings and hashes the analysis limits, complete
-audited node schemas, and fixed implementation selections as an `ALSI` V1
-identity. Simulation accepts only `HostExact` nodes, requires an implementation
-for every node, and evaluates no firmware resource or device placement.
+The registry canonicalizes bindings and hashes the complete exact unit/type and
+clock context, analysis limits, audited node schemas, and fixed implementation
+selections as an `ALSI` V2 identity. Simulation accepts only `HostExact` nodes,
+requires an implementation for every node, and evaluates no firmware resource
+or device placement. Binding the context means that changing a unit scale or a
+clock definition changes the registry identity even when every node binding is
+otherwise unchanged.
 
 The caller supplies an inclusive horizon in one independent root clock and
 exact typed samples with source-clock ticks and monotonic sequence numbers.
@@ -174,8 +185,40 @@ against each due interval and the unconsumed horizon tail.
 
 External sample count, generated ticks per transition, total trace entries,
 root-clock horizon, and canonical trace bytes have independent limits. The
-first subset intentionally does not model state, parameters, resource handles,
-side effects, Service/Realtime execution, deadlines, or firmware layout.
+same generated-tick limit also bounds each clocked control domain. Every
+same-clock control input must have one exact sample at every evaluated tick;
+sparse values require an explicit rate transition rather than an implicit
+hold. Arithmetic output is reconstructed through the document schema at every
+tick, so rational magnitude policy remains authoritative after computation.
+Dimensionless scale values include their registered exact unit scale.
+
+The unit delay is the only stateful fixed behavior. Its implementation must
+match the audited `NodeStateContract` exactly: initial parameter, state type,
+clock, next input, prior-state output, and bounded canonical storage. At each
+tick all delay outputs expose prior state first, combinational nodes then settle
+in audited dependency order, and only afterward do delays capture next state.
+This admits deliberate feedback while preserving the existing combinational-
+cycle rejection. No controller state is hidden in a PID-specific opcode.
+
+The representative control fixture resamples 50 Hz setpoint, measurement, and
+permit Streams onto a 10 Hz control clock. It composes subtract, two explicit
+delays, exact scale/add, clamp, and permit nodes into a discrete PID/interlock.
+The coefficients are percentage values with exact `1/100` unit scale. Its
+integral and derivative factors are explicitly pre-discretized for that clock;
+the simulator supplies no hidden or floating-point `dt`. Its
+integral prior-state trace is `0, 3, 5, 6, 6, 6` mm, the clamped controller trace
+is `5, 5, 4, 2, 3, 3` mm, and dropping permit forces the final trace to
+`5, 5, 4, 0, 0, 0` mm. Reversing every caller sample reproduces the same
+simulation, and `ALGT` replay regenerates the complete trace byte for byte.
+The canonical fixture graph identity is
+`cd99124ff57d181830c71e0a79ed0d1f030e319f73e8bfe93569d41b2cb5a921`;
+its fixed semantic/implementation registry identity is
+`6bb6f814941b632ac5c9858fbbfe599fe8febb3a04b4dcc7bf4fbc8ac2f61537`.
+The 7,836-byte trace has SHA-256
+`9ad6e174717880b9c7e522c8f4b1cf69c905444dc1c19bd4c1518253762dddb9`.
+
+The fixed host subset still does not model resource handles, physical side
+effects, Service/Realtime execution, deadlines, or firmware layout.
 
 `ALGT` V1 is a canonical deterministic trace. Its fixed-width header binds the
 canonical graph digest, the semantic/implementation registry digest, and the
@@ -184,7 +227,7 @@ sequence, and the canonical typed value. Untrusted replay bounds and decodes the
 trace, extracts only external inputs, independently reruns simulation,
 re-encodes the entire result, and requires byte-for-byte equality. The
 representative 1,000 Hz to 600 Hz trace is 658 bytes with SHA-256 identity
-`4e0dbaec5495e96a1f472c218a83e8f441118c8a68c4bd94b77516b2d61b773a`.
+`99677284550e7465541096c675ddd360416a3f3655653af3c96e6c6d96ffa2f4`.
 
 ## First fixed Service/Realtime lowering
 
@@ -298,12 +341,12 @@ families. Its graph digest is
 
 ## Deliberately open
 
-V1 now has one fixed host-executable Stream/rate subset, while deployed graph IR
-V2 has one capability-bound Service/Realtime lowering and portable executor;
-arbitrary documents remain non-executable. Subgraphs/components, general
-feedback structures, queue timeouts and additional policies, cases/loops/state
-machines, front panels, capability-generated editor nodes, broader resource
-claims, general host implementation admission, measured WCET/deadline analysis,
-physical HIL, output and motion opcodes, and protocol-resource nodes remain
-later M9 slices. No arbitrary graph document is sent to or interpreted by
-firmware.
+V1 now has one fixed host-executable Stream/rate/exact-control subset, while
+deployed graph IR V2 has one capability-bound Service/Realtime lowering and
+portable executor; arbitrary documents remain non-executable.
+Subgraphs/components, multi-value state records, queue timeouts and additional
+policies, cases/loops/state machines, front panels, capability-generated editor
+nodes, broader resource claims, general host implementation admission, measured
+WCET/deadline analysis, physical HIL, output and motion opcodes, and
+protocol-resource nodes remain later M9 slices. No arbitrary graph document is
+sent to or interpreted by firmware.
