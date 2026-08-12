@@ -54,6 +54,14 @@ clocks must resolve in the complete document. Ports are canonicalized by local
 ID. Wires must begin at an output, end at an input of the identical registered
 type, and uniquely own the input.
 
+Canvas placement is intentionally not an `ALGR` value. The separate canonical
+[`ALGW` V1 workspace](GRAPH-WORKSPACE-V1.md) embeds the complete graph and adds
+one bounded signed-integer logical-pixel position per node plus monotonic
+node/wire allocation cursors. Placement edits cannot change the embedded graph
+digest; typed wire edits reconstruct and revalidate the whole graph, advance
+both revisions, and never reuse deleted identities. This separation prevents
+pointer or renderer values from becoming exact-control or machine authority.
+
 ## Audited semantic admission
 
 Opaque node identity remains saveable data until a separate
@@ -219,16 +227,22 @@ The 7,836-byte trace has SHA-256
 
 The fixture is one fallible public core construction shared by its regression
 test and the native/WASM application; the UI does not reproduce its values or
-topology. The initial inspector independently caps presentation at 256 nodes,
+topology. The initial workspace independently caps presentation at 256 nodes,
 1,024 wires, and 4,096 points per selected series. It ranks nodes from audited
 current-tick dependencies, excludes only declared next-state captures from that
-acyclic rank, and routes those captures visibly as feedback. Node selection
-exposes kind/version, typed ports, exact parameters, and explicit state facts.
-Four traces show error, integral prior state, clamped controller, and
-permit-gated output. Egui coordinates and plot labels are named display
+acyclic rank, and routes those captures visibly as feedback. Its canonical
+`ALGW` envelope retains one bounded integer position per node and monotonic
+identity cursors. Node drags and typed wire connect/disconnect operations replace
+the draft only after complete candidate validation; structural edits detach the
+reference trace because its `ALGT` identity still binds the reviewed graph.
+The initial 3,396-byte workspace has SHA-256
+`d7d4ef9e27359a474b59f48cdbcb604b3d4d16f2a768a65f12c95dde8aee9799`.
+Node selection exposes kind/version, typed ports, exact parameters, and explicit
+state facts. Four traces show error, integral prior state, clamped controller,
+and permit-gated output. Egui coordinates and plot labels are named display
 projections from certified finite `f64` enclosures; the hover cursor displays
-the retained exact rational. A headless full-frame test exercises the same
-native/browser render path.
+the retained exact rational. Headless core-edit and full-frame tests exercise
+the same native/browser paths.
 
 The fixed host subset still does not model resource handles, physical side
 effects, Service/Realtime execution, deadlines, or firmware layout.

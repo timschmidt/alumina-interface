@@ -97,11 +97,15 @@ prototype.
   time and unit scales, orders every coincident source tick first, and produces
   the same canonical result regardless of caller sample order.
 - The native and browser shells construct that same fallible core fixture and
-  open a bounded inspector by default: semantic current-tick layers, explicit feedback
-  routes, typed ports, exact parameters/state, and four control traces. Plot
-  coordinates come only from certified `f64` enclosures; the cursor retains
-  and displays the exact rational sample. This is an inspector, not deployment
-  or an arbitrary graph editor.
+  open a bounded workspace by default: semantic current-tick layers, explicit
+  feedback routes, typed ports, exact parameters/state, and four control traces.
+  Canonical `ALGW` V1 embeds the unchanged `ALGR` plus integer canvas positions
+  and monotonic ID cursors. Node moves and typed wire connect/disconnect edits
+  are transactional; structural edits detach the graph-bound reference trace.
+  Plot coordinates come only from certified `f64` enclosures, and the cursor
+  retains the exact rational sample. This is an in-memory editing foundation,
+  not deployment or firmware authority. See
+  [`docs/GRAPH-WORKSPACE-V1.md`](docs/GRAPH-WORKSPACE-V1.md).
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
@@ -194,8 +198,8 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, editable general graph/front-panel workflows, broader deterministic host
-graph behaviors, and fixed-memory
+views, node/palette/parameter/group/component/front-panel editing, workspace
+persistence and history, broader deterministic host graph behaviors, and fixed-memory
 authenticated Service/Realtime upload/core transfer and task composition,
 additional resource opcodes and capability-generated graph nodes, and physical
 input/timing qualification. Raw G-code remains an optional exact UI importer,

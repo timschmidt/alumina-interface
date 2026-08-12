@@ -1,7 +1,7 @@
 //! Bounded exact value and type registries for the greenfield graphical-control IR.
 //!
-//! This module owns no renderer, graph editor, network transport, device task,
-//! or executor. It establishes the value authority those layers must share:
+//! This module owns no renderer, network transport, device task, or executor.
+//! It establishes the value and saved editor-document authority those layers share:
 //! registered multiplicative units, exact rational values, bounded physical
 //! intervals, canonical integer lattices, typed composites, runtime-only
 //! events/streams, and identity-bearing resource/job handles.
@@ -20,6 +20,7 @@ mod simulation;
 mod storage;
 mod trace;
 mod wire;
+mod workspace;
 
 pub use analysis::{
     ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
@@ -56,6 +57,11 @@ pub use trace::{
 pub use wire::{
     CanonicalGraphEncoding, GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GraphReplay,
     GraphWireError, encode_graph_document, replay_graph_document,
+};
+pub use workspace::{
+    CanonicalGraphWorkspaceEncoding, GRAPH_WORKSPACE_MAGIC, GRAPH_WORKSPACE_VERSION,
+    GraphNodePlacement, GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits,
+    GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
 };
 
 /// Stable identifier for one registered physical unit.

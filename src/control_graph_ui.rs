@@ -7,10 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alumina_interface_core::graph::{
-    ExecutionDomain, GraphDocument, GraphNodeId, GraphSimulationRegistry, GraphTraceEntryKind,
-    GraphValue, GraphWireId, NodeDefinition, RepresentativeControlSignal,
-    RepresentativeExactControlGraph, TypeKind, WireEndpoint,
-    compile_representative_exact_control_graph,
+    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphDocument, GraphNodeId,
+    GraphNodePlacement, GraphSimulationRegistry, GraphTraceEntryKind, GraphValue, GraphWireId,
+    GraphWorkspaceDocument, GraphWorkspaceLimits, NodeDefinition, RepresentativeControlSignal,
+    RepresentativeExactControlGraph, TypeKind, WireEndpoint, analyze_graph,
+    compile_representative_exact_control_graph, encode_graph_workspace,
 };
 use eframe::egui;
 
@@ -48,6 +49,19 @@ struct GraphPresentation {
     size: egui::Vec2,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NodeDrag {
+    node: GraphNodeId,
+    origin: GraphNodePlacement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PortEdit {
+    SelectOutput(WireEndpoint),
+    ConnectInput(WireEndpoint),
+    DisconnectInput(WireEndpoint),
+}
+
 #[derive(Clone, Debug)]
 struct TracePoint {
     tick: u64,
@@ -64,9 +78,14 @@ struct TraceSeries {
 /// Browser/native inspector for one shared exact control graph and trace.
 pub(crate) struct ExactControlWorkspace {
     fixture: RepresentativeExactControlGraph,
+    workspace: GraphWorkspaceDocument,
+    workspace_encoding: CanonicalGraphWorkspaceEncoding,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
     selected_node: Option<GraphNodeId>,
+    pending_source: Option<WireEndpoint>,
+    drag: Option<NodeDrag>,
+    edit_status: String,
     cursor_tick: u64,
 }
 
@@ -74,33 +93,47 @@ impl ExactControlWorkspace {
     pub(crate) fn try_new() -> Result<Self, String> {
         let fixture =
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
-        let presentation = graph_presentation(fixture.document(), fixture.registry())?;
+        let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let traces = trace_series(&fixture)?;
         Ok(Self {
             fixture,
+            workspace,
+            workspace_encoding,
             presentation,
             traces,
             selected_node: None,
+            pending_source: None,
+            drag: None,
+            edit_status: "canonical workspace ready; no structural edits".to_owned(),
             cursor_tick: 0,
         })
     }
 
     pub(crate) fn show_sidebar(&self, ui: &mut egui::Ui) {
-        let document = self.fixture.document();
-        ui.label("Exact control graph inspector");
+        let document = self.workspace.graph();
+        ui.label("Exact control graph workspace");
         ui.label(format!(
-            "Saved nodes / wires: {} / {}",
+            "Draft nodes / wires: {} / {} · revision {}",
             document.nodes().len(),
-            document.wires().len()
+            document.wires().len(),
+            self.workspace.revision()
         ));
         ui.label(format!(
-            "Canonical trace: {} entries / {} bytes",
+            "Canonical workspace: {} bytes",
+            self.workspace_encoding.bytes().len()
+        ));
+        ui.monospace(format!(
+            "workspace {}…",
+            digest_prefix(self.workspace_encoding.digest().0)
+        ));
+        ui.label(format!(
+            "Reference trace: {} entries / {} bytes",
             self.fixture.simulation().entries().len(),
             self.fixture.trace().bytes().len()
         ));
         ui.monospace(format!(
-            "graph {}…",
-            digest_prefix(self.fixture.simulation().graph_digest().0)
+            "draft graph {}…",
+            digest_prefix(self.workspace.graph_digest().0)
         ));
         ui.monospace(format!(
             "registry {}…",
@@ -112,7 +145,7 @@ impl ExactControlWorkspace {
         ));
         ui.colored_label(
             egui::Color32::YELLOW,
-            "HostExact simulation only — no firmware or output authority.",
+            "Editor draft only — no deployment, firmware, or output authority.",
         );
         if let Some(selected) = self.selected_node
             && let Some(node) = document.node(selected)
@@ -125,31 +158,73 @@ impl ExactControlWorkspace {
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.heading("Exact PID / interlock");
             ui.label("50 Hz acquisition to 10 Hz control");
-            ui.colored_label(egui::Color32::LIGHT_BLUE, "canonical replay attached");
+            let trace_current = self.reference_trace_is_current();
+            ui.colored_label(
+                if trace_current {
+                    egui::Color32::LIGHT_BLUE
+                } else {
+                    egui::Color32::YELLOW
+                },
+                if trace_current {
+                    "canonical reference replay attached"
+                } else {
+                    "draft topology changed; reference replay detached"
+                },
+            );
+            if ui.small_button("reset draft").clicked() {
+                self.reset_draft();
+            }
         });
         ui.label(
-            "Inspect the saved typed graph, explicit delay state, feedback wires, and exact trace. Layout and plots are display projections only.",
+            "Drag node headers to record integer canvas positions in the in-memory ALGW draft. Click an output then an input to connect; secondary-click an input to disconnect. Editing never arms or commands firmware.",
         );
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(egui::Color32::from_rgb(96, 169, 232), "— exact Stream");
             ui.colored_label(egui::Color32::from_rgb(241, 178, 84), "— Boolean Stream");
             ui.colored_label(egui::Color32::from_rgb(209, 158, 255), "outlined state");
+            if let Some(source) = self.pending_source {
+                ui.colored_label(
+                    egui::Color32::WHITE,
+                    format!("wiring #{}.{}", source.node.get(), source.port.get()),
+                );
+                if ui.small_button("cancel wire").clicked() {
+                    self.pending_source = None;
+                    "pending wire cancelled".clone_into(&mut self.edit_status);
+                }
+            }
         });
+        ui.label(&self.edit_status);
         ui.separator();
 
         let graph_height = (ui.available_height() * 0.5).clamp(230.0, 430.0);
         self.show_graph(ui, graph_height);
         self.show_selected_node(ui);
         ui.separator();
-        self.show_trace(ui);
+        if self.reference_trace_is_current() {
+            self.show_trace(ui);
+        } else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "The exact trace is hidden because ALGT binds the unedited reference graph. Reset the draft or simulate a newly reviewed graph before plotting it.",
+            );
+        }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "canvas allocation, layered node/port interaction, preview, and deferred transactional edits remain one egui frame operation"
+    )]
     fn show_graph(&mut self, ui: &mut egui::Ui, maximum_height: f32) {
+        let nodes = self.workspace.graph().nodes().to_vec();
+        let wires = self.workspace.graph().wires().to_vec();
         let mut clicked_node = None;
         let mut canvas_clicked = false;
+        let mut move_request = None;
+        let mut port_edit = None;
         egui::ScrollArea::both()
             .id_salt("exact_control_graph_canvas")
             .auto_shrink([false, false])
@@ -162,28 +237,112 @@ impl ExactControlWorkspace {
                 paint_grid(&painter, canvas.rect);
                 let origin = canvas.rect.min.to_vec2();
 
-                for wire in self.fixture.document().wires() {
+                for wire in &wires {
                     self.paint_wire(&painter, origin, wire.id(), wire.source(), wire.target());
                 }
-                for node in self.fixture.document().nodes() {
+                for node in &nodes {
                     let Some(presentation) = self.presentation.nodes.get(&node.id()) else {
                         continue;
                     };
                     let rect = presentation.rect.translate(origin);
-                    let response = ui.interact(
-                        rect,
-                        egui::Id::new(("exact_control_node", node.id().get())),
-                        egui::Sense::click(),
+                    let header_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
                     );
+                    let response = ui.interact(
+                        header_rect,
+                        egui::Id::new(("exact_control_node", node.id().get())),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if response.drag_started()
+                        && let Some(placement) = self.workspace.placement(node.id())
+                    {
+                        self.drag = Some(NodeDrag {
+                            node: node.id(),
+                            origin: placement,
+                        });
+                    }
+                    let dragging = self
+                        .drag
+                        .filter(|drag| drag.node == node.id())
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let painted_rect =
+                        dragging.map_or(rect, |_| rect.translate(response.drag_delta()));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        move_request = Some((drag, response.drag_delta()));
+                        self.drag = None;
+                    }
                     if response.clicked() {
                         clicked_node = Some(node.id());
                     }
-                    self.paint_node(&painter, rect, node, presentation.rank);
+                    for (index, port) in node.inputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, false);
+                        let port_response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "exact_control_input",
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        let endpoint = WireEndpoint {
+                            node: node.id(),
+                            port: port.id(),
+                        };
+                        if port_response.secondary_clicked() {
+                            port_edit = Some(PortEdit::DisconnectInput(endpoint));
+                            clicked_node = Some(node.id());
+                        } else if port_response.clicked() {
+                            port_edit = Some(PortEdit::ConnectInput(endpoint));
+                            clicked_node = Some(node.id());
+                        }
+                    }
+                    for (index, port) in node.outputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, true);
+                        let port_response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "exact_control_output",
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        if port_response.clicked() {
+                            port_edit = Some(PortEdit::SelectOutput(WireEndpoint {
+                                node: node.id(),
+                                port: port.id(),
+                            }));
+                            clicked_node = Some(node.id());
+                        }
+                    }
+                    self.paint_node(&painter, painted_rect, node, presentation.rank);
+                }
+                if let Some(source) = self.pending_source
+                    && let Some(source_anchor) =
+                        port_anchor(self.workspace.graph(), &self.presentation, source, true)
+                    && let Some(pointer) = ui.ctx().pointer_hover_pos()
+                {
+                    painter.line_segment(
+                        [source_anchor + origin, pointer],
+                        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    );
                 }
             });
+        let interaction_consumed =
+            clicked_node.is_some() || move_request.is_some() || port_edit.is_some();
+        if let Some((drag, delta)) = move_request {
+            self.commit_node_drag(drag, delta);
+        }
+        if let Some(edit) = port_edit {
+            self.handle_port_edit(edit);
+        }
         if let Some(node) = clicked_node {
             self.selected_node = Some(node);
-        } else if canvas_clicked {
+        } else if canvas_clicked && !interaction_consumed {
             self.selected_node = None;
         }
     }
@@ -197,8 +356,8 @@ impl ExactControlWorkspace {
         target: WireEndpoint,
     ) {
         let (Some(source_anchor), Some(target_anchor)) = (
-            port_anchor(self.fixture.document(), &self.presentation, source, true),
-            port_anchor(self.fixture.document(), &self.presentation, target, false),
+            port_anchor(self.workspace.graph(), &self.presentation, source, true),
+            port_anchor(self.workspace.graph(), &self.presentation, target, false),
         ) else {
             return;
         };
@@ -210,7 +369,7 @@ impl ExactControlWorkspace {
         let color = if selected {
             egui::Color32::WHITE
         } else {
-            wire_color(self.fixture.document(), source)
+            wire_color(self.workspace.graph(), source)
         };
         let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
         let feedback_lane = self
@@ -345,12 +504,173 @@ impl ExactControlWorkspace {
         );
     }
 
+    fn reference_trace_is_current(&self) -> bool {
+        self.workspace.graph_digest() == self.fixture.simulation().graph_digest()
+    }
+
+    fn reset_draft(&mut self) {
+        match initial_workspace(&self.fixture) {
+            Ok((workspace, encoding, presentation)) => {
+                self.workspace = workspace;
+                self.workspace_encoding = encoding;
+                self.presentation = presentation;
+                self.pending_source = None;
+                self.drag = None;
+                "draft reset to the canonical reference graph and layout"
+                    .clone_into(&mut self.edit_status);
+            }
+            Err(error) => {
+                self.edit_status = format!("draft reset failed without mutation: {error}");
+            }
+        }
+    }
+
+    fn commit_node_drag(&mut self, drag: NodeDrag, delta: egui::Vec2) {
+        let (x, y) = match (
+            quantized_canvas_coordinate(drag.origin.x(), delta.x),
+            quantized_canvas_coordinate(drag.origin.y(), delta.y),
+        ) {
+            (Ok(x), Ok(y)) => (x, y),
+            (Err(error), _) | (_, Err(error)) => {
+                self.edit_status = format!("node move rejected without mutation: {error}");
+                return;
+            }
+        };
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.move_node(drag.node, x, y) {
+            self.edit_status = format!("node move rejected without mutation: {error}");
+            return;
+        }
+        self.commit_candidate(
+            candidate,
+            &format!(
+                "moved node {} to canonical canvas ({x}, {y})",
+                drag.node.get()
+            ),
+        );
+    }
+
+    fn handle_port_edit(&mut self, edit: PortEdit) {
+        match edit {
+            PortEdit::SelectOutput(source) => {
+                if self.pending_source == Some(source) {
+                    self.pending_source = None;
+                    "pending wire cancelled".clone_into(&mut self.edit_status);
+                } else {
+                    self.pending_source = Some(source);
+                    self.edit_status = format!(
+                        "selected output #{}.{}; choose one typed input",
+                        source.node.get(),
+                        source.port.get()
+                    );
+                }
+            }
+            PortEdit::ConnectInput(target) => {
+                let Some(source) = self.pending_source else {
+                    self.edit_status = format!(
+                        "input #{}.{} selected; choose an output first",
+                        target.node.get(),
+                        target.port.get()
+                    );
+                    return;
+                };
+                let mut candidate = self.workspace.clone();
+                let id = match candidate.connect(source, target) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        self.edit_status = format!("wire edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                if self.commit_candidate(
+                    candidate,
+                    &format!(
+                        "connected wire {} from #{}.{} to #{}.{}",
+                        id.get(),
+                        source.node.get(),
+                        source.port.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                ) {
+                    self.pending_source = None;
+                }
+            }
+            PortEdit::DisconnectInput(target) => {
+                let Some(id) = self
+                    .workspace
+                    .graph()
+                    .wires()
+                    .iter()
+                    .find(|wire| wire.target() == target)
+                    .map(|wire| wire.id())
+                else {
+                    self.edit_status = format!(
+                        "input #{}.{} is already disconnected",
+                        target.node.get(),
+                        target.port.get()
+                    );
+                    return;
+                };
+                let mut candidate = self.workspace.clone();
+                if let Err(error) = candidate.disconnect(id) {
+                    self.edit_status = format!("wire removal rejected without mutation: {error}");
+                    return;
+                }
+                if self.commit_candidate(
+                    candidate,
+                    &format!(
+                        "disconnected wire {} from input #{}.{}",
+                        id.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                ) {
+                    self.pending_source = None;
+                }
+            }
+        }
+    }
+
+    fn commit_candidate(&mut self, candidate: GraphWorkspaceDocument, success: &str) -> bool {
+        let presentation = match graph_presentation(
+            candidate.graph(),
+            self.fixture.registry(),
+            Some(candidate.placements()),
+        ) {
+            Ok(presentation) => presentation,
+            Err(error) => {
+                self.edit_status = format!("edit rejected without mutation: {error}");
+                return false;
+            }
+        };
+        let encoding = match encode_graph_workspace(&candidate) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.edit_status = format!("edit encoding rejected without mutation: {error}");
+                return false;
+            }
+        };
+        let semantic = match analyze_graph(
+            candidate.graph(),
+            self.fixture.registry().semantic_registry(),
+        ) {
+            Ok(_) => "audited semantics valid".to_owned(),
+            Err(error) => format!("draft semantic blocker: {error}"),
+        };
+        self.workspace = candidate;
+        self.workspace_encoding = encoding;
+        self.presentation = presentation;
+        self.edit_status = format!("{success}; {semantic}");
+        true
+    }
+
     fn show_selected_node(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.selected_node else {
             ui.weak("Select a node to inspect exact ports, parameters, and state authority.");
             return;
         };
-        let Some(node) = self.fixture.document().node(id) else {
+        let Some(node) = self.workspace.graph().node(id).cloned() else {
             return;
         };
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -362,19 +682,26 @@ impl ExactControlWorkspace {
                 }
             });
             ui.label(format!("Execution domain: {}", domain_label(node.domain())));
+            if let Some(placement) = self.workspace.placement(id) {
+                ui.monospace(format!(
+                    "canvas = ({}, {}) logical px · presentation only",
+                    placement.x(),
+                    placement.y()
+                ));
+            }
             ui.horizontal_wrapped(|ui| {
                 for port in node.inputs() {
-                    ui.monospace(port_description(self.fixture.document(), "in", port));
+                    ui.monospace(port_description(self.workspace.graph(), "in", port));
                 }
                 for port in node.outputs() {
-                    ui.monospace(port_description(self.fixture.document(), "out", port));
+                    ui.monospace(port_description(self.workspace.graph(), "out", port));
                 }
             });
             for parameter in node.parameters() {
                 ui.monospace(format!(
                     "{} = {}",
                     parameter.name(),
-                    typed_value_text(self.fixture.document(), parameter.value())
+                    typed_value_text(self.workspace.graph(), parameter.value())
                 ));
             }
             if let Some(state) = self
@@ -487,6 +814,67 @@ impl ExactControlWorkspace {
     }
 }
 
+fn initial_workspace(
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<
+    (
+        GraphWorkspaceDocument,
+        CanonicalGraphWorkspaceEncoding,
+        GraphPresentation,
+    ),
+    String,
+> {
+    let automatic = graph_presentation(fixture.document(), fixture.registry(), None)?;
+    let placements = fixture
+        .document()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let layout = automatic
+                .nodes
+                .get(&node.id())
+                .ok_or_else(|| format!("automatic layout omitted node {}", node.id().get()))?;
+            Ok(GraphNodePlacement::new(
+                node.id(),
+                canonical_initial_coordinate(layout.rect.left())?,
+                canonical_initial_coordinate(layout.rect.top())?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let next_node_id = fixture
+        .document()
+        .nodes()
+        .iter()
+        .map(|node| u64::from(node.id().get()))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let next_wire_id = fixture
+        .document()
+        .wires()
+        .iter()
+        .map(|wire| u64::from(wire.id().get()))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let workspace = GraphWorkspaceDocument::try_new(
+        GraphWorkspaceLimits::interactive(),
+        1,
+        next_node_id,
+        next_wire_id,
+        fixture.document().clone(),
+        placements,
+    )
+    .map_err(|error| error.to_string())?;
+    let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+    let presentation = graph_presentation(
+        workspace.graph(),
+        fixture.registry(),
+        Some(workspace.placements()),
+    )?;
+    Ok((workspace, encoding, presentation))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "layout admission, state-edge classification, ranking, and bounded placement stay together for auditability"
@@ -494,6 +882,7 @@ impl ExactControlWorkspace {
 fn graph_presentation(
     document: &GraphDocument,
     registry: &GraphSimulationRegistry,
+    placements: Option<&[GraphNodePlacement]>,
 ) -> Result<GraphPresentation, String> {
     if document.nodes().is_empty() {
         return Err("exact control graph has no nodes".to_owned());
@@ -587,24 +976,66 @@ fn graph_presentation(
     }
     let mut nodes = BTreeMap::new();
     let mut maximum_bottom = 0.0_f32;
-    for (rank, column) in &columns {
-        let x = CANVAS_MARGIN + display_index(*rank) * (NODE_WIDTH + COLUMN_GAP);
-        let mut y = CANVAS_MARGIN;
-        for id in column {
+    let mut maximum_right = 0.0_f32;
+    if let Some(placements) = placements {
+        if placements.len() != document.nodes().len() {
+            return Err("saved canvas does not cover every graph node".to_owned());
+        }
+        let minimum_x = placements
+            .iter()
+            .map(|placement| display_coordinate(placement.x()))
+            .fold(f32::INFINITY, f32::min);
+        let minimum_y = placements
+            .iter()
+            .map(|placement| display_coordinate(placement.y()))
+            .fold(f32::INFINITY, f32::min);
+        let offset = egui::vec2(
+            (CANVAS_MARGIN - minimum_x).max(0.0),
+            (CANVAS_MARGIN - minimum_y).max(0.0),
+        );
+        for placement in placements {
             let node = document
-                .node(*id)
-                .ok_or_else(|| format!("layout node {} is missing", id.get()))?;
+                .node(placement.node())
+                .ok_or_else(|| format!("layout node {} is missing", placement.node().get()))?;
             let height = node_height(node);
-            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(NODE_WIDTH, height));
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    display_coordinate(placement.x()) + offset.x,
+                    display_coordinate(placement.y()) + offset.y,
+                ),
+                egui::vec2(NODE_WIDTH, height),
+            );
             maximum_bottom = maximum_bottom.max(rect.bottom());
-            nodes.insert(*id, NodePresentation { rect, rank: *rank });
-            y += height + NODE_GAP;
+            maximum_right = maximum_right.max(rect.right());
+            nodes.insert(
+                placement.node(),
+                NodePresentation {
+                    rect,
+                    rank: ranks[&placement.node()],
+                },
+            );
+        }
+    } else {
+        for (rank, column) in &columns {
+            let x = CANVAS_MARGIN + display_index(*rank) * (NODE_WIDTH + COLUMN_GAP);
+            let mut y = CANVAS_MARGIN;
+            for id in column {
+                let node = document
+                    .node(*id)
+                    .ok_or_else(|| format!("layout node {} is missing", id.get()))?;
+                let height = node_height(node);
+                let rect =
+                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(NODE_WIDTH, height));
+                maximum_bottom = maximum_bottom.max(rect.bottom());
+                maximum_right = maximum_right.max(rect.right());
+                nodes.insert(*id, NodePresentation { rect, rank: *rank });
+                y += height + NODE_GAP;
+            }
         }
     }
-    let maximum_rank = columns.keys().next_back().copied().unwrap_or(0);
     let feedback_height = 36.0 + display_index(feedback.len()) * 13.0;
     let size = egui::vec2(
-        CANVAS_MARGIN * 2.0 + NODE_WIDTH + display_index(maximum_rank) * (NODE_WIDTH + COLUMN_GAP),
+        maximum_right + CANVAS_MARGIN,
         maximum_bottom + CANVAS_MARGIN + feedback_height,
     );
     let wires = document
@@ -807,6 +1238,46 @@ fn trace_value_bounds(series: &[TraceSeries]) -> (f64, f64) {
 
 #[allow(
     clippy::cast_precision_loss,
+    reason = "workspace coordinates are bounded to one million and exactly representable in display f32"
+)]
+fn display_coordinate(value: i32) -> f32 {
+    value as f32
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "automatic layout is finite, integral, bounded presentation metadata"
+)]
+fn canonical_initial_coordinate(value: f32) -> Result<i32, String> {
+    let widened = f64::from(value);
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || widened < f64::from(i32::MIN)
+        || widened > f64::from(i32::MAX)
+    {
+        return Err("automatic canvas coordinate is not a canonical i32".to_owned());
+    }
+    Ok(widened as i32)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a finite pointer delta is rounded once into presentation-only integer canvas metadata"
+)]
+fn quantized_canvas_coordinate(origin: i32, delta: f32) -> Result<i32, String> {
+    let projected = f64::from(origin) + f64::from(delta);
+    if !projected.is_finite() {
+        return Err("pointer delta is not finite".to_owned());
+    }
+    let rounded = projected.round();
+    if rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        return Err("pointer delta exceeds the canvas integer lattice".to_owned());
+    }
+    Ok(rounded as i32)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
     reason = "bounded indices are projected only into non-authoritative egui coordinates"
 )]
 fn display_index(value: usize) -> f32 {
@@ -875,6 +1346,7 @@ fn digest_prefix(digest: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alumina_interface_core::graph::{GraphLimits, GraphPortId, replay_graph_workspace};
 
     #[test]
     fn representative_layout_is_bounded_acyclic_and_keeps_feedback_visible() {
@@ -903,6 +1375,79 @@ mod tests {
                 .traces
                 .iter()
                 .all(|series| series.points.len() == 6)
+        );
+        let replay = replay_graph_workspace(
+            workspace.workspace_encoding.bytes(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(workspace.workspace_encoding.bytes().len(), 3_396);
+        assert_eq!(
+            workspace.workspace_encoding.digest().0,
+            [
+                0xd7, 0xd4, 0xef, 0x9e, 0x27, 0x35, 0x9a, 0x47, 0x4b, 0x59, 0xf4, 0x8c, 0xdb, 0xcb,
+                0x60, 0x4b, 0x3d, 0x4d, 0x16, 0xf2, 0xa7, 0x68, 0xa6, 0x5f, 0x12, 0xc9, 0x5d, 0xde,
+                0x8a, 0xee, 0x97, 0x99,
+            ]
+        );
+        assert_eq!(replay.document(), &workspace.workspace);
+        assert_eq!(replay.encoding(), &workspace.workspace_encoding);
+        assert!(workspace.reference_trace_is_current());
+    }
+
+    #[test]
+    fn moves_and_port_edits_are_transactional_and_detach_bound_trace() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let graph_digest = workspace.workspace.graph_digest();
+        let graph_revision = workspace.workspace.graph().revision();
+        let origin = workspace.workspace.placement(GraphNodeId::new(1)).unwrap();
+        workspace.commit_node_drag(
+            NodeDrag {
+                node: GraphNodeId::new(1),
+                origin,
+            },
+            egui::vec2(17.4, -9.6),
+        );
+        assert_eq!(workspace.workspace.graph_digest(), graph_digest);
+        assert_eq!(workspace.workspace.graph().revision(), graph_revision);
+        assert_eq!(workspace.workspace.revision(), 2);
+        assert_eq!(
+            workspace.workspace.placement(GraphNodeId::new(1)),
+            Some(GraphNodePlacement::new(
+                GraphNodeId::new(1),
+                origin.x() + 17,
+                origin.y() - 10,
+            ))
+        );
+        assert!(workspace.reference_trace_is_current());
+
+        workspace.handle_port_edit(PortEdit::DisconnectInput(WireEndpoint {
+            node: GraphNodeId::new(19),
+            port: GraphPortId::new(1),
+        }));
+        assert_eq!(workspace.workspace.graph().wires().len(), 21);
+        assert!(!workspace.reference_trace_is_current());
+        assert!(workspace.edit_status.contains("draft semantic blocker"));
+
+        workspace.reset_draft();
+        let retained = workspace.workspace.clone();
+        workspace.handle_port_edit(PortEdit::SelectOutput(WireEndpoint {
+            node: GraphNodeId::new(6),
+            port: GraphPortId::new(2),
+        }));
+        workspace.handle_port_edit(PortEdit::ConnectInput(WireEndpoint {
+            node: GraphNodeId::new(19),
+            port: GraphPortId::new(1),
+        }));
+        assert_eq!(workspace.workspace, retained);
+        assert!(workspace.edit_status.contains("rejected without mutation"));
+        assert_eq!(
+            workspace.pending_source,
+            Some(WireEndpoint {
+                node: GraphNodeId::new(6),
+                port: GraphPortId::new(2),
+            })
         );
     }
 
