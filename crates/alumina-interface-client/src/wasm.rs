@@ -14,6 +14,7 @@ use web_sys::{
 
 use crate::Response;
 use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
+use crate::graph::{GraphInstallError, GraphInstallMachine, GraphInstallPhase};
 use crate::http::{
     AUTHENTICATION_PATH, AuthenticatedHttpSession, AuthenticatedProtocolRequest,
     AuthenticatedProtocolResponse, AuthenticationChallenge, AuthenticationChallengeError,
@@ -508,6 +509,63 @@ async fn drive_cache_upload_step_inner(
     Ok(upload.phase())
 }
 
+/// Drives exactly one retry-safe deployed-graph lifecycle operation over Wi-Fi.
+///
+/// Callers first publish [`crate::graph::GraphPackageUpload`] with
+/// [`drive_cache_upload_step`], then repeatedly call this function until the
+/// returned phase is [`GraphInstallPhase::Complete`]. Ambiguous I/O preserves
+/// the phase and causes the exact install or read-only status poll to be retried.
+pub async fn drive_graph_install_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    install: &mut GraphInstallMachine,
+    secret: &[u8],
+) -> Result<GraphInstallPhase, BrowserGraphInstallError> {
+    drive_graph_install_step_inner(window, origin, session, install, secret).await
+}
+
+/// Worker-scope variant of [`drive_graph_install_step`].
+pub async fn drive_graph_install_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    install: &mut GraphInstallMachine,
+    secret: &[u8],
+) -> Result<GraphInstallPhase, BrowserGraphInstallError> {
+    drive_graph_install_step_inner(worker, origin, session, install, secret).await
+}
+
+async fn drive_graph_install_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    install: &mut GraphInstallMachine,
+    secret: &[u8],
+) -> Result<GraphInstallPhase, BrowserGraphInstallError> {
+    let Some(operation) = install.next_request()? else {
+        return Ok(GraphInstallPhase::Complete);
+    };
+    let request = match session.begin_request(operation.operation, &operation.body, secret) {
+        Ok(request) => request,
+        Err(error) => {
+            install.abandon_pending();
+            return Err(BrowserGraphInstallError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            install.abandon_pending();
+            return Err(BrowserGraphInstallError::Fetch(error));
+        }
+    };
+    install.accept_response(&response)?;
+    Ok(install.phase())
+}
+
 fn javascript_error(value: JsValue) -> BrowserFetchError {
     BrowserFetchError::Javascript(format!("{value:?}"))
 }
@@ -652,3 +710,32 @@ impl fmt::Display for BrowserDeliveryError {
 }
 
 impl std::error::Error for BrowserDeliveryError {}
+
+/// One-step browser graph-install failure with lifecycle authority preserved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserGraphInstallError {
+    /// Graph install state rejected the local request or device report.
+    Install(GraphInstallError),
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+}
+
+impl From<GraphInstallError> for BrowserGraphInstallError {
+    fn from(value: GraphInstallError) -> Self {
+        Self::Install(value)
+    }
+}
+
+impl fmt::Display for BrowserGraphInstallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Install(error) => write!(formatter, "graph install failed: {error}"),
+            Self::Session(error) => write!(formatter, "request construction failed: {error}"),
+            Self::Fetch(error) => write!(formatter, "device fetch failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserGraphInstallError {}

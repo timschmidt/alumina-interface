@@ -11,6 +11,7 @@ use alumina_protocol::{
 };
 
 pub mod clock;
+pub mod graph;
 pub mod http;
 pub mod schedule;
 pub mod upload;

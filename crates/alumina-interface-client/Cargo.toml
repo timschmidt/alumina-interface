@@ -10,9 +10,11 @@ publish.workspace = true
 
 [dependencies]
 alumina-clock.workspace = true
+alumina-graph-ir.workspace = true
 alumina-job.workspace = true
 alumina-net.workspace = true
 alumina-protocol.workspace = true
+alumina-runtime.workspace = true
 alumina-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
