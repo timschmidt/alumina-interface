@@ -364,9 +364,12 @@ impl GraphInstallMachine {
                     {
                         GraphInstallPhase::Complete
                     }
-                    GraphCoordinatorPhase::Validating
+                    GraphCoordinatorPhase::Validating => GraphInstallPhase::AwaitingCandidate,
+                    GraphCoordinatorPhase::Recovering
+                    | GraphCoordinatorPhase::Preparing
                     | GraphCoordinatorPhase::Activating
-                    | GraphCoordinatorPhase::Authorizing => GraphInstallPhase::AwaitingCandidate,
+                    | GraphCoordinatorPhase::Committing
+                    | GraphCoordinatorPhase::Authorizing => GraphInstallPhase::AwaitingActive,
                     _ => return Err(GraphInstallError::UnexpectedPhase),
                 }
             }
@@ -377,9 +380,10 @@ impl GraphInstallMachine {
                     {
                         GraphInstallPhase::Complete
                     }
-                    GraphCoordinatorPhase::Activating | GraphCoordinatorPhase::Authorizing => {
-                        GraphInstallPhase::AwaitingActive
-                    }
+                    GraphCoordinatorPhase::Preparing
+                    | GraphCoordinatorPhase::Activating
+                    | GraphCoordinatorPhase::Committing
+                    | GraphCoordinatorPhase::Authorizing => GraphInstallPhase::AwaitingActive,
                     _ => return Err(GraphInstallError::UnexpectedPhase),
                 }
             }
@@ -972,6 +976,20 @@ mod tests {
         }
     }
 
+    fn preparing_report(selection: GraphSelection) -> GraphCoordinatorReport {
+        GraphCoordinatorReport {
+            phase: GraphCoordinatorPhase::Preparing,
+            ..candidate_report(selection)
+        }
+    }
+
+    fn committing_report(selection: GraphSelection) -> GraphCoordinatorReport {
+        GraphCoordinatorReport {
+            phase: GraphCoordinatorPhase::Committing,
+            ..activating_report(selection)
+        }
+    }
+
     fn active_report(selection: GraphSelection) -> GraphCoordinatorReport {
         GraphCoordinatorReport {
             phase: GraphCoordinatorPhase::Active,
@@ -1168,7 +1186,14 @@ mod tests {
         assert_eq!(activate.operation, Operation::GraphActivate);
         assert_eq!(GraphSelection::decode(&activate.body), Ok(selection));
         machine
-            .accept_response(&response(activating_report(selection)))
+            .accept_response(&response(preparing_report(selection)))
+            .unwrap();
+        assert_eq!(machine.phase(), GraphInstallPhase::AwaitingActive);
+
+        let poll = machine.next_request().unwrap().unwrap();
+        assert_eq!(poll.operation, Operation::GraphGet);
+        machine
+            .accept_response(&response(committing_report(selection)))
             .unwrap();
         assert_eq!(machine.phase(), GraphInstallPhase::AwaitingActive);
 
