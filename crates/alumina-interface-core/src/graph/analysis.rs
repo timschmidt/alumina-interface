@@ -10,11 +10,13 @@
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::storage::{analyze_type_storage, literal_storage_bytes};
 use super::{
     ClockDefinition, ExecutionDomain, GraphClockId, GraphDocument, GraphNodeId, GraphPortId,
     GraphSchema, GraphTypeId, GraphWireId, NodeDefinition, NodeKind, PortDefinition, WireEndpoint,
     valid_stable_name,
 };
+use super::{GraphStorageError, GraphTypeStorageBound};
 
 /// Set of execution-domain families admitted by one audited node schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -614,6 +616,7 @@ pub struct NodeStateAllocation {
     clock: GraphClockId,
     value_type: GraphTypeId,
     declared_storage_bytes: u32,
+    required_canonical_bytes: u64,
 }
 
 impl NodeStateAllocation {
@@ -641,6 +644,11 @@ impl NodeStateAllocation {
     pub const fn declared_storage_bytes(self) -> u32 {
         self.declared_storage_bytes
     }
+
+    /// Return the proven maximum canonical typed-value representation.
+    pub const fn required_canonical_bytes(self) -> u64 {
+        self.required_canonical_bytes
+    }
 }
 
 /// Successful semantic shape/domain/state/cycle analysis report.
@@ -649,7 +657,9 @@ pub struct GraphAnalysis {
     admitted_nodes: usize,
     dependency_links: usize,
     total_declared_state_bytes: usize,
+    total_required_state_bytes: u64,
     state_allocations: Vec<NodeStateAllocation>,
+    type_storage_bounds: Vec<GraphTypeStorageBound>,
 }
 
 impl GraphAnalysis {
@@ -668,9 +678,19 @@ impl GraphAnalysis {
         self.total_declared_state_bytes
     }
 
+    /// Return summed proven canonical bytes for all explicit state values.
+    pub const fn total_required_state_bytes(&self) -> u64 {
+        self.total_required_state_bytes
+    }
+
     /// Borrow state declarations in canonical node-ID order.
     pub fn state_allocations(&self) -> &[NodeStateAllocation] {
         &self.state_allocations
+    }
+
+    /// Borrow checked bounds for every registered type in canonical ID order.
+    pub fn type_storage_bounds(&self) -> &[GraphTypeStorageBound] {
+        &self.type_storage_bounds
     }
 }
 
@@ -700,6 +720,17 @@ pub enum GraphAnalysisError {
         /// Rejected concrete placement.
         domain: ExecutionDomain,
     },
+    /// Canonical type-storage analysis rejected the registered type graph.
+    Storage(GraphStorageError),
+    /// Declared state storage could not hold every value of its exact type.
+    StateStorageTooSmall {
+        /// Stateful node instance.
+        node: GraphNodeId,
+        /// Caller-declared byte ceiling.
+        declared: u32,
+        /// Proven maximum canonical typed-value bytes.
+        required: u64,
+    },
     /// Dependency or declared-state policy was exceeded.
     LimitExceeded(&'static str),
     /// Internal DFS ancestry could not reproduce a detected cycle.
@@ -726,6 +757,15 @@ impl fmt::Display for GraphAnalysisError {
             Self::DomainNotAllowed { node, domain } => {
                 write!(formatter, "graph node {node:?} rejects domain {domain:?}")
             }
+            Self::Storage(error) => write!(formatter, "graph storage analysis rejected: {error}"),
+            Self::StateStorageTooSmall {
+                node,
+                declared,
+                required,
+            } => write!(
+                formatter,
+                "graph node {node:?} declares {declared} state bytes but requires {required}"
+            ),
             Self::LimitExceeded(name) => write!(formatter, "graph analysis {name} exceeds policy"),
             Self::InvalidCycleWitness => {
                 formatter.write_str("graph analysis could not reconstruct a cycle witness")
@@ -741,6 +781,12 @@ impl fmt::Display for GraphAnalysisError {
 
 impl std::error::Error for GraphAnalysisError {}
 
+impl From<GraphStorageError> for GraphAnalysisError {
+    fn from(value: GraphStorageError) -> Self {
+        Self::Storage(value)
+    }
+}
+
 /// Resolve every opaque node through an audited schema, verify exact instance
 /// shape/domain/state facts, and reject current-tick combinational cycles.
 pub fn analyze_graph(
@@ -752,9 +798,11 @@ pub fn analyze_graph(
     {
         return Err(GraphAnalysisError::SemanticContextMismatch);
     }
+    let type_storage_bounds = analyze_type_storage(document.schema())?;
     let mut schemas = Vec::with_capacity(document.nodes().len());
     let mut state_allocations = Vec::new();
     let mut total_declared_state_bytes = 0_usize;
+    let mut total_required_state_bytes = 0_u64;
     for node in document.nodes() {
         let schema =
             registry
@@ -773,12 +821,24 @@ pub fn analyze_graph(
             if total_declared_state_bytes > registry.limits.maximum_total_state_bytes {
                 return Err(GraphAnalysisError::LimitExceeded("total state bytes"));
             }
+            let required = literal_storage_bytes(&type_storage_bounds, state.value_type)?;
+            if u64::from(state.declared_storage_bytes) < required {
+                return Err(GraphAnalysisError::StateStorageTooSmall {
+                    node: node.id(),
+                    declared: state.declared_storage_bytes,
+                    required,
+                });
+            }
+            total_required_state_bytes = total_required_state_bytes.checked_add(required).ok_or(
+                GraphAnalysisError::LimitExceeded("required state byte count"),
+            )?;
             state_allocations.push(NodeStateAllocation {
                 node: node.id(),
                 domain: node.domain(),
                 clock: state.clock,
                 value_type: state.value_type,
                 declared_storage_bytes: state.declared_storage_bytes,
+                required_canonical_bytes: required,
             });
         }
         schemas.push(schema);
@@ -793,7 +853,9 @@ pub fn analyze_graph(
         admitted_nodes: document.nodes().len(),
         dependency_links,
         total_declared_state_bytes,
+        total_required_state_bytes,
         state_allocations,
+        type_storage_bounds,
     })
 }
 
@@ -1016,8 +1078,10 @@ mod tests {
     const CLOCK: GraphClockId = GraphClockId::new(1);
 
     fn graph_schema() -> GraphSchema {
+        let mut limits = GraphLimits::interactive();
+        limits.maximum_rational_digits = 16;
         GraphSchema::try_new(
-            GraphLimits::interactive(),
+            limits,
             vec![UnitDefinition::new(
                 UnitId::new(1),
                 "mm",
@@ -1238,10 +1302,16 @@ mod tests {
         assert_eq!(report.admitted_nodes(), 4);
         assert_eq!(report.dependency_links(), 6);
         assert_eq!(report.total_declared_state_bytes(), 64);
+        assert_eq!(report.total_required_state_bytes(), 45);
         assert_eq!(report.state_allocations().len(), 1);
         assert_eq!(report.state_allocations()[0].node(), GraphNodeId::new(3));
         assert_eq!(report.state_allocations()[0].clock(), CLOCK);
         assert_eq!(report.state_allocations()[0].value_type(), EXACT);
+        assert_eq!(report.state_allocations()[0].required_canonical_bytes(), 45);
+        assert_eq!(
+            report.type_storage_bounds()[0].maximum_literal_bytes(),
+            Some(45)
+        );
     }
 
     #[test]
@@ -1485,6 +1555,37 @@ mod tests {
         assert_eq!(
             analyze_graph(&state_document, &state_registry),
             Err(GraphAnalysisError::LimitExceeded("total state bytes"))
+        );
+
+        let small_delay = NodeSchema::new(
+            NodeKind::new("test.delay", 1),
+            ExecutionDomainSet::HOST_EXACT,
+            vec![port(1, "next")],
+            vec![port(2, "current")],
+            vec![NodeParameterContract::new(1, "initial", EXACT)],
+            vec![dependency(2, &[])],
+            Some(NodeStateContract::new(
+                CLOCK,
+                EXACT,
+                1,
+                GraphPortId::new(1),
+                GraphPortId::new(2),
+                44,
+            )),
+        );
+        let small_registry = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &state_document,
+            vec![small_delay],
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&state_document, &small_registry),
+            Err(GraphAnalysisError::StateStorageTooSmall {
+                node: GraphNodeId::new(3),
+                declared: 44,
+                required: 45,
+            })
         );
     }
 }

@@ -77,6 +77,9 @@ prototype.
   document's exact type/clock context. Iterative port-level analysis accepts
   deliberate delayed feedback and returns exact wire/feedthrough witnesses for
   forbidden combinational cycles; it emits no executable implementation.
+- Checked recursive storage analysis proves canonical maximum bytes for every
+  literal or runtime payload/sample type and rejects state storage smaller than
+  its complete exact value domain. It does not claim a firmware runtime layout.
 
 The selected local revisions and any uncommitted source state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is

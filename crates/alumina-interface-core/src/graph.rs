@@ -14,6 +14,7 @@ use hyperreal::Rational;
 
 mod analysis;
 mod document;
+mod storage;
 mod wire;
 
 pub use analysis::{
@@ -26,6 +27,7 @@ pub use document::{
     GraphPortId, GraphWireId, NodeDefinition, NodeKind, NodeParameter, PortDefinition,
     WireDefinition, WireEndpoint,
 };
+pub use storage::{GraphStorageError, GraphTypeStorageBound, GraphTypeStorageKind};
 pub use wire::{
     CanonicalGraphEncoding, GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GraphReplay,
     GraphWireError, encode_graph_document, replay_graph_document,

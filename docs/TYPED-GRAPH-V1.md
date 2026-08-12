@@ -64,8 +64,18 @@ than an implicit assumption.
 An optional `NodeStateContract` names one state type, deterministic run-start
 parameter, next-state input, prior-state output, update clock, and declared
 storage ceiling. The prior-state output must have no current-tick feedthrough;
-updates are read-before-write. Declared bytes are bounded and reported, but are
-not yet a static proof that every value of the type fits that storage.
+updates are read-before-write.
+
+Static storage analysis separately derives the maximum canonical byte count for
+every registered literal type by checked recursion over its complete value
+domain. It accounts for rational digit policy, length/tag/field overhead,
+maximum text/blob/array sizes, record/option/result alternatives, and handle
+identities. Event and stream reports instead bound one complete typed payload or
+sample and retain clock/capacity authority; a runtime type nested inside a saved
+literal composite rejects. A state declaration must hold the full canonical
+typed-value bound, and reports retain declared, required, and total bytes.
+This proves canonical retained-value storage, not the in-memory layout of
+`hyperreal`, a future fixed firmware representation, or execution WCET.
 
 The registry is bound to the complete canonical unit/type registry and clock
 set from the document that established its authority. Analysis rejects a
@@ -115,6 +125,7 @@ families. Its graph digest is
 V1 remains non-executable. Subgraphs/components, general feedback structures,
 queue/backpressure semantics, rate transitions, cases/loops/state machines,
 front panels, resource claims, implementation/opcode admission, static
-type-to-storage proof, fixed-memory lowering, WCET/deadline analysis, protocol
-bridges, firmware opcodes, and deterministic graph simulation remain later M9
-slices. No arbitrary graph document is sent to or interpreted by firmware.
+runtime-layout and queue-memory proof, fixed-memory lowering, WCET/deadline
+analysis, protocol bridges, firmware opcodes, and deterministic graph simulation
+remain later M9 slices. No arbitrary graph document is sent to or interpreted
+by firmware.
