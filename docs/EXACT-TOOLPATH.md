@@ -12,7 +12,8 @@ working tree.
 Hypercurve source path
     ├─ certified subdivision ─> Hypergraphics exact display chords ─> GPU
     │                           (presentation evidence only)
-    ├─ lossless family promotion ─> Hyperpath metric objects ─> Hypersolve replay
+    ├─ lossless or motion-certified metric construction
+    │   ─> Hyperpath metric objects ─> Hypersolve replay
     │   └─ machine-bound exact-stop/jerk schedule
     │       ─> certified V1 interpolation ─> configured step/timer lattices
     │       ─> production executor preflight ─> cached partition + evidence
@@ -30,15 +31,17 @@ CAM input, a metric carrier, or machine IR.
 
 | Hypercurve source | Hyperpath result | Policy |
 | --- | --- | --- |
-| axis-aligned `LineSeg2` | `LinePathSegment` | exact endpoint copy and strict predicate validation |
+| nondegenerate `LineSeg2` | `LinePathSegment` | exact endpoint copy, strict predicate validation, and exact Euclidean feed length |
 | `CircularArc2` | `ExplicitCircularArc` | exact center/endpoints/direction and exact derived radius |
-| general quadratic, cubic, rational, spline, or NURBS | typed `UnsupportedMetricCurve` | fail closed; no chord or float fallback |
+| polynomial `CubicBezier2` | exact `LineSeg2` motion path | bounded pointwise degree-elevated-chord certificate over exact Hypercurve de Casteljau spans |
+| general quadratic, rational, spline, or NURBS | typed `UnsupportedMetricCurve` | fail closed; no renderer-chord or float fallback |
 
-This limitation is deliberate. Hyperpath already has native cubic and quintic
+This boundary is deliberate. Hyperpath already has native cubic and quintic
 Pythagorean-hodograph carriers, but a general Hypercurve Bezier is not assumed
-to be PH. A later compiler stage must either prove and promote the appropriate
-family or retain certified metric approximation evidence designed for motion,
-not reuse renderer tessellation.
+to be PH. The current compiler therefore retains a distinct metric path and
+source-to-motion certificate designed for motion. It never reuses renderer
+tessellation. Every generated cubic chord boundary is an exact stop until a
+native or curvature-certified feed policy replaces it.
 
 The general-curve compiler retains a separate approximation boundary: it invokes
 Hypercurve subdivision itself with a motion policy, computes the exact length
@@ -47,14 +50,15 @@ path. This remains useful bounded geometry evidence, but it does not claim a
 lossless general-Bezier metric or a certified jerk schedule and never reuses
 Hypergraphics output.
 
-The machine-bound V1 path accepts the losslessly promoted line/arc subset. It
-derives dynamics, electrical timing, physical uncertainty, step density, timer
-frequency, and output quantum from canonical Configuration V5 rather than a
-second UI schema. Hyperpath/Hypersolve certify zero-radius exact-stop lookahead
-and a four-phase jerk schedule for every retained element. A separate proof
-bounds its approximation by firmware constant-velocity segments, after which
-the production stepper executor is replayed before cache packaging. See
-`EXACT-MACHINE-SCHEDULING.md`.
+The machine-bound V1 path accepts lossless lines/arcs and certified polynomial
+cubics. It derives dynamics, electrical timing, physical uncertainty, step
+density, timer frequency, and output quantum from canonical Configuration V5
+rather than a second UI schema. Hyperpath/Hypersolve certify zero-radius
+exact-stop lookahead and a four-phase jerk schedule for every metric element. A
+separate proof bounds its approximation by firmware constant-velocity
+segments, after which the production stepper executor is replayed before cache
+packaging. See `EXACT-MACHINE-SCHEDULING.md` and
+`CERTIFIED-BEZIER-MOTION.md`.
 
 After canonical quantization, `partition.rs` queries the firmware schema's exact
 per-block record capacity, applies the caller's firmware horizon bound, and
@@ -92,8 +96,9 @@ budget plus the Euclidean two-axis endpoint bound, namely
 The display fixture extends that path with a general cubic Bezier. Hypercurve
 certifies its presentation chords to `1/1024` model unit with a maximum depth
 of 24. The exact source path and the display certificate remain available in
-`ExactScene`; attempting metric promotion of the full fixture is tested to
-fail on the cubic.
+`ExactScene`. Lossless metric promotion of the full fixture still fails on the
+cubic, while the separate machine-specific certificate admits it under an
+explicit source allocation.
 
 The scene also retains a curved material loop and a rectangular hole as one
 exact `CurveRegion2`. Hypergraphics materializes its exact boundary paths,
@@ -104,21 +109,22 @@ from line-mesh winding.
 The machine-bound fixture uses a real canonical two-axis TinyBee configuration,
 including exact 1 MHz device time, one-cycle output quantum, 1,600 nominal
 steps/mm, electrical pulse constraints, dynamics, calibration uncertainty, and
-following error. It schedules the retained four-unit line and radius-two
-semicircle, stops exactly at their unblended join, lowers the result under a
-`1/1000 mm` controller-interpolation bound, and finishes at `[12800, 0]` steps.
+following error. It schedules the retained four-unit line, radius-two
+semicircle, and a cubic arch, stops exactly at every unblended/certified metric
+join, lowers the result under a `1/1000 mm` controller-interpolation bound, and
+finishes at `[19200, 0]` steps. The source-to-motion allocation is `1/100 mm`.
 The same fixture passes production electrical preflight, real cache packaging,
-event-level simulator replay, deterministic evidence reconstruction, identity
-substitution rejection, and evidence-tamper rejection. Its complete test code
-also compiles as a `wasm32-unknown-unknown` test binary.
+event-level simulator replay, deterministic `ALMEVD02` reconstruction,
+identity substitution rejection, and evidence-tamper rejection.
 
 ## Required next boundaries
 
 - add certified filled-region triangulation without reclassifying display chords;
-- promote supported PH curves and replace chord-feed approximation where an
+- promote supported PH/native curves and replace full-stop chord feed where an
   exact or tighter certified source-curve metric is available;
 - add certified nonzero-radius blends and longer-range velocity optimization;
 - add direction-aware axis envelopes, broader kinematics, and more than two axes;
-- extend canonical source evidence beyond exact-rational lines and arcs; and
+- extend canonical source evidence beyond exact-rational lines, arcs, and
+  polynomial cubics; and
 - qualify physical timing, calibration, following, and safety behavior on each
   board/machine combination without weakening the exact software envelope.

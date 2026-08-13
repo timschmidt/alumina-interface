@@ -98,8 +98,10 @@ pub use schedule_evidence::{
     verify_canonical_schedule_evidence_bytes,
 };
 pub use toolpath::{
-    ToolpathError, ToolpathResult, promote_metric_path, representative_curve_path,
-    representative_curve_region, representative_feed_certificate, representative_metric_path,
+    CertifiedMetricPath2, CertifiedMetricSourceSpan2, MetricPathApproximationLimits2,
+    ToolpathError, ToolpathResult, certify_metric_path, promote_metric_path,
+    representative_curve_path, representative_curve_region, representative_feed_certificate,
+    representative_metric_path,
 };
 
 /// The current local path-planning carrier selected for authoritative CAM.

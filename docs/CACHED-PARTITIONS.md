@@ -91,14 +91,15 @@ That later boundary preserves these local object/manifest/terminal identities;
 it does not reopen, reinterpret, or concatenate execution records. See
 `GLOBAL-JOB-MANIFEST.md`.
 
-The machine-bound line/arc fixture additionally replays the packaged bytes with
+The machine-bound line/arc/cubic fixture additionally replays the packaged bytes with
 `alumina-sim::replay_cached_stepper_partition`. That event-level path uses the
 real `JobDescriptor`, first rehashes the complete immutable object, then uses
 `RealtimeJob` and `CachedStepperExecutor`, advances to each exact deadline,
 acknowledges owned blocks in order, and requires terminal tick, position, step
 counts, finish cycle, and block digest to agree. Canonical
-`ALMEVD01` evidence then binds the exact-rational source, configuration,
-capability, budgets, executor facts, and content-addressed partition. See
+`ALMEVD02` evidence then binds the exact-rational source, certified metric path,
+source-to-motion spans, configuration, capability, budgets, executor facts,
+and content-addressed partition. See
 `EXACT-MACHINE-SCHEDULING.md`.
 
 ## Still outside this boundary
@@ -111,10 +112,10 @@ capability, budgets, executor facts, and content-addressed partition. See
   have a browser Wi-Fi upload/retry/finalize and exact cache-reconciliation
   consumer, plus a headless clock/prepare/install/confirm coordinator. Visible
   workflow wiring and complete worker-owned cached-job driving remain open.
-- Two-axis line/arc motion now has exact-stop lookahead, certified jerk
+- Two-axis line/arc/cubic motion now has exact-stop lookahead, certified jerk
   scheduling, configuration-derived calibration/following bounds, and
-  production executor preflight. General curves still use the separate
-  constant-feed chord compiler; blends, broader kinematics, and qualified
-  hardware timing remain open.
+  production executor preflight. The cubic uses bounded source-to-motion
+  chords with a full stop at each join; blends, broader exact families,
+  kinematics, and qualified hardware timing remain open.
 - Passing software replay does not qualify SD media, a board, or physical
   motion. No board is flashed or energized by packaging or its tests.

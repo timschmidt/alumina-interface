@@ -30,30 +30,36 @@ prototype.
 - The baseline renders an exact line/arc/cubic source path with retained chord
   evidence. Exact lines and circular arcs promote losslessly to Hyperpath; a
   general cubic fails with a typed metric blocker instead of borrowing its
-  display chords. The retained line/semicircle fixture certifies the symbolic
-  path length `4 + 2*pi` through Hyperpath and Hypersolve.
+  display chords. The machine compiler can instead admit that cubic through a
+  distinct bounded pointwise certificate over Hypercurve's exact de Casteljau
+  subcurves. The retained
+  line/semicircle fixture certifies the symbolic path length `4 + 2*pi` through
+  Hyperpath and Hypersolve.
 - A separate motion-specific compiler certifies source chords, rounds every
   coordinate and cumulative time with Hyperreal's certified integer boundary,
   replays half-lattice/half-tick bounds through Hyperlimit, and emits the real
   `alumina-machine-ir::ExecutionSegment` type. The deterministic fixture uses
   80 steps/mm, 1 MHz ticks, 10 mm/s, and a `1/1024 mm` source-chord budget.
-- The production-oriented line/arc path now derives a two-axis dynamics profile
+- The production-oriented line/arc/cubic path derives a two-axis dynamics profile
   directly from validated canonical Configuration V5: exact resource and
   transmission facts, uncertainty intervals, travel, pulse-rate ceiling,
   velocity/acceleration/jerk/following limits, device clock, and backend output
   quantum. A machine-wide resolution certificate composes source and controller
   allocations with endpoint, DDA, calibration, following, and half-tick
   position bounds before scheduling.
-- Hyperpath/Hypersolve certify zero-radius exact-stop lookahead and four exact
-  constant-jerk phases per retained source line/arc. The browser evaluates the
-  retained geometry—not renderer chords—while subdividing those phases under
-  the exact `A*dt²/8` interpolation bound. It rounds only at the configured
+- The machine compiler preserves lines/arcs losslessly and reduces a polynomial
+  cubic only under an exact pointwise positional certificate, a 16,384-element
+  bound, and a depth bound. Hyperpath/Hypersolve then certify zero-radius exact-stop
+  lookahead and four exact constant-jerk phases per metric element, including a
+  stop at every cubic chord boundary. The browser evaluates this dedicated
+  metric path—not renderer chords—while subdividing those phases under the
+  exact `A*dt²/8` interpolation bound. It rounds only at the configured
   step/tick lattices, rejects any phase that would exceed the caller-owned
   131,072-point interactive allocation before fallible reservation, and then
   replays every emitted segment through the
   allocation-free production stepper executor's pulse, rate, direction,
   enable, output-grid, continuity, overflow, and terminal checks.
-- Before scheduling, Hypercurve's complete native line/arc bounding box is
+- Before scheduling, Hypercurve's complete native source bounding box is
   compared exactly with the uncertainty-reduced usable travel from the same
   configuration. This catches arc extrema between interpolation samples and
   fails before lowering when any exact boundary lies outside travel. Every
@@ -62,8 +68,9 @@ prototype.
 - The machine-bound program packages only into a partition with identical
   capability/configuration digests. The resulting cached bytes run through an
   event-level `RealtimeJob`/`CachedStepperExecutor` simulator, and canonical
-  `ALMEVD01` evidence binds exact-rational source, physical/error policy,
-  executor results, and content-addressed partition identities. The same
+  `ALMEVD02` evidence independently binds exact-rational source, metric path,
+  source-to-motion certificate, physical/error policy, executor results, and
+  content-addressed partition identities. The same
   representative test binary compiles for WASM. This remains software evidence,
   not TinyBee timing or motion qualification.
 - The shell now opens an offline Machine/CAM inspector by default. One
@@ -71,11 +78,14 @@ prototype.
   travel proof, resolution-budget decomposition, retained-path diagnostic
   projection, exact-stop/four-phase schedule tables, canonical points and
   segments, production executor preflight, SD-cache identities, event-level
-  replay, and `ALMEVD01` evidence. Native and browser file exchange can replace
+  replay, and `ALMEVD02` evidence. Native and browser file exchange can replace
   configuration state only after the entire chain reconstructs successfully;
   evidence imports must equal a fresh reconstruction byte for byte. This view
   initiates no device connection and has no arming or output authority. See
   [`docs/OFFLINE-MACHINE-CAM.md`](docs/OFFLINE-MACHINE-CAM.md).
+- The cubic motion contract, bounded failure modes, exact-stop rationale, error
+  composition, and evidence domains are documented in
+  [`docs/CERTIFIED-BEZIER-MOTION.md`](docs/CERTIFIED-BEZIER-MOTION.md).
 - The same workspace has a bounded UI-only CNC geometry adapter for one
   connected XY line/explicit-IJ-arc path. It parses every decimal into an exact
   rational, requires explicit unit/plane/endpoint/arc-centre modal state,
@@ -303,7 +313,7 @@ assets suitable for later embedding in `aluminafw`.
 
 ## Scope after this checkpoint
 
-The next interface milestones add supported general-curve metric compilation,
+The next interface milestones add native/tighter broader-curve metric carriers,
 certified nonzero-radius blends, direction-aware and broader-axis kinematics,
 live device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,

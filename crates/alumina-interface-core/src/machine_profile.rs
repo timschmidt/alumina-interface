@@ -902,7 +902,9 @@ mod tests {
         ScheduleEvidenceError, build_canonical_schedule_evidence,
         replay_canonical_schedule_evidence, verify_canonical_schedule_evidence_bytes,
     };
-    use crate::toolpath::{representative_curve_path, representative_metric_path};
+    use crate::toolpath::{
+        MetricPathApproximationLimits2, representative_curve_path, representative_metric_path,
+    };
     use alumina_board::{OwnerDomain, ResourceId};
     use alumina_config::{
         BindingFlags, ConfigurationFlags, ConfigurationHeader, ConfigurationRecord, ExactScalar,
@@ -1262,7 +1264,20 @@ mod tests {
     fn retained_line_arc_path_gets_exact_stop_lookahead_and_four_phase_jerk_replay() {
         let profile = profile_from(&machine_records()).unwrap();
         let source = representative_metric_path().unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(&source, &profile).unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
 
         assert_eq!(
             schedule.configuration_digest(),
@@ -1302,13 +1317,6 @@ mod tests {
             assert_eq!(phases[3].ramp.end_acceleration, Real::zero());
         }
 
-        let budget = MachineResolutionBudget2::certify(
-            &profile,
-            Rational::fraction(1, 10).unwrap(),
-            Rational::zero(),
-            Rational::fraction(1, 100).unwrap(),
-        )
-        .unwrap();
         let lowered = lower_certified_schedule_to_v1(
             &schedule,
             &profile,
@@ -1419,7 +1427,9 @@ mod tests {
         assert_eq!(evidence, rebuilt);
         assert!(!evidence.digest().is_zero());
         assert!(!evidence.source_digest().is_zero());
-        assert_eq!(&evidence.encoded()[..8], b"ALMEVD01");
+        assert!(!evidence.metric_path_digest().is_zero());
+        assert!(!evidence.source_approximation_digest().is_zero());
+        assert_eq!(&evidence.encoded()[..8], b"ALMEVD02");
         replay_canonical_schedule_evidence(&evidence, &lowered, &partition).unwrap();
         let mut corrupt_evidence = evidence.encoded().to_vec();
         corrupt_evidence[12] ^= 1;
@@ -1450,15 +1460,150 @@ mod tests {
     }
 
     #[test]
+    fn retained_cubic_gets_certified_chords_with_an_exact_stop_at_every_join() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = representative_curve_path().unwrap();
+        let source_allocation = Rational::fraction(1, 100).unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            source_allocation.clone(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+
+        assert_eq!(schedule.source(), &source);
+        assert_eq!(schedule.metric_path().spans().len(), 3);
+        assert_eq!(
+            schedule.metric_path().maximum_source_error_mm_exact(),
+            &source_allocation
+        );
+        assert!(schedule.metric_path().spans()[2].is_approximated());
+        assert!(schedule.metric_path().spans()[2].motion_element_count() > 1);
+        assert_eq!(
+            schedule.route().len(),
+            schedule.metric_path().path().curves().len()
+        );
+        assert!(schedule.route().len() > source.curves().len());
+        assert!(
+            schedule
+                .lookahead()
+                .corner_feeds
+                .iter()
+                .all(|feed| feed == &Real::zero())
+        );
+        assert!(schedule.phases().iter().all(|phases| {
+            phases.len() == 4
+                && phases[0].ramp.start_feed == Real::zero()
+                && phases[3].ramp.end_feed == Real::zero()
+        }));
+        assert!(schedule.lookahead_report().all_satisfied());
+        assert!(schedule.jerk_report().all_satisfied());
+
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+        assert_eq!(lowered.source(), &source);
+        assert_eq!(lowered.metric_path(), schedule.metric_path());
+        assert_eq!(
+            lowered.evidence().maximum_source_to_motion_error_mm_exact(),
+            &source_allocation
+        );
+        assert_eq!(
+            lowered.points().last().unwrap().steps(),
+            [CanonicalStep::new(19_200), CanonicalStep::new(0)]
+        );
+        assert!(
+            lowered
+                .points()
+                .iter()
+                .any(|point| point.source_element() == 2)
+        );
+        assert!(
+            lowered
+                .points()
+                .iter()
+                .map(|point| point.motion_element())
+                .max()
+                .is_some_and(|maximum| maximum + 1 == schedule.route().len())
+        );
+        let zero_source_budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            lower_certified_schedule_to_v1(
+                &schedule,
+                &profile,
+                &zero_source_budget,
+                Rational::fraction(1, 1_000).unwrap(),
+                ScheduledLoweringLimits::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::SourceApproximationAllocationExceeded)
+        ));
+
+        let partition_policy = MachinePartitionPolicy2::try_new(
+            [0x42; 16],
+            profile.capability_digest(),
+            profile.configuration_digest(),
+            BlockValidationLimits {
+                maximum_block_ticks: 10_000_000,
+                segment: ValidationLimits {
+                    maximum_segment_ticks: 10_000_000,
+                    maximum_steps_per_segment: 100_000,
+                },
+            },
+            UploadId(0x2233_4455_6677_8899),
+            700,
+            CacheLimits {
+                maximum_object_bytes: 4 * 1024 * 1024,
+                maximum_chunk_bytes: 1_024,
+                maximum_chunks: 10_000,
+            },
+        )
+        .unwrap();
+        let partition = package_canonical_scheduled_program(&lowered, partition_policy).unwrap();
+        let evidence = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
+        let rebuilt = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
+
+        assert_eq!(evidence, rebuilt);
+        assert_eq!(&evidence.encoded()[..8], b"ALMEVD02");
+        assert_ne!(evidence.source_digest(), evidence.metric_path_digest());
+        assert!(!evidence.source_approximation_digest().is_zero());
+        replay_canonical_schedule_evidence(&evidence, &lowered, &partition).unwrap();
+    }
+
+    #[test]
     fn interpolation_point_allocation_is_caller_bounded() {
         let profile = profile_from(&machine_records()).unwrap();
         let source = representative_metric_path().unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(&source, &profile).unwrap();
         let budget = MachineResolutionBudget2::certify(
             &profile,
             Rational::fraction(1, 10).unwrap(),
             Rational::zero(),
             Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
         )
         .unwrap();
         let limits = ScheduledLoweringLimits::try_new(2).unwrap();
@@ -1496,8 +1641,20 @@ mod tests {
         }
         let profile = profile_from(&records).unwrap();
         let source = representative_metric_path().unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
-            certify_exact_stop_jerk_schedule(&source, &profile),
+            certify_exact_stop_jerk_schedule(
+                &source,
+                &profile,
+                &budget,
+                MetricPathApproximationLimits2::INTERACTIVE,
+            ),
             Err(MotionScheduleError::TravelEnvelopeExceeded {
                 axis: 0,
                 boundary: TravelBoundary::Maximum,
@@ -1528,12 +1685,18 @@ mod tests {
         }
         let profile = profile_from(&records).unwrap();
         let source = representative_metric_path().unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(&source, &profile).unwrap();
         let budget = MachineResolutionBudget2::certify(
             &profile,
             Rational::fraction(1, 10).unwrap(),
             Rational::zero(),
             Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
         )
         .unwrap();
         assert!(matches!(

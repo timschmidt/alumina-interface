@@ -15,17 +15,19 @@ bytes it reconstructs:
 2. conservative command-density, electrical-rate, travel, dynamics,
    calibration, following-error, and timer facts;
 3. a complete machine-resolution budget;
-4. the retained exact line/native-semicircle Hypercurve path;
+4. the retained exact line/native-semicircle/cubic Hypercurve path;
 5. a native-extrema travel-envelope certificate;
-6. Hyperpath/Hypersolve exact-stop lookahead and four constant-jerk phases per
-   source element;
+6. a bounded exact pointwise certificate over Hypercurve de Casteljau spans, followed by
+   Hyperpath/Hypersolve exact-stop lookahead and four constant-jerk phases per
+   metric element;
 7. exact interpolation under a 131,072-point browser budget, followed by
    configured step/tick lattice lowering;
 8. production `StepperExecutor` electrical and terminal preflight;
 9. chained canonical blocks, independently hashed upload chunks, and the
    immutable SD-cache publication;
 10. deterministic `RealtimeJob` plus `CachedStepperExecutor` event replay; and
-11. a reconstructed canonical `ALMEVD01` transcript.
+11. a reconstructed canonical `ALMEVD02` transcript binding source, metric
+    path, and approximation identities.
 
 The default fixture declares its facts as declared—not measured—and includes
 the cached-autonomous policy bit. The board package remains non-armable because
@@ -50,13 +52,16 @@ The inspector exposes:
 - source and usable travel envelopes;
 - every component of the machine-wide error budget;
 - exact aggregate length, time, feed, acceleration, and jerk limits;
-- all four phase endpoint states for each retained element;
-- an exact selected source point beside its canonical step/tick coordinate;
+- every source-to-motion span, exact error bound, and subdivision depth;
+- all four phase endpoint states for each retained metric element;
+- an exact selected metric point with source/motion provenance beside its
+  canonical step/tick coordinate;
 - a selected firmware segment and complete executor-preflight terminal facts;
 - partition object/manifest/chunk identities and cache horizons;
 - event replay step counts, output transaction count, terminal state, and
   finish cycle; and
-- evidence and exact-source SHA-256 identities.
+- evidence, exact-source, exact-metric, and source-approximation SHA-256
+  identities.
 
 ## Transactional file and source exchange
 
@@ -93,19 +98,21 @@ At checkpoint implementation time:
 - all 28 application tests passed, including a complete headless egui frame,
   deterministic configuration/source-to-event replay, and transactional
   rejection;
-- all 106 exact-core tests plus the compile-fail value-boundary test passed,
-  including native arc-envelope travel rejection, post-rounding containment,
+- all 112 exact-core tests plus the compile-fail value-boundary test passed,
+  including bounded cubic source reduction, exact diagonal metric length,
+  native source-envelope travel rejection, post-rounding containment,
   caller-bounded interpolation allocation, and five exact CNC importer cases;
 - all 37 protocol-client tests and the exact-control integration test passed;
 - native and `wasm32-unknown-unknown` strict Clippy passed for the complete
   workspace, and every workspace test target linked for WASM;
 - strict rustdoc and the local-source/license policy audit passed;
-- the optimized 5,345,732-byte WASM validated with `wasm-tools`; its
-  2,409,207-byte gzip and 1,931,517-byte Brotli forms both decompress to SHA-256
-  `0ffaa504dd5cb0970b12788916a9135517252092ea8fd0474d0fc41243b34c5d`;
+- the optimized 5,356,204-byte WASM validated with `wasm-tools`; its
+  2,413,446-byte gzip and 1,934,812-byte Brotli forms both decompress to SHA-256
+  `a2ed14cab2473b175722a670970c3af4975f40842c9a08b6c04090364c710a7f`;
 - headless Chromium loaded the bundle and dedicated worker over loopback with
   software WebGL, then visibly rendered the complete default Machine/CAM
-  inspector and its exact path plot; and
+  inspector, line/arc/cubic motion plot, source-to-motion certificate, and
+  exact-stop schedule; and
 - no WLAN or physical board operation occurred.
 
 This is development evidence against the current sibling working trees, not a

@@ -1,8 +1,10 @@
 //! Path-wide exact-stop lookahead and certified jerk-limited feed scheduling.
 //!
-//! The first schedule policy preserves source geometry literally: every
-//! non-blended retained join has radius zero and therefore an exact zero-feed
-//! node. Each retained path element is traversed by a four-phase symmetric
+//! The first schedule policy retains the exact Hypercurve source and admits a
+//! separate metric line/arc path only through lossless promotion or a bounded
+//! pointwise certificate over exact Hypercurve de Casteljau spans. Every metric join has radius zero
+//! and therefore an exact zero-feed node, including every certified cubic
+//! chord boundary. Each metric element is traversed by a four-phase symmetric
 //! constant-jerk profile. Hyperpath and Hypersolve replay every lookahead,
 //! phase, length, continuity, feed, acceleration, and jerk condition before a
 //! schedule is exposed. No sampled display chord is used as path geometry.
@@ -29,7 +31,10 @@ use hyperreal::{Problem, Rational, Real};
 use crate::boundary::{BoundaryError, CanonicalCycle, CanonicalStep, canonical_motion_segment};
 use crate::compiler::{MachineCompileError, certified_u64_round, half_lattice_unit, quantize_axis};
 use crate::machine_profile::{MachineDynamicsProfile2, MachineResolutionBudget2};
-use crate::toolpath::{ToolpathError, promote_metric_path};
+use crate::toolpath::{
+    CertifiedMetricPath2, MetricPathApproximationLimits2, ToolpathError, certify_metric_path,
+    promote_metric_path,
+};
 
 /// Result type for exact feed scheduling.
 pub type MotionScheduleResult<T> = Result<T, MotionScheduleError>;
@@ -251,12 +256,13 @@ impl ScalarMotionLimits2 {
     }
 }
 
-/// Certified V1 schedule that stops at every source join lacking a retained blend.
+/// Certified V1 schedule that stops at every retained metric-path join.
 #[derive(Clone, Debug)]
 pub struct CertifiedExactStopSchedule2 {
     configuration_digest: Digest,
     capability_digest: Digest,
     source: CurvePath2,
+    metric_path: CertifiedMetricPath2,
     travel_envelope: CertifiedTravelEnvelope2,
     route: Vec<FeedPathElement>,
     tangent_spans: Vec<TangentSpan>,
@@ -273,6 +279,7 @@ pub struct CertifiedExactStopSchedule2 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduledMachinePoint2 {
     source_element: usize,
+    motion_element: usize,
     phase_index: usize,
     subdivision_index: usize,
     exact_point_mm: CurvePoint2,
@@ -287,7 +294,12 @@ impl ScheduledMachinePoint2 {
         self.source_element
     }
 
-    /// Zero-based constant-jerk phase within that source element.
+    /// Zero-based certified metric element used for actual motion.
+    pub const fn motion_element(&self) -> usize {
+        self.motion_element
+    }
+
+    /// Zero-based constant-jerk phase within that metric element.
     pub const fn phase_index(&self) -> usize {
         self.phase_index
     }
@@ -297,7 +309,7 @@ impl ScheduledMachinePoint2 {
         self.subdivision_index
     }
 
-    /// Exact source-path point before command-lattice quantization.
+    /// Exact certified metric-path point before command-lattice quantization.
     pub const fn exact_point_mm(&self) -> &CurvePoint2 {
         &self.exact_point_mm
     }
@@ -321,6 +333,8 @@ impl ScheduledMachinePoint2 {
 /// Conservative schedule-to-firmware approximation evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduledLoweringEvidence2 {
+    maximum_source_to_motion_error_mm_exact: Rational,
+    maximum_source_to_motion_error_mm: Real,
     requested_interpolation_error_mm_exact: Rational,
     requested_interpolation_error_mm: Real,
     maximum_chord_interpolation_error_mm: Real,
@@ -364,6 +378,16 @@ impl ScheduledLoweringLimits {
 }
 
 impl ScheduledLoweringEvidence2 {
+    /// Certified source-curve to metric-motion bound as an exact rational.
+    pub const fn maximum_source_to_motion_error_mm_exact(&self) -> &Rational {
+        &self.maximum_source_to_motion_error_mm_exact
+    }
+
+    /// Certified source-curve to metric-motion positional bound.
+    pub const fn maximum_source_to_motion_error_mm(&self) -> &Real {
+        &self.maximum_source_to_motion_error_mm
+    }
+
     /// Caller-owned path interpolation allocation as an exact rational.
     pub const fn requested_interpolation_error_mm_exact(&self) -> &Rational {
         &self.requested_interpolation_error_mm_exact
@@ -394,7 +418,7 @@ impl ScheduledLoweringEvidence2 {
         &self.maximum_step_event_tracking_error_mm
     }
 
-    /// Sum of interpolation and command-lattice position bounds.
+    /// Sum of source reduction, interpolation, and command-lattice bounds.
     pub const fn maximum_curve_to_canonical_error_mm(&self) -> &Real {
         &self.maximum_curve_to_canonical_error_mm
     }
@@ -416,6 +440,7 @@ pub struct CanonicalScheduledProgram2 {
     configuration_digest: Digest,
     capability_digest: Digest,
     source: CurvePath2,
+    metric_path: CertifiedMetricPath2,
     timer_ticks_per_second: u64,
     output_quantum_cycles: u32,
     resolution_budget: MachineResolutionBudget2,
@@ -439,6 +464,11 @@ impl CanonicalScheduledProgram2 {
     /// Authoritative retained exact source path used to derive the schedule.
     pub const fn source(&self) -> &CurvePath2 {
         &self.source
+    }
+
+    /// Certified line/arc path actually scheduled against Hyperpath.
+    pub const fn metric_path(&self) -> &CertifiedMetricPath2 {
+        &self.metric_path
     }
 
     /// Exact integer device tick frequency.
@@ -494,12 +524,17 @@ impl CertifiedExactStopSchedule2 {
         &self.source
     }
 
+    /// Certified line/arc path actually scheduled against Hyperpath.
+    pub const fn metric_path(&self) -> &CertifiedMetricPath2 {
+        &self.metric_path
+    }
+
     /// Exact retained-path envelope certified inside conservative usable travel.
     pub const fn travel_envelope(&self) -> &CertifiedTravelEnvelope2 {
         &self.travel_envelope
     }
 
-    /// Losslessly promoted Hyperpath metric elements.
+    /// Hyperpath elements promoted from the certified metric path.
     pub fn route(&self) -> &[FeedPathElement] {
         &self.route
     }
@@ -524,7 +559,7 @@ impl CertifiedExactStopSchedule2 {
         &self.lookahead_report
     }
 
-    /// Four exact constant-jerk phases for every retained source element.
+    /// Four exact constant-jerk phases for every retained metric element.
     pub fn phases(&self) -> &[Vec<JerkRampPhaseProposal>] {
         &self.phases
     }
@@ -547,16 +582,30 @@ impl CertifiedExactStopSchedule2 {
 
 /// Generate and certify the conservative first-release jerk schedule.
 ///
-/// Lines and arcs are promoted losslessly through [`promote_metric_path`]. A
-/// general Bezier therefore remains an explicit unsupported metric family
-/// rather than being replaced by renderer or flattening chords. Every source
-/// join uses zero retained radius and zero feed. This is slower than future
-/// certified fillet/lookahead policies but exactly preserves an unblended path.
+/// Lines and arcs are preserved losslessly. A general cubic is reduced only by
+/// [`certify_metric_path`]'s exact pointwise certificate under the machine's
+/// source-curve allocation and caller-owned element/depth limits. Every
+/// resulting metric join uses zero retained radius and zero feed. This
+/// deliberately stops at certified
+/// cubic chord boundaries: it is slower than future native curved feed but
+/// does not carry an instantaneous direction change at nonzero velocity.
 pub fn certify_exact_stop_jerk_schedule(
     source: &CurvePath2,
     profile: &MachineDynamicsProfile2,
+    resolution_budget: &MachineResolutionBudget2,
+    approximation_limits: MetricPathApproximationLimits2,
 ) -> MotionScheduleResult<CertifiedExactStopSchedule2> {
-    let route = promote_metric_path(source)?;
+    if resolution_budget.configuration_digest() != profile.configuration_digest()
+        || resolution_budget.capability_digest() != profile.capability_digest()
+    {
+        return Err(MotionScheduleError::MachineIdentityMismatch);
+    }
+    let metric_path = certify_metric_path(
+        source,
+        resolution_budget.source_curve_allocation_mm_exact().clone(),
+        approximation_limits,
+    )?;
+    let route = promote_metric_path(metric_path.path())?;
     let travel_envelope = CertifiedTravelEnvelope2::certify(source, profile)?;
     let tangent_spans = route
         .iter()
@@ -616,6 +665,7 @@ pub fn certify_exact_stop_jerk_schedule(
         configuration_digest: profile.configuration_digest(),
         capability_digest: profile.capability_digest(),
         source: source.clone(),
+        metric_path,
         travel_envelope,
         route,
         tangent_spans,
@@ -635,8 +685,9 @@ pub fn certify_exact_stop_jerk_schedule(
 /// The count is the smallest integer whose second-derivative chord bound
 /// `A*dt²/8` is no greater than `maximum_interpolation_error_mm`, where `A`
 /// is the conservative full spatial acceleration envelope. Source points are
-/// evaluated exactly from retained lines/arcs, then coordinates and cumulative
-/// times are independently rounded to the configured step and tick lattices.
+/// evaluated exactly from the certified metric line/arc path, then coordinates
+/// and cumulative times are independently rounded to the configured step and
+/// tick lattices. The retained source-to-motion bound remains additive evidence.
 pub fn lower_certified_schedule_to_v1(
     schedule: &CertifiedExactStopSchedule2,
     profile: &MachineDynamicsProfile2,
@@ -651,6 +702,11 @@ pub fn lower_certified_schedule_to_v1(
     {
         return Err(MotionScheduleError::MachineIdentityMismatch);
     }
+    if schedule.metric_path.maximum_source_error_mm_exact()
+        > resolution_budget.source_curve_allocation_mm_exact()
+    {
+        return Err(MotionScheduleError::SourceApproximationAllocationExceeded);
+    }
     if maximum_interpolation_error_mm <= Rational::zero() {
         return Err(MotionScheduleError::InvalidInterpolationError);
     }
@@ -663,6 +719,10 @@ pub fn lower_certified_schedule_to_v1(
     }
     let maximum_interpolation_error_mm_exact = maximum_interpolation_error_mm;
     let maximum_interpolation_error_mm = Real::from(maximum_interpolation_error_mm_exact.clone());
+    let maximum_source_to_motion_error_mm_exact =
+        schedule.metric_path.maximum_source_error_mm_exact().clone();
+    let maximum_source_to_motion_error_mm =
+        Real::from(maximum_source_to_motion_error_mm_exact.clone());
     let maximum_axis_quantization_error_mm = [
         half_lattice_unit(
             profile.axes()[0]
@@ -682,7 +742,8 @@ pub fn lower_certified_schedule_to_v1(
     .sqrt()?;
     let maximum_step_event_tracking_error_mm =
         resolution_budget.step_event_tracking_error_mm().clone();
-    let maximum_curve_to_canonical_error_mm = maximum_interpolation_error_mm.clone()
+    let maximum_curve_to_canonical_error_mm = maximum_source_to_motion_error_mm.clone()
+        + maximum_interpolation_error_mm.clone()
         + maximum_position_quantization_error_mm.clone()
         + maximum_step_event_tracking_error_mm.clone();
     let timer_frequency = Real::from(profile.timer_ticks_per_second());
@@ -692,13 +753,18 @@ pub fn lower_certified_schedule_to_v1(
     let mut points = Vec::new();
     let mut cumulative_time = Real::zero();
     let mut maximum_chord_interpolation_error_mm = Real::zero();
-    let start = schedule.source.start().clone();
+    let start = schedule.metric_path.path().start().clone();
+    let initial_source_element = schedule
+        .metric_path
+        .source_element_for_motion(0)
+        .ok_or(MotionScheduleError::MetricPathMismatch)?;
     push_scheduled_point(
         &mut points,
         start,
         cumulative_time.clone(),
         ScheduledPointProvenance {
-            source_element: 0,
+            source_element: initial_source_element,
+            motion_element: 0,
             phase_index: 0,
             subdivision_index: 0,
         },
@@ -707,6 +773,10 @@ pub fn lower_certified_schedule_to_v1(
     )?;
 
     for (element_index, element_phases) in schedule.phases.iter().enumerate() {
+        let source_element = schedule
+            .metric_path
+            .source_element_for_motion(element_index)
+            .ok_or(MotionScheduleError::MetricPathMismatch)?;
         let element_length = element_length(&schedule.route[element_index])?;
         let mut element_length_cursor = Real::zero();
         for (phase_index, phase) in element_phases.iter().enumerate() {
@@ -780,15 +850,19 @@ pub fn lower_certified_schedule_to_v1(
                 let phase_distance = jerk_phase_distance(&phase.ramp, &local_time)?;
                 let path_distance = &element_length_cursor + phase_distance;
                 let element_fraction = (path_distance / &element_length)?;
-                let exact_point =
-                    source_point_at_fraction(&schedule.source, element_index, &element_fraction)?;
+                let exact_point = metric_point_at_fraction(
+                    schedule.metric_path.path(),
+                    element_index,
+                    &element_fraction,
+                )?;
                 let ideal_time = &cumulative_time + local_time;
                 push_scheduled_point(
                     &mut points,
                     exact_point,
                     ideal_time,
                     ScheduledPointProvenance {
-                        source_element: element_index,
+                        source_element,
+                        motion_element: element_index,
                         phase_index,
                         subdivision_index,
                     },
@@ -835,7 +909,7 @@ pub fn lower_certified_schedule_to_v1(
     let initial_position = points
         .first()
         .map(|point| [point.steps[0].get(), point.steps[1].get()])
-        .ok_or(MotionScheduleError::SourceShapeMismatch)?;
+        .ok_or(MotionScheduleError::MetricPathMismatch)?;
     let executor_preflight =
         preflight_stepper_segments(profile.stepper_timing(0), initial_position, &segments)?;
 
@@ -843,6 +917,7 @@ pub fn lower_certified_schedule_to_v1(
         configuration_digest: profile.configuration_digest(),
         capability_digest: profile.capability_digest(),
         source: schedule.source.clone(),
+        metric_path: schedule.metric_path.clone(),
         timer_ticks_per_second: profile.timer_ticks_per_second(),
         output_quantum_cycles: profile.output_quantum_cycles(),
         resolution_budget: resolution_budget.clone(),
@@ -850,6 +925,8 @@ pub fn lower_certified_schedule_to_v1(
         segments,
         executor_preflight,
         evidence: ScheduledLoweringEvidence2 {
+            maximum_source_to_motion_error_mm_exact,
+            maximum_source_to_motion_error_mm,
             requested_interpolation_error_mm_exact: maximum_interpolation_error_mm_exact,
             requested_interpolation_error_mm: maximum_interpolation_error_mm,
             maximum_chord_interpolation_error_mm,
@@ -866,6 +943,7 @@ pub fn lower_certified_schedule_to_v1(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ScheduledPointProvenance {
     source_element: usize,
+    motion_element: usize,
     phase_index: usize,
     subdivision_index: usize,
 }
@@ -905,6 +983,7 @@ fn push_scheduled_point(
     )?;
     points.push(ScheduledMachinePoint2 {
         source_element: provenance.source_element,
+        motion_element: provenance.motion_element,
         phase_index: provenance.phase_index,
         subdivision_index: provenance.subdivision_index,
         exact_point_mm,
@@ -977,21 +1056,21 @@ fn jerk_phase_distance(
         + (jerk * time_cubed / Real::from(6))?)
 }
 
-fn source_point_at_fraction(
-    source: &CurvePath2,
+fn metric_point_at_fraction(
+    metric_path: &CurvePath2,
     element_index: usize,
     fraction: &Real,
 ) -> MotionScheduleResult<CurvePoint2> {
-    let curve = source
+    let curve = metric_path
         .curves()
         .get(element_index)
-        .ok_or(MotionScheduleError::SourceShapeMismatch)?;
+        .ok_or(MotionScheduleError::MetricPathMismatch)?;
     match curve.geometry() {
         CurveGeometry2::Line(line) => Ok(line.point_at(fraction.clone())),
         CurveGeometry2::CircularArc(arc) => {
             match arc.point_at_sweep_fraction(fraction, &CurveContext::STRICT)? {
                 Classification::Decided(point) => Ok(point),
-                Classification::Uncertain(_) => Err(MotionScheduleError::SourceEvaluationUncertain),
+                Classification::Uncertain(_) => Err(MotionScheduleError::MetricEvaluationUncertain),
             }
         }
         _ => Err(MotionScheduleError::UnsupportedMetricElement),
@@ -1081,9 +1160,7 @@ fn tangent_span(element: &FeedPathElement) -> MotionScheduleResult<TangentSpan> 
 
 fn element_length(element: &FeedPathElement) -> MotionScheduleResult<Real> {
     match element {
-        FeedPathElement::Line(line) => line
-            .axis_length(PredicatePolicy::STRICT)
-            .ok_or(MotionScheduleError::UnsupportedMetricElement),
+        FeedPathElement::Line(line) => Ok(line.euclidean_length()?),
         FeedPathElement::ExplicitArc(arc) => arc
             .certified_sweep_length()
             .ok_or(MotionScheduleError::UnsupportedMetricElement),
@@ -1147,10 +1224,10 @@ pub enum MotionScheduleError {
     UnsupportedTangentCarrier,
     /// A retained element lacked an exact supported metric length.
     UnsupportedMetricElement,
-    /// Retained source and promoted metric route shapes diverged.
-    SourceShapeMismatch,
-    /// Exact source evaluation remained undecided.
-    SourceEvaluationUncertain,
+    /// Certified metric path, route, phases, or provenance diverged.
+    MetricPathMismatch,
+    /// Exact metric-path evaluation remained undecided.
+    MetricEvaluationUncertain,
     /// The complete exact source envelope lies outside conservative usable travel.
     TravelEnvelopeExceeded {
         /// Dense machine axis index.
@@ -1199,6 +1276,8 @@ pub enum MotionScheduleError {
     InvalidInterpolationError,
     /// Requested V1 interpolation exceeded its machine-wide allocation.
     InterpolationAllocationExceeded,
+    /// The schedule's certified source reduction exceeded the lowering budget.
+    SourceApproximationAllocationExceeded,
     /// A lowering policy must retain at least an initial and final point.
     InvalidLoweringLimits,
     /// The proposed interpolation exceeds the caller-owned point budget.
@@ -1272,11 +1351,10 @@ impl fmt::Display for MotionScheduleError {
             Self::UnsupportedMetricElement => {
                 formatter.write_str("the retained path element has no exact supported length")
             }
-            Self::SourceShapeMismatch => {
-                formatter.write_str("retained source and metric route shapes do not match")
-            }
-            Self::SourceEvaluationUncertain => {
-                formatter.write_str("exact source-path evaluation remained uncertain")
+            Self::MetricPathMismatch => formatter
+                .write_str("certified metric path, route, phases, and provenance do not match"),
+            Self::MetricEvaluationUncertain => {
+                formatter.write_str("exact metric-path evaluation remained uncertain")
             }
             Self::TravelEnvelopeExceeded { axis, boundary } => write!(
                 formatter,
@@ -1318,6 +1396,9 @@ impl fmt::Display for MotionScheduleError {
             }
             Self::InterpolationAllocationExceeded => formatter
                 .write_str("V1 interpolation error exceeds its certified machine-wide allocation"),
+            Self::SourceApproximationAllocationExceeded => formatter.write_str(
+                "certified source-to-motion error exceeds the machine-wide source allocation",
+            ),
             Self::InvalidLoweringLimits => {
                 formatter.write_str("scheduled lowering requires a point budget of at least two")
             }

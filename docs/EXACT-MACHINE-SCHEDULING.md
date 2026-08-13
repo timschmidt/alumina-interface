@@ -1,4 +1,4 @@
-# Exact machine scheduling V1
+# Exact machine scheduling
 
 The browser/WASM compiler now has one machine-bound scheduling path for exact
 two-axis stepper motion. It begins with the firmware's validated canonical
@@ -16,8 +16,8 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> allocation-free ConfigurationDocumentView
     -> exact two-axis MachineDynamicsProfile2
     -> certified MachineResolutionBudget2
-    -> retained Hypercurve line/arc source
-    -> lossless Hyperpath metric promotion
+    -> retained Hypercurve line/arc/cubic source
+    -> lossless or certified/budgeted metric-path construction
     -> native exact source-envelope / usable-travel proof
     -> exact-stop lookahead + four-phase jerk replay
     -> certified interpolation onto the firmware V1 segment model
@@ -25,7 +25,7 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> allocation-free production StepperExecutor preflight
     -> independently replayed chained execution blocks
     -> content-addressed SD partition
-       ├-> canonical ALMEVD01 evidence transcript
+       ├-> canonical ALMEVD02 evidence transcript
        └-> event-level cached-partition simulator replay (verification)
 ```
 
@@ -95,27 +95,38 @@ envelope contains all of the following conservative components:
 - configured following error; and
 - half a device tick of position at the maximum vector velocity.
 
-The first line/arc scheduler uses no source-curve approximation, so that
-allocation may be zero. The full-travel calibration term is intentionally
-conservative; a later per-job certificate may tighten the occupied extent but
-may never exceed this machine envelope. An unresolved exact comparison or an
-insufficient requested total fails before scheduling.
+An all-line/arc path uses no source-curve approximation, so its actual bound is
+zero even when the machine policy reserves a positive allocation. A general
+cubic can consume that allocation only through an exact pointwise
+degree-elevated-chord certificate over Hypercurve de Casteljau subcurves and
+caller-owned element/depth limits. The
+full-travel calibration term is intentionally conservative; a later per-job
+certificate may tighten the occupied extent but may never exceed this machine
+envelope. An unresolved exact comparison or an insufficient requested total
+fails before scheduling.
 
 ## Exact-stop lookahead and jerk schedule
 
-Supported lines and circular arcs are promoted losslessly from Hypercurve to
-Hyperpath. V1 assigns zero retained blend radius and zero feed to every source
-join, as well as zero entry and exit feed. Hyperpath and Hypersolve replay every
-tangent span, join constraint, and speed node. Zero radius therefore means an
-intentional unblended exact stop, not a missing radius or an unchecked divide.
+Lines and circular arcs are promoted losslessly from Hypercurve to Hyperpath.
+A polynomial cubic is first reduced to exact `LineSeg2` chords under that
+pointwise certificate; renderer output is not accepted. Hyperpath's mixed
+feed carrier retains the exact Euclidean length of diagonal chords. V1 assigns
+zero retained blend radius and zero feed to every metric join, as well as zero
+entry and exit feed. Hyperpath and Hypersolve replay every tangent span, join
+constraint, and speed node. Zero radius therefore means an intentional
+unblended exact stop, not a missing radius or an unchecked divide.
 
-Each retained source element receives a symmetric four-phase, rest-to-rest,
+Each retained metric element receives a symmetric four-phase, rest-to-rest,
 constant-jerk schedule. Its phase distances are `1/12`, `5/12`, `5/12`, and
 `1/12` of the exact element length. A common phase duration is rounded upward
 to an exact integer device-tick interval after satisfying the feed,
 acceleration, and jerk lower bounds. The reconstructed phases are then replayed
 by Hyperpath/Hypersolve for length, state continuity, feed, acceleration, and
 jerk.
+
+The complete bounded reduction, exact-stop rationale, error composition, and
+source/metric evidence contract are documented in
+[`CERTIFIED-BEZIER-MOTION.md`](CERTIFIED-BEZIER-MOTION.md).
 
 For a route containing an arc, the scalar tangential envelopes are reduced and
 the feed ceiling is additionally constrained by radius-dependent centripetal,
@@ -133,12 +144,14 @@ maximum_spatial_acceleration × interval_time² / 8
     <= controller interpolation allocation.
 ```
 
-Every retained line or arc is evaluated exactly at the resulting path
-fractions. Coordinates and cumulative times are then independently rounded to
-the configured step and tick lattices. A subdivision may legitimately quantize
-to zero steps while consuming time; this is an intentional hold segment, not a
-dropped part of the schedule. Collapsed tick boundaries, integer overflow, or
-an unresolved interpolation predicate reject the lowering.
+Every certified metric line or arc is evaluated exactly at the resulting path
+fractions. The selected point retains both its original source index and its
+motion-element index. Coordinates and cumulative times are then independently
+rounded to the configured step and tick lattices. A subdivision may
+legitimately quantize to zero steps while consuming time; this is an
+intentional hold segment, not a dropped part of the schedule. Collapsed tick
+boundaries, integer overflow, or an unresolved interpolation predicate reject
+the lowering.
 
 `ScheduledLoweringLimits` supplies a caller-owned retained-point budget. The
 lowerer checks the complete post-phase point count with checked arithmetic and
@@ -173,35 +186,41 @@ deadline event loop, acknowledges ownership in production order, and requires
 the terminal block digest, tick, position, step counts, and finish cycle to
 agree. It uses no target backend and produces no output.
 
-Canonical `ALMEVD01` V1 binds:
+Canonical `ALMEVD02` binds:
 
-- exact rational line/arc source identity;
+- exact-rational line/arc/cubic source identity;
+- the exact line/arc metric-path identity;
+- source-to-motion spans, family tags, motion ranges, exact error bounds, and
+  subdivision depths;
 - configuration and capability digests;
 - partition object and manifest identities and object length;
 - timer and output-quantum facts;
 - block, point, segment, position, tick, finish, and step-count facts; and
-- exact requested total, source, controller, and interpolation budgets.
+- exact requested total, source, controller, certified source-to-motion, and
+  interpolation budgets.
 
 Replay reconstructs the transcript from the retained program and partition and
 requires byte-for-byte equality; externally stored bytes are SHA-256 checked
-before reconstruction. V1 evidence serialization accepts only retained
-line/arc primitives whose parameters are exact rationals. The schedule can
-carry other exact expressions such as the symbolic semicircle length, but a
-non-rational source parameter currently fails the evidence boundary.
+before reconstruction. Source, metric, and approximation transcripts are
+domain-separated and independently hashed. Evidence serialization requires
+exact-rational primitive parameters. The schedule can carry other exact
+expressions such as the symbolic semicircle length, but a non-rational source
+parameter currently fails the evidence boundary.
 
 The event-level simulator report is separate verification evidence; it is not
-silently encoded as an `ALMEVD01` certification flag. The transcript's partition
+silently encoded as an `ALMEVD02` certification flag. The transcript's partition
 replay flag refers to the independent canonical `MotionStreamValidator` replay
 performed during packaging.
 
 ## Current limits
 
 - Exactly two Cartesian stepper axes are supported by this scheduler.
-- Scheduled source geometry is limited to axis-aligned lines and explicit
-  circular arcs; general Bezier, PH, spline, and NURBS scheduling remains
-  fail-closed at this boundary.
-- Every unblended source join is a full stop. Certified nonzero-radius blends
-  and longer-range velocity optimization are not implemented yet.
+- Scheduled source geometry supports exact lines, explicit circular arcs, and
+  certified polynomial cubic reduction. Other Bezier, PH, spline, and NURBS
+  policies remain fail-closed at this boundary.
+- Every metric join—including every generated cubic chord boundary—is a full
+  stop. Certified nonzero-radius blends and longer-range velocity optimization
+  are not implemented yet.
 - Scalar limits use the most conservative axis-wide envelope; direction-aware
   utilization and non-Cartesian kinematics remain future work.
 - Firmware V1 follows the certified smooth schedule through bounded

@@ -55,13 +55,13 @@ The import report retains:
 - for every curve, source line, optional N number, motion family, units,
   endpoint mode, and I/J mode.
 
-Those facts support UI review but do not enter firmware. `ALMEVD01` separately
-binds a canonical exact-rational encoding of the resulting line/arc geometry.
-Tests compile the direct Hypercurve fixture, the equivalent CNC text, and a
-comment-only variant: all three produce the same exact-source digest, cached
-partition, and evidence identity, while the two text sources have different
-raw-source hashes. This proves that comments, formatting, and legacy text are
-not machine authority.
+Those facts support UI review but do not enter firmware. `ALMEVD02` separately
+binds canonical exact-rational source geometry, the metric path, and the
+source-to-motion certificate. Tests compile the selected CNC text and a
+comment-only variant: both produce the same exact-source digest, cached
+partition, and evidence identity while their raw-source hashes differ. The
+built-in line/arc/cubic fixture has a different canonical identity. This proves
+that comments, formatting, and legacy text are not machine authority.
 
 ## Transactional Machine/CAM admission
 
@@ -78,7 +78,7 @@ bounded raw source
     -> bounded step/tick lowering and post-rounding travel proof
     -> production StepperExecutor preflight
     -> canonical cached partition and independent event replay
-    -> reconstructed ALMEVD01 evidence replay
+    -> reconstructed ALMEVD02 evidence replay
 ```
 
 Any failure leaves the existing source, schedule, cache, replay, evidence, and
@@ -93,16 +93,16 @@ The checkpoint passed:
 - 28 application tests, including the direct-fixture/text/comment identity
   comparison, transactional process/travel rejection, and a complete headless
   egui frame;
-- 106 exact-core tests, including five importer tests for exact line/arc
+- 112 exact-core tests, including five importer tests for exact line/arc
   construction, inch/incremental conversion, selected-semantics rejection,
   admission limits, and every strict prefix of the representative program;
 - 37 protocol-client tests, the exact-control integration test, and the
   compile-fail display-to-exact boundary test;
 - strict native and `wasm32-unknown-unknown` Clippy, strict rustdoc, complete
   WASM test-target linking, and the local-source/permissive-license audit;
-- an optimized 5,345,732-byte WASM validated by `wasm-tools`, with
-  2,409,207-byte gzip and 1,931,517-byte Brotli forms that both decompress to
-  SHA-256 `0ffaa504dd5cb0970b12788916a9135517252092ea8fd0474d0fc41243b34c5d`;
+- an optimized 5,356,204-byte WASM validated by `wasm-tools`, with
+  2,413,446-byte gzip and 1,934,812-byte Brotli forms that both decompress to
+  SHA-256 `a2ed14cab2473b175722a670970c3af4975f40842c9a08b6c04090364c710a7f`;
   and
 - a loopback-only software-WebGL Chromium render showing the source authority,
   selected-semantics/limit panel, bounded file/editor controls, exact geometry

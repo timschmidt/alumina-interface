@@ -5,26 +5,34 @@ use std::fmt;
 
 use alumina_protocol::Digest;
 use alumina_storage::sha256;
-use hypercurve::{CurveGeometry2, CurvePath2};
+use hypercurve::{CurveFamily2, CurveGeometry2, CurvePath2};
 use hyperreal::{Rational, Real};
 
 use crate::motion_schedule::CanonicalScheduledProgram2;
 use crate::partition::CanonicalMachinePartition2;
+use crate::toolpath::CertifiedMetricPath2;
 
-const EVIDENCE_MAGIC: [u8; 8] = *b"ALMEVD01";
-const EVIDENCE_VERSION: u16 = 1;
-const SOURCE_VERSION: u16 = 1;
+const EVIDENCE_MAGIC: [u8; 8] = *b"ALMEVD02";
+const EVIDENCE_VERSION: u16 = 2;
+const SOURCE_MAGIC: [u8; 8] = *b"ALMSRC02";
+const SOURCE_VERSION: u16 = 2;
+const METRIC_MAGIC: [u8; 8] = *b"ALMMTR01";
+const METRIC_VERSION: u16 = 1;
+const APPROXIMATION_MAGIC: [u8; 8] = *b"ALMAPX01";
+const APPROXIMATION_VERSION: u16 = 1;
 const AXES: u16 = 2;
 const CERTIFIED_LOOKAHEAD: u32 = 1 << 0;
 const CERTIFIED_JERK_REPLAY: u32 = 1 << 1;
 const CERTIFIED_INTERPOLATION: u32 = 1 << 2;
 const CERTIFIED_EXECUTOR_PREFLIGHT: u32 = 1 << 3;
 const CERTIFIED_PARTITION_STREAM_REPLAY: u32 = 1 << 4;
+const CERTIFIED_SOURCE_APPROXIMATION: u32 = 1 << 5;
 const CERTIFICATION_FLAGS: u32 = CERTIFIED_LOOKAHEAD
     | CERTIFIED_JERK_REPLAY
     | CERTIFIED_INTERPOLATION
     | CERTIFIED_EXECUTOR_PREFLIGHT
-    | CERTIFIED_PARTITION_STREAM_REPLAY;
+    | CERTIFIED_PARTITION_STREAM_REPLAY
+    | CERTIFIED_SOURCE_APPROXIMATION;
 
 /// Result type for canonical schedule-evidence construction and replay.
 pub type ScheduleEvidenceResult<T> = Result<T, ScheduleEvidenceError>;
@@ -36,10 +44,12 @@ pub struct CanonicalScheduleEvidence2 {
     encoded: Vec<u8>,
     digest: Digest,
     source_digest: Digest,
+    metric_path_digest: Digest,
+    source_approximation_digest: Digest,
 }
 
 impl CanonicalScheduleEvidence2 {
-    /// Complete canonical V1 transcript bytes.
+    /// Complete canonical V2 transcript bytes.
     pub fn encoded(&self) -> &[u8] {
         &self.encoded
     }
@@ -49,9 +59,19 @@ impl CanonicalScheduleEvidence2 {
         self.digest
     }
 
-    /// SHA-256 identity of the exact rational line/arc source transcript.
+    /// SHA-256 identity of the retained exact rational source transcript.
     pub const fn source_digest(&self) -> Digest {
         self.source_digest
+    }
+
+    /// SHA-256 identity of the exact line/arc path presented to Hyperpath.
+    pub const fn metric_path_digest(&self) -> Digest {
+        self.metric_path_digest
+    }
+
+    /// SHA-256 identity of source-to-motion spans and exact error bounds.
+    pub const fn source_approximation_digest(&self) -> Digest {
+        self.source_approximation_digest
     }
 }
 
@@ -87,15 +107,20 @@ pub fn build_canonical_schedule_evidence(
         return Err(ScheduleEvidenceError::TerminalMismatch);
     }
 
-    let source = encode_exact_source(program.source())?;
+    let source = encode_exact_path(program.source(), ExactPathDomain::Source)?;
     let source_digest = sha256(&source).digest;
+    let metric_path = encode_exact_path(program.metric_path().path(), ExactPathDomain::Metric)?;
+    let metric_path_digest = sha256(&metric_path).digest;
+    let source_approximation =
+        encode_source_approximation(program.source(), program.metric_path())?;
+    let source_approximation_digest = sha256(&source_approximation).digest;
     let publication = partition.publication();
     let budget = program.resolution_budget();
     let requested_interpolation = program.evidence().requested_interpolation_error_mm_exact();
 
     let mut encoded = Vec::new();
     encoded
-        .try_reserve_exact(320)
+        .try_reserve_exact(416)
         .map_err(|_| ScheduleEvidenceError::AllocationOverflow)?;
     encoded.extend_from_slice(&EVIDENCE_MAGIC);
     push_u16(&mut encoded, EVIDENCE_VERSION);
@@ -104,6 +129,8 @@ pub fn build_canonical_schedule_evidence(
     encoded.extend_from_slice(&program.configuration_digest().0);
     encoded.extend_from_slice(&program.capability_digest().0);
     encoded.extend_from_slice(&source_digest.0);
+    encoded.extend_from_slice(&metric_path_digest.0);
+    encoded.extend_from_slice(&source_approximation_digest.0);
     encoded.extend_from_slice(&publication.object.content.digest.0);
     encoded.extend_from_slice(&publication.manifest.digest.0);
     push_u64(&mut encoded, publication.object.byte_len);
@@ -128,6 +155,7 @@ pub fn build_canonical_schedule_evidence(
         budget.requested_total_error_mm_exact(),
         budget.source_curve_allocation_mm_exact(),
         budget.controller_interpolation_allocation_mm_exact(),
+        program.evidence().maximum_source_to_motion_error_mm_exact(),
         requested_interpolation,
     ] {
         push_rational(&mut encoded, rational)?;
@@ -138,6 +166,8 @@ pub fn build_canonical_schedule_evidence(
         encoded,
         digest,
         source_digest,
+        metric_path_digest,
+        source_approximation_digest,
     })
 }
 
@@ -156,7 +186,9 @@ pub fn replay_canonical_schedule_evidence(
         partition,
     )?;
     let rebuilt = build_canonical_schedule_evidence(program, partition)?;
-    (rebuilt.source_digest == evidence.source_digest)
+    (rebuilt.source_digest == evidence.source_digest
+        && rebuilt.metric_path_digest == evidence.metric_path_digest
+        && rebuilt.source_approximation_digest == evidence.source_approximation_digest)
         .then_some(())
         .ok_or(ScheduleEvidenceError::ReplayMismatch)
 }
@@ -181,14 +213,28 @@ pub fn verify_canonical_schedule_evidence_bytes(
     Ok(())
 }
 
-fn encode_exact_source(source: &CurvePath2) -> ScheduleEvidenceResult<Vec<u8>> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactPathDomain {
+    Source,
+    Metric,
+}
+
+fn encode_exact_path(
+    path: &CurvePath2,
+    domain: ExactPathDomain,
+) -> ScheduleEvidenceResult<Vec<u8>> {
     let mut encoded = Vec::new();
     encoded
-        .try_reserve_exact(128)
+        .try_reserve_exact(160)
         .map_err(|_| ScheduleEvidenceError::AllocationOverflow)?;
-    push_u16(&mut encoded, SOURCE_VERSION);
-    push_usize(&mut encoded, source.curves().len())?;
-    for (element, curve) in source.curves().iter().enumerate() {
+    let (magic, version) = match domain {
+        ExactPathDomain::Source => (SOURCE_MAGIC, SOURCE_VERSION),
+        ExactPathDomain::Metric => (METRIC_MAGIC, METRIC_VERSION),
+    };
+    encoded.extend_from_slice(&magic);
+    push_u16(&mut encoded, version);
+    push_usize(&mut encoded, path.curves().len())?;
+    for (element, curve) in path.curves().iter().enumerate() {
         match curve.geometry() {
             CurveGeometry2::Line(line) => {
                 encoded.push(1);
@@ -210,10 +256,91 @@ fn encode_exact_source(source: &CurvePath2) -> ScheduleEvidenceResult<Vec<u8>> {
                     None => encoded.push(0),
                 }
             }
+            CurveGeometry2::CubicBezier(cubic) if domain == ExactPathDomain::Source => {
+                encoded.push(3);
+                push_point(&mut encoded, cubic.start(), element)?;
+                push_point(&mut encoded, cubic.control1(), element)?;
+                push_point(&mut encoded, cubic.control2(), element)?;
+                push_point(&mut encoded, cubic.end(), element)?;
+            }
             _ => return Err(ScheduleEvidenceError::UnsupportedSource { element }),
         }
     }
     Ok(encoded)
+}
+
+fn encode_source_approximation(
+    source: &CurvePath2,
+    metric_path: &CertifiedMetricPath2,
+) -> ScheduleEvidenceResult<Vec<u8>> {
+    if metric_path.spans().len() != source.curves().len() {
+        return Err(ScheduleEvidenceError::SourceApproximationMismatch);
+    }
+
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(160)
+        .map_err(|_| ScheduleEvidenceError::AllocationOverflow)?;
+    encoded.extend_from_slice(&APPROXIMATION_MAGIC);
+    push_u16(&mut encoded, APPROXIMATION_VERSION);
+    push_usize(&mut encoded, source.curves().len())?;
+    push_usize(&mut encoded, metric_path.path().curves().len())?;
+    push_rational(&mut encoded, metric_path.maximum_source_error_mm_exact())?;
+    push_usize(&mut encoded, metric_path.spans().len())?;
+
+    let mut motion_cursor = 0_usize;
+    let mut maximum_span_error = Rational::zero();
+    for (expected_source_element, span) in metric_path.spans().iter().enumerate() {
+        let expected_family = source.curves()[expected_source_element].geometry().family();
+        if span.source_element() != expected_source_element
+            || span.source_family() != expected_family
+            || span.motion_element_start() != motion_cursor
+            || span.motion_element_count() == 0
+        {
+            return Err(ScheduleEvidenceError::SourceApproximationMismatch);
+        }
+        let motion_end = motion_cursor
+            .checked_add(span.motion_element_count())
+            .ok_or(ScheduleEvidenceError::CounterOverflow)?;
+        if motion_end > metric_path.path().curves().len()
+            || (motion_cursor..motion_end).any(|motion_element| {
+                metric_path.source_element_for_motion(motion_element)
+                    != Some(expected_source_element)
+            })
+        {
+            return Err(ScheduleEvidenceError::SourceApproximationMismatch);
+        }
+        if span.maximum_error_mm_exact() > &maximum_span_error {
+            maximum_span_error = span.maximum_error_mm_exact().clone();
+        }
+
+        push_usize(&mut encoded, span.source_element())?;
+        encoded.push(curve_family_tag(span.source_family()));
+        push_usize(&mut encoded, span.motion_element_start())?;
+        push_usize(&mut encoded, span.motion_element_count())?;
+        push_rational(&mut encoded, span.maximum_error_mm_exact())?;
+        push_usize(&mut encoded, span.maximum_subdivision_depth())?;
+        motion_cursor = motion_end;
+    }
+    if motion_cursor != metric_path.path().curves().len()
+        || maximum_span_error != *metric_path.maximum_source_error_mm_exact()
+    {
+        return Err(ScheduleEvidenceError::SourceApproximationMismatch);
+    }
+    Ok(encoded)
+}
+
+const fn curve_family_tag(family: CurveFamily2) -> u8 {
+    match family {
+        CurveFamily2::Line => 1,
+        CurveFamily2::CircularArc => 2,
+        CurveFamily2::QuadraticBezier => 3,
+        CurveFamily2::CubicBezier => 4,
+        CurveFamily2::RationalQuadraticBezier => 5,
+        CurveFamily2::RationalBezier => 6,
+        CurveFamily2::PolynomialBSpline => 7,
+        CurveFamily2::Nurbs => 8,
+    }
 }
 
 fn push_point(
@@ -289,18 +416,20 @@ pub enum ScheduleEvidenceError {
     EmptyProgram,
     /// Program, executor, and partition terminal facts differed.
     TerminalMismatch,
-    /// V1 source evidence supports retained lines and circular arcs only.
+    /// A retained source or metric path contained an unsupported exact family.
     UnsupportedSource {
         /// Zero-based retained path element.
         element: usize,
     },
-    /// V1 source evidence requires exact-rational primitive parameters.
+    /// Exact path evidence requires exact-rational primitive parameters.
     NonRationalSource {
         /// Zero-based retained path element.
         element: usize,
     },
-    /// A canonical length/count did not fit its V1 field.
+    /// A canonical length/count did not fit its V2 field.
     CounterOverflow,
+    /// Source spans, motion provenance, and retained paths did not agree.
+    SourceApproximationMismatch,
     /// Transcript storage could not be reserved.
     AllocationOverflow,
     /// Rebuilt bytes or their SHA-256 identity differed.
@@ -321,13 +450,15 @@ impl fmt::Display for ScheduleEvidenceError {
             }
             Self::UnsupportedSource { element } => write!(
                 formatter,
-                "source element {element} is not a V1 retained line or circular arc"
+                "exact path element {element} is not supported by canonical evidence"
             ),
             Self::NonRationalSource { element } => write!(
                 formatter,
                 "source element {element} contains a non-rational exact parameter"
             ),
-            Self::CounterOverflow => formatter.write_str("evidence counter does not fit V1"),
+            Self::CounterOverflow => formatter.write_str("evidence counter does not fit V2"),
+            Self::SourceApproximationMismatch => formatter
+                .write_str("source-to-motion approximation evidence is internally inconsistent"),
             Self::AllocationOverflow => formatter.write_str("evidence storage reservation failed"),
             Self::ReplayMismatch => formatter.write_str("canonical evidence replay differed"),
             Self::DigestMismatch => formatter.write_str("canonical evidence digest differed"),

@@ -14,10 +14,11 @@ use alumina_config::{
 use alumina_interface_core::{
     CanonicalMachinePartition2, CanonicalScheduleEvidence2, CanonicalScheduledProgram2,
     CertifiedExactStopSchedule2, CncGeometryImportLimits, CncGeometryImportReport2, ExactValue,
-    MachineDynamicsProfile2, MachinePartitionPolicy2, MachineResolutionBudget2, Millimetres,
-    ScheduledLoweringLimits, build_canonical_schedule_evidence, certify_exact_stop_jerk_schedule,
-    import_exact_cnc_geometry, lower_certified_schedule_to_v1, package_canonical_scheduled_program,
-    project_for_display, replay_canonical_schedule_evidence, representative_metric_path,
+    MachineDynamicsProfile2, MachinePartitionPolicy2, MachineResolutionBudget2,
+    MetricPathApproximationLimits2, Millimetres, ScheduledLoweringLimits,
+    build_canonical_schedule_evidence, certify_exact_stop_jerk_schedule, import_exact_cnc_geometry,
+    lower_certified_schedule_to_v1, package_canonical_scheduled_program, project_for_display,
+    replay_canonical_schedule_evidence, representative_curve_path,
     verify_canonical_schedule_evidence_bytes,
 };
 use alumina_machine_ir::{BlockValidationLimits, ValidationLimits};
@@ -33,7 +34,7 @@ const MAXIMUM_CONFIGURATION_BYTES: usize =
 const MAXIMUM_EVIDENCE_BYTES: usize = 64 * 1024;
 const MAXIMUM_CNC_SOURCE_BYTES: usize = CncGeometryImportLimits::INTERACTIVE.maximum_source_bytes();
 const CONFIGURATION_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMCFG05 file", "almcfg");
-const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD01 file", "almevd");
+const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD02 file", "almevd");
 const CNC_SOURCE_FILE: BoundedFileSpec = BoundedFileSpec::new("UI-only CNC geometry draft", "nc");
 const STREAM_ID: [u8; 16] = *b"tinybee-cam-v1!!";
 const UPLOAD_ID: UploadId = UploadId(0x1122_3344_5566_7788);
@@ -63,8 +64,8 @@ enum MachineCamSource {
 impl MachineCamSource {
     fn exact_fixture() -> Result<Self, String> {
         Ok(Self::ExactFixture {
-            path: representative_metric_path()
-                .map_err(|error| format!("retained metric source construction failed: {error}"))?,
+            path: representative_curve_path()
+                .map_err(|error| format!("retained exact source construction failed: {error}"))?,
         })
     }
 
@@ -127,12 +128,17 @@ impl MachineCamArtifacts {
         let resolution_budget = MachineResolutionBudget2::certify(
             &profile,
             Rational::fraction(1, 10).map_err(|error| error.to_string())?,
-            Rational::zero(),
+            Rational::fraction(1, 100).map_err(|error| error.to_string())?,
             Rational::fraction(1, 100).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("machine resolution budget rejected: {error}"))?;
-        let schedule = certify_exact_stop_jerk_schedule(source.path(), &profile)
-            .map_err(|error| format!("exact jerk scheduling rejected: {error}"))?;
+        let schedule = certify_exact_stop_jerk_schedule(
+            source.path(),
+            &profile,
+            &resolution_budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .map_err(|error| format!("exact jerk scheduling rejected: {error}"))?;
         let program = lower_certified_schedule_to_v1(
             &schedule,
             &profile,
@@ -238,7 +244,8 @@ impl MachineCamWorkspace {
         ui.separator();
         ui.label(artifacts.source.description());
         ui.label(format!(
-            "{} retained elements · {} exact samples",
+            "{} source curves → {} metric elements · {} exact samples",
+            artifacts.source.path().curves().len(),
             artifacts.schedule.route().len(),
             artifacts.program.points().len()
         ));
@@ -404,26 +411,26 @@ impl MachineCamWorkspace {
                         match self.verify_evidence_bytes(&bytes) {
                             Ok(()) => {
                                 self.file_status = format!(
-                                    "verified {} imported ALMEVD01 bytes against the current exact reconstruction",
+                                    "verified {} imported ALMEVD02 bytes against the current exact reconstruction",
                                     bytes.len()
                                 );
                             }
                             Err(error) => {
                                 self.file_status = format!(
-                                    "ALMEVD01 import rejected without changing the workspace: {error}"
+                                    "ALMEVD02 import rejected without changing the workspace: {error}"
                                 );
                             }
                         }
                     }
                     BoundedFileEvent::Import(Err(error)) => {
-                        self.file_status = format!("ALMEVD01 read rejected: {error}");
+                        self.file_status = format!("ALMEVD02 read rejected: {error}");
                     }
                     BoundedFileEvent::Export(Ok(bytes)) => {
                         self.file_status =
-                            format!("exported {bytes} canonical ALMEVD01 evidence bytes");
+                            format!("exported {bytes} canonical ALMEVD02 evidence bytes");
                     }
                     BoundedFileEvent::Export(Err(error)) => {
-                        self.file_status = format!("ALMEVD01 export failed: {error}");
+                        self.file_status = format!("ALMEVD02 export failed: {error}");
                     }
                 }
             }
@@ -766,9 +773,12 @@ impl MachineCamWorkspace {
 
     fn show_exact_path_plot(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading("Retained exact path");
+            ui.heading("Exact source / certified motion path");
             ui.label(self.artifacts.source.description());
         });
+        ui.weak(
+            "The source remains native Hypercurve geometry. The plotted samples are the separately certified metric path consumed by motion control.",
+        );
         let points = self.artifacts.program.points();
         if points.is_empty() {
             ui.colored_label(egui::Color32::RED, "scheduled point set is empty");
@@ -811,11 +821,7 @@ impl MachineCamWorkspace {
             let Some(end) = projected_point(pair[1].exact_point_mm(), plot, world) else {
                 continue;
             };
-            let color = if pair[1].source_element() == 0 {
-                egui::Color32::from_rgb(96, 169, 232)
-            } else {
-                egui::Color32::from_rgb(241, 178, 84)
-            };
+            let color = source_curve_color(pair[1].source_element());
             painter.line_segment([start, end], egui::Stroke::new(2.0_f32, color));
         }
         if let Some(selected) =
@@ -833,8 +839,9 @@ impl MachineCamWorkspace {
         ui.add(egui::Slider::new(&mut self.selected_point, 0..=points.len() - 1).text("sample"));
         let point = &points[self.selected_point];
         ui.monospace(format!(
-            "element {} · phase {} · subdivision {} · exact ({}, {}) mm",
+            "source {} · motion {} · phase {} · subdivision {} · exact metric ({}, {}) mm",
             point.source_element(),
+            point.motion_element(),
             point.phase_index(),
             point.subdivision_index(),
             point.exact_point_mm().x(),
@@ -859,7 +866,7 @@ impl MachineCamWorkspace {
             .show(ui, |ui| {
                 real_row(
                     ui,
-                    "retained path length (mm)",
+                    "certified metric path length (mm)",
                     schedule.total_path_length_mm(),
                 );
                 real_row(
@@ -885,6 +892,13 @@ impl MachineCamWorkspace {
                     schedule.limits().maximum_jerk_mm_per_second_cubed(),
                 );
             });
+        ui.monospace(format!(
+            "{} retained source curves → {} certified metric elements · maximum source-to-motion error {} mm",
+            schedule.source().curves().len(),
+            schedule.metric_path().path().curves().len(),
+            schedule.metric_path().maximum_source_error_mm_exact()
+        ));
+        self.show_source_to_motion_certificate(ui);
         let envelope = schedule.travel_envelope();
         ui.monospace(format!(
             "source envelope X {}..{} mm · Y {}..{} mm",
@@ -906,9 +920,62 @@ impl MachineCamWorkspace {
             schedule.lookahead_report().spans.len(),
             schedule.jerk_report().elements.len()
         ));
+        self.show_jerk_phases(ui);
+    }
+
+    fn show_source_to_motion_certificate(&self, ui: &mut egui::Ui) {
+        let metric_path = self.artifacts.schedule.metric_path();
+        ui.collapsing("Source-to-motion certificate", |ui| {
+            egui::Grid::new("source_to_motion_spans")
+                .num_columns(6)
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in [
+                        "source",
+                        "family",
+                        "motion range",
+                        "elements",
+                        "error mm",
+                        "depth",
+                    ] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    for span in metric_path.spans() {
+                        let motion_end = span
+                            .motion_element_start()
+                            .saturating_add(span.motion_element_count());
+                        ui.monospace(span.source_element().to_string());
+                        ui.monospace(format!("{:?}", span.source_family()));
+                        ui.monospace(format!(
+                            "{}..{}",
+                            span.motion_element_start(),
+                            motion_end
+                        ));
+                        ui.monospace(span.motion_element_count().to_string());
+                        ui.monospace(span.maximum_error_mm_exact().to_string());
+                        ui.monospace(span.maximum_subdivision_depth().to_string());
+                        ui.end_row();
+                    }
+                });
+            ui.weak(
+                "Every metric join is an exact zero-feed node; cubic chord boundaries cannot carry an instantaneous turn at nonzero velocity.",
+            );
+        });
+    }
+
+    fn show_jerk_phases(&self, ui: &mut egui::Ui) {
+        let schedule = &self.artifacts.schedule;
         for (element, phases) in schedule.phases().iter().enumerate() {
+            let source_element = schedule
+                .metric_path()
+                .source_element_for_motion(element)
+                .map_or_else(|| "?".to_owned(), |source| source.to_string());
             ui.collapsing(
-                format!("element {element} · {} constant-jerk phases", phases.len()),
+                format!(
+                    "motion {element} / source {source_element} · {} constant-jerk phases",
+                    phases.len()
+                ),
                 |ui| {
                     egui::Grid::new(("jerk_phases", element))
                         .num_columns(7)
@@ -948,6 +1015,11 @@ impl MachineCamWorkspace {
             .num_columns(2)
             .striped(true)
             .show(ui, |ui| {
+                real_row(
+                    ui,
+                    "maximum source-to-motion (mm)",
+                    evidence.maximum_source_to_motion_error_mm(),
+                );
                 real_row(
                     ui,
                     "requested interpolation (mm)",
@@ -1038,9 +1110,14 @@ impl MachineCamWorkspace {
             digest_prefix(replay.terminal_block_digest.0)
         ));
         ui.monospace(format!(
-            "evidence {}… · exact source {}… · {} canonical bytes",
+            "evidence {}… · source {}… · metric {}… · approximation {}…",
             digest_prefix(self.artifacts.evidence.digest().0),
             digest_prefix(self.artifacts.evidence.source_digest().0),
+            digest_prefix(self.artifacts.evidence.metric_path_digest().0),
+            digest_prefix(self.artifacts.evidence.source_approximation_digest().0),
+        ));
+        ui.monospace(format!(
+            "{} canonical ALMEVD02 bytes",
             self.artifacts.evidence.encoded().len()
         ));
         ui.colored_label(
@@ -1277,6 +1354,16 @@ fn digest_prefix(digest: [u8; 32]) -> String {
     result
 }
 
+fn source_curve_color(source_element: usize) -> egui::Color32 {
+    const COLORS: [egui::Color32; 4] = [
+        egui::Color32::from_rgb(96, 169, 232),
+        egui::Color32::from_rgb(241, 178, 84),
+        egui::Color32::from_rgb(125, 211, 164),
+        egui::Color32::from_rgb(205, 145, 232),
+    ];
+    COLORS[source_element % COLORS.len()]
+}
+
 fn display_midpoint(value: &Real) -> Option<f64> {
     project_for_display(&ExactValue::<Millimetres>::from_real(value.clone()))
         .ok()
@@ -1322,6 +1409,15 @@ mod tests {
         assert!(artifacts.configuration_identity.summary.safety_binding);
         assert!(artifacts.schedule.lookahead_report().all_satisfied());
         assert!(artifacts.schedule.jerk_report().all_satisfied());
+        assert_eq!(artifacts.schedule.source().curves().len(), 3);
+        assert!(artifacts.schedule.metric_path().path().curves().len() > 3);
+        assert_eq!(
+            artifacts
+                .schedule
+                .metric_path()
+                .maximum_source_error_mm_exact(),
+            &Rational::fraction(1, 100).unwrap()
+        );
         assert_eq!(
             artifacts.program.points().len(),
             artifacts.program.segments().len() + 1
@@ -1330,7 +1426,11 @@ mod tests {
             artifacts.replay.terminal_position,
             artifacts.partition.final_position()
         );
-        assert_eq!(&artifacts.evidence.encoded()[..8], b"ALMEVD01");
+        assert_eq!(&artifacts.evidence.encoded()[..8], b"ALMEVD02");
+        assert_ne!(
+            artifacts.evidence.source_digest(),
+            artifacts.evidence.metric_path_digest()
+        );
     }
 
     #[test]
@@ -1367,15 +1467,7 @@ mod tests {
     #[test]
     fn selected_cnc_text_reconstructs_geometry_without_becoming_canonical_identity() {
         let mut workspace = MachineCamWorkspace::try_new().unwrap();
-        let retained_evidence = workspace.artifacts.evidence.digest();
-        let retained_exact_source = workspace.artifacts.evidence.source_digest();
-        let retained_partition = workspace
-            .artifacts
-            .partition
-            .publication()
-            .object
-            .content
-            .digest;
+        let built_in_evidence = workspace.artifacts.evidence.digest();
 
         assert_eq!(
             workspace
@@ -1387,21 +1479,16 @@ mod tests {
         let first_raw_source = report.raw_source_digest();
         assert_eq!(first_raw_source, sha256(CNC_EXAMPLE.as_bytes()).digest);
         assert_eq!(report.spans().len(), 2);
-        assert_eq!(workspace.artifacts.evidence.digest(), retained_evidence);
-        assert_eq!(
-            workspace.artifacts.evidence.source_digest(),
-            retained_exact_source
-        );
-        assert_eq!(
-            workspace
-                .artifacts
-                .partition
-                .publication()
-                .object
-                .content
-                .digest,
-            retained_partition
-        );
+        assert_ne!(workspace.artifacts.evidence.digest(), built_in_evidence);
+        let retained_evidence = workspace.artifacts.evidence.digest();
+        let retained_exact_source = workspace.artifacts.evidence.source_digest();
+        let retained_partition = workspace
+            .artifacts
+            .partition
+            .publication()
+            .object
+            .content
+            .digest;
 
         let comment_variant = CNC_EXAMPLE.replace(
             "selected exact geometry subset; feed/tool/process words are rejected",
@@ -1423,6 +1510,16 @@ mod tests {
         assert_eq!(
             workspace.artifacts.evidence.source_digest(),
             retained_exact_source
+        );
+        assert_eq!(
+            workspace
+                .artifacts
+                .partition
+                .publication()
+                .object
+                .content
+                .digest,
+            retained_partition
         );
     }
 
