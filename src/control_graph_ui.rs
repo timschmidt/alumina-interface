@@ -7,15 +7,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alumina_interface_core::graph::{
-    CanonicalGraphComponentEncoding, CanonicalGraphWorkspaceEncoding, ExecutionDomain,
-    GraphComponentDocument, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding,
+    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphComponentDocument,
+    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem, GraphFrontPanelItemId,
-    GraphFrontPanelRect, GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype,
-    GraphSimulationRegistry, GraphTraceEntryKind, GraphTypeId, GraphValue, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits, NodeDefinition,
-    NodeParameter, RepresentativeControlSignal, RepresentativeExactControlGraph, TypeKind,
-    TypedGraphValue, WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
-    encode_graph_component, encode_graph_workspace, replay_graph_workspace,
+    GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening, GraphHierarchyLimits,
+    GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphSimulationRegistry,
+    GraphTraceEntryKind, GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument,
+    GraphWorkspaceHistory, GraphWorkspaceLimits, NodeDefinition, NodeParameter,
+    RepresentativeControlSignal, RepresentativeExactControlGraph, TypeKind, TypedGraphValue,
+    WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
+    encode_graph_component, encode_graph_hierarchy, encode_graph_workspace,
+    flatten_graph_hierarchy, graph_component_instance_prototype, replay_graph_workspace,
 };
 use eframe::egui;
 use hyperreal::Rational;
@@ -100,6 +103,14 @@ struct TraceSeries {
 struct ComponentPackage {
     document: GraphComponentDocument,
     encoding: CanonicalGraphComponentEncoding,
+    hierarchy: HierarchyPackage,
+}
+
+#[derive(Clone, Debug)]
+struct HierarchyPackage {
+    document: GraphHierarchyDocument,
+    encoding: CanonicalGraphHierarchyEncoding,
+    flattening: GraphHierarchyFlattening,
 }
 
 #[derive(Clone, Debug)]
@@ -145,7 +156,7 @@ impl ExactControlWorkspace {
         let fixture =
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
-        let component = representative_component(&workspace)?;
+        let component = representative_component(&workspace, &fixture)?;
         let traces = trace_series(&fixture)?;
         let palette = control_palette(&fixture)?;
         let mut result = Self {
@@ -239,6 +250,18 @@ impl ExactControlWorkspace {
             ui.monospace(format!(
                 "component {}…",
                 digest_prefix(component.encoding.digest().0)
+            ));
+            ui.label(format!(
+                "Hierarchy: {} instance → {} nodes / {} wires · {} bytes",
+                component.hierarchy.document.instances().len(),
+                component.hierarchy.document.flattened_node_count(),
+                component.hierarchy.document.flattened_wire_count(),
+                component.hierarchy.encoding.bytes().len()
+            ));
+            ui.monospace(format!(
+                "hierarchy {}… → ALGW {}…",
+                digest_prefix(component.hierarchy.encoding.digest().0),
+                digest_prefix(component.hierarchy.flattening.encoding().digest().0)
             ));
         }
         ui.label(format!(
@@ -546,6 +569,17 @@ impl ExactControlWorkspace {
             ui.colored_label(egui::Color32::YELLOW, &self.component_status);
             return;
         };
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Reusable instance proof");
+            ui.monospace(format!(
+                "ALGH {}… · {} collapsed instance → {} ordinary ALGR nodes / {} wires · flattened ALGW {}…",
+                digest_prefix(component.hierarchy.encoding.digest().0),
+                component.hierarchy.document.instances().len(),
+                component.hierarchy.document.flattened_node_count(),
+                component.hierarchy.document.flattened_wire_count(),
+                digest_prefix(component.hierarchy.flattening.encoding().digest().0)
+            ));
+        });
         let items = component
             .document
             .panel_items()
@@ -1355,7 +1389,7 @@ impl ExactControlWorkspace {
     }
 
     fn refresh_component(&mut self) {
-        match representative_component(&self.workspace) {
+        match representative_component(&self.workspace, &self.fixture) {
             Ok(component) => {
                 self.component = Some(component);
                 "canonical ALGC connector pane and front panel attached"
@@ -1915,6 +1949,7 @@ fn initial_workspace(
 
 fn representative_component(
     workspace: &GraphWorkspaceDocument,
+    fixture: &RepresentativeExactControlGraph,
 ) -> Result<ComponentPackage, String> {
     let outputs = SIGNALS
         .iter()
@@ -1987,7 +2022,68 @@ fn representative_component(
     )
     .map_err(|error| error.to_string())?;
     let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
-    Ok(ComponentPackage { document, encoding })
+    let hierarchy = representative_hierarchy(&document, encoding.digest(), fixture)?;
+    Ok(ComponentPackage {
+        document,
+        encoding,
+        hierarchy,
+    })
+}
+
+fn representative_hierarchy(
+    component: &GraphComponentDocument,
+    component_digest: alumina_protocol::Digest,
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<HierarchyPackage, String> {
+    let prototype = graph_component_instance_prototype(component, "Reference PID component")
+        .map_err(|error| error.to_string())?;
+    let instance_id = GraphNodeId::new(1);
+    let instance = NodeDefinition::new(
+        instance_id,
+        prototype.kind().clone(),
+        "Reference PID component",
+        prototype.domain(),
+        prototype.inputs().to_vec(),
+        prototype.outputs().to_vec(),
+        prototype.parameters().to_vec(),
+    );
+    let root_graph = GraphDocument::try_new(
+        1,
+        component.workspace().graph().schema().clone(),
+        component.workspace().graph().clocks().to_vec(),
+        vec![instance],
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let root = GraphWorkspaceDocument::try_new(
+        GraphWorkspaceLimits::interactive(),
+        1,
+        2,
+        1,
+        root_graph,
+        vec![GraphNodePlacement::new(instance_id, 28, 28)],
+    )
+    .map_err(|error| error.to_string())?;
+    let document = GraphHierarchyDocument::try_new(
+        GraphHierarchyLimits::interactive(),
+        component.revision(),
+        root,
+        vec![component.clone()],
+        vec![GraphComponentInstance::new(instance_id, component_digest)],
+    )
+    .map_err(|error| error.to_string())?;
+    let encoding = encode_graph_hierarchy(&document).map_err(|error| error.to_string())?;
+    let flattening = flatten_graph_hierarchy(&document).map_err(|error| error.to_string())?;
+    analyze_graph_draft(
+        flattening.workspace().graph(),
+        fixture.registry().semantic_registry(),
+    )
+    .map_err(|error| format!("flattened component draft semantics rejected: {error}"))?;
+    Ok(HierarchyPackage {
+        document,
+        encoding,
+        flattening,
+    })
 }
 
 #[allow(
@@ -2481,7 +2577,8 @@ fn digest_prefix(digest: [u8; 32]) -> String {
 mod tests {
     use super::*;
     use alumina_interface_core::graph::{
-        GraphLimits, GraphPortId, NodeKind, replay_graph_component, replay_graph_workspace,
+        GraphLimits, GraphPortId, NodeKind, replay_graph_component, replay_graph_hierarchy,
+        replay_graph_workspace,
     };
 
     #[test]
@@ -2570,6 +2667,57 @@ mod tests {
         .unwrap();
         assert_eq!(replay.document(), &initial.document);
         assert_eq!(replay.encoding(), &initial.encoding);
+        assert_eq!(initial.hierarchy.document.instances().len(), 1);
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_008);
+        assert_eq!(
+            initial.hierarchy.encoding.digest().0,
+            [
+                0xd9, 0xa0, 0xd5, 0xcb, 0xe0, 0xb7, 0x69, 0x4b, 0x50, 0x67, 0x11, 0xf4, 0x8d, 0x85,
+                0xac, 0x2a, 0x90, 0x48, 0x74, 0x26, 0x1f, 0xd0, 0xd2, 0xd8, 0x62, 0x44, 0xda, 0x06,
+                0xcf, 0x2e, 0x5f, 0x64,
+            ]
+        );
+        assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_396);
+        assert_eq!(
+            initial.hierarchy.flattening.encoding().digest().0,
+            [
+                0xa5, 0xe0, 0xab, 0xfd, 0x4f, 0x1e, 0x86, 0x42, 0xa7, 0x82, 0x44, 0xb7, 0xc1, 0x4f,
+                0x91, 0x15, 0x06, 0x65, 0xfa, 0xad, 0xef, 0x48, 0x98, 0xc4, 0x9d, 0xdc, 0x25, 0x6c,
+                0x88, 0xa9, 0x82, 0x77,
+            ]
+        );
+        assert_eq!(initial.hierarchy.document.flattened_node_count(), 19);
+        assert_eq!(initial.hierarchy.document.flattened_wire_count(), 22);
+        assert_eq!(
+            initial
+                .hierarchy
+                .flattening
+                .workspace()
+                .graph()
+                .nodes()
+                .len(),
+            19
+        );
+        assert_eq!(
+            initial
+                .hierarchy
+                .flattening
+                .workspace()
+                .graph()
+                .wires()
+                .len(),
+            22
+        );
+        let hierarchy_replay = replay_graph_hierarchy(
+            initial.hierarchy.encoding.bytes(),
+            GraphHierarchyLimits::interactive(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(hierarchy_replay.document(), &initial.hierarchy.document);
+        assert_eq!(hierarchy_replay.encoding(), &initial.hierarchy.encoding);
 
         let initial_digest = initial.encoding.digest();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "201");

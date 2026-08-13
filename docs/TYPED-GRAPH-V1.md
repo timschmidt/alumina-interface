@@ -390,12 +390,15 @@ deployed graph IR V2 has one capability-bound Service/Realtime lowering and
 portable executor; arbitrary documents remain non-executable.
 The separate canonical [`ALGC` V1 package](GRAPH-COMPONENT-V1.md) now provides
 bounded public-terminal mappings and exact front-panel bindings around one
-unchanged `ALGW`. Component instances, hierarchy lowering, recursive package
-dependencies, and general panel editing/execution remain open. Multi-value
-state records, queue timeouts and additional policies, cases/loops/state
-machines, capability-generated editor nodes, composite/identity-bearing
-parameter and label/domain editors, workspace collaboration/conflict handling,
-broader resource claims, general host implementation admission, measured
-WCET/deadline analysis, physical HIL, output and motion opcodes, and
-protocol-resource nodes remain later M9 slices. No arbitrary graph or component
-document is sent to or interpreted by firmware.
+unchanged `ALGW`. Canonical [`ALGH` V1](GRAPH-HIERARCHY-V1.md) now binds
+leaf-only component instances by exact package digest and deterministically
+flattens connector wiring to an ordinary workspace using fresh monotonic IDs.
+Nested package dependencies, general cycle/depth rules, editable instance and
+panel workflows remain open. Multi-value state records, queue timeouts and
+additional policies, cases/loops/state machines, capability-generated editor
+nodes, composite/identity-bearing parameter and label/domain editors, workspace
+collaboration/conflict handling, broader resource claims, general host
+implementation admission, measured WCET/deadline analysis, physical HIL,
+output and motion opcodes, and protocol-resource nodes remain later M9 slices.
+No arbitrary graph, component, or hierarchy document is sent to or interpreted
+by firmware.

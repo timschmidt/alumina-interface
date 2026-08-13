@@ -17,6 +17,7 @@ mod component;
 mod control_fixture;
 mod deployment;
 mod document;
+mod hierarchy;
 mod simulation;
 mod storage;
 mod trace;
@@ -52,6 +53,15 @@ pub use document::{
     ClockDefinition, ClockKind, ExecutionDomain, GraphDocument, GraphDocumentError, GraphNodeId,
     GraphPortId, GraphWireId, NodeDefinition, NodeKind, NodeParameter, PortDefinition,
     WireDefinition, WireEndpoint,
+};
+pub use hierarchy::{
+    CanonicalGraphHierarchyEncoding, GRAPH_COMPONENT_INSTANCE_KIND,
+    GRAPH_COMPONENT_INSTANCE_VERSION, GRAPH_HIERARCHY_MAGIC, GRAPH_HIERARCHY_VERSION,
+    GraphComponentInstance, GraphFlattenedInstance, GraphFlattenedNode, GraphHierarchyDependency,
+    GraphHierarchyDocument, GraphHierarchyError, GraphHierarchyFlattening, GraphHierarchyLimits,
+    GraphHierarchyReplay, encode_graph_hierarchy, flatten_graph_hierarchy,
+    graph_component_instance_input_port, graph_component_instance_output_port,
+    graph_component_instance_prototype, replay_graph_hierarchy,
 };
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,

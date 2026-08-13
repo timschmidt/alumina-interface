@@ -113,12 +113,18 @@ prototype.
   reference component supplies six exact PID/interlock controls and four exact
   replay indicators; invalidating a binding detaches the panel without
   weakening or rejecting the underlying workspace draft.
+  Canonical `ALGH` V1 then binds a collapsed authoring instance to that exact
+  component digest and deterministically flattens it to an ordinary audited
+  19-node/22-wire workspace with fresh monotonic identities. V1 rejects nested
+  instances outright until recursive depth/cycle authority is explicit.
   Plot coordinates come only from certified `f64` enclosures, and the cursor
   retains the exact rational sample. This remains editor state, not deployment
   or firmware authority. See
   [`docs/GRAPH-WORKSPACE-V1.md`](docs/GRAPH-WORKSPACE-V1.md).
   The component/front-panel boundary is in
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
+  The component-instance/flattening boundary is in
+  [`docs/GRAPH-HIERARCHY-V1.md`](docs/GRAPH-HIERARCHY-V1.md).
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
@@ -211,8 +217,8 @@ The next interface milestones add supported general-curve metric compilation,
 capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
-views, groups, general component libraries/instances/hierarchy lowering,
-front-panel editing/execution, composite/identity-bearing parameter editing,
+views, groups, nested component dependency/cycle handling, editable instance
+and library workflows, front-panel editing/execution, composite/identity-bearing parameter editing,
 label/domain editing, conflict-aware shared workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated
 Service/Realtime upload/core transfer and task

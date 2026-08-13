@@ -119,9 +119,12 @@ a later UI slice.
 
 ## Deliberately open
 
-Component instantiation nodes, hierarchy flattening, recursive dependency and
-cycle rules, component libraries, package signatures/permissions, locked
-dependency manifests, connector editing, arbitrary panel editing, panel value
-injection during simulation, probes, groups/comments, and `ALGC` persistence or
-file exchange remain open. `ALGC` V1 grants no semantic, implementation,
-resource, timing, safety, firmware, or physical-output authority.
+The separate canonical [`ALGH` V1 hierarchy](GRAPH-HIERARCHY-V1.md) now binds
+leaf component instances by exact digest and deterministically flattens them to
+ordinary `ALGW`/`ALGR`. Nested dependencies and general recursive cycle/depth
+rules, editable instance workflows, component libraries, package
+signatures/permissions, locked dependency manifests, connector editing,
+arbitrary panel editing, panel value injection during simulation, probes,
+groups/comments, and `ALGC` persistence or file exchange remain open. `ALGC` V1
+grants no semantic, implementation, resource, timing, safety, firmware, or
+physical-output authority.
