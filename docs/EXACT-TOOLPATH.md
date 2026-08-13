@@ -14,7 +14,7 @@ Hypercurve source path
     │                           (presentation evidence only)
     ├─ lossless or motion-certified metric construction
     │   ─> Hyperpath metric objects ─> Hypersolve replay
-    │   └─ machine-bound exact-stop/jerk schedule
+    │   └─ machine-bound acceleration/jerk-feasible schedule
     │       ─> certified V1 interpolation ─> configured step/timer lattices
     │       ─> production executor preflight ─> cached partition + evidence
     └─ general-curve certified subdivision ─> exact chord metric
@@ -54,10 +54,12 @@ The machine-bound V1 path accepts lossless lines/arcs and certified polynomial
 cubics. It derives dynamics, electrical timing, physical uncertainty, step
 density, timer frequency, and output quantum from canonical Configuration V5
 rather than a second UI schema. Hyperpath/Hypersolve certify zero-radius
-exact-stop lookahead and a four-phase jerk schedule for every metric element. A
-separate proof bounds its approximation by firmware constant-velocity
-segments, after which the production stepper executor is replayed before cache
-packaging. See `EXACT-MACHINE-SCHEDULING.md` and
+acceleration lookahead, stop-separated component-local jerk refinement, and
+two- or four-phase schedules from the selected boundary nodes. Only lossless
+line-to-line G1 joins can remain moving; all approximated cubic and
+curvature-bearing joins stop. A separate proof bounds the schedule's firmware
+constant-velocity approximation, after which the production stepper executor
+is replayed before cache packaging. See `EXACT-MACHINE-SCHEDULING.md` and
 `CERTIFIED-BEZIER-MOTION.md`.
 
 After canonical quantization, `partition.rs` queries the firmware schema's exact

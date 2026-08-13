@@ -80,10 +80,10 @@ pub use machine_profile::{
     MachineResolutionBudget2, StepperAxisMachineProfile,
 };
 pub use motion_schedule::{
-    CanonicalScheduledProgram2, CertifiedExactStopSchedule2, CertifiedTravelEnvelope2,
+    CanonicalScheduledProgram2, CertifiedJerkSchedule2, CertifiedTravelEnvelope2,
     MotionScheduleError, MotionScheduleResult, ScalarMotionLimits2, ScheduledLoweringEvidence2,
-    ScheduledLoweringLimits, ScheduledMachinePoint2, TravelBoundary,
-    certify_exact_stop_jerk_schedule, lower_certified_schedule_to_v1,
+    ScheduledLoweringLimits, ScheduledMachinePoint2, TravelBoundary, certify_jerk_schedule,
+    lower_certified_schedule_to_v1,
 };
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,

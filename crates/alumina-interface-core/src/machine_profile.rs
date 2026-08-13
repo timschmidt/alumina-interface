@@ -892,8 +892,8 @@ mod tests {
         MachineCompileError, MotionCompilePolicy2, compile_certified_chord_program,
     };
     use crate::motion_schedule::{
-        MotionScheduleError, ScheduledLoweringLimits, TravelBoundary,
-        certify_exact_stop_jerk_schedule, lower_certified_schedule_to_v1,
+        MotionScheduleError, ScheduledLoweringLimits, TravelBoundary, certify_jerk_schedule,
+        lower_certified_schedule_to_v1,
     };
     use crate::partition::{
         MachinePartitionError, MachinePartitionPolicy2, package_canonical_scheduled_program,
@@ -913,6 +913,9 @@ mod tests {
     use alumina_machine_ir::{BlockValidationLimits, EXECUTION_BLOCK_BYTES, ValidationLimits};
     use alumina_sim::motion::{CachedStepperReplayError, replay_cached_stepper_partition};
     use alumina_storage::{CacheLimits, UploadId, sha256};
+    use hypercurve::{
+        CircularArc2, Curve2, CurveGeometry2, CurvePath2, LineSeg2, Point2 as CurvePoint2,
+    };
 
     fn wire_rational(numerator: i64, denominator: u64) -> ConfigurationRational {
         ConfigurationRational::new(numerator, denominator).unwrap()
@@ -1271,7 +1274,7 @@ mod tests {
             Rational::fraction(1, 100).unwrap(),
         )
         .unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(
+        let schedule = certify_jerk_schedule(
             &source,
             &profile,
             &budget,
@@ -1290,11 +1293,13 @@ mod tests {
         assert_eq!(schedule.lookahead().corner_radii, vec![Real::zero()]);
         assert!(schedule.lookahead_plan().all_satisfied());
         assert_eq!(
-            schedule.lookahead_plan().effective_node_feed_limits,
+            schedule
+                .acceleration_lookahead_plan()
+                .effective_node_feed_limits,
             vec![Real::zero(); schedule.route().len() + 1]
         );
         assert_eq!(
-            schedule.lookahead_plan().forward_node_feeds,
+            schedule.acceleration_lookahead_plan().forward_node_feeds,
             vec![Real::zero(); schedule.route().len() + 1]
         );
         assert!(schedule.lookahead_report().all_satisfied());
@@ -1469,6 +1474,190 @@ mod tests {
     }
 
     #[test]
+    fn exact_g1_split_retains_positive_feed_and_two_phase_transitions() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = CurvePath2::try_new(vec![
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(0, 0),
+                    CurvePoint2::from_values(1, 0),
+                )
+                .unwrap(),
+            )),
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(1, 0),
+                    CurvePoint2::from_values(2, 0),
+                )
+                .unwrap(),
+            )),
+        ])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+
+        assert_eq!(schedule.route().len(), 2);
+        assert_eq!(schedule.lookahead().corner_feeds.len(), 1);
+        assert_ne!(schedule.lookahead().corner_feeds[0], Real::zero());
+        assert_eq!(schedule.lookahead().corner_radii, vec![Real::zero()]);
+        assert_eq!(schedule.lookahead_plan().positive_node_components.len(), 1);
+        assert!(
+            schedule
+                .lookahead_plan()
+                .span_transitions
+                .iter()
+                .all(Option::is_some)
+        );
+        assert!(schedule.phases().iter().all(|phases| phases.len() == 2));
+        assert_eq!(schedule.phases()[0][0].ramp.start_feed, Real::zero());
+        assert_eq!(
+            schedule.phases()[0][1].ramp.end_feed,
+            schedule.lookahead().corner_feeds[0]
+        );
+        assert_eq!(
+            schedule.phases()[1][0].ramp.start_feed,
+            schedule.lookahead().corner_feeds[0]
+        );
+        assert_eq!(schedule.phases()[1][1].ramp.end_feed, Real::zero());
+        assert!(schedule.lookahead_plan().all_satisfied());
+        assert!(schedule.lookahead_report().all_satisfied());
+        assert!(schedule.jerk_report().all_satisfied());
+
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+        assert_eq!(
+            lowered.points().first().unwrap().steps(),
+            [CanonicalStep::new(0); 2]
+        );
+        assert_eq!(
+            lowered.points().last().unwrap().steps(),
+            [CanonicalStep::new(3_200), CanonicalStep::new(0)]
+        );
+        assert!(lowered.executor_preflight().segment_count > 0);
+    }
+
+    #[test]
+    fn exact_reversal_remains_a_full_stop_under_positive_join_policy() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = CurvePath2::try_new(vec![
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(0, 0),
+                    CurvePoint2::from_values(1, 0),
+                )
+                .unwrap(),
+            )),
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(1, 0),
+                    CurvePoint2::from_values(0, 0),
+                )
+                .unwrap(),
+            )),
+        ])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+
+        assert_eq!(schedule.lookahead().corner_feeds, vec![Real::zero()]);
+        assert!(
+            schedule
+                .lookahead_plan()
+                .positive_node_components
+                .is_empty()
+        );
+        assert!(
+            schedule
+                .lookahead_plan()
+                .span_transitions
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(schedule.phases().iter().all(|phases| phases.len() == 4));
+        assert!(schedule.lookahead_plan().all_satisfied());
+        assert!(schedule.jerk_report().all_satisfied());
+    }
+
+    #[test]
+    fn curvature_bearing_g1_join_remains_a_full_stop() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = CurvePath2::try_new(vec![
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(0, 1),
+                    CurvePoint2::from_values(1, 1),
+                )
+                .unwrap(),
+            )),
+            Curve2::new(CurveGeometry2::CircularArc(
+                CircularArc2::try_from_center(
+                    CurvePoint2::from_values(1, 1),
+                    CurvePoint2::from_values(2, 0),
+                    CurvePoint2::from_values(1, 0),
+                    true,
+                )
+                .unwrap(),
+            )),
+        ])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+
+        assert_eq!(schedule.lookahead().corner_feeds, vec![Real::zero()]);
+        assert!(
+            schedule
+                .lookahead_plan()
+                .positive_node_components
+                .is_empty()
+        );
+        assert!(schedule.phases().iter().all(|phases| phases.len() == 4));
+        assert!(schedule.lookahead_plan().all_satisfied());
+        assert!(schedule.jerk_report().all_satisfied());
+    }
+
+    #[test]
     fn retained_cubic_gets_certified_chords_with_an_exact_stop_at_every_join() {
         let profile = profile_from(&machine_records()).unwrap();
         let source = representative_curve_path().unwrap();
@@ -1480,7 +1669,7 @@ mod tests {
             Rational::fraction(1, 100).unwrap(),
         )
         .unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(
+        let schedule = certify_jerk_schedule(
             &source,
             &profile,
             &budget,
@@ -1511,14 +1700,14 @@ mod tests {
         assert!(schedule.lookahead_plan().all_satisfied());
         assert!(
             schedule
-                .lookahead_plan()
+                .acceleration_lookahead_plan()
                 .effective_node_feed_limits
                 .iter()
                 .all(|feed| feed == &Real::zero())
         );
         assert!(
             schedule
-                .lookahead_plan()
+                .acceleration_lookahead_plan()
                 .forward_node_feeds
                 .iter()
                 .all(|feed| feed == &Real::zero())
@@ -1623,7 +1812,7 @@ mod tests {
             Rational::fraction(1, 100).unwrap(),
         )
         .unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(
+        let schedule = certify_jerk_schedule(
             &source,
             &profile,
             &budget,
@@ -1673,7 +1862,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            certify_exact_stop_jerk_schedule(
+            certify_jerk_schedule(
                 &source,
                 &profile,
                 &budget,
@@ -1716,7 +1905,7 @@ mod tests {
             Rational::fraction(1, 100).unwrap(),
         )
         .unwrap();
-        let schedule = certify_exact_stop_jerk_schedule(
+        let schedule = certify_jerk_schedule(
             &source,
             &profile,
             &budget,

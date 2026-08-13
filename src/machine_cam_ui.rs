@@ -13,10 +13,10 @@ use alumina_config::{
 };
 use alumina_interface_core::{
     CanonicalMachinePartition2, CanonicalScheduleEvidence2, CanonicalScheduledProgram2,
-    CertifiedExactStopSchedule2, CncGeometryImportLimits, CncGeometryImportReport2, ExactValue,
+    CertifiedJerkSchedule2, CncGeometryImportLimits, CncGeometryImportReport2, ExactValue,
     MachineDynamicsProfile2, MachinePartitionPolicy2, MachineResolutionBudget2,
     MetricPathApproximationLimits2, Millimetres, ScheduledLoweringLimits,
-    build_canonical_schedule_evidence, certify_exact_stop_jerk_schedule, import_exact_cnc_geometry,
+    build_canonical_schedule_evidence, certify_jerk_schedule, import_exact_cnc_geometry,
     lower_certified_schedule_to_v1, package_canonical_scheduled_program, project_for_display,
     replay_canonical_schedule_evidence, representative_curve_path,
     verify_canonical_schedule_evidence_bytes,
@@ -106,7 +106,7 @@ struct MachineCamArtifacts {
     source: MachineCamSource,
     profile: MachineDynamicsProfile2,
     resolution_budget: MachineResolutionBudget2,
-    schedule: CertifiedExactStopSchedule2,
+    schedule: CertifiedJerkSchedule2,
     program: CanonicalScheduledProgram2,
     partition: CanonicalMachinePartition2,
     replay: CachedStepperReplayReport<2>,
@@ -132,7 +132,7 @@ impl MachineCamArtifacts {
             Rational::fraction(1, 100).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("machine resolution budget rejected: {error}"))?;
-        let schedule = certify_exact_stop_jerk_schedule(
+        let schedule = certify_jerk_schedule(
             source.path(),
             &profile,
             &resolution_budget,
@@ -914,18 +914,27 @@ impl MachineCamWorkspace {
             envelope.usable_minimum_mm()[1],
             envelope.usable_maximum_mm()[1]
         ));
+        let maximum_jerk_refinement = schedule
+            .lookahead_plan()
+            .positive_node_components
+            .iter()
+            .map(|component| component.uniform_halvings)
+            .max()
+            .unwrap_or(0);
         ui.label(format!(
-            "exact two-pass lookahead: {} nodes / {} joins / {} spans, caller and reachability replay certified · jerk replay: {} elements, all certified",
+            "exact acceleration + jerk-feasible lookahead: {} nodes / {} joins / {} spans, {} positive components, at most {} exact halvings · jerk replay: {} elements, all certified",
             schedule
-                .lookahead_plan()
+                .acceleration_lookahead_plan()
                 .effective_node_feed_limits
                 .len(),
             schedule.lookahead().corner_feeds.len(),
             schedule.lookahead_report().spans.len(),
+            schedule.lookahead_plan().positive_node_components.len(),
+            maximum_jerk_refinement,
             schedule.jerk_report().elements.len()
         ));
         ui.label(
-            "active phase policy: four-phase rest-to-rest at every metric element; positive node ceilings remain disabled",
+            "active phase policy: positive feed only across lossless exact line-to-line G1 continuations; curvature-bearing joins, corners, reversals, and certified cubic chords remain full stops",
         );
         self.show_jerk_phases(ui);
     }
@@ -966,7 +975,7 @@ impl MachineCamWorkspace {
                     }
                 });
             ui.weak(
-                "Every metric join is an exact zero-feed node; cubic chord boundaries cannot carry an instantaneous turn at nonzero velocity.",
+                "Every curvature-bearing join, true corner, reversal, and certified cubic chord boundary is an exact zero-feed node; only lossless exact line-to-line G1 continuations may remain moving.",
             );
         });
     }

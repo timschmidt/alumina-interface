@@ -22,15 +22,15 @@ retained exact Hypercurve path
               -> exact-Real LineSeg2 chords
               -> source-index / motion-range / error / depth certificate
                     -> exact diagonal Hyperpath metric carriers
-                    -> exact forward/reverse lookahead
-                       under a zero caller ceiling at every node
+                    -> exact forward/reverse lookahead and jerk refinement
+                       under a zero caller ceiling at every cubic chord node
                     -> four-phase jerk schedule per metric element
                     -> bounded controller interpolation
                     -> step/tick lattices and executor preflight
                     -> cached partition + ALMEVD02
 ```
 
-`CurvePath2` remains in both `CertifiedExactStopSchedule2` and
+`CurvePath2` remains in both `CertifiedJerkSchedule2` and
 `CanonicalScheduledProgram2`. `CertifiedMetricPath2` is a distinct object. Its
 spans map every retained source curve to a contiguous range of motion elements
 and record its exact rational certified positional bound and the deepest
@@ -74,20 +74,21 @@ as a connected `CurvePath2` before Hyperpath sees it.
 
 ## Conservative first motion policy
 
-The current scheduler treats every metric join as an exact stop, including
-adjacent certified chords from one cubic. Each chord therefore starts and ends
-at zero feed and receives an independently replayed symmetric four-phase
-constant-jerk profile. This is intentionally slow, but it avoids claiming that
-an instantaneous chord-direction change can occur at nonzero velocity.
+The current scheduler treats every approximated metric join as an exact stop,
+including adjacent certified chords from one cubic. Each chord therefore starts
+and ends at zero feed and receives an independently replayed symmetric
+four-phase constant-jerk profile. This is intentionally slow, but it avoids
+claiming that an instantaneous chord-direction change can occur at nonzero
+velocity.
 
-Those zeros are no longer hand-filled as the final schedule. Alumina supplies
-them as caller-owned node ceilings to Hyperpath's exact two-pass planner. The
-planner combines those ceilings with tangent class, global feed, retained
-radius, and exact span length; performs squared-speed forward and reverse
-reachability passes; and releases its candidate only after independent
-Hypersolve replay. The resulting bytes remain unchanged under this conservative
-policy, while the retained forward trace and final schedule expose the planner
-needed for later certified blends.
+Those zeros are not inferred from the chord angles. Alumina identifies the
+approximated source span and supplies zero caller-owned ceilings at every
+boundary before Hyperpath planning. Hyperpath combines them with tangent class,
+global feed, retained radius, and exact span length; performs squared-speed
+forward and reverse reachability; and releases its candidate only after
+independent Hypersolve replay. Its later jerk-feasibility pass cannot raise a
+zero node. This keeps the cubic policy invariant even though lossless exact
+line-to-line G1 joins elsewhere may now remain moving.
 
 Hyperpath now computes an exact Euclidean length for diagonal
 `LinePathSegment` values. Axis-ordering and axis-specific APIs remain strict;
@@ -99,13 +100,12 @@ A future native Bezier, PH, or curvature-certified feed carrier may remove
 internal stops. It must replace this certificate explicitly; renderer
 tessellation cannot be promoted by convenience.
 
-The phase selector now reads the exact lookahead boundary nodes. The current
-all-zero policy therefore follows the same rest-to-rest path and emits the same
-machine schedule. A dormant positive-node branch has a separately certified
-Hyperpath two-phase monotonic transition with zero acceleration at both element
-boundaries. It remains unreachable until retained blend geometry and a policy
-for positive ceilings exist, and it is not sufficient by itself to move across
-the sharp direction changes between certified cubic chords.
+The phase selector reads exact lookahead boundary nodes. Every cubic chord sees
+zero/zero and follows the same rest-to-rest path. Hyperpath's two-phase
+monotonic transition is enabled only on lossless exact line chains; it is not
+eligible at an approximated chord even if two adjacent chord tangents happen to
+be collinear. A future native Bezier or curvature-certified carrier must replace
+this explicit source-to-motion policy to move through the curve.
 
 ## Error composition
 
@@ -148,10 +148,10 @@ enter evidence.
 - Source reduction supports exact lines, explicit circular arcs, and polynomial
   cubic Beziers. Other exact families fail closed.
 - The metric schedule is two-axis Cartesian stepper motion.
-- Every certified chord boundary is a full stop. The exact two-pass planner is
-  present and a monotonic positive-boundary phase primitive is certified, but
-  there is no retained blend geometry or enabled nonzero-feed policy across a
-  cubic yet.
+- Every certified chord boundary is a full stop. Exact acceleration lookahead,
+  component-local jerk refinement, and monotonic positive-boundary phases are
+  active for eligible lossless line chains, but no nonzero-feed policy exists
+  across an approximated cubic.
 - The certificate bounds positional deviation, not tool/process clearance.
   Native source bounds still gate configured travel, while fixtures and tools
   need later job-specific clearance evidence.

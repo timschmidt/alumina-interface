@@ -19,8 +19,9 @@ bytes it reconstructs:
 5. a native-extrema travel-envelope certificate;
 6. a bounded exact pointwise certificate over Hypercurve de Casteljau spans,
    followed by Hyperpath's exact forward/reverse node planner, independent
-   Hypersolve replay, and phase selection from the resulting boundary feeds;
-   the current caller policy caps every node at zero and therefore retains four
+   Hypersolve replay, stop-separated exact jerk-feasibility refinement, and
+   phase selection from the resulting boundary feeds; the default fixture has
+   no eligible lossless line-to-line G1 join and therefore retains four
    constant-jerk phases per metric element;
 7. exact interpolation under a 131,072-point browser budget, followed by
    configured step/tick lattice lowering;
@@ -54,10 +55,11 @@ The inspector exposes:
 - source and usable travel envelopes;
 - every component of the machine-wide error budget;
 - exact aggregate length, time, feed, acceleration, and jerk limits;
-- every effective lookahead node ceiling, forward-pass node, final exact-stop
-  node, and caller/geometric/reachability replay result;
+- every effective lookahead node ceiling, forward-pass node, final
+  jerk-feasible node, positive component/refinement count, and
+  caller/geometric/reachability replay result;
 - every source-to-motion span, exact error bound, and subdivision depth;
-- all four phase endpoint states for each retained metric element;
+- every two- or four-phase endpoint state for each retained metric element;
 - an exact selected metric point with source/motion provenance beside its
   canonical step/tick coordinate;
 - a selected firmware segment and complete executor-preflight terminal facts;
@@ -99,28 +101,30 @@ later 4 MiB cache admission limit.
 
 At checkpoint implementation time:
 
-- the sibling Hyperpath suite passed 2 unit, 430 integration/property, and 2
+- the sibling Hyperpath suite passed 2 unit, 436 integration/property, and 2
   README tests; strict all-target Clippy and rustdoc also passed;
 - all 28 application tests passed, including a complete headless egui frame,
   deterministic configuration/source-to-event replay, and transactional
   rejection;
-- all 114 exact-core tests plus the compile-fail value-boundary test passed,
+- all 115 exact-core tests plus the compile-fail value-boundary test passed,
   including bounded cubic source reduction, exact diagonal metric length,
+  jerk-feasible exact-line G1 motion, curvature-bearing G1/reversal stops,
   native source-envelope travel rejection, post-rounding containment,
   caller-bounded interpolation allocation, and five exact CNC importer cases;
 - all 37 protocol-client tests and the exact-control integration test passed;
 - native and `wasm32-unknown-unknown` strict Clippy passed for the complete
   workspace, and every workspace test target linked for WASM;
 - strict rustdoc and the local-source/license policy audit passed;
-- the optimized 5,366,430-byte WASM validated with `wasm-tools`; its
-  2,418,053-byte gzip and 1,937,935-byte Brotli forms passed integrity checks,
+- the optimized 5,384,033-byte WASM validated with `wasm-tools`; its
+  2,424,991-byte gzip and 1,942,999-byte Brotli forms passed integrity checks,
   and the uncompressed artifact has SHA-256
-  `28e93b5cbdb83ec712b754c93cb9fc01db08ceb54ac3a0d18ebfdfca4e5d69f8`;
+  `8785de3c63b5f2059fe942e44125a0f3f4bcc79b475dd04a5f48189871d9a798`;
 - headless Chromium loaded the bundle and dedicated worker over loopback with
   software WebGL, then visibly rendered the complete default Machine/CAM
   inspector, line/arc/cubic motion plot, source-to-motion certificate, and the
-  certified exact two-pass status for 35 nodes, 33 joins, and 34 spans, plus
-  the active all-zero/four-phase policy; and
+  exact acceleration/jerk-feasible status for 35 nodes, 33 joins, and 34 spans,
+  zero eligible positive components in the default line/arc/cubic fixture, and
+  the active lossless-line G1-only policy; and
 - no WLAN or physical board operation occurred.
 
 This is development evidence against the current sibling working trees, not a

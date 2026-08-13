@@ -19,8 +19,9 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> retained Hypercurve line/arc/cubic source
     -> lossless or certified/budgeted metric-path construction
     -> native exact source-envelope / usable-travel proof
-    -> exact two-pass lookahead under explicit node ceilings
-    -> four-phase jerk replay
+    -> exact acceleration lookahead under explicit node ceilings
+    -> stop-separated component-local jerk-feasibility refinement
+    -> two- or four-phase jerk replay from selected boundary nodes
     -> certified interpolation onto the firmware V1 segment model
     -> configured step/tick/output lattices
     -> allocation-free production StepperExecutor preflight
@@ -106,53 +107,52 @@ certificate may tighten the occupied extent but may never exceed this machine
 envelope. An unresolved exact comparison or an insufficient requested total
 fails before scheduling.
 
-## Exact two-pass lookahead and jerk schedule
+## Exact acceleration lookahead and jerk feasibility
 
 Lines and circular arcs are promoted losslessly from Hypercurve to Hyperpath.
 A polynomial cubic is first reduced to exact `LineSeg2` chords under that
 pointwise certificate; renderer output is not accepted. Hyperpath's mixed
 feed carrier retains the exact Euclidean length of diagonal chords. V1 assigns
-zero retained blend radius and a caller-owned zero ceiling to every metric
-join, as well as zero entry and exit ceilings. Hyperpath classifies every exact
-tangent join, combines caller, global-feed, reversal, and retained-radius
-ceilings, propagates `sqrt(v² + 2*a*L)` through an exact forward acceleration
-pass, and then through an exact reverse deceleration pass. It independently
-replays every caller ceiling and every global, geometric, reversal, and span
-reachability row with Hypersolve before releasing the schedule. Zero radius at
-a true corner therefore means an intentional unblended exact stop, not a
-missing radius or an unchecked divide. A G1 join does not require a radius, but
-Alumina's explicit zero caller ceiling still stops there.
+zero entry/exit ceilings and zero retained radius everywhere. Caller join
+ceilings are positive only when both adjacent metric elements are lossless
+exact source lines; arcs and every approximated cubic element receive zero.
+Hyperpath then classifies the exact tangent join. A true corner with zero radius
+and every reversal remain stops, so a positive selected join is possible only
+for exact line-to-line G1 continuity.
 
-This introduces the bounded path-wide node planner without changing current
-machine output: every selected speed remains exactly zero. The planner's
-positive-radius input is only meaningful when the metric path contains the
-corresponding retained blend. Alumina does not yet construct such blends or
-permit nonzero node feeds.
+Hyperpath combines caller, global-feed, reversal, and retained-radius ceilings,
+propagates `sqrt(v² + 2*a*L)` through an exact forward acceleration pass and
+then through an exact reverse deceleration pass. It independently replays every
+caller ceiling and every global, geometric, reversal, and span reachability row
+with Hypersolve. Zero radius at a true corner means an intentional unblended
+stop, not a missing value or unchecked divide.
 
-Phase selection nevertheless consumes those selected nodes rather than
-assuming zero implicitly. A zero/zero element uses the existing four-phase
-rest-to-rest profile. If a later internal policy supplies at least one positive
-boundary feed, the dormant branch asks Hyperpath for a conservative two-phase
-monotonic transition. For exact length `L` and boundary feeds `v0`, `v1`, both
-phases have `T = L/(v0+v1)`, the shared feed is `(v0+v1)/2`, acceleration
-returns to zero at both element boundaries, and no feed overshoot is permitted.
-Hyperpath independently replays the requested boundaries, monotonic shared
-feed, local kinematics, length sum, phase continuity, feed, acceleration, and
-jerk limits. Both-zero input remains owned by the rest-to-rest proposer.
+Acceleration reachability alone does not establish jerk feasibility. The next
+layer partitions its selected node vector into maximal positive components
+separated by exact zero stops. It tries the exact monotonic transition on every
+span touching one component. If any transition exceeds acceleration or jerk,
+all nodes in that component are divided by two and the complete component is
+replayed. The maximum is 64 exact halvings. Exhaustion fails closed; a zero node
+is never raised, components on opposite sides of a stop do not affect one
+another, and relative feeds inside one component are retained. Final caller,
+lookahead, and per-span jerk reports are reconstructed independently.
 
-This branch is groundwork, not enabled blending. It cannot invent retained
-blend geometry, alter the all-zero caller policy, or make an infeasible short
-span pass; independent replay rejects the latter. It is not a general
-time-optimal S-curve or a jerk-aware replacement for the acceleration-only
-lookahead node selection.
+A zero/zero element uses the existing four-phase rest-to-rest profile. Its
+phase distances are `1/12`, `5/12`, `5/12`, and `1/12` of exact length; a
+common phase duration is rounded upward to an exact integer device-tick
+interval after satisfying feed, acceleration, and jerk lower bounds. An element
+with at least one positive boundary uses a conservative two-phase monotonic
+transition. For length `L` and feeds `v0`, `v1`, both phases have
+`T = L/(v0+v1)`, their shared feed is `(v0+v1)/2`, and acceleration returns to
+zero at both element boundaries. Hyperpath independently replays requested
+boundaries, monotonic shared feed, exact length sum, continuity, kinematics,
+and all dynamic limits.
 
-Each retained metric element receives a symmetric four-phase, rest-to-rest,
-constant-jerk schedule. Its phase distances are `1/12`, `5/12`, `5/12`, and
-`1/12` of the exact element length. A common phase duration is rounded upward
-to an exact integer device-tick interval after satisfying the feed,
-acceleration, and jerk lower bounds. The reconstructed phases are then replayed
-by Hyperpath/Hypersolve for length, state continuity, feed, acceleration, and
-jerk.
+This is enabled only for lossless straight-line G1 joins. G1 alone would not be
+enough across a curvature discontinuity because normal acceleration can jump;
+therefore line/arc, arc/arc, all approximated cubic, and all true-corner joins
+remain stopped. The planner is conservative rather than time-optimal and does
+not construct a retained blend or solve a general N-axis S-curve.
 
 The complete bounded reduction, exact-stop rationale, error composition, and
 source/metric evidence contract are documented in
@@ -248,12 +248,11 @@ performed during packaging.
 - Scheduled source geometry supports exact lines, explicit circular arcs, and
   certified polynomial cubic reduction. Other Bezier, PH, spline, and NURBS
   policies remain fail-closed at this boundary.
-- Every metric join—including every generated cubic chord boundary—is still a
-  full stop. Exact forward/reverse acceleration reachability is implemented,
-  and a monotonic zero-acceleration-boundary transition exists behind the
-  disabled positive-node branch. Retained nonzero-radius blend construction,
-  jerk-aware node selection, and general time-optimal nonzero-boundary S-curves
-  are not implemented yet.
+- Positive feed is supported only across lossless exact line-to-line G1 joins.
+  Every generated cubic chord boundary, curvature-bearing join, corner, and
+  reversal remains a stop. Component-local jerk refinement is implemented;
+  retained blends, curvature/normal-jerk continuity, globally time-optimal node
+  selection, and general nonzero-boundary S-curves are not.
 - Scalar limits use the most conservative axis-wide envelope; direction-aware
   utilization and non-Cartesian kinematics remain future work.
 - Firmware V1 follows the certified smooth schedule through bounded

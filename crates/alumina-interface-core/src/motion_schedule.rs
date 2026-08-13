@@ -1,16 +1,16 @@
-//! Path-wide exact-stop lookahead and certified jerk-limited feed scheduling.
+//! Path-wide exact lookahead and certified jerk-limited feed scheduling.
 //!
 //! The first schedule policy retains the exact Hypercurve source and admits a
 //! separate metric line/arc path only through lossless promotion or a bounded
-//! pointwise certificate over exact Hypercurve de Casteljau spans. The current
-//! policy assigns every metric join a zero caller ceiling and zero retained
-//! radius, including every certified cubic chord boundary. Each resulting
-//! rest-to-rest metric element uses a four-phase symmetric constant-jerk
-//! profile. A dormant positive-node path delegates to Hyperpath's exact
-//! monotonic two-phase proposer, but no current caller can select it. Hyperpath
-//! and Hypersolve replay every lookahead, phase, length, continuity, feed,
-//! acceleration, and jerk condition before a schedule is exposed. No sampled
-//! display chord is used as path geometry.
+//! pointwise certificate over exact Hypercurve de Casteljau spans. Entry, exit,
+//! every true corner, every reversal, and every certified cubic chord boundary
+//! remain exact stops. Lossless line-to-line G1 joins may retain positive feed
+//! after Hyperpath's acceleration lookahead and bounded component-local jerk
+//! refinement. A zero/zero element uses the four-phase symmetric rest-to-rest
+//! profile; every nonzero element uses Hyperpath's exact two-phase monotonic transition.
+//! Hyperpath and Hypersolve replay every lookahead, phase, length, continuity,
+//! feed, acceleration, and jerk condition before a schedule is exposed. No
+//! sampled display chord is used as path geometry.
 
 use std::cmp::Ordering;
 use std::error::Error as StdError;
@@ -27,9 +27,9 @@ use hyperlimit::{PredicatePolicy, Sign, classify_real_sign, compare_reals};
 use hyperpath::{
     FeedPathElement, JerkRampPhaseProposal, JerkRampSpanProposal, LookaheadFeedPlanningLimits,
     LookaheadFeedSchedule, LookaheadFeedScheduleReport, MultiPhaseJerkRampFeedScheduleReport,
-    PlannedLookaheadFeedSchedule, RouteCertificationError, TangentSpan,
-    certify_multi_phase_jerk_ramp_feed_schedule, plan_lookahead_feed_schedule,
-    plan_monotonic_jerk_transition,
+    PlannedJerkFeasibleLookaheadSchedule, PlannedLookaheadFeedSchedule, RouteCertificationError,
+    TangentSpan, certify_multi_phase_jerk_ramp_feed_schedule,
+    plan_jerk_feasible_lookahead_schedule,
 };
 use hyperreal::{Problem, Rational, Real};
 
@@ -43,6 +43,8 @@ use crate::toolpath::{
 
 /// Result type for exact feed scheduling.
 pub type MotionScheduleResult<T> = Result<T, MotionScheduleError>;
+
+const MAXIMUM_JERK_COMPONENT_HALVINGS: u32 = 64;
 
 /// Which side of a configured travel interval rejected retained source geometry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,9 +263,9 @@ impl ScalarMotionLimits2 {
     }
 }
 
-/// Certified V1 schedule that stops at every retained metric-path join.
+/// Certified V1 schedule with positive feed only across lossless line-to-line G1 joins.
 #[derive(Clone, Debug)]
-pub struct CertifiedExactStopSchedule2 {
+pub struct CertifiedJerkSchedule2 {
     configuration_digest: Digest,
     capability_digest: Digest,
     source: CurvePath2,
@@ -272,7 +274,7 @@ pub struct CertifiedExactStopSchedule2 {
     route: Vec<FeedPathElement>,
     tangent_spans: Vec<TangentSpan>,
     limits: ScalarMotionLimits2,
-    lookahead_plan: PlannedLookaheadFeedSchedule,
+    lookahead_plan: PlannedJerkFeasibleLookaheadSchedule,
     phases: Vec<Vec<JerkRampPhaseProposal>>,
     jerk_report: MultiPhaseJerkRampFeedScheduleReport,
     total_path_length_mm: Real,
@@ -512,7 +514,7 @@ impl CanonicalScheduledProgram2 {
     }
 }
 
-impl CertifiedExactStopSchedule2 {
+impl CertifiedJerkSchedule2 {
     /// Canonical machine configuration for which the schedule was certified.
     pub const fn configuration_digest(&self) -> Digest {
         self.configuration_digest
@@ -553,22 +555,27 @@ impl CertifiedExactStopSchedule2 {
         &self.limits
     }
 
-    /// Exact zero-radius/zero-feed schedule selected by two-pass lookahead.
+    /// Exact zero-radius schedule selected by lookahead and jerk refinement.
     pub const fn lookahead(&self) -> &LookaheadFeedSchedule {
         &self.lookahead_plan.schedule
     }
 
-    /// Exact node ceilings, forward pass, final schedule, and all replay rows.
-    pub const fn lookahead_plan(&self) -> &PlannedLookaheadFeedSchedule {
+    /// Exact acceleration proposal, jerk refinement, final nodes, and replay.
+    pub const fn lookahead_plan(&self) -> &PlannedJerkFeasibleLookaheadSchedule {
         &self.lookahead_plan
+    }
+
+    /// Original exact node ceilings, forward pass, and reverse-pass proposal.
+    pub const fn acceleration_lookahead_plan(&self) -> &PlannedLookaheadFeedSchedule {
+        &self.lookahead_plan.acceleration_plan
     }
 
     /// Hyperpath/Hypersolve replay of every join and span speed node.
     pub const fn lookahead_report(&self) -> &LookaheadFeedScheduleReport {
-        &self.lookahead_plan.certification
+        &self.lookahead_plan.lookahead_certification
     }
 
-    /// Four exact constant-jerk phases for every retained metric element.
+    /// Exact constant-jerk phases for every retained metric element.
     pub fn phases(&self) -> &[Vec<JerkRampPhaseProposal>] {
         &self.phases
     }
@@ -593,17 +600,18 @@ impl CertifiedExactStopSchedule2 {
 ///
 /// Lines and arcs are preserved losslessly. A general cubic is reduced only by
 /// [`certify_metric_path`]'s exact pointwise certificate under the machine's
-/// source-curve allocation and caller-owned element/depth limits. Every
-/// resulting metric join uses zero retained radius and zero feed. This
-/// deliberately stops at certified
-/// cubic chord boundaries: it is slower than future native curved feed but
-/// does not carry an instantaneous direction change at nonzero velocity.
-pub fn certify_exact_stop_jerk_schedule(
+/// source-curve allocation and caller-owned element/depth limits. Every join
+/// uses zero retained radius. Lossless exact line-to-line G1 continuations may
+/// retain positive feed; curvature-bearing joins, true corners, reversals, and
+/// certified cubic chord boundaries stop. This is slower than future retained
+/// blends or native curved feed but never carries an instantaneous direction
+/// change or uncertified curvature discontinuity at nonzero velocity.
+pub fn certify_jerk_schedule(
     source: &CurvePath2,
     profile: &MachineDynamicsProfile2,
     resolution_budget: &MachineResolutionBudget2,
     approximation_limits: MetricPathApproximationLimits2,
-) -> MotionScheduleResult<CertifiedExactStopSchedule2> {
+) -> MotionScheduleResult<CertifiedJerkSchedule2> {
     if resolution_budget.configuration_digest() != profile.configuration_digest()
         || resolution_budget.capability_digest() != profile.capability_digest()
     {
@@ -624,16 +632,26 @@ pub fn certify_exact_stop_jerk_schedule(
     let corner_count = route.len().saturating_sub(1);
     let lookahead_limits = LookaheadFeedPlanningLimits {
         maximum_entry_feed: Real::zero(),
-        maximum_corner_feeds: vec![Real::zero(); corner_count],
+        maximum_corner_feeds: (0..corner_count)
+            .map(|join_index| {
+                if lossless_line_join_can_move(&metric_path, &route, join_index) {
+                    limits.maximum_feed_mm_per_second.clone()
+                } else {
+                    Real::zero()
+                }
+            })
+            .collect(),
         corner_radii: vec![Real::zero(); corner_count],
         maximum_exit_feed: Real::zero(),
     };
-    let lookahead_plan = plan_lookahead_feed_schedule(
+    let lookahead_plan = plan_jerk_feasible_lookahead_schedule(
         &route,
         &tangent_spans,
         &lookahead_limits,
         limits.maximum_feed_mm_per_second.clone(),
         limits.maximum_acceleration_mm_per_second_squared.clone(),
+        limits.maximum_jerk_mm_per_second_cubed.clone(),
+        MAXIMUM_JERK_COMPONENT_HALVINGS,
         PredicatePolicy::STRICT,
     )?;
 
@@ -643,24 +661,12 @@ pub fn certify_exact_stop_jerk_schedule(
     for (element_index, element) in route.iter().enumerate() {
         let length = element_length(element)?;
         total_path_length_mm += &length;
-        let start_feed = if element_index == 0 {
-            &lookahead_plan.schedule.entry_feed
-        } else {
-            &lookahead_plan.schedule.corner_feeds[element_index - 1]
+        let element_phases = match &lookahead_plan.span_transitions[element_index] {
+            Some(transition) => transition.phases.clone(),
+            None => {
+                symmetric_rest_to_rest_phases(&length, &limits, profile.timer_ticks_per_second())?
+            }
         };
-        let end_feed = lookahead_plan
-            .schedule
-            .corner_feeds
-            .get(element_index)
-            .unwrap_or(&lookahead_plan.schedule.exit_feed);
-        let element_phases = phases_for_boundary_feeds(
-            element,
-            &length,
-            start_feed,
-            end_feed,
-            &limits,
-            profile.timer_ticks_per_second(),
-        )?;
         for phase in &element_phases {
             total_traversal_time_seconds += &phase.ramp.traversal_time;
         }
@@ -680,7 +686,7 @@ pub fn certify_exact_stop_jerk_schedule(
         });
     }
 
-    Ok(CertifiedExactStopSchedule2 {
+    Ok(CertifiedJerkSchedule2 {
         configuration_digest: profile.configuration_digest(),
         capability_digest: profile.capability_digest(),
         source: source.clone(),
@@ -697,6 +703,31 @@ pub fn certify_exact_stop_jerk_schedule(
     })
 }
 
+fn lossless_line_join_can_move(
+    metric_path: &CertifiedMetricPath2,
+    route: &[FeedPathElement],
+    join_index: usize,
+) -> bool {
+    if !matches!(route.get(join_index), Some(FeedPathElement::Line(_)))
+        || !matches!(route.get(join_index + 1), Some(FeedPathElement::Line(_)))
+    {
+        return false;
+    }
+    [join_index, join_index + 1]
+        .into_iter()
+        .all(|motion_index| {
+            metric_path
+                .source_element_for_motion(motion_index)
+                .and_then(|source_index| {
+                    metric_path
+                        .spans()
+                        .iter()
+                        .find(|span| span.source_element() == source_index)
+                })
+                .is_some_and(|span| !span.is_approximated())
+        })
+}
+
 /// Lower a certified schedule to V1 constant-velocity firmware segments.
 ///
 /// A phase is divided into an exact integer number of equal time intervals.
@@ -707,7 +738,7 @@ pub fn certify_exact_stop_jerk_schedule(
 /// and cumulative times are independently rounded to the configured step and
 /// tick lattices. The retained source-to-motion bound remains additive evidence.
 pub fn lower_certified_schedule_to_v1(
-    schedule: &CertifiedExactStopSchedule2,
+    schedule: &CertifiedJerkSchedule2,
     profile: &MachineDynamicsProfile2,
     resolution_budget: &MachineResolutionBudget2,
     maximum_interpolation_error_mm: Rational,
@@ -1166,43 +1197,6 @@ fn symmetric_rest_to_rest_phases(
     ])
 }
 
-fn phases_for_boundary_feeds(
-    element: &FeedPathElement,
-    length: &Real,
-    start_feed: &Real,
-    end_feed: &Real,
-    limits: &ScalarMotionLimits2,
-    timer_ticks_per_second: u64,
-) -> MotionScheduleResult<Vec<JerkRampPhaseProposal>> {
-    let start_is_zero = boundary_feed_is_zero(start_feed, "element start feed")?;
-    let end_is_zero = boundary_feed_is_zero(end_feed, "element end feed")?;
-    if start_is_zero && end_is_zero {
-        return symmetric_rest_to_rest_phases(length, limits, timer_ticks_per_second);
-    }
-
-    Ok(plan_monotonic_jerk_transition(
-        element,
-        start_feed.clone(),
-        end_feed.clone(),
-        limits.maximum_feed_mm_per_second.clone(),
-        limits.maximum_acceleration_mm_per_second_squared.clone(),
-        limits.maximum_jerk_mm_per_second_cubed.clone(),
-        PredicatePolicy::STRICT,
-    )?
-    .phases)
-}
-
-fn boundary_feed_is_zero(value: &Real, domain: &'static str) -> MotionScheduleResult<bool> {
-    match classify_real_sign(value, PredicatePolicy::STRICT).value() {
-        Some(Sign::Zero) => Ok(true),
-        Some(Sign::Positive) => Ok(false),
-        Some(Sign::Negative) => Err(MotionScheduleError::Route(
-            RouteCertificationError::NegativeFeedRate,
-        )),
-        None => Err(MotionScheduleError::PredicateUnresolved { domain }),
-    }
-}
-
 fn tangent_span(element: &FeedPathElement) -> MotionScheduleResult<TangentSpan> {
     match element {
         FeedPathElement::Line(line) => Ok(TangentSpan::from_line_segment(line)),
@@ -1534,80 +1528,5 @@ impl From<BoundaryError> for MotionScheduleError {
 impl From<MotionError> for MotionScheduleError {
     fn from(value: MotionError) -> Self {
         Self::ExecutorPreflight(value)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use hyperlimit::Point2 as PredicatePoint2;
-    use hyperpath::LinePathSegment;
-
-    use super::*;
-
-    fn scalar_limits() -> ScalarMotionLimits2 {
-        ScalarMotionLimits2 {
-            maximum_feed_mm_per_second: Real::from(4),
-            maximum_acceleration_mm_per_second_squared: Real::from(1),
-            maximum_jerk_mm_per_second_cubed: Real::from(1),
-            maximum_spatial_acceleration_mm_per_second_squared: Real::from(1),
-        }
-    }
-
-    fn twelve_millimetre_line() -> FeedPathElement {
-        FeedPathElement::Line(
-            LinePathSegment::new(
-                PredicatePoint2::new(Real::zero(), Real::zero()),
-                PredicatePoint2::new(Real::from(12), Real::zero()),
-                PredicatePolicy::STRICT,
-            )
-            .unwrap(),
-        )
-    }
-
-    #[test]
-    fn boundary_phase_selector_preserves_current_rest_to_rest_policy() {
-        let element = twelve_millimetre_line();
-        let phases = phases_for_boundary_feeds(
-            &element,
-            &Real::from(12),
-            &Real::zero(),
-            &Real::zero(),
-            &scalar_limits(),
-            1_000_000,
-        )
-        .unwrap();
-
-        assert_eq!(phases.len(), 4);
-        assert_eq!(phases[0].ramp.start_feed, Real::zero());
-        assert_eq!(phases[3].ramp.end_feed, Real::zero());
-    }
-
-    #[test]
-    fn boundary_phase_selector_replays_dormant_positive_node_path() {
-        let element = twelve_millimetre_line();
-        let limits = scalar_limits();
-        let phases = phases_for_boundary_feeds(
-            &element,
-            &Real::from(12),
-            &Real::from(2),
-            &Real::from(4),
-            &limits,
-            1_000_000,
-        )
-        .unwrap();
-
-        assert_eq!(phases.len(), 2);
-        assert_eq!(phases[0].ramp.start_feed, Real::from(2));
-        assert_eq!(phases[1].ramp.end_feed, Real::from(4));
-        let report = certify_multi_phase_jerk_ramp_feed_schedule(
-            &[element],
-            &[phases],
-            limits.maximum_feed_mm_per_second,
-            limits.maximum_acceleration_mm_per_second_squared,
-            limits.maximum_jerk_mm_per_second_cubed,
-            PredicatePolicy::STRICT,
-        )
-        .unwrap();
-        assert!(report.all_satisfied());
     }
 }

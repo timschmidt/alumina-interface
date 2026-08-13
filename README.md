@@ -51,11 +51,12 @@ prototype.
   cubic only under an exact pointwise positional certificate, a 16,384-element
   bound, and a depth bound. Hyperpath now derives speed nodes with exact
   squared-speed forward/reverse reachability, tangent classification, retained
-  radii, and caller-owned ceilings, then independently replays the result with
-  Hypersolve. Alumina's current policy supplies a zero ceiling at entry, exit,
-  and every join, preserving an exact stop at every cubic chord boundary. Four
-  exact constant-jerk phases are then certified per metric element. The browser
-  evaluates this dedicated
+  radii, and caller-owned ceilings, then partitions positive nodes at exact
+  stops and halves each component until every monotonic jerk transition
+  independently certifies. Alumina permits positive caller ceilings only at
+  lossless exact line-to-line joins; Hyperpath's tangent predicates still
+  require G1 continuity. Entry, exit, arcs, corners, reversals, and every cubic
+  chord boundary remain exact stops. The browser evaluates this dedicated
   metric path—not renderer chords—while subdividing those phases under the
   exact `A*dt²/8` interpolation bound. It rounds only at the configured
   step/tick lattices, rejects any phase that would exceed the caller-owned
@@ -63,12 +64,12 @@ prototype.
   replays every emitted segment through the
   allocation-free production stepper executor's pulse, rate, direction,
   enable, output-grid, continuity, overflow, and terminal checks.
-- Phase construction now reads the selected lookahead boundary nodes. The
-  reachable zero/zero policy retains the original four-phase rest-to-rest
-  schedule. A separately tested but unreachable positive-node branch uses
-  Hyperpath's exact two-phase monotonic transition with zero endpoint
-  acceleration and independent construction/kinematic replay. No UI,
-  configuration, or job policy enables positive node ceilings yet.
+- Phase construction reads the selected lookahead boundary nodes. A zero/zero
+  element retains the four-phase rest-to-rest schedule. An element with at
+  least one positive boundary uses Hyperpath's exact two-phase monotonic
+  transition with zero endpoint acceleration and independent construction and
+  kinematic replay. Dedicated exact-line tests lower positive G1 motion through
+  production executor preflight; curvature-bearing joins remain disabled.
 - Before scheduling, Hypercurve's complete native source bounding box is
   compared exactly with the uncertainty-reduced usable travel from the same
   configuration. This catches arc extrema between interpolation samples and
@@ -86,8 +87,8 @@ prototype.
 - The shell now opens an offline Machine/CAM inspector by default. One
   canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
   travel proof, resolution-budget decomposition, retained-path diagnostic
-  projection, exact two-pass/exact-stop/four-phase schedule tables, canonical points and
-  segments, production executor preflight, SD-cache identities, event-level
+  projection, exact acceleration/jerk-feasible schedule tables, canonical
+  points and segments, production executor preflight, SD-cache identities, event-level
   replay, and `ALMEVD02` evidence. Native and browser file exchange can replace
   configuration state only after the entire chain reconstructs successfully;
   evidence imports must equal a fresh reconstruction byte for byte. This view
