@@ -121,9 +121,16 @@ prototype.
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
   into a separate Realtime draft; no broader pin/peripheral inventory is
-  inferred. Canonical `ALGP` V1 sidecars bind bounded diagnostic probes to exact
-  workspace outputs. Probe edits filter host plots without mutating the graph
-  or granting firmware telemetry/resource access.
+  inferred. A distinct board-name-independent explorer now decodes the complete
+  bounded capability ledger into 62 TinyBee resources, 51 aliases, ownership,
+  safe/hazard facts and supporting-section counts while retaining that four-item
+  graph access set as a visibly narrower authority. Search and filters separate
+  graph-readable, graph-closed, hazardous, Service and Realtime resources. The
+  package has no licensed visual, so the UI explicitly draws no board shape or
+  hotspot and keeps physical placement/HIL authority closed. Canonical `ALGP`
+  V1 sidecars bind bounded diagnostic probes to exact workspace outputs. Probe
+  edits filter host plots without mutating the graph or granting firmware
+  telemetry/resource access.
   Plot coordinates come only from certified `f64` enclosures, and the cursor
   retains the exact rational sample. This remains editor state, not deployment
   or firmware authority. See
@@ -134,6 +141,8 @@ prototype.
   [`docs/GRAPH-HIERARCHY-V1.md`](docs/GRAPH-HIERARCHY-V1.md).
   The authenticated resource-palette boundary is in
   [`docs/GRAPH-CAPABILITY-CATALOG-V1.md`](docs/GRAPH-CAPABILITY-CATALOG-V1.md).
+  The descriptive-versus-operational board boundary is in
+  [`docs/BOARD-EXPLORER-V1.md`](docs/BOARD-EXPLORER-V1.md).
   The diagnostic-probe sidecar is in
   [`docs/GRAPH-PROBE-V1.md`](docs/GRAPH-PROBE-V1.md).
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation

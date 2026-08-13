@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod board_explorer;
 pub mod boundary;
 pub mod compiler;
 pub mod global_job;
@@ -15,6 +16,10 @@ pub mod partition;
 pub mod scene;
 pub mod toolpath;
 
+pub use board_explorer::{
+    BoardExplorerError, BoardExplorerHotspot, BoardExplorerResource, BoardExplorerResourceSummary,
+    BoardExplorerSnapshot, BoardExplorerVisual, build_board_explorer_snapshot,
+};
 pub use boundary::{
     BoundaryError, BoundedMeasurement, CanonicalCycle, CanonicalStep, DisplayScalar, ExactValue,
     Millimetres, Seconds, Unit, canonical_motion_segment, project_for_display,

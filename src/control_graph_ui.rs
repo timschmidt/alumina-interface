@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
+use alumina_board::{OwnerDomain, ResourceId, SafeValue};
+use alumina_capability::{
+    BoardCapabilityLimits, MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range,
+};
 use alumina_interface_core::graph::{
     CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
     CanonicalGraphWorkspaceEncoding, ClockDefinition, ClockKind, ExecutionDomain,
@@ -28,6 +31,7 @@ use alumina_interface_core::graph::{
     encode_graph_probes, encode_graph_workspace, flatten_graph_hierarchy,
     graph_component_instance_prototype, graph_resource_label, replay_graph_workspace,
 };
+use alumina_interface_core::{BoardExplorerSnapshot, build_board_explorer_snapshot};
 use alumina_protocol::{DeviceId, Digest};
 use eframe::egui;
 use hyperreal::Rational;
@@ -138,6 +142,46 @@ struct TargetResourceProof {
     status: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoardResourceFilter {
+    All,
+    GraphReadable,
+    GraphClosed,
+    Hazardous,
+    Service,
+    Realtime,
+}
+
+impl BoardResourceFilter {
+    const ALL: [Self; 6] = [
+        Self::All,
+        Self::GraphReadable,
+        Self::GraphClosed,
+        Self::Hazardous,
+        Self::Service,
+        Self::Realtime,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all described",
+            Self::GraphReadable => "graph-readable",
+            Self::GraphClosed => "graph-closed",
+            Self::Hazardous => "hazardous",
+            Self::Service => "Service-owned",
+            Self::Realtime => "Realtime-owned",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BoardExplorerPanel {
+    snapshot: BoardExplorerSnapshot,
+    filter: BoardResourceFilter,
+    search: String,
+    selected: Option<ResourceId>,
+}
+
 #[derive(Clone, Debug)]
 struct ComponentPanelItem {
     name: String,
@@ -145,6 +189,325 @@ struct ComponentPanelItem {
     rect: GraphFrontPanelRect,
     value_type: GraphTypeId,
     output_text: Option<String>,
+}
+
+impl BoardExplorerPanel {
+    fn show(&mut self, ui: &mut egui::Ui) {
+        self.show_summary(ui);
+        self.show_filters(ui);
+        self.show_resource_ledger(ui);
+        self.show_selected_resource(ui);
+        self.show_visual_authority(ui);
+        self.show_supporting_section_counts(ui);
+    }
+
+    fn show_summary(&self, ui: &mut egui::Ui) {
+        let summary = self.snapshot.resource_summary();
+        let (flash, internal_sram, psram) = self.snapshot.memory_bytes();
+        let (service_core, realtime_core) = self.snapshot.core_assignment();
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("TinyBee board explorer");
+            ui.monospace(format!(
+                "capability {}… · {} bytes",
+                digest_prefix(self.snapshot.identity().digest.0),
+                self.snapshot.identity().byte_len
+            ));
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                if self.snapshot.armable() {
+                    "package claims armable"
+                } else {
+                    "non-armable package"
+                },
+            );
+        });
+        ui.label(format!(
+            "{} · {} · {:?} / {:?} · {} application cores",
+            self.snapshot.board_id(),
+            self.snapshot.revision(),
+            self.snapshot.chip(),
+            self.snapshot.qualification(),
+            self.snapshot.application_cores()
+        ));
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(format!(
+                "flash {} · internal SRAM {} · PSRAM {}",
+                display_bytes(flash),
+                display_bytes(internal_sram),
+                display_bytes(psram)
+            ));
+            ui.monospace(format!(
+                "Service core {service_core} · Realtime core {realtime_core}"
+            ));
+        });
+        ui.colored_label(
+            egui::Color32::LIGHT_BLUE,
+            "Offline exact capability snapshot only — no board connection, live value, allocation, command, or output authority.",
+        );
+        ui.label(
+            "Descriptive resources state what is routed and its safe/hazard ownership. Only the separately published graph access records permit graph authoring; every other operation remains closed.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("{} resources", self.snapshot.resources().len()));
+            ui.label(format!("{} Service", summary.service));
+            ui.label(format!("{} Realtime", summary.realtime));
+            ui.colored_label(
+                egui::Color32::from_rgb(241, 104, 104),
+                format!("{} hazardous", summary.hazardous),
+            );
+            ui.colored_label(
+                egui::Color32::from_rgb(123, 214, 149),
+                format!("{} graph-readable", summary.graph_addressable),
+            );
+            ui.label(format!("{} aliases", self.snapshot.alias_count()));
+        });
+    }
+
+    fn show_filters(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("tinybee_board_resource_filter")
+                .selected_text(self.filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in BoardResourceFilter::ALL {
+                        ui.selectable_value(&mut self.filter, filter, filter.label());
+                    }
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("resource or alias")
+                    .desired_width(220.0),
+            );
+            if !self.search.is_empty() && ui.small_button("clear search").clicked() {
+                self.search.clear();
+            }
+        });
+    }
+
+    fn show_resource_ledger(&mut self, ui: &mut egui::Ui) {
+        let search = self.search.trim().to_ascii_lowercase();
+        let matching = self
+            .snapshot
+            .resources()
+            .iter()
+            .filter(|resource| resource_matches_filter(resource, self.filter))
+            .filter(|resource| resource_matches_search(resource, &search))
+            .map(|resource| resource.descriptor().id)
+            .collect::<Vec<_>>();
+        let visible_count = matching.len();
+        egui::ScrollArea::vertical()
+            .id_salt("tinybee_board_resource_ledger")
+            .max_height(285.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for id in matching {
+                    let resource = self
+                        .snapshot
+                        .resource(id)
+                        .expect("filtered resource remains in immutable snapshot");
+                    let descriptor = resource.descriptor();
+                    let aliases = if resource.aliases().is_empty() {
+                        "no aliases".to_owned()
+                    } else {
+                        resource.aliases().join(", ")
+                    };
+                    let label = graph_resource_label(id);
+                    let graph_addressable = resource.is_graph_addressable();
+                    let selected = self.selected == Some(id);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .selectable_label(selected, format!("{label} · {aliases}"))
+                            .clicked()
+                        {
+                            self.selected = Some(id);
+                        }
+                        ui.weak(owner_label(descriptor.owner));
+                        ui.weak(format!("safe {}", safe_value_label(descriptor.safe_value)));
+                        if descriptor.hazardous_output {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(241, 104, 104),
+                                "hazardous output",
+                            );
+                        }
+                        ui.colored_label(
+                            if graph_addressable {
+                                egui::Color32::from_rgb(123, 214, 149)
+                            } else {
+                                egui::Color32::GRAY
+                            },
+                            if graph_addressable {
+                                "stable Boolean graph read"
+                            } else {
+                                "no graph operation"
+                            },
+                        );
+                    });
+                }
+            });
+        ui.weak(format!("{visible_count} resources match the current view"));
+    }
+
+    fn show_selected_resource(&self, ui: &mut egui::Ui) {
+        if let Some(selected) = self.selected
+            && let Some(resource) = self.snapshot.resource(selected)
+        {
+            let descriptor = resource.descriptor();
+            ui.group(|ui| {
+                ui.strong(format!("Selected {}", graph_resource_label(selected)));
+                ui.monospace(format!("typed selector {selected:?}"));
+                ui.label(format!(
+                    "owner {} · safe {} · {}",
+                    owner_label(descriptor.owner),
+                    safe_value_label(descriptor.safe_value),
+                    if descriptor.hazardous_output {
+                        "hazardous-output policy applies"
+                    } else {
+                        "not marked as a hazardous output"
+                    }
+                ));
+                ui.label(format!(
+                    "aliases: {}",
+                    if resource.aliases().is_empty() {
+                        "none".to_owned()
+                    } else {
+                        resource.aliases().join(", ")
+                    }
+                ));
+                if resource.graph_accesses().is_empty() {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Descriptive only: no graph read, write, sample, schedule, or diagnostic-test operation is published.",
+                    );
+                } else {
+                    for access in resource.graph_accesses() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(123, 214, 149),
+                            format!(
+                                "graph class {} · {:?} · {:?}",
+                                access.class.get(),
+                                access.access,
+                                access.support
+                            ),
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    fn show_supporting_section_counts(&self, ui: &mut egui::Ui) {
+        let sections = self.snapshot.supporting_section_counts();
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(format!(
+                "validated ledger: {} buses · {} devices · {} flash regions · {} clocks · {} electrical constraints · {} interrupts · {} safe images · {} HIL gates",
+                sections[0],
+                sections[1],
+                sections[2],
+                sections[3],
+                sections[4],
+                sections[5],
+                sections[6],
+                self.snapshot.hil_requirement_count()
+            ));
+        });
+    }
+
+    fn show_visual_authority(&self, ui: &mut egui::Ui) {
+        ui.add_space(5.0);
+        ui.strong("Physical view authority");
+        if self.snapshot.visuals().is_empty() {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_height(72.0);
+                ui.vertical_centered(|ui| {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "NO LICENSED REVISION PHOTO OR REVIEWED HOTSPOTS IN THIS CAPABILITY",
+                    );
+                    ui.label(
+                        "No board silhouette or connector placement is inferred. Add an operator-owned TinyBee V1.0 photograph, exact digest/license/attribution, and physically reconciled resource polygons before an overlay can claim correspondence to the object.",
+                    );
+                });
+            });
+            return;
+        }
+        for visual in self.snapshot.visuals() {
+            ui.group(|ui| {
+                let (width, height) = visual.pixel_dimensions();
+                ui.strong(format!("{} · {width}×{height}", visual.id()));
+                ui.monospace(format!(
+                    "{} · {} · {}…",
+                    visual.asset_path(),
+                    visual.media_type(),
+                    digest_prefix(visual.asset_digest().0)
+                ));
+                ui.label(format!(
+                    "{} · {} · {} reviewed hotspots",
+                    visual.license(),
+                    visual.attribution(),
+                    visual.hotspots().len()
+                ));
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "The canonical visual record is decoded; raster fetch and digest verification must succeed before drawing an image or hotspot overlay.",
+                );
+            });
+        }
+    }
+}
+
+fn resource_matches_filter(
+    resource: &alumina_interface_core::BoardExplorerResource,
+    filter: BoardResourceFilter,
+) -> bool {
+    let descriptor = resource.descriptor();
+    match filter {
+        BoardResourceFilter::All => true,
+        BoardResourceFilter::GraphReadable => resource.is_graph_addressable(),
+        BoardResourceFilter::GraphClosed => !resource.is_graph_addressable(),
+        BoardResourceFilter::Hazardous => descriptor.hazardous_output,
+        BoardResourceFilter::Service => descriptor.owner == OwnerDomain::Service,
+        BoardResourceFilter::Realtime => descriptor.owner == OwnerDomain::Realtime,
+    }
+}
+
+fn resource_matches_search(
+    resource: &alumina_interface_core::BoardExplorerResource,
+    search: &str,
+) -> bool {
+    search.is_empty()
+        || graph_resource_label(resource.descriptor().id)
+            .to_ascii_lowercase()
+            .contains(search)
+        || resource
+            .aliases()
+            .iter()
+            .any(|alias| alias.to_ascii_lowercase().contains(search))
+}
+
+const fn owner_label(owner: OwnerDomain) -> &'static str {
+    match owner {
+        OwnerDomain::Service => "Service",
+        OwnerDomain::Realtime => "Realtime",
+    }
+}
+
+const fn safe_value_label(value: SafeValue) -> &'static str {
+    match value {
+        SafeValue::NotApplicable => "n/a",
+        SafeValue::HighImpedance => "high-Z",
+        SafeValue::Low => "low",
+        SafeValue::High => "high",
+        SafeValue::EngineImage => "engine image",
+    }
+}
+
+fn display_bytes(bytes: u64) -> String {
+    if bytes.is_multiple_of(1_024 * 1_024) {
+        format!("{} MiB", bytes / (1_024 * 1_024))
+    } else if bytes.is_multiple_of(1_024) {
+        format!("{} KiB", bytes / 1_024)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Browser/native inspector for one shared exact control graph and trace.
@@ -156,6 +519,7 @@ pub(crate) struct ExactControlWorkspace {
     component_status: String,
     probes: Option<ProbePackage>,
     probe_status: String,
+    board_explorer: BoardExplorerPanel,
     target_resources: TargetResourceProof,
     history: GraphWorkspaceHistory,
     presentation: GraphPresentation,
@@ -186,6 +550,7 @@ impl ExactControlWorkspace {
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let component = representative_component(&workspace, &fixture)?;
         let probes = representative_probes(&workspace)?;
+        let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
         let traces = trace_series(&fixture)?;
         let palette = control_palette(&fixture)?;
@@ -197,6 +562,7 @@ impl ExactControlWorkspace {
             component_status: "canonical ALGC connector pane and front panel attached".to_owned(),
             probes: Some(probes),
             probe_status: "canonical ALGP diagnostic probes attached".to_owned(),
+            board_explorer,
             target_resources,
             history: GraphWorkspaceHistory::default(),
             presentation,
@@ -399,6 +765,9 @@ impl ExactControlWorkspace {
             }
         });
         ui.label(&self.edit_status);
+        ui.separator();
+
+        self.board_explorer.show(ui);
         ui.separator();
 
         self.show_target_resources(ui);
@@ -2160,6 +2529,24 @@ fn tinybee_capability_document() -> Result<Vec<u8>, String> {
     Ok(document)
 }
 
+fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
+    let document = tinybee_capability_document()?;
+    let expected_identity =
+        calculate_identity(&board_mks_tinybee::PACKAGE).map_err(|error| format!("{error:?}"))?;
+    let snapshot = build_board_explorer_snapshot(
+        &document,
+        expected_identity,
+        BoardCapabilityLimits::interactive(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(BoardExplorerPanel {
+        snapshot,
+        filter: BoardResourceFilter::All,
+        search: String::new(),
+        selected: Some(ResourceId::Gpio(33)),
+    })
+}
+
 fn empty_target_workspace(
     registry: &GraphDeploymentRegistry,
 ) -> Result<GraphWorkspaceDocument, String> {
@@ -3318,6 +3705,45 @@ mod tests {
         proof.reset();
         assert!(proof.workspace.graph().nodes().is_empty());
         assert_eq!(proof.workspace.next_node_id(), 1);
+    }
+
+    #[test]
+    fn tinybee_board_explorer_keeps_descriptive_hazard_and_graph_filters_distinct() {
+        let panel = tinybee_board_explorer().unwrap();
+        assert_eq!(
+            panel.snapshot.identity(),
+            calculate_identity(&board_mks_tinybee::PACKAGE).unwrap()
+        );
+        assert!(panel.snapshot.visuals().is_empty());
+        assert_eq!(panel.selected, Some(ResourceId::Gpio(33)));
+        let resources = panel.snapshot.resources();
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|resource| resource_matches_filter(
+                    resource,
+                    BoardResourceFilter::GraphReadable
+                ))
+                .count(),
+            4
+        );
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|resource| resource_matches_filter(
+                    resource,
+                    BoardResourceFilter::GraphClosed
+                ))
+                .count(),
+            resources.len() - 4
+        );
+        let x_step = resources
+            .iter()
+            .find(|resource| resource_matches_search(resource, "axis.x.step"))
+            .unwrap();
+        assert!(x_step.descriptor().hazardous_output);
+        assert!(!x_step.is_graph_addressable());
+        assert_eq!(display_bytes(8 * 1_024 * 1_024), "8 MiB");
     }
 
     #[test]
