@@ -49,9 +49,13 @@ prototype.
   position bounds before scheduling.
 - The machine compiler preserves lines/arcs losslessly and reduces a polynomial
   cubic only under an exact pointwise positional certificate, a 16,384-element
-  bound, and a depth bound. Hyperpath/Hypersolve then certify zero-radius exact-stop
-  lookahead and four exact constant-jerk phases per metric element, including a
-  stop at every cubic chord boundary. The browser evaluates this dedicated
+  bound, and a depth bound. Hyperpath now derives speed nodes with exact
+  squared-speed forward/reverse reachability, tangent classification, retained
+  radii, and caller-owned ceilings, then independently replays the result with
+  Hypersolve. Alumina's current policy supplies a zero ceiling at entry, exit,
+  and every join, preserving an exact stop at every cubic chord boundary. Four
+  exact constant-jerk phases are then certified per metric element. The browser
+  evaluates this dedicated
   metric path—not renderer chords—while subdividing those phases under the
   exact `A*dt²/8` interpolation bound. It rounds only at the configured
   step/tick lattices, rejects any phase that would exceed the caller-owned
@@ -76,7 +80,7 @@ prototype.
 - The shell now opens an offline Machine/CAM inspector by default. One
   canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
   travel proof, resolution-budget decomposition, retained-path diagnostic
-  projection, exact-stop/four-phase schedule tables, canonical points and
+  projection, exact two-pass/exact-stop/four-phase schedule tables, canonical points and
   segments, production executor preflight, SD-cache identities, event-level
   replay, and `ALMEVD02` evidence. Native and browser file exchange can replace
   configuration state only after the entire chain reconstructs successfully;

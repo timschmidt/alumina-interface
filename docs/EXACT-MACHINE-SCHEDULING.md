@@ -19,7 +19,8 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> retained Hypercurve line/arc/cubic source
     -> lossless or certified/budgeted metric-path construction
     -> native exact source-envelope / usable-travel proof
-    -> exact-stop lookahead + four-phase jerk replay
+    -> exact two-pass lookahead under explicit node ceilings
+    -> four-phase jerk replay
     -> certified interpolation onto the firmware V1 segment model
     -> configured step/tick/output lattices
     -> allocation-free production StepperExecutor preflight
@@ -105,16 +106,28 @@ certificate may tighten the occupied extent but may never exceed this machine
 envelope. An unresolved exact comparison or an insufficient requested total
 fails before scheduling.
 
-## Exact-stop lookahead and jerk schedule
+## Exact two-pass lookahead and jerk schedule
 
 Lines and circular arcs are promoted losslessly from Hypercurve to Hyperpath.
 A polynomial cubic is first reduced to exact `LineSeg2` chords under that
 pointwise certificate; renderer output is not accepted. Hyperpath's mixed
 feed carrier retains the exact Euclidean length of diagonal chords. V1 assigns
-zero retained blend radius and zero feed to every metric join, as well as zero
-entry and exit feed. Hyperpath and Hypersolve replay every tangent span, join
-constraint, and speed node. Zero radius therefore means an intentional
-unblended exact stop, not a missing radius or an unchecked divide.
+zero retained blend radius and a caller-owned zero ceiling to every metric
+join, as well as zero entry and exit ceilings. Hyperpath classifies every exact
+tangent join, combines caller, global-feed, reversal, and retained-radius
+ceilings, propagates `sqrt(v² + 2*a*L)` through an exact forward acceleration
+pass, and then through an exact reverse deceleration pass. It independently
+replays every caller ceiling and every global, geometric, reversal, and span
+reachability row with Hypersolve before releasing the schedule. Zero radius at
+a true corner therefore means an intentional unblended exact stop, not a
+missing radius or an unchecked divide. A G1 join does not require a radius, but
+Alumina's explicit zero caller ceiling still stops there.
+
+This introduces the bounded path-wide node planner without changing current
+machine output: every selected speed remains exactly zero. The planner's
+positive-radius input is only meaningful when the metric path contains the
+corresponding retained blend. Alumina does not yet construct such blends or
+permit nonzero node feeds.
 
 Each retained metric element receives a symmetric four-phase, rest-to-rest,
 constant-jerk schedule. Its phase distances are `1/12`, `5/12`, `5/12`, and
@@ -218,9 +231,10 @@ performed during packaging.
 - Scheduled source geometry supports exact lines, explicit circular arcs, and
   certified polynomial cubic reduction. Other Bezier, PH, spline, and NURBS
   policies remain fail-closed at this boundary.
-- Every metric join—including every generated cubic chord boundary—is a full
-  stop. Certified nonzero-radius blends and longer-range velocity optimization
-  are not implemented yet.
+- Every metric join—including every generated cubic chord boundary—is still a
+  full stop. Exact forward/reverse acceleration reachability is implemented,
+  but retained nonzero-radius blend construction and jerk profiles with
+  arbitrary nonzero boundary feeds are not implemented yet.
 - Scalar limits use the most conservative axis-wide envelope; direction-aware
   utilization and non-Cartesian kinematics remain future work.
 - Firmware V1 follows the certified smooth schedule through bounded

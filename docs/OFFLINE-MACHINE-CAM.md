@@ -17,9 +17,10 @@ bytes it reconstructs:
 3. a complete machine-resolution budget;
 4. the retained exact line/native-semicircle/cubic Hypercurve path;
 5. a native-extrema travel-envelope certificate;
-6. a bounded exact pointwise certificate over Hypercurve de Casteljau spans, followed by
-   Hyperpath/Hypersolve exact-stop lookahead and four constant-jerk phases per
-   metric element;
+6. a bounded exact pointwise certificate over Hypercurve de Casteljau spans,
+   followed by Hyperpath's exact forward/reverse node planner, independent
+   Hypersolve replay, and four constant-jerk phases per metric element; the
+   current caller policy caps every node at zero;
 7. exact interpolation under a 131,072-point browser budget, followed by
    configured step/tick lattice lowering;
 8. production `StepperExecutor` electrical and terminal preflight;
@@ -52,6 +53,8 @@ The inspector exposes:
 - source and usable travel envelopes;
 - every component of the machine-wide error budget;
 - exact aggregate length, time, feed, acceleration, and jerk limits;
+- every effective lookahead node ceiling, forward-pass node, final exact-stop
+  node, and caller/geometric/reachability replay result;
 - every source-to-motion span, exact error bound, and subdivision depth;
 - all four phase endpoint states for each retained metric element;
 - an exact selected metric point with source/motion provenance beside its
@@ -95,6 +98,8 @@ later 4 MiB cache admission limit.
 
 At checkpoint implementation time:
 
+- the sibling Hyperpath suite passed 2 unit, 426 integration/property, and 2
+  README tests; strict all-target Clippy and rustdoc also passed;
 - all 28 application tests passed, including a complete headless egui frame,
   deterministic configuration/source-to-event replay, and transactional
   rejection;
@@ -106,13 +111,14 @@ At checkpoint implementation time:
 - native and `wasm32-unknown-unknown` strict Clippy passed for the complete
   workspace, and every workspace test target linked for WASM;
 - strict rustdoc and the local-source/license policy audit passed;
-- the optimized 5,356,204-byte WASM validated with `wasm-tools`; its
-  2,413,446-byte gzip and 1,934,812-byte Brotli forms both decompress to SHA-256
-  `a2ed14cab2473b175722a670970c3af4975f40842c9a08b6c04090364c710a7f`;
+- the optimized 5,362,231-byte WASM validated with `wasm-tools`; its
+  2,415,458-byte gzip and 1,936,847-byte Brotli forms passed integrity checks,
+  and the uncompressed artifact has SHA-256
+  `026a0323696315b528844b06bc8baafa5fefd0f4c52add4025c784d9a6f7c491`;
 - headless Chromium loaded the bundle and dedicated worker over loopback with
   software WebGL, then visibly rendered the complete default Machine/CAM
-  inspector, line/arc/cubic motion plot, source-to-motion certificate, and
-  exact-stop schedule; and
+  inspector, line/arc/cubic motion plot, source-to-motion certificate, and the
+  certified exact two-pass status for 35 nodes, 33 joins, and 34 spans; and
 - no WLAN or physical board operation occurred.
 
 This is development evidence against the current sibling working trees, not a

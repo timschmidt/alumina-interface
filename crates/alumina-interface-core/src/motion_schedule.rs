@@ -22,9 +22,10 @@ use hypercurve::{
 };
 use hyperlimit::{PredicatePolicy, Sign, classify_real_sign, compare_reals};
 use hyperpath::{
-    FeedPathElement, JerkRampPhaseProposal, JerkRampSpanProposal, LookaheadFeedSchedule,
-    LookaheadFeedScheduleReport, MultiPhaseJerkRampFeedScheduleReport, RouteCertificationError,
-    TangentSpan, certify_lookahead_feed_schedule, certify_multi_phase_jerk_ramp_feed_schedule,
+    FeedPathElement, JerkRampPhaseProposal, JerkRampSpanProposal, LookaheadFeedPlanningLimits,
+    LookaheadFeedSchedule, LookaheadFeedScheduleReport, MultiPhaseJerkRampFeedScheduleReport,
+    PlannedLookaheadFeedSchedule, RouteCertificationError, TangentSpan,
+    certify_multi_phase_jerk_ramp_feed_schedule, plan_lookahead_feed_schedule,
 };
 use hyperreal::{Problem, Rational, Real};
 
@@ -267,8 +268,7 @@ pub struct CertifiedExactStopSchedule2 {
     route: Vec<FeedPathElement>,
     tangent_spans: Vec<TangentSpan>,
     limits: ScalarMotionLimits2,
-    lookahead: LookaheadFeedSchedule,
-    lookahead_report: LookaheadFeedScheduleReport,
+    lookahead_plan: PlannedLookaheadFeedSchedule,
     phases: Vec<Vec<JerkRampPhaseProposal>>,
     jerk_report: MultiPhaseJerkRampFeedScheduleReport,
     total_path_length_mm: Real,
@@ -549,14 +549,19 @@ impl CertifiedExactStopSchedule2 {
         &self.limits
     }
 
-    /// Exact zero-radius/zero-feed join proposal.
+    /// Exact zero-radius/zero-feed schedule selected by two-pass lookahead.
     pub const fn lookahead(&self) -> &LookaheadFeedSchedule {
-        &self.lookahead
+        &self.lookahead_plan.schedule
+    }
+
+    /// Exact node ceilings, forward pass, final schedule, and all replay rows.
+    pub const fn lookahead_plan(&self) -> &PlannedLookaheadFeedSchedule {
+        &self.lookahead_plan
     }
 
     /// Hyperpath/Hypersolve replay of every join and span speed node.
     pub const fn lookahead_report(&self) -> &LookaheadFeedScheduleReport {
-        &self.lookahead_report
+        &self.lookahead_plan.certification
     }
 
     /// Four exact constant-jerk phases for every retained metric element.
@@ -613,26 +618,20 @@ pub fn certify_exact_stop_jerk_schedule(
         .collect::<MotionScheduleResult<Vec<_>>>()?;
     let limits = ScalarMotionLimits2::from_machine(profile, &route)?;
     let corner_count = route.len().saturating_sub(1);
-    let lookahead = LookaheadFeedSchedule {
-        entry_feed: Real::zero(),
-        corner_feeds: vec![Real::zero(); corner_count],
+    let lookahead_limits = LookaheadFeedPlanningLimits {
+        maximum_entry_feed: Real::zero(),
+        maximum_corner_feeds: vec![Real::zero(); corner_count],
         corner_radii: vec![Real::zero(); corner_count],
-        exit_feed: Real::zero(),
+        maximum_exit_feed: Real::zero(),
     };
-    let lookahead_report = certify_lookahead_feed_schedule(
+    let lookahead_plan = plan_lookahead_feed_schedule(
         &route,
         &tangent_spans,
-        &lookahead,
+        &lookahead_limits,
         limits.maximum_feed_mm_per_second.clone(),
         limits.maximum_acceleration_mm_per_second_squared.clone(),
         PredicatePolicy::STRICT,
     )?;
-    if !lookahead_report.all_satisfied() {
-        return Err(MotionScheduleError::LookaheadUncertified {
-            join: lookahead_report.corners.first_unsatisfied_join(),
-            span: lookahead_report.first_unsatisfied_span(),
-        });
-    }
 
     let mut phases = Vec::with_capacity(route.len());
     let mut total_path_length_mm = Real::zero();
@@ -670,8 +669,7 @@ pub fn certify_exact_stop_jerk_schedule(
         route,
         tangent_spans,
         limits,
-        lookahead,
-        lookahead_report,
+        lookahead_plan,
         phases,
         jerk_report,
         total_path_length_mm,
@@ -1304,13 +1302,6 @@ pub enum MotionScheduleError {
         /// Zero-based V1 segment index.
         segment_index: usize,
     },
-    /// At least one lookahead constraint did not certify.
-    LookaheadUncertified {
-        /// First failed join, if any.
-        join: Option<usize>,
-        /// First failed retained span, if any.
-        span: Option<usize>,
-    },
     /// At least one jerk phase, sum, or continuity condition did not certify.
     JerkScheduleUncertified {
         /// First failed retained element, if any.
@@ -1418,10 +1409,6 @@ impl fmt::Display for MotionScheduleError {
             Self::TickBoundaryCollapsed { segment_index } => write!(
                 formatter,
                 "scheduled interval {segment_index} collapsed on the timer lattice"
-            ),
-            Self::LookaheadUncertified { join, span } => write!(
-                formatter,
-                "lookahead proposal did not certify (join {join:?}, span {span:?})"
             ),
             Self::JerkScheduleUncertified { element } => write!(
                 formatter,

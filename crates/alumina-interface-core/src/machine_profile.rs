@@ -1288,6 +1288,15 @@ mod tests {
         assert!(schedule.phases().iter().all(|phases| phases.len() == 4));
         assert_eq!(schedule.lookahead().corner_feeds, vec![Real::zero()]);
         assert_eq!(schedule.lookahead().corner_radii, vec![Real::zero()]);
+        assert!(schedule.lookahead_plan().all_satisfied());
+        assert_eq!(
+            schedule.lookahead_plan().effective_node_feed_limits,
+            vec![Real::zero(); schedule.route().len() + 1]
+        );
+        assert_eq!(
+            schedule.lookahead_plan().forward_node_feeds,
+            vec![Real::zero(); schedule.route().len() + 1]
+        );
         assert!(schedule.lookahead_report().all_satisfied());
         assert!(schedule.jerk_report().all_satisfied());
         assert_eq!(
@@ -1496,6 +1505,21 @@ mod tests {
             schedule
                 .lookahead()
                 .corner_feeds
+                .iter()
+                .all(|feed| feed == &Real::zero())
+        );
+        assert!(schedule.lookahead_plan().all_satisfied());
+        assert!(
+            schedule
+                .lookahead_plan()
+                .effective_node_feed_limits
+                .iter()
+                .all(|feed| feed == &Real::zero())
+        );
+        assert!(
+            schedule
+                .lookahead_plan()
+                .forward_node_feeds
                 .iter()
                 .all(|feed| feed == &Real::zero())
         );

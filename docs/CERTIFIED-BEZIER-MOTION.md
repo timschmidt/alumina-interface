@@ -22,7 +22,8 @@ retained exact Hypercurve path
               -> exact-Real LineSeg2 chords
               -> source-index / motion-range / error / depth certificate
                     -> exact diagonal Hyperpath metric carriers
-                    -> zero-feed node at every metric join
+                    -> exact forward/reverse lookahead
+                       under a zero caller ceiling at every node
                     -> four-phase jerk schedule per metric element
                     -> bounded controller interpolation
                     -> step/tick lattices and executor preflight
@@ -79,6 +80,15 @@ at zero feed and receives an independently replayed symmetric four-phase
 constant-jerk profile. This is intentionally slow, but it avoids claiming that
 an instantaneous chord-direction change can occur at nonzero velocity.
 
+Those zeros are no longer hand-filled as the final schedule. Alumina supplies
+them as caller-owned node ceilings to Hyperpath's exact two-pass planner. The
+planner combines those ceilings with tangent class, global feed, retained
+radius, and exact span length; performs squared-speed forward and reverse
+reachability passes; and releases its candidate only after independent
+Hypersolve replay. The resulting bytes remain unchanged under this conservative
+policy, while the retained forward trace and final schedule expose the planner
+needed for later certified blends.
+
 Hyperpath now computes an exact Euclidean length for diagonal
 `LinePathSegment` values. Axis-ordering and axis-specific APIs remain strict;
 only the mixed feed carrier accepts a general nonzero line. This lets certified
@@ -130,8 +140,9 @@ enter evidence.
 - Source reduction supports exact lines, explicit circular arcs, and polynomial
   cubic Beziers. Other exact families fail closed.
 - The metric schedule is two-axis Cartesian stepper motion.
-- Every certified chord boundary is a full stop; there is no blending across a
-  cubic yet.
+- Every certified chord boundary is a full stop. The exact two-pass planner is
+  present, but there is no retained blend geometry or nonzero-boundary jerk
+  profile across a cubic yet.
 - The certificate bounds positional deviation, not tool/process clearance.
   Native source bounds still gate configured travel, while fixtures and tools
   need later job-specific clearance evidence.

@@ -915,7 +915,11 @@ impl MachineCamWorkspace {
             envelope.usable_maximum_mm()[1]
         ));
         ui.label(format!(
-            "lookahead: {} joins / {} spans, all certified · jerk replay: {} elements, all certified",
+            "exact two-pass lookahead: {} nodes / {} joins / {} spans, caller and reachability replay certified · jerk replay: {} elements, all certified",
+            schedule
+                .lookahead_plan()
+                .effective_node_feed_limits
+                .len(),
             schedule.lookahead().corner_feeds.len(),
             schedule.lookahead_report().spans.len(),
             schedule.jerk_report().elements.len()
