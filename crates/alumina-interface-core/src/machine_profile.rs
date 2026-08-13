@@ -1304,6 +1304,7 @@ mod tests {
         );
         assert!(schedule.lookahead_report().all_satisfied());
         assert!(schedule.jerk_report().all_satisfied());
+        assert!(schedule.limits().affine_axis_projection().is_none());
         assert_eq!(
             schedule.travel_envelope().source_minimum_mm(),
             &[Real::zero(), Real::zero()]
@@ -1534,6 +1535,12 @@ mod tests {
         assert!(schedule.lookahead_plan().all_satisfied());
         assert!(schedule.lookahead_report().all_satisfied());
         assert!(schedule.jerk_report().all_satisfied());
+        assert!(
+            schedule
+                .limits()
+                .affine_axis_projection()
+                .is_some_and(|projection| projection.all_satisfied())
+        );
 
         let lowered = lower_certified_schedule_to_v1(
             &schedule,
@@ -1550,6 +1557,110 @@ mod tests {
         assert_eq!(
             lowered.points().last().unwrap().steps(),
             [CanonicalStep::new(3_200), CanonicalStep::new(0)]
+        );
+        assert!(lowered.executor_preflight().segment_count > 0);
+    }
+
+    #[test]
+    fn exact_diagonal_g1_uses_dense_axis_projection_and_lowers_to_terminal_steps() {
+        let mut records = machine_records();
+        for record in &mut records {
+            let ConfigurationRecord::Scalar(scalar) = record else {
+                continue;
+            };
+            if scalar.fact == ScalarFact::AxisVelocityLimitMetresPerSecond {
+                scalar.value = wire_rational(1, 1_000);
+                scalar.uncertainty = wire_rational(0, 1);
+            }
+        }
+        let profile = profile_from(&records).unwrap();
+        let source = CurvePath2::try_new(vec![
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(0, 0),
+                    CurvePoint2::from_values(3, 4),
+                )
+                .unwrap(),
+            )),
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(3, 4),
+                    CurvePoint2::from_values(6, 8),
+                )
+                .unwrap(),
+            )),
+        ])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+
+        let projection = schedule.limits().affine_axis_projection().unwrap();
+        let scale = Rational::fraction(5, 4).unwrap();
+        assert_eq!(
+            projection.maximum_path_feed,
+            Real::from(
+                profile.axes()[1].effective_velocity_limit_metres_per_second()
+                    * Rational::from(1_000)
+                    * &scale
+            )
+        );
+        assert_eq!(
+            projection.maximum_path_acceleration,
+            Real::from(
+                profile.axes()[1].effective_acceleration_limit_metres_per_second_squared()
+                    * Rational::from(1_000)
+                    * &scale
+            )
+        );
+        assert_eq!(
+            projection.maximum_path_jerk,
+            Real::from(
+                profile.axes()[1].effective_jerk_limit_metres_per_second_cubed()
+                    * Rational::from(1_000)
+                    * scale
+            )
+        );
+        assert_eq!(projection.certification.rows.len(), 4);
+        assert_eq!(
+            projection.certification.rows[0].absolute_axis_derivative,
+            Real::from(Rational::fraction(3, 5).unwrap())
+        );
+        assert_eq!(
+            projection.certification.rows[1].absolute_axis_derivative,
+            Real::from(Rational::fraction(4, 5).unwrap())
+        );
+        assert_eq!(projection.feed_bottleneck.span_index, 0);
+        assert_eq!(projection.feed_bottleneck.axis_index, 1);
+        assert_eq!(projection.acceleration_bottleneck.axis_index, 1);
+        assert_eq!(projection.jerk_bottleneck.axis_index, 1);
+        assert!(projection.all_satisfied());
+        assert_ne!(schedule.lookahead().corner_feeds[0], Real::zero());
+        assert!(schedule.lookahead_plan().all_satisfied());
+        assert!(schedule.jerk_report().all_satisfied());
+
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+        assert_eq!(
+            lowered.points().last().unwrap().steps(),
+            [CanonicalStep::new(9_600), CanonicalStep::new(12_800)]
         );
         assert!(lowered.executor_preflight().segment_count > 0);
     }

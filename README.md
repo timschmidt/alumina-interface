@@ -47,6 +47,15 @@ prototype.
   quantum. A machine-wide resolution certificate composes source and controller
   allocations with endpoint, DDA, calibration, following, and half-tick
   position bounds before scheduling.
+- For an all-line metric route, Hyperpath now projects every dense axis's exact
+  velocity, acceleration, and jerk limits through the retained constant
+  `|dq_i/ds|`. It selects route-wide scalar minima, retains the first exact
+  feed/acceleration/jerk bottleneck, and replays every span/axis inequality plus
+  those equalities through Hypersolve. A 3-4-5 diagonal regression obtains the
+  exact `5/4` utilization factor and lowers through production preflight under
+  an explicitly configured electrical-rate margin. Mixed curved routes keep
+  the earlier conservative direction-independent envelope until their
+  higher-derivative terms are certified.
 - The machine compiler preserves lines/arcs losslessly and reduces a polynomial
   cubic only under an exact pointwise positional certificate, a 16,384-element
   bound, and a depth bound. Hyperpath now derives speed nodes with exact
@@ -69,7 +78,10 @@ prototype.
   least one positive boundary uses Hyperpath's exact two-phase monotonic
   transition with zero endpoint acceleration and independent construction and
   kinematic replay. Dedicated exact-line tests lower positive G1 motion through
-  production executor preflight; curvature-bearing joins remain disabled.
+  production executor preflight; curvature-bearing joins remain disabled. A
+  projected continuous limit which lands exactly on an electrical pulse ceiling
+  is still allowed to fail later timer-lattice preflight; the compiler does not
+  invent unproved rounding headroom.
 - Before scheduling, Hypercurve's complete native source bounding box is
   compared exactly with the uncertainty-reduced usable travel from the same
   configuration. This catches arc extrema between interpolation samples and

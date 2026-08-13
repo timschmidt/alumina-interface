@@ -25,10 +25,12 @@ use hypercurve::{
 };
 use hyperlimit::{PredicatePolicy, Sign, classify_real_sign, compare_reals};
 use hyperpath::{
-    FeedPathElement, JerkRampPhaseProposal, JerkRampSpanProposal, LookaheadFeedPlanningLimits,
-    LookaheadFeedSchedule, LookaheadFeedScheduleReport, MultiPhaseJerkRampFeedScheduleReport,
-    PlannedJerkFeasibleLookaheadSchedule, PlannedLookaheadFeedSchedule, RouteCertificationError,
-    TangentSpan, certify_multi_phase_jerk_ramp_feed_schedule,
+    AffineSpanAxisProjection, AxisMotionLimits, FeedPathElement, JerkRampPhaseProposal,
+    JerkRampSpanProposal, LookaheadFeedPlanningLimits, LookaheadFeedSchedule,
+    LookaheadFeedScheduleReport, MultiPhaseJerkRampFeedScheduleReport,
+    PlannedAxisProjectedMotionLimits, PlannedJerkFeasibleLookaheadSchedule,
+    PlannedLookaheadFeedSchedule, RouteCertificationError, TangentSpan,
+    certify_multi_phase_jerk_ramp_feed_schedule, plan_axis_projected_motion_limits,
     plan_jerk_feasible_lookahead_schedule,
 };
 use hyperreal::{Problem, Rational, Real};
@@ -166,6 +168,7 @@ pub struct ScalarMotionLimits2 {
     maximum_acceleration_mm_per_second_squared: Real,
     maximum_jerk_mm_per_second_cubed: Real,
     maximum_spatial_acceleration_mm_per_second_squared: Real,
+    affine_axis_projection: Option<PlannedAxisProjectedMotionLimits>,
 }
 
 impl ScalarMotionLimits2 {
@@ -173,7 +176,7 @@ impl ScalarMotionLimits2 {
         profile: &MachineDynamicsProfile2,
         route: &[FeedPathElement],
     ) -> MotionScheduleResult<Self> {
-        let maximum_feed = minimum_rational(
+        let conservative_maximum_feed = minimum_rational(
             profile.axes()[0]
                 .effective_velocity_limit_metres_per_second()
                 .clone(),
@@ -181,7 +184,7 @@ impl ScalarMotionLimits2 {
                 .effective_velocity_limit_metres_per_second()
                 .clone(),
         ) * Rational::from(1_000);
-        let maximum_acceleration = minimum_rational(
+        let conservative_maximum_acceleration = minimum_rational(
             profile.axes()[0]
                 .effective_acceleration_limit_metres_per_second_squared()
                 .clone(),
@@ -189,7 +192,7 @@ impl ScalarMotionLimits2 {
                 .effective_acceleration_limit_metres_per_second_squared()
                 .clone(),
         ) * Rational::from(1_000);
-        let maximum_jerk = minimum_rational(
+        let conservative_maximum_jerk = minimum_rational(
             profile.axes()[0]
                 .effective_jerk_limit_metres_per_second_cubed()
                 .clone(),
@@ -197,9 +200,37 @@ impl ScalarMotionLimits2 {
                 .effective_jerk_limit_metres_per_second_cubed()
                 .clone(),
         ) * Rational::from(1_000);
-        let mut maximum_feed = Real::from(maximum_feed);
-        let maximum_spatial_acceleration = Real::from(maximum_acceleration);
-        let maximum_spatial_jerk = Real::from(maximum_jerk);
+        let axis_limits = profile
+            .axes()
+            .iter()
+            .map(|axis| AxisMotionLimits {
+                maximum_velocity: Real::from(
+                    axis.effective_velocity_limit_metres_per_second() * Rational::from(1_000),
+                ),
+                maximum_acceleration: Real::from(
+                    axis.effective_acceleration_limit_metres_per_second_squared()
+                        * Rational::from(1_000),
+                ),
+                maximum_jerk: Real::from(
+                    axis.effective_jerk_limit_metres_per_second_cubed() * Rational::from(1_000),
+                ),
+            })
+            .collect::<Vec<_>>();
+        let affine_axis_projection = affine_line_axis_projection(route, &axis_limits)?;
+        let (mut maximum_feed, maximum_spatial_acceleration, maximum_spatial_jerk) =
+            if let Some(projection) = &affine_axis_projection {
+                (
+                    projection.maximum_path_feed.clone(),
+                    projection.maximum_path_acceleration.clone(),
+                    projection.maximum_path_jerk.clone(),
+                )
+            } else {
+                (
+                    Real::from(conservative_maximum_feed),
+                    Real::from(conservative_maximum_acceleration),
+                    Real::from(conservative_maximum_jerk),
+                )
+            };
         let has_arc = route
             .iter()
             .any(|element| matches!(element, FeedPathElement::ExplicitArc(_)));
@@ -236,6 +267,7 @@ impl ScalarMotionLimits2 {
             maximum_acceleration_mm_per_second_squared: maximum_acceleration,
             maximum_jerk_mm_per_second_cubed: maximum_jerk,
             maximum_spatial_acceleration_mm_per_second_squared: maximum_spatial_acceleration,
+            affine_axis_projection,
         })
     }
 
@@ -260,6 +292,61 @@ impl ScalarMotionLimits2 {
     /// also covers centripetal acceleration.
     pub const fn maximum_spatial_acceleration_mm_per_second_squared(&self) -> &Real {
         &self.maximum_spatial_acceleration_mm_per_second_squared
+    }
+
+    /// Exact dense-axis projection when every retained metric element is affine.
+    ///
+    /// Mixed or curved routes return `None` and retain the conservative
+    /// direction-independent machine-wide minima until their higher-derivative
+    /// terms have a separate certificate.
+    pub fn affine_axis_projection(&self) -> Option<&PlannedAxisProjectedMotionLimits> {
+        self.affine_axis_projection.as_ref()
+    }
+}
+
+fn affine_line_axis_projection(
+    route: &[FeedPathElement],
+    axis_limits: &[AxisMotionLimits],
+) -> MotionScheduleResult<Option<PlannedAxisProjectedMotionLimits>> {
+    if !route
+        .iter()
+        .all(|element| matches!(element, FeedPathElement::Line(_)))
+    {
+        return Ok(None);
+    }
+    let projections = route
+        .iter()
+        .map(|element| {
+            let FeedPathElement::Line(line) = element else {
+                return Err(MotionScheduleError::UnsupportedMetricElement);
+            };
+            let direction = line.direction_vector();
+            let length = line.euclidean_length()?;
+            let absolute_x = absolute_real(
+                &direction.x,
+                "affine line X derivative sign for axis projection",
+            )?;
+            let absolute_y = absolute_real(
+                &direction.y,
+                "affine line Y derivative sign for axis projection",
+            )?;
+            Ok(AffineSpanAxisProjection {
+                absolute_axis_derivatives: vec![(&absolute_x / &length)?, (&absolute_y / &length)?],
+            })
+        })
+        .collect::<MotionScheduleResult<Vec<_>>>()?;
+    Ok(Some(plan_axis_projected_motion_limits(
+        &projections,
+        axis_limits,
+        PredicatePolicy::STRICT,
+    )?))
+}
+
+fn absolute_real(value: &Real, domain: &'static str) -> MotionScheduleResult<Real> {
+    match classify_real_sign(value, PredicatePolicy::STRICT).value() {
+        Some(Sign::Negative) => Ok(-value.clone()),
+        Some(Sign::Zero | Sign::Positive) => Ok(value.clone()),
+        None => Err(MotionScheduleError::PredicateUnresolved { domain }),
     }
 }
 

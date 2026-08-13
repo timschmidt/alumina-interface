@@ -94,7 +94,10 @@ Hyperpath now computes an exact Euclidean length for diagonal
 `LinePathSegment` values. Axis-ordering and axis-specific APIs remain strict;
 only the mixed feed carrier accepts a general nonzero line. This lets certified
 cubic chords retain `sqrt(dx² + dy²)` symbolically through lookahead and jerk
-replay.
+replay. When the complete metric route is line-only, the machine layer also
+forms exact `|dx|/length` and `|dy|/length` derivatives and uses Hyperpath's
+dense-axis projection to replay every velocity, acceleration, and jerk limit.
+The cubic's stop-at-every-chord rule remains unchanged.
 
 A future native Bezier, PH, or curvature-certified feed carrier may remove
 internal stops. It must replace this certificate explicitly; renderer
@@ -148,6 +151,8 @@ enter evidence.
 - Source reduction supports exact lines, explicit circular arcs, and polynomial
   cubic Beziers. Other exact families fail closed.
 - The metric schedule is two-axis Cartesian stepper motion.
+- A complete line-only metric route uses exact affine dense-axis projection;
+  mixed curved routes retain conservative direction-independent limits.
 - Every certified chord boundary is a full stop. Exact acceleration lookahead,
   component-local jerk refinement, and monotonic positive-boundary phases are
   active for eligible lossless line chains, but no nonzero-feed policy exists

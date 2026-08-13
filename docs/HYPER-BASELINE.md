@@ -20,8 +20,8 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `d85eec9aa6bcde54ebbfd5ac08a3ac72d2f244e9` | concurrent tracked edits in `src/bezier_offset.rs`; post-qualification observed diff SHA-256 `491ddc3ad6cd04e92a4a22ca4c21b7e1617193522e947b1169d1ecbcb96303ce` |
-| `hyperpath` | `513a13fb63c38de6bfcee18577358771001bc16c` | clean; includes exact diagonal feed length, independently replayed acceleration lookahead, monotonic transitions, and component-local exact jerk-feasibility refinement used here |
+| `hypercurve` | `d85eec9aa6bcde54ebbfd5ac08a3ac72d2f244e9` | concurrent tracked edits in `src/bezier_offset.rs`; post-qualification observed diff SHA-256 `c1583f1c371c28ab32f30435f4bdcd07d74e42bcd2c0d6f60bb3c1f991e4b08e` |
+| `hyperpath` | `d792aa8dc843218b26fc0d1730033e5cd06bdf2f` | clean; adds exact N-axis affine velocity/acceleration/jerk projection and bottleneck replay to diagonal length, acceleration lookahead, monotonic transitions, and component-local jerk refinement |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
 | `hypersolve` | `cec630b0fb121fa6ec7fe99e9780c8f020f92d61` | clean |
 | `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
@@ -46,7 +46,12 @@ monotonic-jerk checkpoint observed HEAD
 `3d390387e0c88c85efdad6ce52b8c45fffac1230c33b1c70950d2283ca8542d3`.
 The current jerk-feasible G1 checkpoint's final native/WASM tests, strict
 checks, optimized bundle, decompression checks, loopback render, and final core
-check completed against the newer table state.
+check completed against the earlier same-HEAD tracked diff SHA-256
+`491ddc3ad6cd04e92a4a22ca4c21b7e1617193522e947b1169d1ecbcb96303ce`.
+The subsequent affine axis-projection checkpoint's native/WASM tests, strict
+checks, optimized bundle, decompression checks, corrected software-WebGL
+loopback render, and final core check completed against the current table
+state.
 
 Hypercurve advanced through multiple coherent and temporarily non-compiling
 states while this work was underway and is expected to continue changing. This
@@ -81,7 +86,10 @@ it does not promote a renderer mesh. Hyperpath retains exact Euclidean length
 for diagonal feed segments while leaving axis-specific ordering APIs strict.
 It also owns the exact forward/reverse squared-speed proposer, conservative
 two-phase monotonic jerk transitions, stop-separated component-local exact jerk
-refinement, and independent Hypersolve replay. Alumina supplies positive caller
-ceilings only to lossless exact line-to-line joins. Exact tangent predicates
-must still select G1 continuity; all curvature-bearing, approximated cubic,
-corner, reversal, entry, and exit nodes remain zero.
+refinement, arbitrary-dense-axis affine dynamic projection, and independent
+Hypersolve replay. Alumina derives exact two-axis line derivatives and retains
+the projection rows and bottlenecks for all-line routes; mixed curved routes
+stay on the conservative direction-independent envelope. It supplies positive
+caller ceilings only to lossless exact line-to-line joins. Exact tangent
+predicates must still select G1 continuity; all curvature-bearing, approximated
+cubic, corner, reversal, entry, and exit nodes remain zero.

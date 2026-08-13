@@ -19,6 +19,7 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> retained Hypercurve line/arc/cubic source
     -> lossless or certified/budgeted metric-path construction
     -> native exact source-envelope / usable-travel proof
+    -> exact dense-axis projection for an all-affine route
     -> exact acceleration lookahead under explicit node ceilings
     -> stop-separated component-local jerk-feasibility refinement
     -> two- or four-phase jerk replay from selected boundary nodes
@@ -106,6 +107,41 @@ full-travel calibration term is intentionally conservative; a later per-job
 certificate may tighten the occupied extent but may never exceed this machine
 envelope. An unresolved exact comparison or an insufficient requested total
 fails before scheduling.
+
+## Exact affine dense-axis projection
+
+For an affine path span parameterized by scalar distance `s`, each dense
+machine coordinate has one constant exact derivative `dq_i/ds`. Hyperpath now
+accepts any number of axes and spans and selects the route-wide limits from
+
+```text
+|dq_i/ds| × path feed         <= axis velocity limit
+|dq_i/ds| × path acceleration <= axis acceleration limit
+|dq_i/ds| × path jerk         <= axis jerk limit.
+```
+
+Every structurally positive derivative contributes the exact quotient
+`axis_limit / |dq_i/ds|`; a zero derivative contributes no restriction. The
+planner selects the exact minimum separately for all three orders, retains the
+first span/axis bottleneck deterministically, and asks Hypersolve to replay
+every inequality and all three limiting equalities. Empty axis sets,
+shape-mismatched projections, negative absolute derivatives, stationary spans,
+unresolved comparisons, or a failed replay reject the result.
+
+The current Alumina compiler constructs this certificate only when every
+metric carrier is a line. Its exact Cartesian derivatives are
+`(|dx|/sqrt(dx²+dy²), |dy|/sqrt(dx²+dy²))`. A 3-4-5 diagonal therefore permits
+the scalar limit of two equal X/Y axes to rise by exactly `5/4`, rather than
+discarding usable vector capacity through the old axis minimum. The dedicated
+two-line G1 regression retains that exact ratio, independently replays four
+span/axis rows, and lowers to terminal steps `[9600, 12800]` under an explicitly
+configured velocity below the electrical ceiling.
+
+This affine formula is deliberately not applied to arcs or nonlinear
+kinematics. Those cases also contain higher derivatives of the coordinate map.
+A mixed curved route keeps the conservative direction-independent axis minimum
+and the existing curvature budgets until those extra acceleration and jerk
+terms have their own certificate.
 
 ## Exact acceleration lookahead and jerk feasibility
 
@@ -200,6 +236,14 @@ overflow, terminal position, terminal tick, emitted step count, and earliest
 legal finish. The compiler uses zero allowed lateness; runtime lateness remains
 a separate board-qualified policy.
 
+The projected continuous feed may equal an axis's exact electrical pulse-rate
+ceiling. Independent coordinate/time rounding can then leave no representable
+one-tick margin, and production preflight is allowed to reject with a pulse
+boundary fault. The current successful diagonal regression supplies explicit
+configured headroom. A future timer-lattice planner must derive any tighter
+reserve from the actual output quantum and segment construction; no arbitrary
+floating safety factor is inserted here.
+
 ## Cache, simulation, and evidence
 
 `package_canonical_scheduled_program` requires the program's configuration and
@@ -253,8 +297,12 @@ performed during packaging.
   reversal remains a stop. Component-local jerk refinement is implemented;
   retained blends, curvature/normal-jerk continuity, globally time-optimal node
   selection, and general nonzero-boundary S-curves are not.
-- Scalar limits use the most conservative axis-wide envelope; direction-aware
-  utilization and non-Cartesian kinematics remain future work.
+- All-affine two-axis routes use exact dense-axis projection. Mixed curved
+  routes retain the most conservative axis-wide envelope; curved derivative
+  projection, span-local limits, and non-Cartesian kinematics remain future
+  work.
+- A continuous projected limit at the exact pulse-rate ceiling can still fail
+  timer-lattice preflight. Exact output-quantum headroom selection remains open.
 - Firmware V1 follows the certified smooth schedule through bounded
   constant-velocity segments; it does not run an onboard jerk planner.
 - Configured source/command travel containment does not by itself prove tool,

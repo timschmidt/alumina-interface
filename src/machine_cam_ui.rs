@@ -892,6 +892,7 @@ impl MachineCamWorkspace {
                     schedule.limits().maximum_jerk_mm_per_second_cubed(),
                 );
             });
+        self.show_axis_projection(ui);
         ui.monospace(format!(
             "{} retained source curves → {} certified metric elements · maximum source-to-motion error {} mm",
             schedule.source().curves().len(),
@@ -937,6 +938,52 @@ impl MachineCamWorkspace {
             "active phase policy: positive feed only across lossless exact line-to-line G1 continuations; curvature-bearing joins, corners, reversals, and certified cubic chords remain full stops",
         );
         self.show_jerk_phases(ui);
+    }
+
+    fn show_axis_projection(&self, ui: &mut egui::Ui) {
+        let Some(projection) = self.artifacts.schedule.limits().affine_axis_projection() else {
+            ui.label(
+                "axis projection: conservative direction-independent limits retained because the metric route contains a curved span; affine |dq/ds| limits are not reused across curvature",
+            );
+            return;
+        };
+        ui.label(format!(
+            "exact affine dense-axis projection: {} span/axis rows · feed bottleneck span {} axis {} · acceleration span {} axis {} · jerk span {} axis {} · all replayed",
+            projection.certification.rows.len(),
+            projection.feed_bottleneck.span_index,
+            projection.feed_bottleneck.axis_index,
+            projection.acceleration_bottleneck.span_index,
+            projection.acceleration_bottleneck.axis_index,
+            projection.jerk_bottleneck.span_index,
+            projection.jerk_bottleneck.axis_index,
+        ));
+        ui.collapsing("Affine axis-projection certificate", |ui| {
+            egui::Grid::new("affine_axis_projection_rows")
+                .num_columns(7)
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in [
+                        "span", "axis", "|dq/ds|", "axis V", "axis A", "axis J", "replay",
+                    ] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    for row in &projection.certification.rows {
+                        ui.monospace(row.span_index.to_string());
+                        ui.monospace(row.axis_index.to_string());
+                        ui.monospace(row.absolute_axis_derivative.to_string());
+                        ui.monospace(row.axis_limits.maximum_velocity.to_string());
+                        ui.monospace(row.axis_limits.maximum_acceleration.to_string());
+                        ui.monospace(row.axis_limits.maximum_jerk.to_string());
+                        ui.monospace(if row.certification.all_satisfied() {
+                            "certified"
+                        } else {
+                            "rejected"
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
     }
 
     fn show_source_to_motion_certificate(&self, ui: &mut egui::Ui) {

@@ -17,19 +17,22 @@ bytes it reconstructs:
 3. a complete machine-resolution budget;
 4. the retained exact line/native-semicircle/cubic Hypercurve path;
 5. a native-extrema travel-envelope certificate;
-6. a bounded exact pointwise certificate over Hypercurve de Casteljau spans,
+6. an exact dense-axis projection with retained span/axis bottlenecks when the
+   complete metric route is affine, or an explicit conservative curved-route
+   fallback;
+7. a bounded exact pointwise certificate over Hypercurve de Casteljau spans,
    followed by Hyperpath's exact forward/reverse node planner, independent
    Hypersolve replay, stop-separated exact jerk-feasibility refinement, and
    phase selection from the resulting boundary feeds; the default fixture has
    no eligible lossless line-to-line G1 join and therefore retains four
    constant-jerk phases per metric element;
-7. exact interpolation under a 131,072-point browser budget, followed by
+8. exact interpolation under a 131,072-point browser budget, followed by
    configured step/tick lattice lowering;
-8. production `StepperExecutor` electrical and terminal preflight;
-9. chained canonical blocks, independently hashed upload chunks, and the
+9. production `StepperExecutor` electrical and terminal preflight;
+10. chained canonical blocks, independently hashed upload chunks, and the
    immutable SD-cache publication;
-10. deterministic `RealtimeJob` plus `CachedStepperExecutor` event replay; and
-11. a reconstructed canonical `ALMEVD02` transcript binding source, metric
+11. deterministic `RealtimeJob` plus `CachedStepperExecutor` event replay; and
+12. a reconstructed canonical `ALMEVD02` transcript binding source, metric
     path, and approximation identities.
 
 The default fixture declares its facts as declared—not measured—and includes
@@ -55,6 +58,8 @@ The inspector exposes:
 - source and usable travel envelopes;
 - every component of the machine-wide error budget;
 - exact aggregate length, time, feed, acceleration, and jerk limits;
+- either every exact affine span/axis derivative, machine limit, replay result,
+  and selected bottleneck or an explicit curved-route fallback statement;
 - every effective lookahead node ceiling, forward-pass node, final
   jerk-feasible node, positive component/refinement count, and
   caller/geometric/reachability replay result;

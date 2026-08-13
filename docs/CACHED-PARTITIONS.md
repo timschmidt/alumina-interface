@@ -113,11 +113,13 @@ and content-addressed partition. See
   consumer, plus a headless clock/prepare/install/confirm coordinator. Visible
   workflow wiring and complete worker-owned cached-job driving remain open.
 - Two-axis line/arc/cubic motion now has exact acceleration lookahead,
-  component-local jerk-feasibility refinement, certified phase scheduling,
-  configuration-derived calibration/following bounds, and production executor
-  preflight. Lossless line-to-line G1 joins may remain moving; the cubic uses
-  bounded source-to-motion chords with a full stop at each join. Blends,
-  curvature-bearing continuity, broader exact families, kinematics, and
+  all-affine dense-axis projection, component-local jerk-feasibility
+  refinement, certified phase scheduling, configuration-derived
+  calibration/following bounds, and production executor preflight. Lossless
+  line-to-line G1 joins may remain moving; the cubic uses bounded
+  source-to-motion chords with a full stop at each join. Mixed curved routes
+  retain conservative axis-wide limits. Blends, curvature-bearing continuity,
+  broader exact families, kinematics, exact timer-lattice headroom, and
   qualified hardware timing remain open.
 - Passing software replay does not qualify SD media, a board, or physical
   motion. No board is flashed or energized by packaging or its tests.
