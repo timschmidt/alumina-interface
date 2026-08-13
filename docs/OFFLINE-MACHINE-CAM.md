@@ -58,12 +58,13 @@ The inspector exposes:
   finish cycle; and
 - evidence and exact-source SHA-256 identities.
 
-## Transactional file exchange
+## Transactional file and source exchange
 
-The prior `ALGW`-specific platform bridge is now a generic bounded canonical
-artifact bridge while parsing authority remains in each owning workspace.
-Native paths and browser file selection/download support `.algw`, `.almcfg`,
-and `.almevd` without treating an extension as evidence.
+The prior `ALGW`-specific platform bridge is now a generic bounded byte bridge
+while parsing authority remains in each owning workspace. Native paths and
+browser file selection/download support `.algw`, `.almcfg`, `.almevd`, and
+UI-only `.nc` source without treating an extension as evidence or source text as
+canonical.
 
 An imported configuration replaces visible state only after complete board
 validation, exact derivation, travel certification, scheduling, lowering,
@@ -72,6 +73,12 @@ evidence replay all succeed. A corrupt or semantically inadmissible candidate
 leaves the current machine state unchanged. Imported evidence is SHA-256
 checked against the current evidence identity and must equal the transcript
 freshly reconstructed from the current program and partition.
+
+The optional CNC importer retains exact raw-source SHA-256 and per-curve modal
+provenance separately from canonical exact-geometry identity. It accepts only a
+bounded explicit line/IJ-arc geometry subset and replaces source state only
+after the same travel, schedule, lowering, cache, simulator, and evidence chain
+succeeds. See `EXACT-CNC-GEOMETRY-IMPORT.md`.
 
 Lowering checks the caller-owned point budget before each phase and uses
 fallible reservations for points and canonical segments. A semantically valid
@@ -83,18 +90,19 @@ later 4 MiB cache admission limit.
 
 At checkpoint implementation time:
 
-- all 26 application tests passed, including a complete headless egui frame,
-  deterministic configuration-to-event replay, and transactional rejection;
-- all 101 exact-core tests plus the compile-fail value-boundary test passed,
+- all 28 application tests passed, including a complete headless egui frame,
+  deterministic configuration/source-to-event replay, and transactional
+  rejection;
+- all 106 exact-core tests plus the compile-fail value-boundary test passed,
   including native arc-envelope travel rejection, post-rounding containment,
-  and caller-bounded interpolation allocation;
+  caller-bounded interpolation allocation, and five exact CNC importer cases;
 - all 37 protocol-client tests and the exact-control integration test passed;
 - native and `wasm32-unknown-unknown` strict Clippy passed for the complete
   workspace, and every workspace test target linked for WASM;
 - strict rustdoc and the local-source/license policy audit passed;
-- the optimized 5,322,110-byte WASM validated with `wasm-tools`; its
-  2,399,637-byte gzip and 1,922,975-byte Brotli forms both decompress to SHA-256
-  `f5c6d91db2f095edd8ac94bf7951026d0b08b020a48fbdff05e61e348fca301a`;
+- the optimized 5,345,732-byte WASM validated with `wasm-tools`; its
+  2,409,207-byte gzip and 1,931,517-byte Brotli forms both decompress to SHA-256
+  `0ffaa504dd5cb0970b12788916a9135517252092ea8fd0474d0fc41243b34c5d`;
 - headless Chromium loaded the bundle and dedicated worker over loopback with
   software WebGL, then visibly rendered the complete default Machine/CAM
   inspector and its exact path plot; and

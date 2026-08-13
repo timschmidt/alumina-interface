@@ -20,7 +20,7 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `3184bce0b5a42c30b2c3cace7032cbc26173592c` | clean at observation; ongoing local development is expected |
+| `hypercurve` | `9b0ced6c8607364da45ea912e6d0ff2247f09d0c` | clean through final artifact validation; ongoing local development is expected |
 | `hyperpath` | `1ed1b44fe2834656cb8b9c1188027aca759d3cd0` | clean; includes exact-stop lookahead corner support used here |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
 | `hypersolve` | `cec630b0fb121fa6ec7fe99e9780c8f020f92d61` | clean |
@@ -37,17 +37,16 @@ build executables are
 excluded from Cargo package sources but must still be removed or explicitly
 excluded before a whole-tree release digest is generated.
 
-Hypercurve's then-uncommitted tracked diff SHA-256
-`c2b1099005d6155c0c1043b93c1988e88c8cdd800b9f23acaf30eb29d0f48b60`
-was identical on both sides of the final native/WASM coherence checks and
-complete test run. That exact content was committed during the final bundle
-build as `3184bce0b5a42c30b2c3cace7032cbc26173592c`; diffing its parent to that
-commit produces the same digest, and the checkout was clean when artifact
-validation completed. Hypercurve is expected to continue changing, so the row
-is a tested observation rather than a promise that its checkout remains there.
-The Hyperphysics digest remained unchanged through qualification. These facts
-establish development evidence; they do not convert a moving or dirty sibling
-tree into a release pin.
+The exact CNC-import checkpoint's final native/WASM tests, strict checks,
+optimized bundle, decompression checks, and loopback render observed Hypercurve
+clean at `9b0ced6c8607364da45ea912e6d0ff2247f09d0c`. Hypercurve advanced through
+multiple clean and dirty states while this work was underway and is expected to
+continue changing. The row therefore records the last observed dependency
+identity for this development artifact; it is not a request to hold, reset, or
+pin that working tree. The Hyperphysics tracked diff remained SHA-256
+`99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667`
+through qualification. These facts establish development evidence; they do not
+convert a moving or dirty sibling tree into a release pin.
 
 The baseline is advanced only as one set: update paths/patches if needed, run
 native and WASM compiler fixtures, run the full license scan, update every row,

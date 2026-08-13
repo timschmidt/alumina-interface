@@ -76,6 +76,13 @@ prototype.
   evidence imports must equal a fresh reconstruction byte for byte. This view
   initiates no device connection and has no arming or output authority. See
   [`docs/OFFLINE-MACHINE-CAM.md`](docs/OFFLINE-MACHINE-CAM.md).
+- The same workspace has a bounded UI-only CNC geometry adapter for one
+  connected XY line/explicit-IJ-arc path. It parses every decimal into an exact
+  rational, requires explicit unit/plane/endpoint/arc-centre modal state,
+  rejects every process or unsupported word, and transactionally rebuilds the
+  complete schedule/cache/replay chain. Raw text has a separate provenance
+  digest and never becomes canonical or firmware input. See
+  [`docs/EXACT-CNC-GEOMETRY-IMPORT.md`](docs/EXACT-CNC-GEOMETRY-IMPORT.md).
 - Canonical segments are deterministically partitioned using the firmware's
   queried record capacity and caller-owned horizon limits. Every chained
   512-byte block is independently replayed before `alumina-storage` creates the
@@ -221,6 +228,8 @@ The configuration-derived scheduling and executor-preflight contract is in
 [`docs/EXACT-MACHINE-SCHEDULING.md`](docs/EXACT-MACHINE-SCHEDULING.md).
 The visible offline machine/CAM and transactional artifact boundary is in
 [`docs/OFFLINE-MACHINE-CAM.md`](docs/OFFLINE-MACHINE-CAM.md).
+The selected exact UI-only CNC source boundary is in
+[`docs/EXACT-CNC-GEOMETRY-IMPORT.md`](docs/EXACT-CNC-GEOMETRY-IMPORT.md).
 The immutable block/cache boundary is in
 [`docs/CACHED-PARTITIONS.md`](docs/CACHED-PARTITIONS.md).
 The global participant/manifest boundary is in

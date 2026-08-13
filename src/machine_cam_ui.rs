@@ -13,11 +13,11 @@ use alumina_config::{
 };
 use alumina_interface_core::{
     CanonicalMachinePartition2, CanonicalScheduleEvidence2, CanonicalScheduledProgram2,
-    CertifiedExactStopSchedule2, ExactValue, MachineDynamicsProfile2, MachinePartitionPolicy2,
-    MachineResolutionBudget2, Millimetres, ScheduledLoweringLimits,
-    build_canonical_schedule_evidence, certify_exact_stop_jerk_schedule,
-    lower_certified_schedule_to_v1, package_canonical_scheduled_program, project_for_display,
-    replay_canonical_schedule_evidence, representative_metric_path,
+    CertifiedExactStopSchedule2, CncGeometryImportLimits, CncGeometryImportReport2, ExactValue,
+    MachineDynamicsProfile2, MachinePartitionPolicy2, MachineResolutionBudget2, Millimetres,
+    ScheduledLoweringLimits, build_canonical_schedule_evidence, certify_exact_stop_jerk_schedule,
+    import_exact_cnc_geometry, lower_certified_schedule_to_v1, package_canonical_scheduled_program,
+    project_for_display, replay_canonical_schedule_evidence, representative_metric_path,
     verify_canonical_schedule_evidence_bytes,
 };
 use alumina_machine_ir::{BlockValidationLimits, ValidationLimits};
@@ -26,20 +26,83 @@ use alumina_storage::{CacheLimits, UploadId, sha256};
 use eframe::egui;
 use hyperreal::{Rational, Real};
 
-use crate::workspace_file::{CanonicalFileBridge, CanonicalFileEvent, CanonicalFileSpec};
+use crate::workspace_file::{BoundedFileBridge, BoundedFileEvent, BoundedFileSpec};
 
 const MAXIMUM_CONFIGURATION_BYTES: usize =
     CONFIGURATION_HEADER_BYTES + MAX_CONFIGURATION_RECORDS * CONFIGURATION_RECORD_BYTES;
 const MAXIMUM_EVIDENCE_BYTES: usize = 64 * 1024;
-const CONFIGURATION_FILE: CanonicalFileSpec = CanonicalFileSpec::new("ALMCFG05 file", "almcfg");
-const EVIDENCE_FILE: CanonicalFileSpec = CanonicalFileSpec::new("ALMEVD01 file", "almevd");
+const MAXIMUM_CNC_SOURCE_BYTES: usize = CncGeometryImportLimits::INTERACTIVE.maximum_source_bytes();
+const CONFIGURATION_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMCFG05 file", "almcfg");
+const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD01 file", "almevd");
+const CNC_SOURCE_FILE: BoundedFileSpec = BoundedFileSpec::new("UI-only CNC geometry draft", "nc");
 const STREAM_ID: [u8; 16] = *b"tinybee-cam-v1!!";
 const UPLOAD_ID: UploadId = UploadId(0x1122_3344_5566_7788);
 const PREPARE_ID: u64 = 0x8877_6655_4433_2211;
+const MAXIMUM_VISIBLE_CNC_SPANS: usize = 128;
+const CNC_EXAMPLE: &str = "%\n\
+(selected exact geometry subset; feed/tool/process words are rejected)\n\
+G21 G90 G17 G91.1\n\
+N10 G0 X0 Y0\n\
+N20 G1 X4 Y0\n\
+N30 G2 X8 Y0 I2 J0\n\
+M30\n\
+%\n";
+
+#[derive(Clone, Debug)]
+enum MachineCamSource {
+    ExactFixture {
+        path: hypercurve::CurvePath2,
+    },
+    ImportedCnc {
+        path: hypercurve::CurvePath2,
+        raw_bytes: Vec<u8>,
+        report: CncGeometryImportReport2,
+    },
+}
+
+impl MachineCamSource {
+    fn exact_fixture() -> Result<Self, String> {
+        Ok(Self::ExactFixture {
+            path: representative_metric_path()
+                .map_err(|error| format!("retained metric source construction failed: {error}"))?,
+        })
+    }
+
+    const fn path(&self) -> &hypercurve::CurvePath2 {
+        match self {
+            Self::ExactFixture { path } | Self::ImportedCnc { path, .. } => path,
+        }
+    }
+
+    #[cfg(test)]
+    const fn cnc_report(&self) -> Option<&CncGeometryImportReport2> {
+        match self {
+            Self::ExactFixture { .. } => None,
+            Self::ImportedCnc { report, .. } => Some(report),
+        }
+    }
+
+    fn cnc_parts(&self) -> Option<(&CncGeometryImportReport2, &[u8])> {
+        match self {
+            Self::ExactFixture { .. } => None,
+            Self::ImportedCnc {
+                raw_bytes, report, ..
+            } => Some((report, raw_bytes)),
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Self::ExactFixture { .. } => "built-in exact Hypercurve fixture",
+            Self::ImportedCnc { .. } => "selected UI-only CNC geometry import",
+        }
+    }
+}
 
 struct MachineCamArtifacts {
     configuration_bytes: Vec<u8>,
     configuration_identity: ConfigurationIdentity,
+    source: MachineCamSource,
     profile: MachineDynamicsProfile2,
     resolution_budget: MachineResolutionBudget2,
     schedule: CertifiedExactStopSchedule2,
@@ -50,7 +113,7 @@ struct MachineCamArtifacts {
 }
 
 impl MachineCamArtifacts {
-    fn compile(configuration_bytes: Vec<u8>) -> Result<Self, String> {
+    fn compile(configuration_bytes: Vec<u8>, source: MachineCamSource) -> Result<Self, String> {
         let configuration_digest = sha256(&configuration_bytes).digest;
         let view = ConfigurationDocumentView::decode::<MAX_CONFIGURATION_RECORDS>(
             &board_mks_tinybee::PACKAGE,
@@ -68,9 +131,7 @@ impl MachineCamArtifacts {
             Rational::fraction(1, 100).map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("machine resolution budget rejected: {error}"))?;
-        let source = representative_metric_path()
-            .map_err(|error| format!("retained metric source construction failed: {error}"))?;
-        let schedule = certify_exact_stop_jerk_schedule(&source, &profile)
+        let schedule = certify_exact_stop_jerk_schedule(source.path(), &profile)
             .map_err(|error| format!("exact jerk scheduling rejected: {error}"))?;
         let program = lower_certified_schedule_to_v1(
             &schedule,
@@ -119,6 +180,7 @@ impl MachineCamArtifacts {
         Ok(Self {
             configuration_bytes,
             configuration_identity,
+            source,
             profile,
             resolution_budget,
             schedule,
@@ -136,20 +198,25 @@ pub(crate) struct MachineCamWorkspace {
     selected_axis: usize,
     selected_point: usize,
     selected_segment: usize,
-    configuration_file: CanonicalFileBridge,
-    evidence_file: CanonicalFileBridge,
+    configuration_file: BoundedFileBridge,
+    evidence_file: BoundedFileBridge,
+    cnc_source_file: BoundedFileBridge,
+    cnc_draft: String,
     file_status: String,
 }
 
 impl MachineCamWorkspace {
     pub(crate) fn try_new() -> Result<Self, String> {
+        let source = MachineCamSource::exact_fixture()?;
         Ok(Self {
-            artifacts: MachineCamArtifacts::compile(representative_configuration_bytes()?)?,
+            artifacts: MachineCamArtifacts::compile(representative_configuration_bytes()?, source)?,
             selected_axis: 0,
             selected_point: 0,
             selected_segment: 0,
-            configuration_file: CanonicalFileBridge::default(),
-            evidence_file: CanonicalFileBridge::default(),
+            configuration_file: BoundedFileBridge::default(),
+            evidence_file: BoundedFileBridge::default(),
+            cnc_source_file: BoundedFileBridge::default(),
+            cnc_draft: CNC_EXAMPLE.to_owned(),
             file_status: "canonical offline fixture reconstructed; no file exchange this session"
                 .to_owned(),
         })
@@ -169,6 +236,7 @@ impl MachineCamWorkspace {
             digest_prefix(artifacts.configuration_identity.capability_digest.0)
         ));
         ui.separator();
+        ui.label(artifacts.source.description());
         ui.label(format!(
             "{} retained elements · {} exact samples",
             artifacts.schedule.route().len(),
@@ -196,11 +264,39 @@ impl MachineCamWorkspace {
 
     fn import_configuration_bytes(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
         let byte_len = bytes.len();
-        let artifacts = MachineCamArtifacts::compile(bytes)?;
+        let artifacts = MachineCamArtifacts::compile(bytes, self.artifacts.source.clone())?;
         self.artifacts = artifacts;
         self.selected_point = 0;
         self.selected_segment = 0;
         Ok(byte_len)
+    }
+
+    fn import_cnc_source_bytes(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
+        let imported = import_exact_cnc_geometry(&bytes, CncGeometryImportLimits::INTERACTIVE)
+            .map_err(|error| format!("selected CNC geometry import rejected: {error}"))?;
+        let (path, report) = imported.into_parts();
+        let byte_len = bytes.len();
+        let source = MachineCamSource::ImportedCnc {
+            path,
+            raw_bytes: bytes,
+            report,
+        };
+        let artifacts =
+            MachineCamArtifacts::compile(self.artifacts.configuration_bytes.clone(), source)?;
+        self.artifacts = artifacts;
+        self.selected_point = 0;
+        self.selected_segment = 0;
+        Ok(byte_len)
+    }
+
+    fn restore_exact_fixture(&mut self) -> Result<(), String> {
+        let source = MachineCamSource::exact_fixture()?;
+        let artifacts =
+            MachineCamArtifacts::compile(self.artifacts.configuration_bytes.clone(), source)?;
+        self.artifacts = artifacts;
+        self.selected_point = 0;
+        self.selected_segment = 0;
+        Ok(())
     }
 
     fn verify_evidence_bytes(&self, bytes: &[u8]) -> Result<(), String> {
@@ -236,6 +332,8 @@ impl MachineCamWorkspace {
 
         self.show_file_exchange(ui);
         ui.separator();
+        self.show_cnc_source(ui);
+        ui.separator();
         self.show_configuration(ui);
         ui.separator();
         self.show_exact_path_plot(ui);
@@ -262,7 +360,7 @@ impl MachineCamWorkspace {
             );
             for event in events {
                 match event {
-                    CanonicalFileEvent::Import(Ok(bytes)) => {
+                    BoundedFileEvent::Import(Ok(bytes)) => {
                         match self.import_configuration_bytes(bytes) {
                             Ok(byte_len) => {
                                 self.file_status = format!(
@@ -276,14 +374,14 @@ impl MachineCamWorkspace {
                             }
                         }
                     }
-                    CanonicalFileEvent::Import(Err(error)) => {
+                    BoundedFileEvent::Import(Err(error)) => {
                         self.file_status = format!("ALMCFG05 read rejected: {error}");
                     }
-                    CanonicalFileEvent::Export(Ok(bytes)) => {
+                    BoundedFileEvent::Export(Ok(bytes)) => {
                         self.file_status =
                             format!("exported {bytes} exact canonical ALMCFG05 bytes");
                     }
-                    CanonicalFileEvent::Export(Err(error)) => {
+                    BoundedFileEvent::Export(Err(error)) => {
                         self.file_status = format!("ALMCFG05 export failed: {error}");
                     }
                 }
@@ -302,7 +400,7 @@ impl MachineCamWorkspace {
             );
             for event in events {
                 match event {
-                    CanonicalFileEvent::Import(Ok(bytes)) => {
+                    BoundedFileEvent::Import(Ok(bytes)) => {
                         match self.verify_evidence_bytes(&bytes) {
                             Ok(()) => {
                                 self.file_status = format!(
@@ -317,20 +415,205 @@ impl MachineCamWorkspace {
                             }
                         }
                     }
-                    CanonicalFileEvent::Import(Err(error)) => {
+                    BoundedFileEvent::Import(Err(error)) => {
                         self.file_status = format!("ALMEVD01 read rejected: {error}");
                     }
-                    CanonicalFileEvent::Export(Ok(bytes)) => {
+                    BoundedFileEvent::Export(Ok(bytes)) => {
                         self.file_status =
                             format!("exported {bytes} canonical ALMEVD01 evidence bytes");
                     }
-                    CanonicalFileEvent::Export(Err(error)) => {
+                    BoundedFileEvent::Export(Err(error)) => {
                         self.file_status = format!("ALMEVD01 export failed: {error}");
                     }
                 }
             }
             ui.weak(&self.file_status);
         });
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the source admission policy, transaction, and provenance are kept visibly adjacent"
+    )]
+    fn show_cnc_source(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Exact source geometry");
+            ui.colored_label(
+                egui::Color32::LIGHT_BLUE,
+                self.artifacts.source.description(),
+            );
+        });
+        ui.label(
+            "Optional CNC text is a bounded UI-only geometry importer. Raw text, modal words, and comments are never canonical job bytes and are never sent to firmware.",
+        );
+        ui.collapsing("Selected CNC semantics and admission limits", |ui| {
+            ui.label(
+                "Accepted: explicit G20/G21 units, G90/G91 endpoints, G17 XY plane, G90.1/G91.1 I/J centres, initial absolute G0 X/Y, connected G1/G2/G3 geometry, and terminal M2/M30.",
+            );
+            ui.label(
+                "Rejected: feed, Z, spindle, tool, compensation, canned cycles, R arcs, full circles, rapid moves after retained geometry, and every unrecognized word or code.",
+            );
+            let limits = CncGeometryImportLimits::INTERACTIVE;
+            ui.monospace(format!(
+                "{} bytes · {} bytes/line · {} lines · {} words · {} curves · {} chars/decimal",
+                limits.maximum_source_bytes(),
+                limits.maximum_line_bytes(),
+                limits.maximum_lines(),
+                limits.maximum_words(),
+                limits.maximum_curves(),
+                limits.maximum_decimal_characters()
+            ));
+        });
+
+        let events = self.cnc_source_file.show(
+            ui,
+            self.cnc_draft.as_bytes(),
+            MAXIMUM_CNC_SOURCE_BYTES,
+            "alumina-selected-geometry.nc",
+            CNC_SOURCE_FILE,
+        );
+        ui.weak(
+            "File controls move the editable draft only; compiling or opening an accepted file is the only operation that can replace the active exact source.",
+        );
+        for event in events {
+            match event {
+                BoundedFileEvent::Import(Ok(bytes)) => match String::from_utf8(bytes.clone()) {
+                    Ok(draft) => match self.import_cnc_source_bytes(bytes) {
+                        Ok(byte_len) => {
+                            self.cnc_draft = draft;
+                            self.file_status = format!(
+                                "imported {byte_len} non-canonical CNC source bytes and transactionally rebuilt exact CAM, cached IR, simulation, and evidence"
+                            );
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "CNC source import rejected without changing machine/CAM state: {error}"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        self.file_status = format!(
+                            "CNC source read rejected without changing state: source is not UTF-8: {error}"
+                        );
+                    }
+                },
+                BoundedFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("CNC source read rejected: {error}");
+                }
+                BoundedFileEvent::Export(Ok(bytes)) => {
+                    self.file_status = format!("exported {bytes} non-canonical CNC draft bytes");
+                }
+                BoundedFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("CNC draft export failed: {error}");
+                }
+            }
+        }
+
+        ui.collapsing("Edit/paste bounded CNC geometry draft", |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut self.cnc_draft)
+                    .code_editor()
+                    .desired_rows(9)
+                    .char_limit(MAXIMUM_CNC_SOURCE_BYTES),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("compile draft transactionally").clicked() {
+                    let result = if self.cnc_draft.len() > MAXIMUM_CNC_SOURCE_BYTES {
+                        Err(format!(
+                            "CNC draft has {} UTF-8 bytes; policy permits {MAXIMUM_CNC_SOURCE_BYTES}",
+                            self.cnc_draft.len()
+                        ))
+                    } else {
+                        self.import_cnc_source_bytes(self.cnc_draft.as_bytes().to_vec())
+                    };
+                    match result {
+                        Ok(byte_len) => {
+                            self.file_status = format!(
+                                "compiled {byte_len} draft bytes through exact geometry, motion, cache, simulation, and evidence replay"
+                            );
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "CNC draft rejected without changing machine/CAM state: {error}"
+                            );
+                        }
+                    }
+                }
+                if ui.button("restore built-in exact fixture").clicked() {
+                    match self.restore_exact_fixture() {
+                        Ok(()) => {
+                            "restored the built-in exact Hypercurve fixture transactionally"
+                                .clone_into(&mut self.file_status);
+                        }
+                        Err(error) => {
+                            self.file_status =
+                                format!("exact fixture restoration failed without mutation: {error}");
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some((report, raw_bytes)) = self.artifacts.source.cnc_parts() {
+            ui.monospace(format!(
+                "raw source {}… · exact geometry {}… · {} bytes / {} lines / {} words · {} positioning blocks · M-end line {}",
+                digest_prefix(report.raw_source_digest().0),
+                digest_prefix(self.artifacts.evidence.source_digest().0),
+                raw_bytes.len(),
+                report.source_lines(),
+                report.parsed_words(),
+                report.positioning_blocks(),
+                report.program_end_line()
+            ));
+            ui.monospace(format!(
+                "retained path: {} exact curves · ({}, {}) → ({}, {}) mm",
+                report.spans().len(),
+                report.start_mm().x(),
+                report.start_mm().y(),
+                report.end_mm().x(),
+                report.end_mm().y()
+            ));
+            ui.collapsing("Imported per-curve source provenance", |ui| {
+                egui::Grid::new("cnc_source_provenance")
+                    .num_columns(7)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for heading in ["curve", "line", "N", "motion", "units", "X/Y mode", "I/J"]
+                        {
+                            ui.strong(heading);
+                        }
+                        ui.end_row();
+                        for span in report.spans().iter().take(MAXIMUM_VISIBLE_CNC_SPANS) {
+                            ui.monospace(span.curve_index().to_string());
+                            ui.monospace(span.source_line().to_string());
+                            ui.monospace(
+                                span.block_number()
+                                    .map_or_else(|| "—".to_owned(), |value| value.to_string()),
+                            );
+                            ui.monospace(format!("{:?}", span.motion()));
+                            ui.monospace(format!("{:?}", span.units()));
+                            ui.monospace(format!("{:?}", span.distance_mode()));
+                            ui.monospace(
+                                span.arc_center_mode()
+                                    .map_or_else(|| "—".to_owned(), |mode| format!("{mode:?}")),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                if report.spans().len() > MAXIMUM_VISIBLE_CNC_SPANS {
+                    ui.weak(format!(
+                        "{} additional spans are retained but omitted from this bounded table",
+                        report.spans().len() - MAXIMUM_VISIBLE_CNC_SPANS
+                    ));
+                }
+            });
+        } else {
+            ui.monospace(format!(
+                "exact geometry {}… · no legacy text source or modal provenance by design",
+                digest_prefix(self.artifacts.evidence.source_digest().0)
+            ));
+        }
+        ui.weak(&self.file_status);
     }
 
     #[allow(
@@ -484,7 +767,7 @@ impl MachineCamWorkspace {
     fn show_exact_path_plot(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.heading("Retained exact path");
-            ui.label("line + native clockwise semicircle");
+            ui.label(self.artifacts.source.description());
         });
         let points = self.artifacts.program.points();
         if points.is_empty() {
@@ -1079,6 +1362,114 @@ mod tests {
         let mut corrupt = workspace.artifacts.evidence.encoded().to_vec();
         corrupt[12] ^= 1;
         assert!(workspace.verify_evidence_bytes(&corrupt).is_err());
+    }
+
+    #[test]
+    fn selected_cnc_text_reconstructs_geometry_without_becoming_canonical_identity() {
+        let mut workspace = MachineCamWorkspace::try_new().unwrap();
+        let retained_evidence = workspace.artifacts.evidence.digest();
+        let retained_exact_source = workspace.artifacts.evidence.source_digest();
+        let retained_partition = workspace
+            .artifacts
+            .partition
+            .publication()
+            .object
+            .content
+            .digest;
+
+        assert_eq!(
+            workspace
+                .import_cnc_source_bytes(CNC_EXAMPLE.as_bytes().to_vec())
+                .unwrap(),
+            CNC_EXAMPLE.len()
+        );
+        let report = workspace.artifacts.source.cnc_report().unwrap();
+        let first_raw_source = report.raw_source_digest();
+        assert_eq!(first_raw_source, sha256(CNC_EXAMPLE.as_bytes()).digest);
+        assert_eq!(report.spans().len(), 2);
+        assert_eq!(workspace.artifacts.evidence.digest(), retained_evidence);
+        assert_eq!(
+            workspace.artifacts.evidence.source_digest(),
+            retained_exact_source
+        );
+        assert_eq!(
+            workspace
+                .artifacts
+                .partition
+                .publication()
+                .object
+                .content
+                .digest,
+            retained_partition
+        );
+
+        let comment_variant = CNC_EXAMPLE.replace(
+            "selected exact geometry subset; feed/tool/process words are rejected",
+            "different non-canonical comment text",
+        );
+        workspace
+            .import_cnc_source_bytes(comment_variant.as_bytes().to_vec())
+            .unwrap();
+        assert_ne!(
+            workspace
+                .artifacts
+                .source
+                .cnc_report()
+                .unwrap()
+                .raw_source_digest(),
+            first_raw_source
+        );
+        assert_eq!(workspace.artifacts.evidence.digest(), retained_evidence);
+        assert_eq!(
+            workspace.artifacts.evidence.source_digest(),
+            retained_exact_source
+        );
+    }
+
+    #[test]
+    fn cnc_source_transaction_rejects_process_words_and_machine_travel_escape() {
+        let mut workspace = MachineCamWorkspace::try_new().unwrap();
+        workspace
+            .import_cnc_source_bytes(CNC_EXAMPLE.as_bytes().to_vec())
+            .unwrap();
+        let retained_raw = workspace
+            .artifacts
+            .source
+            .cnc_report()
+            .unwrap()
+            .raw_source_digest();
+        let retained_evidence = workspace.artifacts.evidence.digest();
+
+        let process_word = CNC_EXAMPLE.replace("X4 Y0", "X4 Y0 F100");
+        let error = workspace
+            .import_cnc_source_bytes(process_word.into_bytes())
+            .unwrap_err();
+        assert!(error.contains("F word"));
+        assert_eq!(
+            workspace
+                .artifacts
+                .source
+                .cnc_report()
+                .unwrap()
+                .raw_source_digest(),
+            retained_raw
+        );
+
+        let outside_travel = b"G21 G90 G17 G91.1\nG0 X0 Y0\nG1 X301 Y0\nM2\n";
+        let error = workspace
+            .import_cnc_source_bytes(outside_travel.to_vec())
+            .unwrap_err();
+        assert!(error.contains("travel boundary"), "{error}");
+        assert_eq!(workspace.artifacts.evidence.digest(), retained_evidence);
+        assert_eq!(
+            workspace
+                .artifacts
+                .source
+                .cnc_report()
+                .unwrap()
+                .raw_source_digest(),
+            retained_raw
+        );
     }
 
     #[test]

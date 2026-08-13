@@ -9,6 +9,7 @@
 
 pub mod board_explorer;
 pub mod boundary;
+pub mod cnc_import;
 pub mod compiler;
 pub mod diagnostics;
 pub mod global_job;
@@ -27,6 +28,11 @@ pub use board_explorer::{
 pub use boundary::{
     BoundaryError, BoundedMeasurement, CanonicalCycle, CanonicalStep, DisplayScalar, ExactValue,
     Millimetres, Seconds, Unit, canonical_motion_segment, project_for_display,
+};
+pub use cnc_import::{
+    CncArcCenterMode, CncDistanceMode, CncGeometryImportError, CncGeometryImportLimits,
+    CncGeometryImportReport2, CncGeometryImportResult, CncMotionKind, CncSourceSpan2, CncUnitMode,
+    ImportedCncGeometry2, import_exact_cnc_geometry,
 };
 pub use compiler::{
     CanonicalPathPoint2, CanonicalPathProgram2, CanonicalTimeBoundary, MachineCompileError,

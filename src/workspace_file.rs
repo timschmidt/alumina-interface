@@ -1,23 +1,23 @@
-//! Platform file exchange for bounded canonical artifact bytes.
+//! Platform file exchange for bounded untrusted bytes.
 //!
-//! This module never parses or trusts an artifact. It only moves bounded bytes
-//! between the platform and an owning workspace, whose canonical replay and
-//! semantic admission remain authoritative.
+//! This module never parses or trusts a file. It only moves caller-bounded
+//! bytes between the platform and an owning workspace. Canonical artifact
+//! replay or non-canonical source import remains the owning workspace's job.
 
 use eframe::egui;
 
-pub(crate) enum CanonicalFileEvent {
+pub(crate) enum BoundedFileEvent {
     Import(Result<Vec<u8>, String>),
     Export(Result<usize, String>),
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct CanonicalFileSpec {
+pub(crate) struct BoundedFileSpec {
     label: &'static str,
     extension: &'static str,
 }
 
-impl CanonicalFileSpec {
+impl BoundedFileSpec {
     pub(crate) const fn new(label: &'static str, extension: &'static str) -> Self {
         Self { label, extension }
     }
@@ -25,20 +25,20 @@ impl CanonicalFileSpec {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
-pub(crate) struct CanonicalFileBridge {
+pub(crate) struct BoundedFileBridge {
     path: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl CanonicalFileBridge {
+impl BoundedFileBridge {
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         bytes: &[u8],
         maximum_import_bytes: usize,
         _download_name: &str,
-        spec: CanonicalFileSpec,
-    ) -> Vec<CanonicalFileEvent> {
+        spec: BoundedFileSpec,
+    ) -> Vec<BoundedFileEvent> {
         let mut events = Vec::new();
         ui.horizontal_wrapped(|ui| {
             ui.label(spec.label);
@@ -51,14 +51,14 @@ impl CanonicalFileBridge {
                 .small_button(format!("open .{}", spec.extension))
                 .clicked()
             {
-                events.push(CanonicalFileEvent::Import(read_bounded_file(
+                events.push(BoundedFileEvent::Import(read_bounded_file(
                     &self.path,
                     maximum_import_bytes,
                     spec.label,
                 )));
             }
-            if ui.small_button("save exact bytes").clicked() {
-                events.push(CanonicalFileEvent::Export(write_file(
+            if ui.small_button("save bytes").clicked() {
+                events.push(BoundedFileEvent::Export(write_file(
                     &self.path, bytes, spec.label,
                 )));
             }
@@ -112,7 +112,7 @@ fn write_file(path: &str, bytes: &[u8], label: &str) -> Result<usize, String> {
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
-pub(crate) struct CanonicalFileBridge {
+pub(crate) struct BoundedFileBridge {
     pending: Option<PendingImport>,
 }
 
@@ -127,15 +127,15 @@ struct PendingImport {
 type PendingImportResult = std::rc::Rc<std::cell::RefCell<Option<Result<Vec<u8>, String>>>>;
 
 #[cfg(target_arch = "wasm32")]
-impl CanonicalFileBridge {
+impl BoundedFileBridge {
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         bytes: &[u8],
         maximum_import_bytes: usize,
         download_name: &str,
-        spec: CanonicalFileSpec,
-    ) -> Vec<CanonicalFileEvent> {
+        spec: BoundedFileSpec,
+    ) -> Vec<BoundedFileEvent> {
         let mut events = Vec::new();
         if let Some(result) = self
             .pending
@@ -145,13 +145,13 @@ impl CanonicalFileBridge {
             if let Some(pending) = self.pending.take() {
                 pending.input.remove();
             }
-            events.push(CanonicalFileEvent::Import(result));
+            events.push(BoundedFileEvent::Import(result));
         }
         ui.horizontal_wrapped(|ui| {
             ui.label(spec.label);
-            if ui.small_button("download exact bytes").clicked() {
-                events.push(CanonicalFileEvent::Export(
-                    download_workspace(download_name, bytes).map(|()| bytes.len()),
+            if ui.small_button("download bytes").clicked() {
+                events.push(BoundedFileEvent::Export(
+                    download_bytes(download_name, bytes).map(|()| bytes.len()),
                 ));
             }
             let waiting = self.pending.is_some();
@@ -164,7 +164,7 @@ impl CanonicalFileBridge {
             {
                 match PendingImport::start(maximum_import_bytes, spec) {
                     Ok(pending) => self.pending = Some(pending),
-                    Err(error) => events.push(CanonicalFileEvent::Import(Err(error))),
+                    Err(error) => events.push(BoundedFileEvent::Import(Err(error))),
                 }
             }
             if waiting {
@@ -184,7 +184,7 @@ impl CanonicalFileBridge {
 
 #[cfg(target_arch = "wasm32")]
 impl PendingImport {
-    fn start(maximum_bytes: usize, spec: CanonicalFileSpec) -> Result<Self, String> {
+    fn start(maximum_bytes: usize, spec: BoundedFileSpec) -> Result<Self, String> {
         use wasm_bindgen::JsCast as _;
 
         let document = web_sys::window()
@@ -289,7 +289,7 @@ fn set_import_result(slot: &PendingImportResult, result: Result<Vec<u8>, String>
 }
 
 #[cfg(target_arch = "wasm32")]
-fn download_workspace(name: &str, bytes: &[u8]) -> Result<(), String> {
+fn download_bytes(name: &str, bytes: &[u8]) -> Result<(), String> {
     use wasm_bindgen::JsCast as _;
 
     let parts = js_sys::Array::new();
@@ -348,8 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn native_file_exchange_is_exact_and_import_allocation_is_bounded() {
-        let path = temporary_path("exact");
+    fn native_file_exchange_preserves_bounded_bytes() {
+        let path = temporary_path("bounded");
         let path_text = path.to_string_lossy();
         let bytes = b"ALGW canonical fixture bytes";
         assert_eq!(
