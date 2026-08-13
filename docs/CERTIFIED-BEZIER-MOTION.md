@@ -99,6 +99,14 @@ A future native Bezier, PH, or curvature-certified feed carrier may remove
 internal stops. It must replace this certificate explicitly; renderer
 tessellation cannot be promoted by convenience.
 
+The phase selector now reads the exact lookahead boundary nodes. The current
+all-zero policy therefore follows the same rest-to-rest path and emits the same
+machine schedule. A dormant positive-node branch has a separately certified
+Hyperpath two-phase monotonic transition with zero acceleration at both element
+boundaries. It remains unreachable until retained blend geometry and a policy
+for positive ceilings exist, and it is not sufficient by itself to move across
+the sharp direction changes between certified cubic chords.
+
 ## Error composition
 
 For the current path, the conservative curve-to-canonical command bound is:
@@ -141,8 +149,9 @@ enter evidence.
   cubic Beziers. Other exact families fail closed.
 - The metric schedule is two-axis Cartesian stepper motion.
 - Every certified chord boundary is a full stop. The exact two-pass planner is
-  present, but there is no retained blend geometry or nonzero-boundary jerk
-  profile across a cubic yet.
+  present and a monotonic positive-boundary phase primitive is certified, but
+  there is no retained blend geometry or enabled nonzero-feed policy across a
+  cubic yet.
 - The certificate bounds positional deviation, not tool/process clearance.
   Native source bounds still gate configured travel, while fixtures and tools
   need later job-specific clearance evidence.

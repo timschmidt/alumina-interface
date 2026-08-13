@@ -20,8 +20,8 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `08fb7fef66720b123d32cf94d3e0528eea1c83fd` | concurrent tracked edits in `src/bezier_offset.rs`, `src/bezier_region.rs`, `src/curve.rs`, and `src/curve_region_boolean.rs`; post-qualification observed diff SHA-256 `7795fb1083b66d04053d981f3c1725447a320bc58d79a7f1ecf1880cd0fc93b8` |
-| `hyperpath` | `b8b4503d92cabcc5c6917969cf293aeac0035ae4` | clean; includes exact diagonal feed length and independently replayed exact two-pass lookahead planning used here |
+| `hypercurve` | `08fb7fef66720b123d32cf94d3e0528eea1c83fd` | concurrent tracked edits in `src/bezier_offset.rs`, `src/bezier_region.rs`, `src/curve.rs`, and `src/curve_region_boolean.rs`; post-qualification observed diff SHA-256 `3d390387e0c88c85efdad6ce52b8c45fffac1230c33b1c70950d2283ca8542d3` |
+| `hyperpath` | `1e484973e25d899cc72447527fdcfeebf134d7d8` | clean; includes exact diagonal feed length, independently replayed exact two-pass lookahead, and exact monotonic nonzero-boundary jerk transitions used here |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
 | `hypersolve` | `cec630b0fb121fa6ec7fe99e9780c8f020f92d61` | clean |
 | `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
@@ -41,9 +41,10 @@ The prior certified cubic-motion artifact observed Hypercurve at the same HEAD
 with tracked diff SHA-256
 `cd562aeada7607c31b290db51bc81025fd056cbe56d75bad443283c7328941d8`; that
 artifact snapshot remains recorded in its milestone evidence. The exact
-two-pass checkpoint's final native/WASM tests, strict checks, optimized bundle,
-decompression checks, and loopback render completed against the same HEAD. The
-table records the tracked diff observed immediately after those gates.
+monotonic-jerk checkpoint's final native/WASM tests, strict checks, optimized
+bundle, decompression checks, and loopback render completed against the same
+HEAD. The table records the tracked diff observed immediately after those
+gates.
 Hypercurve advanced through multiple coherent and temporarily non-compiling
 states while this work was underway and is expected to continue changing. This
 is an observed/tested development state, not a request to hold, reset, or pin
@@ -75,6 +76,7 @@ distinct machine-budgeted pointwise certificate to Hypercurve's exact
 cubic/de Casteljau objects before constructing exact Hyperpath metric carriers;
 it does not promote a renderer mesh. Hyperpath retains exact Euclidean length
 for diagonal feed segments while leaving axis-specific ordering APIs strict.
-It also owns the exact forward/reverse squared-speed proposer and independent
-Hypersolve replay; Alumina currently supplies zero caller ceilings at every
-node.
+It also owns the exact forward/reverse squared-speed proposer, the conservative
+two-phase monotonic jerk transition for nonzero boundary feeds, and independent
+Hypersolve replay. Alumina currently supplies zero caller ceilings at every
+node, so only the existing four-phase rest-to-rest policy is reachable.

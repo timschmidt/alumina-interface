@@ -129,6 +129,23 @@ positive-radius input is only meaningful when the metric path contains the
 corresponding retained blend. Alumina does not yet construct such blends or
 permit nonzero node feeds.
 
+Phase selection nevertheless consumes those selected nodes rather than
+assuming zero implicitly. A zero/zero element uses the existing four-phase
+rest-to-rest profile. If a later internal policy supplies at least one positive
+boundary feed, the dormant branch asks Hyperpath for a conservative two-phase
+monotonic transition. For exact length `L` and boundary feeds `v0`, `v1`, both
+phases have `T = L/(v0+v1)`, the shared feed is `(v0+v1)/2`, acceleration
+returns to zero at both element boundaries, and no feed overshoot is permitted.
+Hyperpath independently replays the requested boundaries, monotonic shared
+feed, local kinematics, length sum, phase continuity, feed, acceleration, and
+jerk limits. Both-zero input remains owned by the rest-to-rest proposer.
+
+This branch is groundwork, not enabled blending. It cannot invent retained
+blend geometry, alter the all-zero caller policy, or make an infeasible short
+span pass; independent replay rejects the latter. It is not a general
+time-optimal S-curve or a jerk-aware replacement for the acceleration-only
+lookahead node selection.
+
 Each retained metric element receives a symmetric four-phase, rest-to-rest,
 constant-jerk schedule. Its phase distances are `1/12`, `5/12`, `5/12`, and
 `1/12` of the exact element length. A common phase duration is rounded upward
@@ -233,8 +250,10 @@ performed during packaging.
   policies remain fail-closed at this boundary.
 - Every metric join—including every generated cubic chord boundary—is still a
   full stop. Exact forward/reverse acceleration reachability is implemented,
-  but retained nonzero-radius blend construction and jerk profiles with
-  arbitrary nonzero boundary feeds are not implemented yet.
+  and a monotonic zero-acceleration-boundary transition exists behind the
+  disabled positive-node branch. Retained nonzero-radius blend construction,
+  jerk-aware node selection, and general time-optimal nonzero-boundary S-curves
+  are not implemented yet.
 - Scalar limits use the most conservative axis-wide envelope; direction-aware
   utilization and non-Cartesian kinematics remain future work.
 - Firmware V1 follows the certified smooth schedule through bounded

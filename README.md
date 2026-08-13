@@ -63,6 +63,12 @@ prototype.
   replays every emitted segment through the
   allocation-free production stepper executor's pulse, rate, direction,
   enable, output-grid, continuity, overflow, and terminal checks.
+- Phase construction now reads the selected lookahead boundary nodes. The
+  reachable zero/zero policy retains the original four-phase rest-to-rest
+  schedule. A separately tested but unreachable positive-node branch uses
+  Hyperpath's exact two-phase monotonic transition with zero endpoint
+  acceleration and independent construction/kinematic replay. No UI,
+  configuration, or job policy enables positive node ceilings yet.
 - Before scheduling, Hypercurve's complete native source bounding box is
   compared exactly with the uncertainty-reduced usable travel from the same
   configuration. This catches arc extrema between interpolation samples and

@@ -2,12 +2,15 @@
 //!
 //! The first schedule policy retains the exact Hypercurve source and admits a
 //! separate metric line/arc path only through lossless promotion or a bounded
-//! pointwise certificate over exact Hypercurve de Casteljau spans. Every metric join has radius zero
-//! and therefore an exact zero-feed node, including every certified cubic
-//! chord boundary. Each metric element is traversed by a four-phase symmetric
-//! constant-jerk profile. Hyperpath and Hypersolve replay every lookahead,
-//! phase, length, continuity, feed, acceleration, and jerk condition before a
-//! schedule is exposed. No sampled display chord is used as path geometry.
+//! pointwise certificate over exact Hypercurve de Casteljau spans. The current
+//! policy assigns every metric join a zero caller ceiling and zero retained
+//! radius, including every certified cubic chord boundary. Each resulting
+//! rest-to-rest metric element uses a four-phase symmetric constant-jerk
+//! profile. A dormant positive-node path delegates to Hyperpath's exact
+//! monotonic two-phase proposer, but no current caller can select it. Hyperpath
+//! and Hypersolve replay every lookahead, phase, length, continuity, feed,
+//! acceleration, and jerk condition before a schedule is exposed. No sampled
+//! display chord is used as path geometry.
 
 use std::cmp::Ordering;
 use std::error::Error as StdError;
@@ -26,6 +29,7 @@ use hyperpath::{
     LookaheadFeedSchedule, LookaheadFeedScheduleReport, MultiPhaseJerkRampFeedScheduleReport,
     PlannedLookaheadFeedSchedule, RouteCertificationError, TangentSpan,
     certify_multi_phase_jerk_ramp_feed_schedule, plan_lookahead_feed_schedule,
+    plan_monotonic_jerk_transition,
 };
 use hyperreal::{Problem, Rational, Real};
 
@@ -636,11 +640,27 @@ pub fn certify_exact_stop_jerk_schedule(
     let mut phases = Vec::with_capacity(route.len());
     let mut total_path_length_mm = Real::zero();
     let mut total_traversal_time_seconds = Real::zero();
-    for element in &route {
+    for (element_index, element) in route.iter().enumerate() {
         let length = element_length(element)?;
         total_path_length_mm += &length;
-        let element_phases =
-            symmetric_rest_to_rest_phases(&length, &limits, profile.timer_ticks_per_second())?;
+        let start_feed = if element_index == 0 {
+            &lookahead_plan.schedule.entry_feed
+        } else {
+            &lookahead_plan.schedule.corner_feeds[element_index - 1]
+        };
+        let end_feed = lookahead_plan
+            .schedule
+            .corner_feeds
+            .get(element_index)
+            .unwrap_or(&lookahead_plan.schedule.exit_feed);
+        let element_phases = phases_for_boundary_feeds(
+            element,
+            &length,
+            start_feed,
+            end_feed,
+            &limits,
+            profile.timer_ticks_per_second(),
+        )?;
         for phase in &element_phases {
             total_traversal_time_seconds += &phase.ramp.traversal_time;
         }
@@ -1146,6 +1166,43 @@ fn symmetric_rest_to_rest_phases(
     ])
 }
 
+fn phases_for_boundary_feeds(
+    element: &FeedPathElement,
+    length: &Real,
+    start_feed: &Real,
+    end_feed: &Real,
+    limits: &ScalarMotionLimits2,
+    timer_ticks_per_second: u64,
+) -> MotionScheduleResult<Vec<JerkRampPhaseProposal>> {
+    let start_is_zero = boundary_feed_is_zero(start_feed, "element start feed")?;
+    let end_is_zero = boundary_feed_is_zero(end_feed, "element end feed")?;
+    if start_is_zero && end_is_zero {
+        return symmetric_rest_to_rest_phases(length, limits, timer_ticks_per_second);
+    }
+
+    Ok(plan_monotonic_jerk_transition(
+        element,
+        start_feed.clone(),
+        end_feed.clone(),
+        limits.maximum_feed_mm_per_second.clone(),
+        limits.maximum_acceleration_mm_per_second_squared.clone(),
+        limits.maximum_jerk_mm_per_second_cubed.clone(),
+        PredicatePolicy::STRICT,
+    )?
+    .phases)
+}
+
+fn boundary_feed_is_zero(value: &Real, domain: &'static str) -> MotionScheduleResult<bool> {
+    match classify_real_sign(value, PredicatePolicy::STRICT).value() {
+        Some(Sign::Zero) => Ok(true),
+        Some(Sign::Positive) => Ok(false),
+        Some(Sign::Negative) => Err(MotionScheduleError::Route(
+            RouteCertificationError::NegativeFeedRate,
+        )),
+        None => Err(MotionScheduleError::PredicateUnresolved { domain }),
+    }
+}
+
 fn tangent_span(element: &FeedPathElement) -> MotionScheduleResult<TangentSpan> {
     match element {
         FeedPathElement::Line(line) => Ok(TangentSpan::from_line_segment(line)),
@@ -1477,5 +1534,80 @@ impl From<BoundaryError> for MotionScheduleError {
 impl From<MotionError> for MotionScheduleError {
     fn from(value: MotionError) -> Self {
         Self::ExecutorPreflight(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hyperlimit::Point2 as PredicatePoint2;
+    use hyperpath::LinePathSegment;
+
+    use super::*;
+
+    fn scalar_limits() -> ScalarMotionLimits2 {
+        ScalarMotionLimits2 {
+            maximum_feed_mm_per_second: Real::from(4),
+            maximum_acceleration_mm_per_second_squared: Real::from(1),
+            maximum_jerk_mm_per_second_cubed: Real::from(1),
+            maximum_spatial_acceleration_mm_per_second_squared: Real::from(1),
+        }
+    }
+
+    fn twelve_millimetre_line() -> FeedPathElement {
+        FeedPathElement::Line(
+            LinePathSegment::new(
+                PredicatePoint2::new(Real::zero(), Real::zero()),
+                PredicatePoint2::new(Real::from(12), Real::zero()),
+                PredicatePolicy::STRICT,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn boundary_phase_selector_preserves_current_rest_to_rest_policy() {
+        let element = twelve_millimetre_line();
+        let phases = phases_for_boundary_feeds(
+            &element,
+            &Real::from(12),
+            &Real::zero(),
+            &Real::zero(),
+            &scalar_limits(),
+            1_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(phases.len(), 4);
+        assert_eq!(phases[0].ramp.start_feed, Real::zero());
+        assert_eq!(phases[3].ramp.end_feed, Real::zero());
+    }
+
+    #[test]
+    fn boundary_phase_selector_replays_dormant_positive_node_path() {
+        let element = twelve_millimetre_line();
+        let limits = scalar_limits();
+        let phases = phases_for_boundary_feeds(
+            &element,
+            &Real::from(12),
+            &Real::from(2),
+            &Real::from(4),
+            &limits,
+            1_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].ramp.start_feed, Real::from(2));
+        assert_eq!(phases[1].ramp.end_feed, Real::from(4));
+        let report = certify_multi_phase_jerk_ramp_feed_schedule(
+            &[element],
+            &[phases],
+            limits.maximum_feed_mm_per_second,
+            limits.maximum_acceleration_mm_per_second_squared,
+            limits.maximum_jerk_mm_per_second_cubed,
+            PredicatePolicy::STRICT,
+        )
+        .unwrap();
+        assert!(report.all_satisfied());
     }
 }

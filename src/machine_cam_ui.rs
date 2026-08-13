@@ -924,6 +924,9 @@ impl MachineCamWorkspace {
             schedule.lookahead_report().spans.len(),
             schedule.jerk_report().elements.len()
         ));
+        ui.label(
+            "active phase policy: four-phase rest-to-rest at every metric element; positive node ceilings remain disabled",
+        );
         self.show_jerk_phases(ui);
     }
 
