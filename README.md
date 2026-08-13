@@ -190,6 +190,14 @@ The first typed graph and canonical replay boundary is in
 The exact-CAM development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
+The first offline board-diagnostic view now independently decodes canonical
+bounded resource overview and digital edge-capture records, reconciles them to
+the complete TinyBee capability, and cross-links ledger selection with an exact
+integer-cycle trigger plot. Its current fixture is prominently simulation-only
+and grants no board connection, measurement, lease, command, or output
+authority. See the [offline diagnostic explorer
+checkpoint](docs/OFFLINE-DIAGNOSTIC-EXPLORER.md).
+
 ## Value domains
 
 The core intentionally keeps four domains structurally separate:

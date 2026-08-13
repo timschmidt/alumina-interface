@@ -10,6 +10,7 @@
 pub mod board_explorer;
 pub mod boundary;
 pub mod compiler;
+pub mod diagnostics;
 pub mod global_job;
 pub mod graph;
 pub mod partition;
@@ -28,6 +29,9 @@ pub use compiler::{
     CanonicalPathPoint2, CanonicalPathProgram2, CanonicalTimeBoundary, MachineCompileError,
     MachineCompileResult, MotionApproximationEvidence2, MotionCompilePolicy2,
     compile_certified_chord_program, compile_representative_program,
+};
+pub use diagnostics::{
+    DiagnosticExplorerError, DiagnosticExplorerSnapshot, build_diagnostic_explorer_snapshot,
 };
 pub use global_job::{
     CanonicalGlobalJob2, CanonicalGlobalManifestChunk, GlobalJobCompileError,

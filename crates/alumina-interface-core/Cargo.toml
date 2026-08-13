@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 alumina-board.workspace = true
 alumina-capability.workspace = true
+alumina-diagnostics.workspace = true
 alumina-graph-ir.workspace = true
 alumina-job.workspace = true
 alumina-machine-ir.workspace = true
@@ -25,6 +26,7 @@ hyperreal.workspace = true
 hypersolve.workspace = true
 
 [dev-dependencies]
+alumina-sim.workspace = true
 board-mks-tinybee.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

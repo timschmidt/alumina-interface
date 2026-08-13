@@ -10,6 +10,10 @@ use alumina_board::{OwnerDomain, ResourceId, SafeValue};
 use alumina_capability::{
     BoardCapabilityLimits, MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range,
 };
+use alumina_diagnostics::{
+    CaptureQualityFlags, DiagnosticLimits, DigitalCaptureFlags, DigitalLevel, OverviewFlags,
+    ResourceValue, SampleProvenance, SampleQuality,
+};
 use alumina_interface_core::graph::{
     CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
     CanonicalGraphWorkspaceEncoding, ClockDefinition, ClockKind, ExecutionDomain,
@@ -31,8 +35,12 @@ use alumina_interface_core::graph::{
     encode_graph_probes, encode_graph_workspace, flatten_graph_hierarchy,
     graph_component_instance_prototype, graph_resource_label, replay_graph_workspace,
 };
-use alumina_interface_core::{BoardExplorerSnapshot, build_board_explorer_snapshot};
+use alumina_interface_core::{
+    BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
+    build_diagnostic_explorer_snapshot,
+};
 use alumina_protocol::{DeviceId, Digest};
+use alumina_sim::diagnostics::tinybee_diagnostic_fixture;
 use eframe::egui;
 use hyperreal::Rational;
 
@@ -53,6 +61,14 @@ const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
 const PERSISTED_WORKSPACE_PREFIX: &str = "algw1:";
 const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
+const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
+    egui::Color32::from_rgb(96, 169, 232),
+    egui::Color32::from_rgb(241, 178, 84),
+    egui::Color32::from_rgb(123, 214, 149),
+    egui::Color32::from_rgb(209, 158, 255),
+    egui::Color32::from_rgb(238, 126, 161),
+    egui::Color32::from_rgb(101, 205, 196),
+];
 #[cfg(target_arch = "wasm32")]
 pub(crate) const WORKSPACE_STORAGE_KEY: &str = "alumina.graph-workspace.algw.v1";
 const SIGNALS: [RepresentativeControlSignal; 4] = [
@@ -177,9 +193,11 @@ impl BoardResourceFilter {
 #[derive(Clone, Debug)]
 struct BoardExplorerPanel {
     snapshot: BoardExplorerSnapshot,
+    diagnostics: DiagnosticExplorerSnapshot,
     filter: BoardResourceFilter,
     search: String,
     selected: Option<ResourceId>,
+    diagnostic_cursor_offset: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +215,7 @@ impl BoardExplorerPanel {
         self.show_filters(ui);
         self.show_resource_ledger(ui);
         self.show_selected_resource(ui);
+        self.show_diagnostics(ui);
         self.show_visual_authority(ui);
         self.show_supporting_section_counts(ui);
     }
@@ -340,6 +359,21 @@ impl BoardExplorerPanel {
                                 "no graph operation"
                             },
                         );
+                        if let Some(sample) = self.diagnostics.overview_sample(id) {
+                            ui.colored_label(
+                                overview_quality_color(sample.quality),
+                                format!(
+                                    "{} {} · {:?} · age {} cycles",
+                                    provenance_short(sample.provenance),
+                                    resource_value_text(sample.value),
+                                    sample.quality,
+                                    self.diagnostics.overview_age_cycles(id).unwrap_or(0)
+                                ),
+                            );
+                        }
+                        if self.diagnostics.capture_channel_index(id).is_some() {
+                            ui.colored_label(egui::Color32::from_rgb(103, 193, 232), "captured");
+                        }
                     });
                 }
             });
@@ -390,8 +424,338 @@ impl BoardExplorerPanel {
                         );
                     }
                 }
+                if let Some(sample) = self.diagnostics.overview_sample(selected) {
+                    ui.separator();
+                    ui.colored_label(
+                        overview_quality_color(sample.quality),
+                        format!(
+                            "Overview: {} {} · {:?} · {:?} · captured cycle {} · age {} cycles",
+                            provenance_short(sample.provenance),
+                            resource_value_text(sample.value),
+                            sample.quality,
+                            sample.quality_flags,
+                            sample.captured_cycle.0,
+                            self.diagnostics
+                                .overview_age_cycles(selected)
+                                .expect("present overview sample has a canonical age")
+                        ),
+                    );
+                } else {
+                    ui.weak("No value for this resource is present in the explicit overview record.");
+                }
+                if let Some(channel) = self.diagnostics.capture_channel_index(selected) {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(103, 193, 232),
+                        format!("Digital capture channel {channel}; selecting the trace and ledger refers to the same typed resource."),
+                    );
+                } else {
+                    ui.weak("This resource is not one of the explicit digital-capture channels.");
+                }
             });
         }
+    }
+
+    fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(5.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Resource overview and digital capture");
+            ui.monospace(format!(
+                "ALMOVW01 {} B · ALMDIG01 {} B",
+                self.diagnostics.overview_bytes(),
+                self.diagnostics.capture_bytes()
+            ));
+        });
+        let context = self.diagnostics.context();
+        let simulated = self
+            .diagnostics
+            .overview_flags()
+            .contains(OverviewFlags::SIMULATED)
+            && self
+                .diagnostics
+                .capture_identity()
+                .0
+                .contains(DigitalCaptureFlags::SIMULATED);
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            if simulated {
+                "DETERMINISTIC SIMULATION — decoded evidence only; no TinyBee connection, measurement, diagnostic lease, command, or output authority."
+            } else {
+                "Decoded acquisition evidence; connection and authority remain separate state."
+            },
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(format!(
+                "device {} · boot {}… · config {}…",
+                printable_identity(&context.device_id.0),
+                byte_prefix(&context.boot_id.as_bytes(), 4),
+                digest_prefix(context.config_digest.0)
+            ));
+            ui.monospace(format!(
+                "clock {} Hz · capability {}… / {} B",
+                context.clock_frequency_hz,
+                digest_prefix(context.capability.digest.0),
+                context.capability.byte_len
+            ));
+        });
+
+        let (snapshot_cycle, sequence) = self.diagnostics.overview_position();
+        let (start_cycle, end_cycle) = self.diagnostics.capture_window();
+        let (requested_pre, requested_post) = self.diagnostics.requested_capture_window();
+        let (trigger_cycle, trigger_channel, trigger_condition, trigger_transition) =
+            self.diagnostics.trigger();
+        let (capacity, stride) = self.diagnostics.capture_retention();
+        let trigger_resource = self
+            .diagnostics
+            .capture_channels()
+            .get(usize::from(trigger_channel))
+            .map_or_else(
+                || "immediate/no channel".to_owned(),
+                |channel| graph_resource_label(channel.resource),
+            );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "Overview sequence {sequence} at cycle {} · {} explicit values",
+                snapshot_cycle.0,
+                self.diagnostics.overview_samples().len()
+            ));
+            ui.label(format!(
+                "Capture {:?} · [{}..{}) · {} transitions / {} capacity · stride {}",
+                self.diagnostics.capture_state(),
+                start_cycle.0,
+                end_cycle.0,
+                self.diagnostics.transitions().len(),
+                capacity,
+                stride
+            ));
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(241, 104, 104),
+                format!(
+                    "trigger {:?} on {trigger_resource} at cycle {} / transition {}",
+                    trigger_condition, trigger_cycle.0, trigger_transition
+                ),
+            );
+            ui.label(format!(
+                "requested pre/post {requested_pre}/{requested_post} cycles"
+            ));
+            ui.label(capture_quality_text(
+                self.diagnostics.capture_quality_flags(),
+            ));
+        });
+
+        self.show_digital_capture_plot(ui);
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::too_many_lines,
+        reason = "this is a bounded, lossy screen projection; canonical cycles remain u64 data"
+    )]
+    fn show_digital_capture_plot(&mut self, ui: &mut egui::Ui) {
+        let channel_count = self.diagnostics.capture_channels().len();
+        if channel_count == 0 {
+            ui.weak("The canonical capture has no digital channels.");
+            return;
+        }
+        let width = ui.available_width().max(360.0);
+        let height = 48.0 + 42.0 * channel_count as f32;
+        let (response, painter) =
+            ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
+        let plot = egui::Rect::from_min_max(
+            response.rect.min + egui::vec2(185.0, 12.0),
+            response.rect.max - egui::vec2(12.0, 30.0),
+        );
+        painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+        let (start_cycle, end_cycle) = self.diagnostics.capture_window();
+        let duration = end_cycle.0.saturating_sub(start_cycle.0).max(1);
+
+        if let Some(pointer) = response
+            .hover_pos()
+            .filter(|position| plot.contains(*position))
+        {
+            self.diagnostic_cursor_offset = digital_cursor_offset(plot, pointer.x, duration);
+            if response.clicked() {
+                let lane_height = plot.height() / channel_count as f32;
+                let lane = ((pointer.y - plot.top()) / lane_height)
+                    .floor()
+                    .clamp(0.0, (channel_count - 1) as f32) as usize;
+                self.selected = self
+                    .diagnostics
+                    .capture_channels()
+                    .get(lane)
+                    .map(|channel| channel.resource);
+            }
+        }
+        self.diagnostic_cursor_offset = self
+            .diagnostic_cursor_offset
+            .min(duration.saturating_sub(1));
+
+        for grid in 0..=4_u64 {
+            let offset = duration.saturating_mul(grid) / 4;
+            let x = digital_plot_x(plot, offset, duration);
+            painter.line_segment(
+                [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
+                egui::Stroke::new(0.7_f32, egui::Color32::from_gray(49)),
+            );
+            painter.text(
+                egui::pos2(x, plot.bottom() + 5.0),
+                egui::Align2::CENTER_TOP,
+                format!("{offset}"),
+                egui::FontId::monospace(9.0),
+                egui::Color32::GRAY,
+            );
+        }
+
+        let trigger_offset = self
+            .diagnostics
+            .trigger()
+            .0
+            .0
+            .saturating_sub(start_cycle.0)
+            .min(duration);
+        let trigger_x = digital_plot_x(plot, trigger_offset, duration);
+        painter.line_segment(
+            [
+                egui::pos2(trigger_x, plot.top()),
+                egui::pos2(trigger_x, plot.bottom()),
+            ],
+            egui::Stroke::new(1.7_f32, egui::Color32::from_rgb(241, 104, 104)),
+        );
+        painter.text(
+            egui::pos2(trigger_x + 3.0, plot.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            "TRIGGER",
+            egui::FontId::monospace(9.0),
+            egui::Color32::from_rgb(241, 104, 104),
+        );
+
+        let cursor_x = digital_plot_x(plot, self.diagnostic_cursor_offset, duration);
+        painter.line_segment(
+            [
+                egui::pos2(cursor_x, plot.top()),
+                egui::pos2(cursor_x, plot.bottom()),
+            ],
+            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(150)),
+        );
+
+        let lane_height = plot.height() / channel_count as f32;
+        for (index, channel) in self
+            .diagnostics
+            .capture_channels()
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let channel_index =
+                u16::try_from(index).expect("canonical capture channels fit the u16 wire index");
+            let lane_top = plot.top() + lane_height * index as f32;
+            let center = lane_top + lane_height * 0.5;
+            if index > 0 {
+                painter.line_segment(
+                    [
+                        egui::pos2(plot.left(), lane_top),
+                        egui::pos2(plot.right(), lane_top),
+                    ],
+                    egui::Stroke::new(0.6_f32, egui::Color32::from_gray(42)),
+                );
+            }
+            let selected = self.selected == Some(channel.resource);
+            let color = diagnostic_channel_color(index, selected);
+            let label = board_resource_short_label(&self.snapshot, channel.resource);
+            painter.text(
+                egui::pos2(plot.left() - 8.0, center),
+                egui::Align2::RIGHT_CENTER,
+                label,
+                egui::FontId::monospace(if selected { 11.0 } else { 10.0 }),
+                color,
+            );
+
+            let mut level = channel.initial_level;
+            let mut previous_offset = 0_u64;
+            for transition in self
+                .diagnostics
+                .transitions()
+                .iter()
+                .copied()
+                .filter(|transition| transition.channel_index == channel_index)
+            {
+                let from_x = digital_plot_x(plot, previous_offset, duration);
+                let to_x = digital_plot_x(plot, transition.offset_cycles, duration);
+                let from_y = digital_level_y(center, level);
+                let to_y = digital_level_y(center, transition.level);
+                painter.line_segment(
+                    [egui::pos2(from_x, from_y), egui::pos2(to_x, from_y)],
+                    egui::Stroke::new(if selected { 2.4_f32 } else { 1.7_f32 }, color),
+                );
+                painter.line_segment(
+                    [egui::pos2(to_x, from_y), egui::pos2(to_x, to_y)],
+                    egui::Stroke::new(if selected { 2.4_f32 } else { 1.7_f32 }, color),
+                );
+                previous_offset = transition.offset_cycles;
+                level = transition.level;
+            }
+            painter.line_segment(
+                [
+                    egui::pos2(
+                        digital_plot_x(plot, previous_offset, duration),
+                        digital_level_y(center, level),
+                    ),
+                    egui::pos2(plot.right(), digital_level_y(center, level)),
+                ],
+                egui::Stroke::new(if selected { 2.4_f32 } else { 1.7_f32 }, color),
+            );
+            let cursor_level = self
+                .diagnostics
+                .digital_level_at(channel.resource, self.diagnostic_cursor_offset)
+                .expect("capture channel has an initial level");
+            painter.circle_filled(
+                egui::pos2(cursor_x, digital_level_y(center, cursor_level)),
+                if selected { 3.8 } else { 2.7 },
+                color,
+            );
+        }
+        painter.text(
+            egui::pos2(plot.center().x, response.rect.bottom() - 2.0),
+            egui::Align2::CENTER_BOTTOM,
+            "device-cycle offset (edge record; end exclusive)",
+            egui::FontId::monospace(9.0),
+            egui::Color32::GRAY,
+        );
+
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!(
+                "cursor +{} cycles · absolute {}",
+                self.diagnostic_cursor_offset,
+                start_cycle.0.saturating_add(self.diagnostic_cursor_offset)
+            ));
+            for channel in self.diagnostics.capture_channels() {
+                let level = self
+                    .diagnostics
+                    .digital_level_at(channel.resource, self.diagnostic_cursor_offset)
+                    .expect("capture channel has an initial level");
+                ui.colored_label(
+                    diagnostic_channel_color(
+                        usize::from(
+                            self.diagnostics
+                                .capture_channel_index(channel.resource)
+                                .expect("iterated channel has an index"),
+                        ),
+                        self.selected == Some(channel.resource),
+                    ),
+                    format!(
+                        "{} {}",
+                        board_resource_short_label(&self.snapshot, channel.resource),
+                        digital_level_text(level)
+                    ),
+                );
+            }
+        });
+        ui.weak(
+            "Hover for an exact cycle cursor; click a lane to select the same typed resource in the board ledger. Rendering is a lossy view of retained integer edge records.",
+        );
     }
 
     fn show_supporting_section_counts(&self, ui: &mut egui::Ui) {
@@ -507,6 +871,148 @@ fn display_bytes(bytes: u64) -> String {
         format!("{} KiB", bytes / 1_024)
     } else {
         format!("{bytes} B")
+    }
+}
+
+const fn overview_quality_color(quality: SampleQuality) -> egui::Color32 {
+    match quality {
+        SampleQuality::Valid => egui::Color32::from_rgb(123, 214, 149),
+        SampleQuality::Stale => egui::Color32::YELLOW,
+        SampleQuality::Unavailable => egui::Color32::GRAY,
+        SampleQuality::Faulted => egui::Color32::from_rgb(241, 104, 104),
+    }
+}
+
+const fn provenance_short(provenance: SampleProvenance) -> &'static str {
+    match provenance {
+        SampleProvenance::Measured => "MEASURED",
+        SampleProvenance::Latched => "LATCHED",
+        SampleProvenance::Inferred => "INFERRED",
+        SampleProvenance::LastCommanded => "LAST-COMMANDED",
+        SampleProvenance::Simulated => "SIM",
+    }
+}
+
+fn resource_value_text(value: ResourceValue) -> String {
+    match value {
+        ResourceValue::Unavailable => "unavailable".to_owned(),
+        ResourceValue::Boolean(value) => if value { "HIGH" } else { "LOW" }.to_owned(),
+        ResourceValue::Unsigned(value) => value.to_string(),
+        ResourceValue::Signed(value) => value.to_string(),
+        ResourceValue::ExactRatio {
+            numerator,
+            denominator,
+        } => format!("{numerator}/{denominator}"),
+    }
+}
+
+fn capture_quality_text(flags: CaptureQualityFlags) -> String {
+    let mut labels = Vec::new();
+    if flags.contains(CaptureQualityFlags::OVERFLOW) {
+        labels.push("OVERFLOW");
+    }
+    if flags.contains(CaptureQualityFlags::PRETRIGGER_TRUNCATED) {
+        labels.push("PRETRIGGER TRUNCATED");
+    }
+    if flags.contains(CaptureQualityFlags::POSTTRIGGER_TRUNCATED) {
+        labels.push("POSTTRIGGER TRUNCATED");
+    }
+    if flags.contains(CaptureQualityFlags::DECIMATED) {
+        labels.push("DECIMATED");
+    }
+    if flags.contains(CaptureQualityFlags::CLOCK_UNQUALIFIED) {
+        labels.push("CLOCK UNQUALIFIED");
+    }
+    if flags.contains(CaptureQualityFlags::DISCONTINUITY) {
+        labels.push("DISCONTINUITY");
+    }
+    if flags.contains(CaptureQualityFlags::SOFTWARE_SAMPLED) {
+        labels.push("SOFTWARE SAMPLED");
+    }
+    if labels.is_empty() {
+        "quality: no loss flags".to_owned()
+    } else {
+        format!("quality: {}", labels.join(" · "))
+    }
+}
+
+fn printable_identity(bytes: &[u8]) -> String {
+    std::str::from_utf8(bytes).map_or_else(
+        |_| byte_prefix(bytes, bytes.len()),
+        |text| {
+            if text.chars().all(|character| !character.is_control()) {
+                text.to_owned()
+            } else {
+                byte_prefix(bytes, bytes.len())
+            }
+        },
+    )
+}
+
+fn byte_prefix(bytes: &[u8], count: usize) -> String {
+    let mut result = String::with_capacity(count.min(bytes.len()) * 2);
+    for byte in bytes.iter().take(count) {
+        use core::fmt::Write as _;
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
+}
+
+fn board_resource_short_label(snapshot: &BoardExplorerSnapshot, resource: ResourceId) -> String {
+    let canonical = graph_resource_label(resource);
+    snapshot
+        .resource(resource)
+        .and_then(|record| record.aliases().first())
+        .map_or(canonical.clone(), |alias| format!("{alias} · {canonical}"))
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "pointer position is a deliberately lossy screen projection onto an integer cursor"
+)]
+fn digital_cursor_offset(rect: egui::Rect, x: f32, duration: u64) -> u64 {
+    if rect.width() <= 0.0 {
+        return 0;
+    }
+    let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    (f64::from(fraction) * duration as f64).round() as u64
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "canonical integer cycles are projected only into finite f32 screen coordinates"
+)]
+fn digital_plot_x(rect: egui::Rect, offset: u64, duration: u64) -> f32 {
+    if duration == 0 {
+        rect.left()
+    } else {
+        rect.left() + rect.width() * (offset as f64 / duration as f64) as f32
+    }
+}
+
+fn diagnostic_channel_color(index: usize, selected: bool) -> egui::Color32 {
+    if selected {
+        return egui::Color32::WHITE;
+    }
+    DIAGNOSTIC_CHANNEL_COLORS[index % DIAGNOSTIC_CHANNEL_COLORS.len()]
+}
+
+const fn digital_level_y(center: f32, level: DigitalLevel) -> f32 {
+    match level {
+        DigitalLevel::Unknown => center,
+        DigitalLevel::Low => center + 8.0,
+        DigitalLevel::High => center - 8.0,
+    }
+}
+
+const fn digital_level_text(level: DigitalLevel) -> &'static str {
+    match level {
+        DigitalLevel::Unknown => "?",
+        DigitalLevel::Low => "LOW",
+        DigitalLevel::High => "HIGH",
     }
 }
 
@@ -2539,11 +3045,21 @@ fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
         BoardCapabilityLimits::interactive(),
     )
     .map_err(|error| error.to_string())?;
+    let fixture = tinybee_diagnostic_fixture().map_err(|error| format!("{error:?}"))?;
+    let diagnostics = build_diagnostic_explorer_snapshot(
+        &snapshot,
+        fixture.overview_bytes(),
+        fixture.digital_capture_bytes(),
+        DiagnosticLimits::interactive(),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(BoardExplorerPanel {
         snapshot,
+        diagnostics,
         filter: BoardResourceFilter::All,
         search: String::new(),
         selected: Some(ResourceId::Gpio(33)),
+        diagnostic_cursor_offset: 500,
     })
 }
 
@@ -3744,6 +4260,35 @@ mod tests {
         assert!(x_step.descriptor().hazardous_output);
         assert!(!x_step.is_graph_addressable());
         assert_eq!(display_bytes(8 * 1_024 * 1_024), "8 MiB");
+        assert_eq!(
+            panel.diagnostics.context().capability,
+            panel.snapshot.identity()
+        );
+        assert_eq!(panel.diagnostics.overview_bytes(), 320);
+        assert_eq!(panel.diagnostics.capture_bytes(), 512);
+        assert_eq!(panel.diagnostics.overview_samples().len(), 4);
+        assert_eq!(panel.diagnostics.capture_channels().len(), 4);
+        assert_eq!(panel.diagnostics.transitions().len(), 14);
+        assert_eq!(
+            panel
+                .diagnostics
+                .overview_sample(ResourceId::Gpio(33))
+                .unwrap()
+                .value,
+            ResourceValue::Boolean(false)
+        );
+        assert_eq!(
+            panel
+                .diagnostics
+                .digital_level_at(ResourceId::Gpio(33), panel.diagnostic_cursor_offset),
+            Some(DigitalLevel::High)
+        );
+        assert!(
+            panel
+                .diagnostics
+                .capture_quality_flags()
+                .contains(CaptureQualityFlags::CLOCK_UNQUALIFIED)
+        );
     }
 
     #[test]

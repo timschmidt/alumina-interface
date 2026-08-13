@@ -80,6 +80,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "alumina-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "alumina-board",
+ "alumina-capability",
+ "alumina-clock",
+ "alumina-protocol",
+]
+
+[[package]]
 name = "alumina-foc"
 version = "0.1.0"
 dependencies = [
@@ -104,6 +114,7 @@ dependencies = [
  "alumina-board",
  "alumina-capability",
  "alumina-clock",
+ "alumina-diagnostics",
  "alumina-interface-client",
  "alumina-interface-core",
  "alumina-job",
@@ -152,11 +163,13 @@ version = "0.1.0"
 dependencies = [
  "alumina-board",
  "alumina-capability",
+ "alumina-diagnostics",
  "alumina-graph-ir",
  "alumina-job",
  "alumina-machine-ir",
  "alumina-protocol",
  "alumina-runtime",
+ "alumina-sim",
  "alumina-storage",
  "board-mks-tinybee",
  "critical-section",
@@ -254,8 +267,11 @@ dependencies = [
 name = "alumina-sim"
 version = "0.1.0"
 dependencies = [
+ "alumina-board",
+ "alumina-capability",
  "alumina-clock",
  "alumina-config",
+ "alumina-diagnostics",
  "alumina-foc",
  "alumina-job",
  "alumina-machine-ir",
@@ -266,6 +282,7 @@ dependencies = [
  "alumina-service",
  "alumina-shift-register",
  "alumina-storage",
+ "board-mks-tinybee",
 ]
 
 [[package]]
