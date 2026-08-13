@@ -11,6 +11,7 @@ use alumina_protocol::{
 };
 
 pub mod clock;
+pub mod diagnostics;
 pub mod graph;
 pub mod http;
 pub mod schedule;
@@ -63,6 +64,11 @@ impl<T: Transport> ProtocolClient<T> {
     /// Borrow the underlying transport for deterministic inspection.
     pub const fn transport(&self) -> &T {
         &self.transport
+    }
+
+    /// Mutably borrow the transport for deterministic simulator publication.
+    pub const fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
     }
 
     /// Send one typed operation with an opaque canonical body.

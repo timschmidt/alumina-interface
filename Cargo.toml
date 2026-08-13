@@ -27,6 +27,7 @@ alumina-machine-ir = { path = "../aluminafw/crates/alumina-machine-ir" }
 alumina-net = { path = "../aluminafw/crates/alumina-net" }
 alumina-protocol = { path = "../aluminafw/crates/alumina-protocol" }
 alumina-runtime = { path = "../aluminafw/crates/alumina-runtime" }
+alumina-service = { path = "../aluminafw/crates/alumina-service" }
 alumina-sim = { path = "../aluminafw/crates/alumina-sim" }
 alumina-storage = { path = "../aluminafw/crates/alumina-storage" }
 board-mks-tinybee = { path = "../aluminafw/boards/mks-tinybee" }

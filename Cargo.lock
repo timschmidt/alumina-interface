@@ -87,6 +87,7 @@ dependencies = [
  "alumina-capability",
  "alumina-clock",
  "alumina-protocol",
+ "sha2",
 ]
 
 [[package]]
@@ -141,13 +142,17 @@ dependencies = [
 name = "alumina-interface-client"
 version = "0.1.0"
 dependencies = [
+ "alumina-board",
  "alumina-clock",
+ "alumina-diagnostics",
  "alumina-graph-ir",
  "alumina-job",
  "alumina-machine-ir",
  "alumina-net",
  "alumina-protocol",
  "alumina-runtime",
+ "alumina-service",
+ "alumina-sim",
  "alumina-storage",
  "js-sys",
  "serde",
@@ -249,6 +254,7 @@ dependencies = [
 name = "alumina-service"
 version = "0.1.0"
 dependencies = [
+ "alumina-diagnostics",
  "alumina-net",
  "alumina-protocol",
  "alumina-safety",

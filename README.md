@@ -14,8 +14,9 @@ prototype.
   metric boundary.
 - `crates/alumina-interface-client` owns the headless native protocol client,
   deterministic simulator transport, origin-bound HMAC V2 session, strict boot
-  challenge decoder, retry-safe content-addressed upload reconciliation, and a
-  WASM `fetch` adapter. Its versioned UI/worker contract carries bounded
+  challenge decoder, retry-safe content-addressed upload reconciliation,
+  context/digest-bound telemetry and capture reconciliation, and a WASM `fetch`
+  adapter. Its versioned UI/worker contract carries bounded
   commands and redacted clock snapshots; browser and native paths share
   canonical frame and response-proof validation.
 - The native/browser shell composes `ExactScene` and `ExactCamera` values and
@@ -197,6 +198,15 @@ integer-cycle trigger plot. Its current fixture is prominently simulation-only
 and grants no board connection, measurement, lease, command, or output
 authority. See the [offline diagnostic explorer
 checkpoint](docs/OFFLINE-DIAGNOSTIC-EXPLORER.md).
+
+The same canonical diagnostic records now have a typed authenticated client
+lifecycle. Subscription state exposes monotonic event/loss progress; capture
+state reconciles ambiguous configure/arm/stop responses and reconstructs a
+retained record from exact digest-bound ranges before exposing it. In-memory,
+signed HTTP-fixture, and real localhost TCP/HTTP tests pass without contacting
+the board or WLAN. This client is not yet connected to the visible worker or
+live WebSocket stream. See the [authenticated diagnostic client
+checkpoint](docs/AUTHENTICATED-DIAGNOSTIC-CLIENT.md).
 
 ## Value domains
 
