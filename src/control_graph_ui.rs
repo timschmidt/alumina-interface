@@ -6,20 +6,29 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
 use alumina_interface_core::graph::{
-    CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding,
-    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphComponentDocument,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
-    GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem, GraphFrontPanelItemId,
-    GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening, GraphHierarchyLimits,
-    GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphSimulationRegistry,
-    GraphTraceEntryKind, GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument,
-    GraphWorkspaceHistory, GraphWorkspaceLimits, NodeDefinition, NodeParameter,
-    RepresentativeControlSignal, RepresentativeExactControlGraph, TypeKind, TypedGraphValue,
+    CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
+    CanonicalGraphWorkspaceEncoding, ClockDefinition, ClockKind, ExecutionDomain,
+    ExecutionDomainSet, GraphAnalysisLimits, GraphCapabilityCatalogLimits,
+    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInstance,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    GraphDeploymentImplementation, GraphDeploymentNodeKind, GraphDeploymentRegistry,
+    GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
+    GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
+    GraphHierarchyLimits, GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype,
+    GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument,
+    GraphProbeId, GraphProbeLimits, GraphSchema, GraphSimulationRegistry, GraphTraceEntryKind,
+    GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory,
+    GraphWorkspaceLimits, NodeDefinition, NodeOutputDependency, NodeParameter,
+    NodeParameterContract, NodeSchema, PortDefinition, RepresentativeControlSignal,
+    RepresentativeExactControlGraph, ResourceClassId, TypeDefinition, TypeKind, TypedGraphValue,
     WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
-    encode_graph_component, encode_graph_hierarchy, encode_graph_workspace,
-    flatten_graph_hierarchy, graph_component_instance_prototype, replay_graph_workspace,
+    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
+    encode_graph_probes, encode_graph_workspace, flatten_graph_hierarchy,
+    graph_component_instance_prototype, graph_resource_label, replay_graph_workspace,
 };
+use alumina_protocol::{DeviceId, Digest};
 use eframe::egui;
 use hyperreal::Rational;
 
@@ -114,6 +123,22 @@ struct HierarchyPackage {
 }
 
 #[derive(Clone, Debug)]
+struct ProbePackage {
+    document: GraphProbeDocument,
+    encoding: CanonicalGraphProbeEncoding,
+}
+
+#[derive(Clone, Debug)]
+struct TargetResourceProof {
+    catalog: GraphCapabilityNodeCatalog,
+    registry: GraphDeploymentRegistry,
+    workspace: GraphWorkspaceDocument,
+    encoding: CanonicalGraphWorkspaceEncoding,
+    catalog_index: usize,
+    status: String,
+}
+
+#[derive(Clone, Debug)]
 struct ComponentPanelItem {
     name: String,
     binding: GraphFrontPanelBinding,
@@ -129,6 +154,9 @@ pub(crate) struct ExactControlWorkspace {
     workspace_encoding: CanonicalGraphWorkspaceEncoding,
     component: Option<ComponentPackage>,
     component_status: String,
+    probes: Option<ProbePackage>,
+    probe_status: String,
+    target_resources: TargetResourceProof,
     history: GraphWorkspaceHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
@@ -157,6 +185,8 @@ impl ExactControlWorkspace {
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let component = representative_component(&workspace, &fixture)?;
+        let probes = representative_probes(&workspace)?;
+        let target_resources = tinybee_resource_proof()?;
         let traces = trace_series(&fixture)?;
         let palette = control_palette(&fixture)?;
         let mut result = Self {
@@ -165,6 +195,9 @@ impl ExactControlWorkspace {
             workspace_encoding,
             component: Some(component),
             component_status: "canonical ALGC connector pane and front panel attached".to_owned(),
+            probes: Some(probes),
+            probe_status: "canonical ALGP diagnostic probes attached".to_owned(),
+            target_resources,
             history: GraphWorkspaceHistory::default(),
             presentation,
             traces,
@@ -264,6 +297,19 @@ impl ExactControlWorkspace {
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
             ));
         }
+        if let Some(probes) = &self.probes {
+            ui.label(format!(
+                "Diagnostic probes: {} bindings / {} canonical bytes",
+                probes.document.probes().len(),
+                probes.encoding.bytes().len()
+            ));
+            ui.monospace(format!(
+                "probe sidecar {}…",
+                digest_prefix(probes.encoding.digest().0)
+            ));
+        } else {
+            ui.colored_label(egui::Color32::YELLOW, &self.probe_status);
+        }
         ui.label(format!(
             "History: {} undo / {} redo · {} bytes",
             self.history.undo_len(),
@@ -355,12 +401,17 @@ impl ExactControlWorkspace {
         ui.label(&self.edit_status);
         ui.separator();
 
+        self.show_target_resources(ui);
+        ui.separator();
+
         self.show_front_panel(ui);
         ui.separator();
 
         let graph_height = (ui.available_height() * 0.5).clamp(230.0, 430.0);
         self.show_graph(ui, graph_height);
         self.show_selected_node(ui);
+        ui.separator();
+        self.show_probes(ui);
         ui.separator();
         if self.reference_trace_is_current() {
             self.show_trace(ui);
@@ -518,6 +569,7 @@ impl ExactControlWorkspace {
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.refresh_component();
+        self.refresh_probes();
         self.edit_status = format!(
             "{} canonical workspace; {semantic}",
             if redo { "redid" } else { "undid to" }
@@ -545,6 +597,83 @@ impl ExactControlWorkspace {
         if add_requested {
             self.add_palette_node();
         }
+    }
+
+    fn show_target_resources(&mut self, ui: &mut egui::Ui) {
+        let proof = &mut self.target_resources;
+        let selected = proof.catalog.entries().get(proof.catalog_index).map_or(
+            "resource unavailable".to_owned(),
+            |entry| {
+                format!(
+                    "{} · {} v{}",
+                    graph_resource_label(entry.resource().resource),
+                    short_kind(entry.kind().name()),
+                    entry.kind().version()
+                )
+            },
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("TinyBee target-I/O draft");
+            ui.monospace(format!(
+                "capability {}… · {} advertised / {} reviewed entries",
+                digest_prefix(proof.catalog.capability_identity().digest.0),
+                proof.catalog.advertised_resource_count(),
+                proof.catalog.entries().len()
+            ));
+            ui.monospace(format!(
+                "ALGW {}… · {} concrete nodes",
+                digest_prefix(proof.encoding.digest().0),
+                proof.workspace.graph().nodes().len()
+            ));
+            ui.monospace(format!(
+                "offline device {}… / config {}…",
+                digest_prefix16(proof.catalog.target().device_id.0),
+                digest_prefix(proof.catalog.target().config_digest.0)
+            ));
+        });
+        ui.label(
+            "This separate Realtime draft is derived from the exact MKS TinyBee V1 8 MiB board package and a reviewed stable-input implementation. Its device/configuration identities are explicit offline reference values, so it cannot be deployed to the connected board.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("tinybee_resource_catalog")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (index, entry) in proof.catalog.entries().iter().enumerate() {
+                        ui.selectable_value(
+                            &mut proof.catalog_index,
+                            index,
+                            format!(
+                                "{} · {:?}",
+                                graph_resource_label(entry.resource().resource),
+                                entry.resource().support
+                            ),
+                        );
+                    }
+                });
+            let already_present = proof.selected_is_present();
+            if ui
+                .add_enabled(
+                    !already_present,
+                    egui::Button::new("add concrete input node"),
+                )
+                .clicked()
+            {
+                proof.add_selected();
+            }
+            if ui.small_button("reset target draft").clicked() {
+                proof.reset();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for node in proof.workspace.graph().nodes() {
+                ui.monospace(format!("#{} {}", node.id().get(), node.label()));
+            }
+        });
+        ui.label(&proof.status);
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Only GPIO22/32/33/35 stable Boolean reads are creatable. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
+        );
     }
 
     #[allow(
@@ -1332,6 +1461,7 @@ impl ExactControlWorkspace {
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.refresh_component();
+        self.refresh_probes();
         self.edit_status = format!("{success}; {semantic}");
         true
     }
@@ -1385,6 +1515,7 @@ impl ExactControlWorkspace {
         self.persistence_dirty = false;
         self.persistence_attempted = false;
         self.refresh_component();
+        self.refresh_probes();
         Ok(())
     }
 
@@ -1400,6 +1531,32 @@ impl ExactControlWorkspace {
                 self.component_status = format!(
                     "ALGC front panel detached from this draft without affecting ALGW: {error}"
                 );
+            }
+        }
+    }
+
+    fn refresh_probes(&mut self) {
+        let result = if let Some(current) = &self.probes {
+            let mut document = current.document.clone();
+            document
+                .replace_workspace(&self.workspace)
+                .and_then(|()| {
+                    let encoding = encode_graph_probes(&document)?;
+                    Ok(ProbePackage { document, encoding })
+                })
+                .map_err(|error| error.to_string())
+        } else {
+            representative_probes(&self.workspace)
+        };
+        match result {
+            Ok(probes) => {
+                self.probes = Some(probes);
+                "canonical ALGP diagnostic probes attached".clone_into(&mut self.probe_status);
+            }
+            Err(error) => {
+                self.probes = None;
+                self.probe_status =
+                    format!("ALGP probes detached from this draft without affecting ALGW: {error}");
             }
         }
     }
@@ -1514,11 +1671,170 @@ impl ExactControlWorkspace {
         }
     }
 
+    fn show_probes(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Diagnostic probes");
+            if let Some(probes) = &self.probes {
+                ui.monospace(format!(
+                    "ALGP {}… · {} / {} bounded bindings",
+                    digest_prefix(probes.encoding.digest().0),
+                    probes.document.probes().len(),
+                    probes.document.limits().maximum_probes
+                ));
+            }
+        });
+        ui.label(
+            "These saved bindings select exact graph outputs and bound host retention only. They do not grant GPIO access, telemetry bandwidth, triggers, or firmware execution authority.",
+        );
+
+        let mut remove = None;
+        if let Some(probes) = &self.probes {
+            for probe in probes.document.probes() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(format!(
+                        "p{} {} ← #{}.{} · t{} · ≤{} values / stride {}",
+                        probe.id().get(),
+                        probe.name(),
+                        probe.source().node.get(),
+                        probe.source().port.get(),
+                        probe.value_type().get(),
+                        probe.capture().maximum_samples(),
+                        probe.capture().sample_stride()
+                    ));
+                    if ui.small_button("remove").clicked() {
+                        remove = Some(probe.id());
+                    }
+                });
+            }
+        } else {
+            ui.colored_label(egui::Color32::YELLOW, &self.probe_status);
+        }
+
+        let mut add = None;
+        if let Some(selected) = self.selected_node
+            && let Some(node) = self.workspace.graph().node(selected)
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Selected outputs");
+                for port in node.outputs() {
+                    let source = WireEndpoint {
+                        node: selected,
+                        port: port.id(),
+                    };
+                    let observed = self
+                        .probes
+                        .as_ref()
+                        .is_some_and(|probes| probes.document.observes(source));
+                    if observed {
+                        ui.weak(format!("{} already probed", port.name()));
+                    } else if ui.small_button(format!("probe {}", port.name())).clicked() {
+                        add = Some(source);
+                    }
+                }
+            });
+        }
+        ui.label(&self.probe_status);
+        if let Some(id) = remove {
+            self.remove_probe(id);
+        } else if let Some(source) = add {
+            self.add_probe(source);
+        }
+    }
+
+    fn add_probe(&mut self, source: WireEndpoint) {
+        let mut document = match &self.probes {
+            Some(probes) => probes.document.clone(),
+            None => match GraphProbeDocument::try_new(
+                GraphProbeLimits::interactive(),
+                0,
+                1,
+                &self.workspace,
+                Vec::new(),
+            ) {
+                Ok(document) => document,
+                Err(error) => {
+                    self.probe_status =
+                        format!("probe creation rejected without mutation: {error}");
+                    return;
+                }
+            },
+        };
+        let name = probe_name(source);
+        let id = match document.add_probe(
+            &self.workspace,
+            name,
+            source,
+            GraphProbeCapture::new(
+                u32::try_from(MAXIMUM_POINTS_PER_SERIES)
+                    .expect("visible trace policy fits canonical u32"),
+                1,
+            ),
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                self.probe_status = format!("probe creation rejected without mutation: {error}");
+                return;
+            }
+        };
+        let encoding = match encode_graph_probes(&document) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.probe_status = format!("probe encoding rejected without mutation: {error}");
+                return;
+            }
+        };
+        self.probes = Some(ProbePackage { document, encoding });
+        self.probe_status = format!(
+            "created bounded probe {} for #{}.{}; authoring only",
+            id.get(),
+            source.node.get(),
+            source.port.get()
+        );
+    }
+
+    fn remove_probe(&mut self, id: GraphProbeId) {
+        let Some(current) = &self.probes else {
+            "probe removal rejected without mutation: no sidecar is attached"
+                .clone_into(&mut self.probe_status);
+            return;
+        };
+        let mut document = current.document.clone();
+        if let Err(error) = document.remove_probe(&self.workspace, id) {
+            self.probe_status = format!("probe removal rejected without mutation: {error}");
+            return;
+        }
+        let encoding = match encode_graph_probes(&document) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.probe_status = format!("probe encoding rejected without mutation: {error}");
+                return;
+            }
+        };
+        self.probes = Some(ProbePackage { document, encoding });
+        self.probe_status = format!("removed probe {}; identity was not reused", id.get());
+    }
+
     fn show_trace(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.strong("Exact control trace");
-            ui.label("10 Hz clock · six retained ticks · certified f64 display enclosures");
+            ui.label("10 Hz clock · ALGP-selected series · certified f64 display enclosures");
         });
+        let traces = self
+            .traces
+            .iter()
+            .filter(|series| {
+                self.probes
+                    .as_ref()
+                    .is_some_and(|probes| probes.document.observes(series.signal.endpoint()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if traces.is_empty() {
+            ui.weak(
+                "No attached ALGP probe has samples in the canonical reference replay. Select a reference node output and add a probe.",
+            );
+            return;
+        }
         let width = ui.available_width().max(120.0);
         let (response, painter) =
             ui.allocate_painter(egui::vec2(width, 214.0), egui::Sense::hover());
@@ -1528,14 +1844,13 @@ impl ExactControlWorkspace {
         );
         painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
 
-        let maximum_tick = self
-            .traces
+        let maximum_tick = traces
             .iter()
             .flat_map(|series| series.points.iter().map(|point| point.tick))
             .max()
             .unwrap_or(1)
             .max(1);
-        let (minimum_value, maximum_value) = trace_value_bounds(&self.traces);
+        let (minimum_value, maximum_value) = trace_value_bounds(&traces);
         paint_trace_grid(&painter, plot, maximum_tick, minimum_value, maximum_value);
 
         if let Some(pointer) = response
@@ -1553,7 +1868,7 @@ impl ExactControlWorkspace {
             egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
         );
 
-        for series in &self.traces {
+        for series in &traces {
             let color = signal_color(series.signal);
             let mut line: Vec<egui::Pos2> = Vec::new();
             for point in &series.points {
@@ -1591,7 +1906,7 @@ impl ExactControlWorkspace {
 
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("tick {}", self.cursor_tick));
-            for series in &self.traces {
+            for series in &traces {
                 if let Some(point) = series
                     .points
                     .iter()
@@ -1605,6 +1920,266 @@ impl ExactControlWorkspace {
             }
         });
     }
+}
+
+impl TargetResourceProof {
+    fn selected_is_present(&self) -> bool {
+        let Some(entry) = self.catalog.entries().get(self.catalog_index) else {
+            return false;
+        };
+        let Some(expected) = entry.prototype().parameters().first() else {
+            return false;
+        };
+        self.workspace.graph().nodes().iter().any(|node| {
+            node.kind() == entry.kind()
+                && node.parameters().iter().any(|parameter| {
+                    parameter.id() == expected.id() && parameter.value() == expected.value()
+                })
+        })
+    }
+
+    fn add_selected(&mut self) {
+        let Some(entry) = self.catalog.entries().get(self.catalog_index) else {
+            "target resource creation rejected without mutation: selection is unavailable"
+                .clone_into(&mut self.status);
+            return;
+        };
+        if self.selected_is_present() {
+            "target resource already has one concrete node in this draft"
+                .clone_into(&mut self.status);
+            return;
+        }
+        let Ok(count) = i32::try_from(self.workspace.graph().nodes().len()) else {
+            "target resource creation rejected: node count exceeds canvas integer policy"
+                .clone_into(&mut self.status);
+            return;
+        };
+        let Some(x) = count
+            .checked_mul(260)
+            .and_then(|offset| offset.checked_add(28))
+        else {
+            "target resource creation rejected: canvas position overflowed"
+                .clone_into(&mut self.status);
+            return;
+        };
+        let mut candidate = self.workspace.clone();
+        let node = match candidate.create_node(entry.instantiate(), x, 28) {
+            Ok(node) => node,
+            Err(error) => {
+                self.status =
+                    format!("target resource creation rejected without mutation: {error}");
+                return;
+            }
+        };
+        if let Err(error) =
+            analyze_graph_draft(candidate.graph(), self.registry.semantic_registry())
+        {
+            self.status = format!("target resource semantics rejected without mutation: {error}");
+            return;
+        }
+        let encoding = match encode_graph_workspace(&candidate) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.status =
+                    format!("target resource encoding rejected without mutation: {error}");
+                return;
+            }
+        };
+        self.workspace = candidate;
+        self.encoding = encoding;
+        self.status = format!(
+            "created target-bound node {} from authenticated capability facts; deployment remains disabled",
+            node.get()
+        );
+    }
+
+    fn reset(&mut self) {
+        match empty_target_workspace(&self.registry).and_then(|workspace| {
+            let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+            Ok((workspace, encoding))
+        }) {
+            Ok((workspace, encoding)) => {
+                self.workspace = workspace;
+                self.encoding = encoding;
+                "reset separate target-I/O draft; no identities were sent to firmware"
+                    .clone_into(&mut self.status);
+            }
+            Err(error) => {
+                self.status = format!("target-I/O reset failed without mutation: {error}");
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the offline proof keeps its exact target schema, clocks, reviewed implementation, capability derivation, and empty draft visibly co-located"
+)]
+fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
+    const DEVICE: DeviceId = DeviceId([0x54; 16]);
+    const BOOL: GraphTypeId = GraphTypeId::new(1);
+    const STREAM: GraphTypeId = GraphTypeId::new(2);
+    const RESOURCE: GraphTypeId = GraphTypeId::new(3);
+    const ROOT: GraphClockId = GraphClockId::new(1);
+    const INPUT_CLOCK: GraphClockId = GraphClockId::new(2);
+
+    let resource_class =
+        ResourceClassId::new(board_mks_tinybee::GRAPH_STABLE_BOOLEAN_INPUT_CLASS.get());
+    let schema = GraphSchema::try_new(
+        GraphLimits::interactive(),
+        Vec::new(),
+        vec![
+            TypeDefinition::new(BOOL, "core.bool", TypeKind::Boolean),
+            TypeDefinition::new(
+                STREAM,
+                "tinybee.stream.stable-bool",
+                TypeKind::Stream {
+                    sample: BOOL,
+                    clock: INPUT_CLOCK,
+                    capacity: 1,
+                },
+            ),
+            TypeDefinition::new(
+                RESOURCE,
+                "tinybee.resource.stable-bool",
+                TypeKind::ResourceHandle {
+                    class: resource_class,
+                },
+            ),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let clocks = vec![
+        ClockDefinition::new(
+            ROOT,
+            "tinybee.reference.cpu",
+            ClockKind::DeviceCycle {
+                device_id: DEVICE,
+                ticks_per_second: 240_000_000,
+            },
+        ),
+        ClockDefinition::new(
+            INPUT_CLOCK,
+            "tinybee.reference.input-1khz",
+            ClockKind::Derived {
+                source: ROOT,
+                numerator: 1,
+                denominator: 240_000,
+            },
+        ),
+    ];
+    let context = GraphDocument::try_new(0, schema, clocks, Vec::new(), Vec::new())
+        .map_err(|error| error.to_string())?;
+    let kind = alumina_interface_core::graph::NodeKind::new("alumina.io.stable-boolean-input", 1);
+    let output = PortDefinition::new(GraphPortId::new(1), "samples", STREAM);
+    let semantic = GraphNodeRegistry::try_new(
+        GraphAnalysisLimits::interactive(),
+        &context,
+        vec![NodeSchema::new(
+            kind.clone(),
+            ExecutionDomainSet::REALTIME,
+            Vec::new(),
+            Vec::new(),
+            vec![output],
+            vec![NodeParameterContract::new(1, "resource", RESOURCE)],
+            vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
+            Vec::new(),
+            None,
+        )],
+    )
+    .map_err(|error| error.to_string())?;
+    let registry = GraphDeploymentRegistry::try_new(
+        semantic,
+        vec![GraphDeploymentImplementation::new(
+            kind,
+            GraphDeploymentNodeKind::StableBooleanInput {
+                output: GraphPortId::new(1),
+                resource_parameter: 1,
+            },
+            INPUT_CLOCK,
+            100,
+        )],
+    )
+    .map_err(|error| error.to_string())?;
+    let capability_document = tinybee_capability_document()?;
+    let target = GraphDeploymentTarget {
+        device_id: DEVICE,
+        capability_digest: board_mks_tinybee::PACKAGE.board.capability_digest,
+        config_digest: Digest([0x43; 32]),
+    };
+    let catalog = derive_graph_capability_node_catalog(
+        &capability_document,
+        target,
+        &registry,
+        GraphCapabilityCatalogLimits::interactive(),
+    )
+    .map_err(|error| error.to_string())?;
+    if catalog.entries().len() != 4 {
+        return Err(format!(
+            "TinyBee reference capability produced {} resource nodes instead of four",
+            catalog.entries().len()
+        ));
+    }
+    let workspace = empty_target_workspace(&registry)?;
+    let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+    Ok(TargetResourceProof {
+        catalog,
+        registry,
+        workspace,
+        encoding,
+        catalog_index: 0,
+        status: "digest-verified offline reference catalog ready; target draft is empty".to_owned(),
+    })
+}
+
+fn tinybee_capability_document() -> Result<Vec<u8>, String> {
+    let package = &board_mks_tinybee::PACKAGE;
+    let identity = calculate_identity(package).map_err(|error| format!("{error:?}"))?;
+    let mut document = vec![
+        0_u8;
+        usize::try_from(identity.byte_len).map_err(|_| {
+            "TinyBee capability length exceeds host usize".to_owned()
+        })?
+    ];
+    let mut offset = 0_u32;
+    while offset < identity.byte_len {
+        let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
+        let read = read_verified_range(package, offset, &mut chunk)
+            .map_err(|error| format!("{error:?}"))?;
+        if read.byte_len == 0 {
+            return Err("TinyBee capability range encoder made no progress".to_owned());
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| "TinyBee capability offset exceeds host usize".to_owned())?;
+        let count = usize::from(read.byte_len);
+        document[start..start + count].copy_from_slice(&chunk[..count]);
+        offset = offset
+            .checked_add(u32::from(read.byte_len))
+            .ok_or_else(|| "TinyBee capability offset overflowed".to_owned())?;
+    }
+    Ok(document)
+}
+
+fn empty_target_workspace(
+    registry: &GraphDeploymentRegistry,
+) -> Result<GraphWorkspaceDocument, String> {
+    let context = GraphDocument::try_new(
+        0,
+        registry.semantic_registry().context_schema().clone(),
+        registry.semantic_registry().context_clocks().to_vec(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    GraphWorkspaceDocument::try_new(
+        GraphWorkspaceLimits::interactive(),
+        0,
+        1,
+        1,
+        context,
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn control_palette(
@@ -1945,6 +2520,52 @@ fn initial_workspace(
         Some(workspace.placements()),
     )?;
     Ok((workspace, encoding, presentation))
+}
+
+fn representative_probes(workspace: &GraphWorkspaceDocument) -> Result<ProbePackage, String> {
+    let probes = SIGNALS
+        .into_iter()
+        .enumerate()
+        .map(|(index, signal)| {
+            GraphProbeDefinition::new(
+                GraphProbeId::new(
+                    u32::try_from(index + 1).expect("reference probe count fits canonical u32"),
+                ),
+                probe_name(signal.endpoint()),
+                signal.endpoint(),
+                GraphProbeCapture::new(
+                    u32::try_from(MAXIMUM_POINTS_PER_SERIES)
+                        .expect("visible trace policy fits canonical u32"),
+                    1,
+                ),
+            )
+        })
+        .collect();
+    let document = GraphProbeDocument::try_new(
+        GraphProbeLimits::interactive(),
+        1,
+        u64::try_from(SIGNALS.len() + 1).expect("reference probe count fits canonical u64"),
+        workspace,
+        probes,
+    )
+    .map_err(|error| error.to_string())?;
+    let encoding = encode_graph_probes(&document).map_err(|error| error.to_string())?;
+    Ok(ProbePackage { document, encoding })
+}
+
+fn probe_name(source: WireEndpoint) -> String {
+    SIGNALS
+        .into_iter()
+        .find(|signal| signal.endpoint() == source)
+        .map_or_else(
+            || format!("node-{}-port-{}", source.node.get(), source.port.get()),
+            |signal| match signal {
+                RepresentativeControlSignal::Error => "error".to_owned(),
+                RepresentativeControlSignal::IntegralPrior => "integral-prior".to_owned(),
+                RepresentativeControlSignal::ClampedController => "controller-clamped".to_owned(),
+                RepresentativeControlSignal::PermittedOutput => "output-permitted".to_owned(),
+            },
+        )
 }
 
 fn representative_component(
@@ -2573,12 +3194,22 @@ fn digest_prefix(digest: [u8; 32]) -> String {
     result
 }
 
+fn digest_prefix16(identity: [u8; 16]) -> String {
+    use std::fmt::Write as _;
+
+    let mut result = String::with_capacity(16);
+    for byte in &identity[..8] {
+        write!(&mut result, "{byte:02x}").expect("writing to String is infallible");
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alumina_interface_core::graph::{
         GraphLimits, GraphPortId, NodeKind, replay_graph_component, replay_graph_hierarchy,
-        replay_graph_workspace,
+        replay_graph_probes, replay_graph_workspace,
     };
 
     #[test]
@@ -2627,6 +3258,25 @@ mod tests {
         assert_eq!(replay.document(), &workspace.workspace);
         assert_eq!(replay.encoding(), &workspace.workspace_encoding);
         assert!(workspace.reference_trace_is_current());
+        let probes = workspace.probes.as_ref().unwrap();
+        assert_eq!(probes.document.probes().len(), 4);
+        assert_eq!(probes.encoding.bytes().len(), 257);
+        assert_eq!(
+            probes.encoding.digest().0,
+            [
+                0x3b, 0xbd, 0x8f, 0xf2, 0x9e, 0x11, 0x8f, 0x3f, 0x0a, 0x37, 0x88, 0x5a, 0xdf, 0x13,
+                0xe2, 0x63, 0x25, 0x2e, 0xcc, 0x01, 0x14, 0x8d, 0x50, 0xeb, 0x88, 0x05, 0x8b, 0xe1,
+                0xa1, 0xb4, 0x26, 0x51,
+            ]
+        );
+        let probe_replay = replay_graph_probes(
+            probes.encoding.bytes(),
+            &workspace.workspace,
+            GraphProbeLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(probe_replay.document(), &probes.document);
+        assert_eq!(probe_replay.encoding(), &probes.encoding);
         assert_eq!(workspace.palette.len(), 11);
         assert!(workspace.palette.iter().all(|entry| {
             workspace
@@ -2636,6 +3286,62 @@ mod tests {
                 .schema(entry.prototype.kind())
                 .is_some()
         }));
+    }
+
+    #[test]
+    fn tinybee_reference_catalog_creates_only_four_concrete_resource_nodes() {
+        let mut proof = tinybee_resource_proof().unwrap();
+        assert_eq!(proof.catalog.advertised_resource_count(), 4);
+        assert_eq!(proof.catalog.entries().len(), 4);
+        assert!(proof.workspace.graph().nodes().is_empty());
+        for index in 0..proof.catalog.entries().len() {
+            proof.catalog_index = index;
+            assert!(!proof.selected_is_present());
+            proof.add_selected();
+            assert!(proof.selected_is_present());
+        }
+        assert_eq!(proof.workspace.graph().nodes().len(), 4);
+        let retained = proof.encoding.clone();
+        proof.add_selected();
+        assert_eq!(proof.encoding, retained);
+        assert!(proof.status.contains("already"));
+        assert!(proof.workspace.graph().nodes().iter().all(|node| {
+            node.domain()
+                == ExecutionDomain::Realtime {
+                    device_id: DeviceId([0x54; 16]),
+                }
+                && matches!(
+                    node.parameters()[0].value().value(),
+                    GraphValue::ResourceHandle(_)
+                )
+        }));
+        proof.reset();
+        assert!(proof.workspace.graph().nodes().is_empty());
+        assert_eq!(proof.workspace.next_node_id(), 1);
+    }
+
+    #[test]
+    fn probe_ui_mutations_retain_canonical_sidecar_and_never_touch_graph() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let graph = workspace.workspace.clone();
+        let source = WireEndpoint {
+            node: GraphNodeId::new(16),
+            port: GraphPortId::new(3),
+        };
+        workspace.add_probe(source);
+        assert_eq!(workspace.workspace, graph);
+        let package = workspace.probes.as_ref().unwrap();
+        assert!(package.document.observes(source));
+        let id = package
+            .document
+            .probes()
+            .iter()
+            .find(|probe| probe.source() == source)
+            .unwrap()
+            .id();
+        workspace.remove_probe(id);
+        assert_eq!(workspace.workspace, graph);
+        assert!(!workspace.probes.as_ref().unwrap().document.observes(source));
     }
 
     #[test]

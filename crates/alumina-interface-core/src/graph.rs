@@ -13,11 +13,13 @@ use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
 mod analysis;
+mod capability_catalog;
 mod component;
 mod control_fixture;
 mod deployment;
 mod document;
 mod hierarchy;
+mod probe;
 mod simulation;
 mod storage;
 mod trace;
@@ -32,6 +34,10 @@ pub use analysis::{
     NodeInputChannelKind, NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract,
     NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind,
     analyze_graph, analyze_graph_draft,
+};
+pub use capability_catalog::{
+    GraphCapabilityCatalogError, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
+    GraphCapabilityNodeEntry, derive_graph_capability_node_catalog, graph_resource_label,
 };
 pub use component::{
     CanonicalGraphComponentEncoding, GRAPH_COMPONENT_MAGIC, GRAPH_COMPONENT_VERSION,
@@ -62,6 +68,11 @@ pub use hierarchy::{
     GraphHierarchyReplay, encode_graph_hierarchy, flatten_graph_hierarchy,
     graph_component_instance_input_port, graph_component_instance_output_port,
     graph_component_instance_prototype, replay_graph_hierarchy,
+};
+pub use probe::{
+    CanonicalGraphProbeEncoding, GRAPH_PROBE_MAGIC, GRAPH_PROBE_VERSION, GraphProbeCapture,
+    GraphProbeDefinition, GraphProbeDocument, GraphProbeError, GraphProbeId, GraphProbeLimits,
+    GraphProbeReplay, encode_graph_probes, replay_graph_probes,
 };
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,

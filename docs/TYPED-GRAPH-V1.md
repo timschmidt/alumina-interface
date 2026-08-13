@@ -354,6 +354,36 @@ the exact opcode, resource class, access, and selector. The physical read path
 still has no connected-board HIL or measured deadline/WCET evidence, and no
 graph opcode can drive a GPIO or motor.
 
+## Capability-derived editor nodes and bounded probes
+
+The editor no longer manufactures physical handles from a nominal pin name.
+`derive_graph_capability_node_catalog` intersects the complete authenticated
+graph-executor capability section with the separately reviewed deployment
+registry. Only a resource whose opcode, Realtime domain, class, access, and
+support all match can produce a concrete `GraphNodePrototype`. Its exact device
+and capability identities, resource class, and canonical typed selector are
+already present in the read-only parameter. Structural insertion and every
+later semantic/deployment proof still run normally.
+
+The visible TinyBee 8 MiB reference catalog therefore exposes only
+GPIO22/32/33/35 with `StableBooleanInput` access. It creates them in a separate
+Realtime workspace with explicit offline reference device/configuration
+identities. ADC, UART, timer, shifted-output, storage, other GPIO, and raw pin
+access remain closed even though the broader board descriptor knows about them.
+See [`GRAPH-CAPABILITY-CATALOG-V1.md`](GRAPH-CAPABILITY-CATALOG-V1.md).
+
+Canonical `ALGP` V1 is a bounded presentation sidecar. It binds stable probe
+IDs/names and capture-retention ceilings to exact output endpoints and one
+canonical `ALGW` digest. Replay resolves output direction and exact value type,
+enforces caller and embedded limits, and requires byte-for-byte canonical
+re-encoding. Probe add/remove/rebind operations are transactional, never reuse
+IDs, and never mutate the graph. The 257-byte four-series reference sidecar has
+SHA-256
+`3bbd8ff29e118f3f0a37885adf13e263252ecc01148d50eb88058be1a1b42651`.
+It filters immutable host trace series only; it grants no firmware read,
+telemetry, trigger, or deployment authority. See
+[`GRAPH-PROBE-V1.md`](GRAPH-PROBE-V1.md).
+
 ## Canonical bytes and replay
 
 `ALGR` format V1 uses fixed-width little-endian integers, length-prefixed UTF-8
@@ -395,10 +425,12 @@ leaf-only component instances by exact package digest and deterministically
 flattens connector wiring to an ordinary workspace using fresh monotonic IDs.
 Nested package dependencies, general cycle/depth rules, editable instance and
 panel workflows remain open. Multi-value state records, queue timeouts and
-additional policies, cases/loops/state machines, capability-generated editor
-nodes, composite/identity-bearing parameter and label/domain editors, workspace
-collaboration/conflict handling, broader resource claims, general host
+additional policies, cases/loops/state machines, capability-generated nodes
+beyond stable Boolean inputs, composite/identity-bearing parameter and
+label/domain editors, workspace collaboration/conflict handling, broader resource claims, general host
 implementation admission, measured WCET/deadline analysis, physical HIL,
-output and motion opcodes, and protocol-resource nodes remain later M9 slices.
+output and motion opcodes, live capability/configuration discovery,
+capability-negotiated telemetry/trigger capture, and protocol-resource nodes
+remain later M9 slices.
 No arbitrary graph, component, or hierarchy document is sent to or interpreted
 by firmware.

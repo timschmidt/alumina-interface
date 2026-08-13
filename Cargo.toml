@@ -52,6 +52,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+alumina-capability.workspace = true
 alumina-clock.workspace = true
 alumina-interface-client.workspace = true
 alumina-interface-core.workspace = true
@@ -60,6 +61,7 @@ alumina-machine-ir.workspace = true
 alumina-protocol.workspace = true
 alumina-sim = { path = "../aluminafw/crates/alumina-sim" }
 alumina-storage.workspace = true
+board-mks-tinybee.workspace = true
 hypergraphics.workspace = true
 hyperreal.workspace = true
 log = "0.4.27"

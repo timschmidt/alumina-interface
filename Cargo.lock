@@ -101,6 +101,7 @@ dependencies = [
 name = "alumina-interface"
 version = "0.1.0"
 dependencies = [
+ "alumina-capability",
  "alumina-clock",
  "alumina-interface-client",
  "alumina-interface-core",
@@ -109,6 +110,7 @@ dependencies = [
  "alumina-protocol",
  "alumina-sim",
  "alumina-storage",
+ "board-mks-tinybee",
  "console_error_panic_hook",
  "console_log",
  "eframe",

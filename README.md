@@ -117,6 +117,13 @@ prototype.
   component digest and deterministically flattens it to an ordinary audited
   19-node/22-wire workspace with fresh monotonic identities. V1 rejects nested
   instances outright until recursive depth/cycle authority is explicit.
+  A separate capability-derived target palette now intersects authenticated
+  firmware opcode/resource facts with the reviewed deployment registry. The
+  visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
+  into a separate Realtime draft; no broader pin/peripheral inventory is
+  inferred. Canonical `ALGP` V1 sidecars bind bounded diagnostic probes to exact
+  workspace outputs. Probe edits filter host plots without mutating the graph
+  or granting firmware telemetry/resource access.
   Plot coordinates come only from certified `f64` enclosures, and the cursor
   retains the exact rational sample. This remains editor state, not deployment
   or firmware authority. See
@@ -125,6 +132,10 @@ prototype.
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
   The component-instance/flattening boundary is in
   [`docs/GRAPH-HIERARCHY-V1.md`](docs/GRAPH-HIERARCHY-V1.md).
+  The authenticated resource-palette boundary is in
+  [`docs/GRAPH-CAPABILITY-CATALOG-V1.md`](docs/GRAPH-CAPABILITY-CATALOG-V1.md).
+  The diagnostic-probe sidecar is in
+  [`docs/GRAPH-PROBE-V1.md`](docs/GRAPH-PROBE-V1.md).
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
@@ -214,9 +225,9 @@ assets suitable for later embedding in `aluminafw`.
 ## Scope after this checkpoint
 
 The next interface milestones add supported general-curve metric compilation,
-capability-derived machine/error policy, device identity/capability discovery,
+capability-derived machine/error policy, live device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
-annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
+annotated board photography, capability-negotiated live telemetry, oscilloscope/logic-analyzer
 views, groups, nested component dependency/cycle handling, editable instance
 and library workflows, front-panel editing/execution, composite/identity-bearing parameter editing,
 label/domain editing, conflict-aware shared workspace persistence,
