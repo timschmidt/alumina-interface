@@ -104,9 +104,12 @@ prototype.
   monotonic node creation, atomic node/incident-wire deletion, node moves,
   typed wire edits, and bounded exact scalar parameter editing. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
+  Canonical replay-backed undo/redo retains bounded complete snapshots, browser
+  local storage preserves the current document, and native/browser `.algw`
+  exchange imports only after full replay plus audited UI admission.
   Plot coordinates come only from certified `f64` enclosures, and the cursor
-  retains the exact rational sample. This is an in-memory editing foundation,
-  not deployment or firmware authority. See
+  retains the exact rational sample. This remains editor state, not deployment
+  or firmware authority. See
   [`docs/GRAPH-WORKSPACE-V1.md`](docs/GRAPH-WORKSPACE-V1.md).
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
@@ -201,8 +204,8 @@ capability-derived machine/error policy, device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, bounded telemetry, oscilloscope/logic-analyzer
 views, groups/components/front panels, composite/identity-bearing parameter
-editing, label/domain editing, workspace persistence and history, broader
-deterministic host graph behaviors, and fixed-memory authenticated
+editing, label/domain editing, conflict-aware shared workspace persistence,
+broader deterministic host graph behaviors, and fixed-memory authenticated
 Service/Realtime upload/core transfer and task
 composition, additional resource opcodes and capability-generated graph nodes,
 and physical input/timing qualification. Raw G-code remains an optional exact

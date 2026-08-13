@@ -8,6 +8,7 @@ pub mod cache_delivery;
 mod control_graph_ui;
 pub mod distributed_schedule;
 pub mod m7_simulation;
+mod workspace_file;
 
 use std::sync::{Arc, Mutex};
 
@@ -24,6 +25,8 @@ use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 #[cfg(target_arch = "wasm32")]
 use crate::browser_worker::{BrowserWorkerSupervisor, SupervisorLifecycle};
 use crate::control_graph_ui::ExactControlWorkspace;
+#[cfg(target_arch = "wasm32")]
+use crate::control_graph_ui::WORKSPACE_STORAGE_KEY;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
 #[cfg(target_arch = "wasm32")]
 use alumina_interface_client::worker::{
@@ -132,8 +135,22 @@ impl RenderResources {
 }
 
 fn initialize_exact_control_workspace() -> (Option<ExactControlWorkspace>, Option<String>) {
-    match ExactControlWorkspace::try_new() {
-        Ok(workspace) => (Some(workspace), None),
+    #[cfg(target_arch = "wasm32")]
+    let persisted = load_persisted_exact_control_workspace();
+    #[cfg(not(target_arch = "wasm32"))]
+    let persisted: Result<Option<String>, String> = Ok(None);
+
+    let (persisted, persistence_error) = match persisted {
+        Ok(persisted) => (persisted, None),
+        Err(error) => (None, Some(error)),
+    };
+    match ExactControlWorkspace::try_new_with_persisted(persisted.as_deref()) {
+        Ok(mut workspace) => {
+            if let Some(error) = persistence_error {
+                workspace.note_persistence_error(&error);
+            }
+            (Some(workspace), None)
+        }
         Err(error) => (
             None,
             Some(format!("exact control workspace failed: {error}")),
@@ -654,6 +671,32 @@ impl AluminaApp {
     }
 
     #[cfg(target_arch = "wasm32")]
+    fn persist_exact_control_workspace(&mut self) {
+        let Some(workspace) = self.exact_control.as_mut() else {
+            return;
+        };
+        if !workspace.persistence_pending() {
+            return;
+        }
+        let persisted = match workspace.persisted_workspace() {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                workspace.note_persistence_error(&error);
+                return;
+            }
+        };
+        let result = browser_local_storage().and_then(|storage| {
+            storage
+                .set_item(WORKSPACE_STORAGE_KEY, &persisted)
+                .map_err(|value| browser_value_text(&value))
+        });
+        match result {
+            Ok(()) => workspace.mark_persisted(),
+            Err(error) => workspace.note_persistence_error(&error),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn apply_live_actions(&mut self, actions: Vec<(u64, bool)>) {
         for (connection_id, disconnect) in actions {
             let command = if disconnect {
@@ -789,6 +832,29 @@ fn encode_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+#[cfg(target_arch = "wasm32")]
+fn browser_local_storage() -> Result<web_sys::Storage, String> {
+    web_sys::window()
+        .ok_or_else(|| "browser window is unavailable".to_owned())?
+        .local_storage()
+        .map_err(|value| browser_value_text(&value))?
+        .ok_or_else(|| "browser local storage is unavailable".to_owned())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_persisted_exact_control_workspace() -> Result<Option<String>, String> {
+    browser_local_storage()?
+        .get_item(WORKSPACE_STORAGE_KEY)
+        .map_err(|value| browser_value_text(&value))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_value_text(value: &wasm_bindgen::JsValue) -> String {
+    value
+        .as_string()
+        .unwrap_or_else(|| format!("browser API rejected: {value:?}"))
+}
+
 impl eframe::App for AluminaApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("exact_stack_status")
@@ -823,6 +889,9 @@ impl eframe::App for AluminaApp {
                 }
             },
         });
+
+        #[cfg(target_arch = "wasm32")]
+        self.persist_exact_control_workspace();
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {

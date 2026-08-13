@@ -7,15 +7,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alumina_interface_core::graph::{
-    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphDocument, GraphNodeId,
+    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphDocument, GraphLimits, GraphNodeId,
     GraphNodePlacement, GraphNodePrototype, GraphSimulationRegistry, GraphTraceEntryKind,
-    GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceLimits,
-    NodeDefinition, NodeParameter, RepresentativeControlSignal, RepresentativeExactControlGraph,
-    TypeKind, TypedGraphValue, WireEndpoint, analyze_graph,
-    compile_representative_exact_control_graph, encode_graph_workspace,
+    GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory,
+    GraphWorkspaceLimits, NodeDefinition, NodeParameter, RepresentativeControlSignal,
+    RepresentativeExactControlGraph, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
+    compile_representative_exact_control_graph, encode_graph_workspace, replay_graph_workspace,
 };
 use eframe::egui;
 use hyperreal::Rational;
+
+use crate::workspace_file::{WorkspaceFileBridge, WorkspaceFileEvent};
 
 const MAXIMUM_VISIBLE_NODES: usize = 256;
 const MAXIMUM_VISIBLE_WIRES: usize = 1_024;
@@ -30,6 +32,10 @@ const NEW_NODE_X_GAP: i32 = 300;
 const NEW_NODE_ORIGIN: i32 = 28;
 const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
+const PERSISTED_WORKSPACE_PREFIX: &str = "algw1:";
+const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+pub(crate) const WORKSPACE_STORAGE_KEY: &str = "alumina.graph-workspace.algw.v1";
 const SIGNALS: [RepresentativeControlSignal; 4] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
@@ -92,6 +98,7 @@ pub(crate) struct ExactControlWorkspace {
     fixture: RepresentativeExactControlGraph,
     workspace: GraphWorkspaceDocument,
     workspace_encoding: CanonicalGraphWorkspaceEncoding,
+    history: GraphWorkspaceHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
     palette: Vec<NodePaletteEntry>,
@@ -101,20 +108,30 @@ pub(crate) struct ExactControlWorkspace {
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
     edit_status: String,
+    persistence_dirty: bool,
+    persistence_attempted: bool,
+    file_status: String,
+    file_bridge: WorkspaceFileBridge,
     cursor_tick: u64,
 }
 
 impl ExactControlWorkspace {
+    #[cfg(test)]
     pub(crate) fn try_new() -> Result<Self, String> {
+        Self::try_new_with_persisted(None)
+    }
+
+    pub(crate) fn try_new_with_persisted(persisted: Option<&str>) -> Result<Self, String> {
         let fixture =
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let traces = trace_series(&fixture)?;
         let palette = control_palette(&fixture)?;
-        Ok(Self {
+        let mut result = Self {
             fixture,
             workspace,
             workspace_encoding,
+            history: GraphWorkspaceHistory::default(),
             presentation,
             traces,
             palette,
@@ -124,8 +141,50 @@ impl ExactControlWorkspace {
             pending_source: None,
             drag: None,
             edit_status: "canonical workspace ready; no structural edits".to_owned(),
+            persistence_dirty: persisted.is_none(),
+            persistence_attempted: false,
+            file_status: "canonical workspace has not been exported this session".to_owned(),
+            file_bridge: WorkspaceFileBridge::default(),
             cursor_tick: 0,
-        })
+        };
+        if let Some(persisted) = persisted {
+            match decode_persisted_workspace(persisted, result.workspace.limits())
+                .and_then(|bytes| result.restore_workspace_bytes(&bytes))
+            {
+                Ok(()) => {
+                    "restored canonical ALGW from application storage"
+                        .clone_into(&mut result.edit_status);
+                }
+                Err(error) => {
+                    result.persistence_dirty = true;
+                    result.edit_status = format!(
+                        "persisted ALGW rejected; canonical reference loaded instead: {error}"
+                    );
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) const fn persistence_pending(&self) -> bool {
+        self.persistence_dirty && !self.persistence_attempted
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn persisted_workspace(&self) -> Result<String, String> {
+        encode_persisted_workspace(&self.workspace_encoding)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn mark_persisted(&mut self) {
+        self.persistence_dirty = false;
+        self.persistence_attempted = false;
+    }
+
+    pub(crate) fn note_persistence_error(&mut self, error: &str) {
+        self.persistence_attempted = true;
+        self.file_status = format!("browser persistence failed: {error}");
     }
 
     pub(crate) fn show_sidebar(&self, ui: &mut egui::Ui) {
@@ -145,6 +204,20 @@ impl ExactControlWorkspace {
             "workspace {}…",
             digest_prefix(self.workspace_encoding.digest().0)
         ));
+        ui.label(format!(
+            "History: {} undo / {} redo · {} bytes",
+            self.history.undo_len(),
+            self.history.redo_len(),
+            self.history.retained_bytes()
+        ));
+        #[cfg(target_arch = "wasm32")]
+        ui.label(if self.persistence_dirty && self.persistence_attempted {
+            "Browser persistence: failed; edit to retry"
+        } else if self.persistence_dirty {
+            "Browser persistence: pending"
+        } else {
+            "Browser persistence: canonical bytes saved"
+        });
         ui.label(format!(
             "Reference trace: {} entries / {} bytes",
             self.fixture.simulation().entries().len(),
@@ -177,6 +250,7 @@ impl ExactControlWorkspace {
     }
 
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
+        self.handle_history_shortcuts(ui);
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.heading("Exact PID / interlock");
@@ -201,6 +275,7 @@ impl ExactControlWorkspace {
         ui.label(
             "Add audited node kinds, drag headers onto the integer canvas, edit exact parameters, and connect typed ports in the in-memory ALGW draft. Secondary-click an input to disconnect. Editing never arms or commands firmware.",
         );
+        self.show_workspace_controls(ui);
         self.show_palette(ui);
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(egui::Color32::from_rgb(96, 169, 232), "— exact Stream");
@@ -232,6 +307,157 @@ impl ExactControlWorkspace {
                 "The exact trace is hidden because ALGT binds the unedited reference graph. Reset the draft or simulate a newly reviewed graph before plotting it.",
             );
         }
+    }
+
+    fn handle_history_shortcuts(&mut self, ui: &egui::Ui) {
+        if ui.ctx().wants_keyboard_input() {
+            return;
+        }
+        let (undo, redo) = ui.input(|input| {
+            let command = input.modifiers.command;
+            let undo = command && !input.modifiers.shift && input.key_pressed(egui::Key::Z);
+            let redo = command
+                && (input.key_pressed(egui::Key::Y)
+                    || (input.modifiers.shift && input.key_pressed(egui::Key::Z)));
+            (undo, redo)
+        });
+        if undo {
+            self.navigate_history(false);
+        } else if redo {
+            self.navigate_history(true);
+        }
+    }
+
+    fn show_workspace_controls(&mut self, ui: &mut egui::Ui) {
+        let mut navigate = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(self.history.can_undo(), egui::Button::new("undo"))
+                .clicked()
+            {
+                navigate = Some(false);
+            }
+            if ui
+                .add_enabled(self.history.can_redo(), egui::Button::new("redo"))
+                .clicked()
+            {
+                navigate = Some(true);
+            }
+            ui.weak(format!(
+                "{} back / {} forward · {} retained bytes",
+                self.history.undo_len(),
+                self.history.redo_len(),
+                self.history.retained_bytes()
+            ));
+        });
+        if let Some(redo) = navigate {
+            self.navigate_history(redo);
+        }
+
+        let download_name = format!(
+            "alumina-{}.algw",
+            digest_prefix(self.workspace_encoding.digest().0)
+        );
+        let events = self.file_bridge.show(
+            ui,
+            self.workspace_encoding.bytes(),
+            GraphWorkspaceLimits::interactive().maximum_workspace_bytes,
+            &download_name,
+        );
+        for event in events {
+            match event {
+                WorkspaceFileEvent::Import(Ok(bytes)) => {
+                    match self.import_workspace_bytes(&bytes) {
+                        Ok(()) => {
+                            self.file_status = format!(
+                                "imported {} canonical ALGW bytes after full replay",
+                                bytes.len()
+                            );
+                        }
+                        Err(error) => {
+                            self.file_status =
+                                format!("ALGW import rejected without mutation: {error}");
+                        }
+                    }
+                }
+                WorkspaceFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("ALGW file read rejected: {error}");
+                }
+                WorkspaceFileEvent::Export(Ok(bytes)) => {
+                    self.file_status = format!("exported {bytes} exact canonical ALGW bytes");
+                }
+                WorkspaceFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("ALGW export failed: {error}");
+                }
+            }
+        }
+        ui.weak(&self.file_status);
+    }
+
+    fn navigate_history(&mut self, redo: bool) {
+        let admission = GraphWorkspaceLimits::interactive();
+        let graph_admission = GraphLimits::interactive();
+        let preview = if redo {
+            self.history.preview_redo(admission, graph_admission)
+        } else {
+            self.history.preview_undo(admission, graph_admission)
+        };
+        let Some(preview) = (match preview {
+            Ok(preview) => preview,
+            Err(error) => {
+                self.edit_status = format!("history replay rejected without mutation: {error}");
+                return;
+            }
+        }) else {
+            self.edit_status = if redo {
+                "no later canonical workspace is retained".to_owned()
+            } else {
+                "no prior canonical workspace is retained".to_owned()
+            };
+            return;
+        };
+        let candidate = preview.document().clone();
+        let (encoding, presentation, semantic) = match self.prepare_candidate(&candidate) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.edit_status = format!("history target rejected without mutation: {error}");
+                return;
+            }
+        };
+        let navigation = if redo {
+            self.history
+                .redo(&self.workspace, admission, graph_admission)
+        } else {
+            self.history
+                .undo(&self.workspace, admission, graph_admission)
+        };
+        let replay = match navigation {
+            Ok(Some(replay)) => replay,
+            Ok(None) => {
+                "history target disappeared without mutation".clone_into(&mut self.edit_status);
+                return;
+            }
+            Err(error) => {
+                self.edit_status = format!("history navigation rejected without mutation: {error}");
+                return;
+            }
+        };
+        debug_assert_eq!(replay.encoding(), &encoding);
+        self.workspace = replay.into_document();
+        self.workspace_encoding = encoding;
+        self.presentation = presentation;
+        self.pending_source = None;
+        self.drag = None;
+        self.parameter_drafts.clear();
+        self.selected_node = self
+            .selected_node
+            .filter(|node| self.workspace.graph().node(*node).is_some());
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
+        self.edit_status = format!(
+            "{} canonical workspace; {semantic}",
+            if redo { "redid" } else { "undid to" }
+        );
     }
 
     fn show_palette(&mut self, ui: &mut egui::Ui) {
@@ -553,16 +779,16 @@ impl ExactControlWorkspace {
 
     fn reset_draft(&mut self) {
         match initial_workspace(&self.fixture) {
-            Ok((workspace, encoding, presentation)) => {
-                self.workspace = workspace;
-                self.workspace_encoding = encoding;
-                self.presentation = presentation;
-                self.selected_node = None;
-                self.pending_source = None;
-                self.drag = None;
-                self.parameter_drafts.clear();
-                "draft reset to the canonical reference graph and layout"
-                    .clone_into(&mut self.edit_status);
+            Ok((workspace, _, _)) => {
+                if self.commit_candidate(
+                    workspace,
+                    "reset draft to the canonical reference graph and layout",
+                ) {
+                    self.selected_node = None;
+                    self.pending_source = None;
+                    self.drag = None;
+                    self.parameter_drafts.clear();
+                }
             }
             Err(error) => {
                 self.edit_status = format!("draft reset failed without mutation: {error}");
@@ -782,31 +1008,21 @@ impl ExactControlWorkspace {
     }
 
     fn commit_candidate(&mut self, candidate: GraphWorkspaceDocument, success: &str) -> bool {
-        let presentation = match graph_presentation(
-            candidate.graph(),
-            self.fixture.registry(),
-            Some(candidate.placements()),
-        ) {
-            Ok(presentation) => presentation,
+        if candidate == self.workspace {
+            self.edit_status = format!("{success}; canonical workspace already matched");
+            return true;
+        }
+        let (encoding, presentation, semantic) = match self.prepare_candidate(&candidate) {
+            Ok(prepared) => prepared,
             Err(error) => {
                 self.edit_status = format!("edit rejected without mutation: {error}");
                 return false;
             }
         };
-        let encoding = match encode_graph_workspace(&candidate) {
-            Ok(encoding) => encoding,
-            Err(error) => {
-                self.edit_status = format!("edit encoding rejected without mutation: {error}");
-                return false;
-            }
-        };
-        let semantic = match analyze_graph(
-            candidate.graph(),
-            self.fixture.registry().semantic_registry(),
-        ) {
-            Ok(_) => "audited semantics valid".to_owned(),
-            Err(error) => format!("draft semantic blocker: {error}"),
-        };
+        if let Err(error) = self.history.record(self.workspace_encoding.clone()) {
+            self.edit_status = format!("edit history rejected without mutation: {error}");
+            return false;
+        }
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
@@ -818,8 +1034,82 @@ impl ExactControlWorkspace {
             .filter(|source| self.workspace.graph().node(source.node).is_some());
         self.parameter_drafts
             .retain(|(node, _), _| self.workspace.graph().node(*node).is_some());
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
         self.edit_status = format!("{success}; {semantic}");
         true
+    }
+
+    fn prepare_candidate(
+        &self,
+        candidate: &GraphWorkspaceDocument,
+    ) -> Result<(CanonicalGraphWorkspaceEncoding, GraphPresentation, String), String> {
+        let presentation = graph_presentation(
+            candidate.graph(),
+            self.fixture.registry(),
+            Some(candidate.placements()),
+        )?;
+        let encoding = encode_graph_workspace(candidate).map_err(|error| error.to_string())?;
+        let draft_analysis = analyze_graph_draft(
+            candidate.graph(),
+            self.fixture.registry().semantic_registry(),
+        )
+        .map_err(|error| format!("audited semantics rejected: {error}"))?;
+        let semantic = if let Some(first) = draft_analysis.required_unconnected_inputs().first() {
+            format!(
+                "draft semantic blocker: {} required input(s) unconnected; first {first:?}",
+                draft_analysis.required_unconnected_inputs().len()
+            )
+        } else {
+            "audited semantics valid".to_owned()
+        };
+        Ok((encoding, presentation, semantic))
+    }
+
+    fn restore_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let replay = replay_graph_workspace(
+            bytes,
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        let candidate = replay.document().clone();
+        let (encoding, presentation, _) = self.prepare_candidate(&candidate)?;
+        if replay.encoding() != &encoding {
+            return Err("replayed ALGW identity changed during UI admission".to_owned());
+        }
+        self.workspace = candidate;
+        self.workspace_encoding = encoding;
+        self.presentation = presentation;
+        self.history.clear();
+        self.selected_node = None;
+        self.pending_source = None;
+        self.drag = None;
+        self.parameter_drafts.clear();
+        self.persistence_dirty = false;
+        self.persistence_attempted = false;
+        Ok(())
+    }
+
+    fn import_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let replay = replay_graph_workspace(
+            bytes,
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        let digest = digest_prefix(replay.encoding().digest().0);
+        if self.commit_candidate(
+            replay.into_document(),
+            &format!("imported canonical ALGW {digest}…"),
+        ) {
+            self.pending_source = None;
+            self.drag = None;
+            self.parameter_drafts.clear();
+            Ok(())
+        } else {
+            Err(self.edit_status.clone())
+        }
     }
 
     fn show_selected_node(&mut self, ui: &mut egui::Ui) {
@@ -1215,6 +1505,72 @@ fn parse_parameter_text(
     };
     TypedGraphValue::try_new(document.schema(), value_type, value)
         .map_err(|error| format!("exact parameter failed schema validation: {error}"))
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn encode_persisted_workspace(
+    encoding: &CanonicalGraphWorkspaceEncoding,
+) -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let bytes = encoding.bytes();
+    if bytes.len() > MAXIMUM_PERSISTED_WORKSPACE_BYTES {
+        return Err(format!(
+            "canonical ALGW has {} bytes; browser persistence admits at most {}",
+            bytes.len(),
+            MAXIMUM_PERSISTED_WORKSPACE_BYTES
+        ));
+    }
+    let encoded_bytes = bytes
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_PREFIX.len()))
+        .ok_or_else(|| "persisted ALGW text length overflowed".to_owned())?;
+    let mut result = String::with_capacity(encoded_bytes);
+    result.push_str(PERSISTED_WORKSPACE_PREFIX);
+    for byte in bytes {
+        result.push(char::from(HEX[usize::from(byte >> 4)]));
+        result.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(result)
+}
+
+fn decode_persisted_workspace(
+    value: &str,
+    workspace_limits: GraphWorkspaceLimits,
+) -> Result<Vec<u8>, String> {
+    let encoded = value
+        .strip_prefix(PERSISTED_WORKSPACE_PREFIX)
+        .ok_or_else(|| "persisted ALGW prefix/version is unsupported".to_owned())?;
+    if !encoded.len().is_multiple_of(2) {
+        return Err("persisted ALGW hex length is odd".to_owned());
+    }
+    let maximum_bytes = workspace_limits
+        .maximum_workspace_bytes
+        .min(MAXIMUM_PERSISTED_WORKSPACE_BYTES);
+    let byte_length = encoded.len() / 2;
+    if byte_length > maximum_bytes {
+        return Err(format!(
+            "persisted ALGW exceeds the {maximum_bytes}-byte admission limit"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(byte_length);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high = canonical_hex_nibble(pair[0])
+            .ok_or_else(|| "persisted ALGW is not canonical lowercase hex".to_owned())?;
+        let low = canonical_hex_nibble(pair[1])
+            .ok_or_else(|| "persisted ALGW is not canonical lowercase hex".to_owned())?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+const fn canonical_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 fn initial_workspace(
@@ -1756,7 +2112,9 @@ fn digest_prefix(digest: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alumina_interface_core::graph::{GraphLimits, GraphPortId, replay_graph_workspace};
+    use alumina_interface_core::graph::{
+        GraphLimits, GraphPortId, NodeKind, replay_graph_workspace,
+    };
 
     #[test]
     fn representative_layout_is_bounded_acyclic_and_keeps_feedback_visible() {
@@ -1959,6 +2317,160 @@ mod tests {
                 NEW_NODE_ORIGIN,
             ))
         );
+    }
+
+    #[test]
+    fn canonical_history_drives_ui_undo_redo_and_clears_abandoned_redo() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.workspace.clone();
+        let origin = workspace.workspace.placement(GraphNodeId::new(1)).unwrap();
+        workspace.commit_node_drag(
+            NodeDrag {
+                node: GraphNodeId::new(1),
+                origin,
+            },
+            egui::vec2(20.0, 30.0),
+        );
+        let moved = workspace.workspace.clone();
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert_eq!(workspace.history.redo_len(), 0);
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.workspace, initial);
+        assert_eq!(workspace.history.undo_len(), 0);
+        assert_eq!(workspace.history.redo_len(), 1);
+        workspace.navigate_history(true);
+        assert_eq!(workspace.workspace, moved);
+
+        workspace.navigate_history(false);
+        let second_origin = workspace.workspace.placement(GraphNodeId::new(2)).unwrap();
+        workspace.commit_node_drag(
+            NodeDrag {
+                node: GraphNodeId::new(2),
+                origin: second_origin,
+            },
+            egui::vec2(-11.0, 7.0),
+        );
+        assert_eq!(workspace.history.redo_len(), 0);
+        assert!(workspace.persistence_pending());
+    }
+
+    #[test]
+    fn persistence_round_trips_only_current_canonical_workspace() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
+        assert_eq!(workspace.history.undo_len(), 1);
+        let persisted = workspace.persisted_workspace().unwrap();
+        assert!(persisted.starts_with(PERSISTED_WORKSPACE_PREFIX));
+        assert!(
+            persisted[PERSISTED_WORKSPACE_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(restored.workspace, workspace.workspace);
+        assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
+        assert_eq!(restored.history.undo_len(), 0);
+        assert_eq!(restored.history.redo_len(), 0);
+        assert!(!restored.persistence_pending());
+
+        let mut uppercase = persisted.clone();
+        let hex = &persisted[PERSISTED_WORKSPACE_PREFIX.len()..];
+        let offset = hex
+            .bytes()
+            .position(|byte| (b'a'..=b'f').contains(&byte))
+            .unwrap();
+        let persisted_offset = PERSISTED_WORKSPACE_PREFIX.len() + offset;
+        uppercase.replace_range(
+            persisted_offset..=persisted_offset,
+            &hex[offset..=offset].to_ascii_uppercase(),
+        );
+        assert!(
+            decode_persisted_workspace(&uppercase, GraphWorkspaceLimits::interactive())
+                .unwrap_err()
+                .contains("lowercase hex")
+        );
+        assert!(
+            decode_persisted_workspace(
+                "algw1:0000",
+                GraphWorkspaceLimits {
+                    maximum_workspace_bytes: 1,
+                    ..GraphWorkspaceLimits::interactive()
+                },
+            )
+            .unwrap_err()
+            .contains("admission limit")
+        );
+    }
+
+    #[test]
+    fn invalid_persistence_and_imports_fail_closed_without_losing_the_draft() {
+        let fallback = ExactControlWorkspace::try_new_with_persisted(Some("wrong:00")).unwrap();
+        assert!(fallback.edit_status.contains("persisted ALGW rejected"));
+        assert!(fallback.persistence_pending());
+        assert!(fallback.reference_trace_is_current());
+
+        let mut source = ExactControlWorkspace::try_new().unwrap();
+        source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
+        let imported_bytes = source.workspace_encoding.bytes().to_vec();
+        let mut target = ExactControlWorkspace::try_new().unwrap();
+        target.import_workspace_bytes(&imported_bytes).unwrap();
+        assert_eq!(target.workspace, source.workspace);
+        assert_eq!(target.history.undo_len(), 1);
+
+        let retained_workspace = target.workspace.clone();
+        let retained_history = target.history.clone();
+        let mut corrupt = imported_bytes;
+        corrupt[0] ^= 0xff;
+        assert!(target.import_workspace_bytes(&corrupt).is_err());
+        assert_eq!(target.workspace, retained_workspace);
+        assert_eq!(target.history, retained_history);
+
+        let exemplar = target
+            .workspace
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .clone();
+        let mut unknown = target.workspace.clone();
+        let required_wire = unknown
+            .graph()
+            .wires()
+            .iter()
+            .find(|wire| {
+                wire.target()
+                    == WireEndpoint {
+                        node: GraphNodeId::new(19),
+                        port: GraphPortId::new(1),
+                    }
+            })
+            .unwrap()
+            .id();
+        unknown.disconnect(required_wire).unwrap();
+        unknown
+            .create_node(
+                GraphNodePrototype::new(
+                    NodeKind::new("control.unreviewed", 1),
+                    "Unreviewed",
+                    exemplar.domain(),
+                    exemplar.inputs().to_vec(),
+                    exemplar.outputs().to_vec(),
+                    exemplar.parameters().to_vec(),
+                ),
+                9_000,
+                100,
+            )
+            .unwrap();
+        let unknown = encode_graph_workspace(&unknown).unwrap();
+        assert!(
+            target
+                .import_workspace_bytes(unknown.bytes())
+                .unwrap_err()
+                .contains("audited semantics rejected")
+        );
+        assert_eq!(target.workspace, retained_workspace);
+        assert_eq!(target.history, retained_history);
     }
 
     #[test]

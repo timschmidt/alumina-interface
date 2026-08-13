@@ -28,6 +28,40 @@ const GRAPH_WORKSPACE_FLAGS: u16 = 0;
 const WORKSPACE_LIMIT_FIELD_COUNT: usize = 3;
 const EXHAUSTED_U32_CURSOR: u64 = u32::MAX as u64 + 1;
 
+/// Bounded first-release undo/redo retention policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphWorkspaceHistoryLimits {
+    /// Maximum retained snapshots on each side of the current document.
+    pub maximum_snapshots_per_direction: usize,
+    /// Maximum combined canonical bytes retained by undo and redo stacks.
+    pub maximum_history_bytes: usize,
+}
+
+impl GraphWorkspaceHistoryLimits {
+    /// Interactive history policy. The current workspace is held separately
+    /// and does not count against this byte budget.
+    pub const fn interactive() -> Self {
+        Self {
+            maximum_snapshots_per_direction: 32,
+            maximum_history_bytes: 64 * 1024 * 1024,
+        }
+    }
+
+    fn validate(self) -> Result<(), GraphWorkspaceHistoryError> {
+        if self.maximum_snapshots_per_direction == 0 || self.maximum_history_bytes == 0 {
+            Err(GraphWorkspaceHistoryError::ZeroLimit)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for GraphWorkspaceHistoryLimits {
+    fn default() -> Self {
+        Self::interactive()
+    }
+}
+
 /// Caller-owned and embedded bounds for one editor workspace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphWorkspaceLimits {
@@ -606,6 +640,256 @@ pub struct GraphWorkspaceReplay {
     document: GraphWorkspaceDocument,
     encoding: CanonicalGraphWorkspaceEncoding,
 }
+
+/// Bounded canonical history around one current workspace. Snapshots are
+/// complete canonical `ALGW` bytes so navigation exercises the same replay
+/// boundary as file and browser persistence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphWorkspaceHistory {
+    limits: GraphWorkspaceHistoryLimits,
+    undo: Vec<CanonicalGraphWorkspaceEncoding>,
+    redo: Vec<CanonicalGraphWorkspaceEncoding>,
+    retained_bytes: usize,
+}
+
+impl GraphWorkspaceHistory {
+    /// Construct empty history under an explicit retention policy.
+    pub fn try_new(
+        limits: GraphWorkspaceHistoryLimits,
+    ) -> Result<Self, GraphWorkspaceHistoryError> {
+        limits.validate()?;
+        Ok(Self {
+            limits,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            retained_bytes: 0,
+        })
+    }
+
+    /// Return the retained policy.
+    pub const fn limits(&self) -> GraphWorkspaceHistoryLimits {
+        self.limits
+    }
+
+    /// Return available undo transitions.
+    pub const fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Return available redo transitions.
+    pub const fn redo_len(&self) -> usize {
+        self.redo.len()
+    }
+
+    /// Return combined canonical history bytes.
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Return whether a prior canonical document exists.
+    pub const fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Return whether a later canonical document exists.
+    pub const fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Replay the next undo target without changing navigation state.
+    pub fn preview_undo(
+        &self,
+        workspace_admission: GraphWorkspaceLimits,
+        graph_admission: GraphLimits,
+    ) -> Result<Option<GraphWorkspaceReplay>, GraphWorkspaceHistoryError> {
+        self.undo
+            .last()
+            .map(|target| {
+                replay_graph_workspace(target.bytes(), workspace_admission, graph_admission)
+                    .map_err(Into::into)
+            })
+            .transpose()
+    }
+
+    /// Replay the next redo target without changing navigation state.
+    pub fn preview_redo(
+        &self,
+        workspace_admission: GraphWorkspaceLimits,
+        graph_admission: GraphLimits,
+    ) -> Result<Option<GraphWorkspaceReplay>, GraphWorkspaceHistoryError> {
+        self.redo
+            .last()
+            .map(|target| {
+                replay_graph_workspace(target.bytes(), workspace_admission, graph_admission)
+                    .map_err(Into::into)
+            })
+            .transpose()
+    }
+
+    /// Record a successfully replaced prior workspace and clear the abandoned
+    /// redo branch. Oldest undo snapshots are evicted until both bounds hold.
+    pub fn record(
+        &mut self,
+        prior: CanonicalGraphWorkspaceEncoding,
+    ) -> Result<(), GraphWorkspaceHistoryError> {
+        if prior.bytes().len() > self.limits.maximum_history_bytes {
+            return Err(GraphWorkspaceHistoryError::SnapshotTooLarge);
+        }
+        let redo_bytes = self
+            .redo
+            .iter()
+            .try_fold(0_usize, |total, encoding| {
+                total.checked_add(encoding.bytes().len())
+            })
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        let retained_without_redo = self
+            .retained_bytes
+            .checked_sub(redo_bytes)
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        let retained_with_prior = retained_without_redo
+            .checked_add(prior.bytes().len())
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        self.redo.clear();
+        self.retained_bytes = retained_with_prior;
+        self.undo.push(prior);
+        self.enforce_limits();
+        Ok(())
+    }
+
+    /// Navigate to the newest prior workspace after independently replaying
+    /// it. Failure leaves both history and current workspace unchanged.
+    pub fn undo(
+        &mut self,
+        current: &GraphWorkspaceDocument,
+        workspace_admission: GraphWorkspaceLimits,
+        graph_admission: GraphLimits,
+    ) -> Result<Option<GraphWorkspaceReplay>, GraphWorkspaceHistoryError> {
+        let Some(target) = self.undo.last() else {
+            return Ok(None);
+        };
+        let replay = replay_graph_workspace(target.bytes(), workspace_admission, graph_admission)?;
+        let current = encode_graph_workspace(current)?;
+        if current.bytes().len() > self.limits.maximum_history_bytes {
+            return Err(GraphWorkspaceHistoryError::SnapshotTooLarge);
+        }
+        let retained_without_target = self
+            .retained_bytes
+            .checked_sub(target.bytes().len())
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        let retained_with_current = retained_without_target
+            .checked_add(current.bytes().len())
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        self.undo.pop().expect("checked nonempty undo stack");
+        self.retained_bytes = retained_with_current;
+        self.redo.push(current);
+        self.enforce_limits();
+        Ok(Some(replay))
+    }
+
+    /// Navigate to the newest later workspace after independently replaying
+    /// it. Failure leaves both history and current workspace unchanged.
+    pub fn redo(
+        &mut self,
+        current: &GraphWorkspaceDocument,
+        workspace_admission: GraphWorkspaceLimits,
+        graph_admission: GraphLimits,
+    ) -> Result<Option<GraphWorkspaceReplay>, GraphWorkspaceHistoryError> {
+        let Some(target) = self.redo.last() else {
+            return Ok(None);
+        };
+        let replay = replay_graph_workspace(target.bytes(), workspace_admission, graph_admission)?;
+        let current = encode_graph_workspace(current)?;
+        if current.bytes().len() > self.limits.maximum_history_bytes {
+            return Err(GraphWorkspaceHistoryError::SnapshotTooLarge);
+        }
+        let retained_without_target = self
+            .retained_bytes
+            .checked_sub(target.bytes().len())
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        let retained_with_current = retained_without_target
+            .checked_add(current.bytes().len())
+            .ok_or(GraphWorkspaceHistoryError::ByteAccounting)?;
+        self.redo.pop().expect("checked nonempty redo stack");
+        self.retained_bytes = retained_with_current;
+        self.undo.push(current);
+        self.enforce_limits();
+        Ok(Some(replay))
+    }
+
+    /// Clear all ephemeral navigation state without changing the current
+    /// canonical workspace.
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.retained_bytes = 0;
+    }
+
+    fn enforce_limits(&mut self) {
+        while self.undo.len() > self.limits.maximum_snapshots_per_direction {
+            let removed = self.undo.remove(0);
+            self.retained_bytes -= removed.bytes().len();
+        }
+        while self.redo.len() > self.limits.maximum_snapshots_per_direction {
+            let removed = self.redo.remove(0);
+            self.retained_bytes -= removed.bytes().len();
+        }
+        while self.retained_bytes > self.limits.maximum_history_bytes {
+            let removed = if !self.undo.is_empty() {
+                self.undo.remove(0)
+            } else if !self.redo.is_empty() {
+                self.redo.remove(0)
+            } else {
+                break;
+            };
+            self.retained_bytes -= removed.bytes().len();
+        }
+    }
+}
+
+impl Default for GraphWorkspaceHistory {
+    fn default() -> Self {
+        Self::try_new(GraphWorkspaceHistoryLimits::interactive())
+            .expect("interactive graph history limits are nonzero")
+    }
+}
+
+/// Rejection at the bounded canonical history boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphWorkspaceHistoryError {
+    /// A retention policy contained zero.
+    ZeroLimit,
+    /// One canonical snapshot alone exceeded the complete history budget.
+    SnapshotTooLarge,
+    /// Checked retained-byte accounting failed.
+    ByteAccounting,
+    /// Canonical workspace encoding or replay rejected a snapshot.
+    Workspace(GraphWorkspaceError),
+}
+
+impl From<GraphWorkspaceError> for GraphWorkspaceHistoryError {
+    fn from(value: GraphWorkspaceError) -> Self {
+        Self::Workspace(value)
+    }
+}
+
+impl fmt::Display for GraphWorkspaceHistoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroLimit => formatter.write_str("graph workspace history policy contains zero"),
+            Self::SnapshotTooLarge => {
+                formatter.write_str("canonical graph workspace snapshot exceeds history policy")
+            }
+            Self::ByteAccounting => {
+                formatter.write_str("graph workspace history byte accounting failed")
+            }
+            Self::Workspace(error) => {
+                write!(formatter, "graph workspace history rejected: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GraphWorkspaceHistoryError {}
 
 impl GraphWorkspaceReplay {
     /// Borrow the reconstructed workspace.
@@ -1371,6 +1655,136 @@ mod tests {
             .document(),
             &workspace
         );
+    }
+
+    #[test]
+    fn canonical_history_undo_redo_replays_bytes_and_new_edits_clear_the_branch() {
+        let mut current = workspace();
+        let initial = current.clone();
+        let mut history = GraphWorkspaceHistory::default();
+
+        history
+            .record(encode_graph_workspace(&current).unwrap())
+            .unwrap();
+        current.move_node(GraphNodeId::new(1), 111, 222).unwrap();
+        let moved_once = current.clone();
+        history
+            .record(encode_graph_workspace(&current).unwrap())
+            .unwrap();
+        current.move_node(GraphNodeId::new(1), 333, 444).unwrap();
+        let moved_twice = current.clone();
+
+        current = history
+            .undo(
+                &current,
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .unwrap()
+            .into_document();
+        assert_eq!(current, moved_once);
+        assert_eq!(history.undo_len(), 1);
+        assert_eq!(history.redo_len(), 1);
+
+        current = history
+            .undo(
+                &current,
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .unwrap()
+            .into_document();
+        assert_eq!(current, initial);
+        assert!(!history.can_undo());
+        assert!(history.can_redo());
+
+        current = history
+            .redo(
+                &current,
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .unwrap()
+            .into_document();
+        assert_eq!(current, moved_once);
+
+        history
+            .record(encode_graph_workspace(&current).unwrap())
+            .unwrap();
+        current.move_node(GraphNodeId::new(2), 555, 666).unwrap();
+        assert_eq!(history.redo_len(), 0);
+        assert_ne!(current, moved_twice);
+        assert_eq!(
+            history
+                .redo(
+                    &current,
+                    GraphWorkspaceLimits::interactive(),
+                    GraphLimits::interactive(),
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn history_bounds_evict_oldest_and_corrupt_snapshot_fails_without_mutation() {
+        assert_eq!(
+            GraphWorkspaceHistory::try_new(GraphWorkspaceHistoryLimits {
+                maximum_snapshots_per_direction: 0,
+                maximum_history_bytes: 1,
+            })
+            .unwrap_err(),
+            GraphWorkspaceHistoryError::ZeroLimit
+        );
+        let mut current = workspace();
+        let snapshot_bytes = encode_graph_workspace(&current).unwrap().bytes().len();
+        let mut history = GraphWorkspaceHistory::try_new(GraphWorkspaceHistoryLimits {
+            maximum_snapshots_per_direction: 2,
+            maximum_history_bytes: snapshot_bytes * 2,
+        })
+        .unwrap();
+        for coordinate in [100, 200, 300] {
+            history
+                .record(encode_graph_workspace(&current).unwrap())
+                .unwrap();
+            current
+                .move_node(GraphNodeId::new(1), coordinate, coordinate)
+                .unwrap();
+        }
+        assert_eq!(history.undo_len(), 2);
+        assert!(history.retained_bytes() <= history.limits().maximum_history_bytes);
+
+        history.undo.last_mut().unwrap().bytes[0] ^= 0xff;
+        let retained_history = history.clone();
+        let retained_current = current.clone();
+        assert!(matches!(
+            history.undo(
+                &current,
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphWorkspaceHistoryError::Workspace(
+                GraphWorkspaceError::InvalidMagic
+            ))
+        ));
+        assert_eq!(history, retained_history);
+        assert_eq!(current, retained_current);
+
+        let too_small = GraphWorkspaceHistoryLimits {
+            maximum_snapshots_per_direction: 1,
+            maximum_history_bytes: snapshot_bytes - 1,
+        };
+        let mut history = GraphWorkspaceHistory::try_new(too_small).unwrap();
+        assert_eq!(
+            history
+                .record(encode_graph_workspace(&current).unwrap())
+                .unwrap_err(),
+            GraphWorkspaceHistoryError::SnapshotTooLarge
+        );
+        assert_eq!(history.retained_bytes(), 0);
     }
 
     #[test]

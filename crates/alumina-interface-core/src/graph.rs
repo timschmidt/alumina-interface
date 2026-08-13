@@ -25,10 +25,11 @@ mod workspace;
 pub use analysis::{
     ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
     GRAPH_CHANNEL_ENVELOPE_BYTES, GraphAnalysis, GraphAnalysisError, GraphAnalysisLimits,
-    GraphChannelAllocation, GraphClockRate, GraphNodeRegistry, GraphRateTransition,
-    InputConnectionRequirement, NodeInputChannelContract, NodeInputChannelKind,
-    NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract, NodeRegistryError,
-    NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind, analyze_graph,
+    GraphChannelAllocation, GraphClockRate, GraphDraftAnalysis, GraphNodeRegistry,
+    GraphRateTransition, InputConnectionRequirement, NodeInputChannelContract,
+    NodeInputChannelKind, NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract,
+    NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind,
+    analyze_graph, analyze_graph_draft,
 };
 pub use control_fixture::{
     RepresentativeControlSignal, RepresentativeExactControlError, RepresentativeExactControlGraph,
@@ -61,6 +62,7 @@ pub use wire::{
 pub use workspace::{
     CanonicalGraphWorkspaceEncoding, GRAPH_WORKSPACE_MAGIC, GRAPH_WORKSPACE_VERSION,
     GraphNodePlacement, GraphNodePrototype, GraphWorkspaceDocument, GraphWorkspaceError,
+    GraphWorkspaceHistory, GraphWorkspaceHistoryError, GraphWorkspaceHistoryLimits,
     GraphWorkspaceLimits, GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
 };
 

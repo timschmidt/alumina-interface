@@ -252,6 +252,15 @@ display projections from certified finite `f64` enclosures; the hover cursor
 displays the retained exact rational. Headless core-edit and full-frame tests
 exercise the same native/browser paths.
 
+Bounded undo/redo stores complete canonical workspace encodings and replays a
+target before mutating navigation state. Browser origin-local storage preserves
+only the current document as versioned lowercase hex under a 2 MiB
+canonical-byte ceiling; history remains ephemeral. Browser `.algw` upload and
+download and the native explicit-path bridge exchange exact bytes under the
+20 MiB workspace ceiling. Imports additionally require layout admission and
+the fixed audited registry, allowing only a visible missing-required-input
+draft blocker rather than silently interpreting unknown behavior.
+
 The fixed host subset still does not model resource handles, physical side
 effects, Service/Realtime execution, deadlines, or firmware layout.
 
@@ -382,7 +391,7 @@ portable executor; arbitrary documents remain non-executable.
 Subgraphs/components, multi-value state records, queue timeouts and additional
 policies, cases/loops/state machines, front panels, capability-generated editor
 nodes, composite/identity-bearing parameter and label/domain editors, workspace
-history/persistence, broader resource claims, general host implementation
-admission, measured WCET/deadline analysis, physical HIL, output and motion
-opcodes, and protocol-resource nodes remain later M9 slices. No arbitrary graph
-document is sent to or interpreted by firmware.
+collaboration/conflict handling, broader resource claims, general host
+implementation admission, measured WCET/deadline analysis, physical HIL,
+output and motion opcodes, and protocol-resource nodes remain later M9 slices.
+No arbitrary graph document is sent to or interpreted by firmware.

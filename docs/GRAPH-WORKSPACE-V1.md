@@ -98,11 +98,58 @@ edit detaches and hides that trace: trace bytes are never relabeled as evidence
 for a graph they did not simulate. Reset reconstructs the reviewed reference
 graph and layout.
 
+## Canonical history
+
+Undo and redo retain complete canonical `ALGW` encodings, not mutable UI deltas
+or inverse operations. The default policy keeps at most 32 snapshots in each
+direction and at most 64 MiB across both stacks; the separately held current
+workspace does not count against that budget. The oldest snapshots are evicted
+first. A successful edit records the exact prior encoding and discards the
+abandoned redo branch.
+
+Every navigation target is replayed under the same 20 MiB workspace and
+interactive graph limits used for an imported file. The UI then rebuilds its
+layout and reruns audited semantic admission before history state changes. A
+corrupt, noncanonical, unregistered, or otherwise inadmissible target leaves
+the document and both history stacks unchanged. Navigation clears transient
+wire, drag, and parameter-text state, but preserves a selection only when that
+node still exists.
+
+History is intentionally ephemeral and is not nested inside `ALGW` or browser
+storage. This avoids recursive snapshots, keeps document identity independent
+of an editing session, and means a restored or freshly opened file begins with
+empty undo and redo stacks. Importing a different valid workspace is itself one
+undoable edit.
+
+## Persistence and file exchange
+
+The browser stores the current canonical workspace directly in origin-local
+storage after a successful edit or history transition. The storage value is
+version-tagged `algw1:` followed by canonical lowercase hexadecimal. Decoding
+rejects the wrong tag, odd length, uppercase or non-hex text, and values over a
+2 MiB canonical-byte persistence ceiling before allocating. The lower ceiling
+leaves room for the two-character-per-byte representation under common browser
+quotas; explicit files retain the 20 MiB workspace admission ceiling. Invalid
+stored state never replaces the reviewed reference workspace and is overwritten
+with that reference if storage remains available.
+
+Browser download writes the byte-for-byte canonical `ALGW` encoding to an
+`.algw` Blob. Browser upload checks the advertised file size, bounds the
+materialized `ArrayBuffer`, and forwards only bytes within policy. The native
+shell exposes an explicit path with bounded reads and exact, synchronized
+writes. Neither platform bridge parses a workspace.
+
+All opened bytes first pass canonical replay, embedded-limit checks, exact
+re-encoding, UI layout admission, and the fixed audited semantic registry. A
+required input may remain disconnected as a visible editor draft blocker;
+other semantic failures, including unknown node kinds, reject without mutation.
+Thus core `ALGW` can still preserve opaque future nodes, while this particular
+control UI never claims it can safely interpret or edit them.
+
 ## Current exclusions
 
-The workspace is currently in memory. File download/upload, browser
-persistence, undo/redo history, node label/domain editing, composite and
-identity-bearing parameter editors, selection sets, groups/comments,
-subgraphs/components, front panels, and collaborative diffs remain later
-slices. `ALGW` grants no semantic admission, implementation, Service/Realtime
-opcode, resource, deployment, safety, or physical-output authority.
+Node label/domain editing, composite and identity-bearing parameter editors,
+selection sets, groups/comments, subgraphs/components, front panels,
+collaborative diffs, and conflict-aware shared persistence remain later slices.
+`ALGW` grants no semantic admission, implementation, Service/Realtime opcode,
+resource, deployment, safety, or physical-output authority.

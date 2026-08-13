@@ -1251,6 +1251,26 @@ impl GraphAnalysis {
     }
 }
 
+/// Successful editor-draft admission after every semantic rule except required
+/// input connectivity has passed. Missing endpoints remain explicit and in
+/// canonical node/port order; this report is not executable authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphDraftAnalysis {
+    required_unconnected_inputs: Vec<WireEndpoint>,
+}
+
+impl GraphDraftAnalysis {
+    /// Borrow every required input that still needs a structural wire.
+    pub fn required_unconnected_inputs(&self) -> &[WireEndpoint] {
+        &self.required_unconnected_inputs
+    }
+
+    /// Return whether the draft also passes complete executable analysis.
+    pub const fn is_complete(&self) -> bool {
+        self.required_unconnected_inputs.is_empty()
+    }
+}
+
 /// Failure at audited node admission or current-tick dependency analysis.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GraphAnalysisError {
@@ -1446,6 +1466,37 @@ pub fn analyze_graph(
     document: &GraphDocument,
     registry: &GraphNodeRegistry,
 ) -> Result<GraphAnalysis, GraphAnalysisError> {
+    analyze_graph_with_required_input_policy(document, registry, RequiredInputPolicy::Reject)
+        .map(|(analysis, _)| analysis)
+}
+
+/// Analyze an editor draft while retaining missing required inputs as visible
+/// blockers. Unknown kinds, shape/domain contradictions, storage/channel/rate
+/// failures, and combinational cycles still reject. This is deliberately a
+/// different result type from [`GraphAnalysis`] so a partial draft cannot be
+/// mistaken for executable authority.
+pub fn analyze_graph_draft(
+    document: &GraphDocument,
+    registry: &GraphNodeRegistry,
+) -> Result<GraphDraftAnalysis, GraphAnalysisError> {
+    let (_, required_unconnected_inputs) =
+        analyze_graph_with_required_input_policy(document, registry, RequiredInputPolicy::Retain)?;
+    Ok(GraphDraftAnalysis {
+        required_unconnected_inputs,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum RequiredInputPolicy {
+    Reject,
+    Retain,
+}
+
+fn analyze_graph_with_required_input_policy(
+    document: &GraphDocument,
+    registry: &GraphNodeRegistry,
+    required_input_policy: RequiredInputPolicy,
+) -> Result<(GraphAnalysis, Vec<WireEndpoint>), GraphAnalysisError> {
     if document.schema() != registry.context_schema()
         || document.clocks() != registry.context_clocks()
     {
@@ -1458,6 +1509,7 @@ pub fn analyze_graph(
         .iter()
         .map(|wire| (wire.target(), (wire.source(), wire.id())))
         .collect();
+    let mut required_unconnected_inputs = Vec::new();
     let mut schemas = Vec::with_capacity(document.nodes().len());
     let mut state_allocations = Vec::new();
     let mut total_declared_state_bytes = 0_usize;
@@ -1482,7 +1534,14 @@ pub fn analyze_graph(
             };
             let Some((source, wire)) = connections.get(&target).copied() else {
                 if channel.requirement == InputConnectionRequirement::Required {
-                    return Err(GraphAnalysisError::RequiredInputUnconnected(target));
+                    match required_input_policy {
+                        RequiredInputPolicy::Reject => {
+                            return Err(GraphAnalysisError::RequiredInputUnconnected(target));
+                        }
+                        RequiredInputPolicy::Retain => {
+                            required_unconnected_inputs.push(target);
+                        }
+                    }
                 }
                 continue;
             };
@@ -1584,19 +1643,22 @@ pub fn analyze_graph(
     if let Some(cycle) = find_cycle(&adjacency, registry.limits.maximum_cycle_witness_links)? {
         return Err(GraphAnalysisError::CombinationalCycle(cycle));
     }
-    Ok(GraphAnalysis {
-        admitted_nodes: document.nodes().len(),
-        dependency_links,
-        total_declared_state_bytes,
-        total_required_state_bytes,
-        state_allocations,
-        type_storage_bounds,
-        total_channel_bytes,
-        channel_allocations,
-        clock_rates,
-        rate_transitions,
-        total_rate_transition_state_bytes,
-    })
+    Ok((
+        GraphAnalysis {
+            admitted_nodes: document.nodes().len(),
+            dependency_links,
+            total_declared_state_bytes,
+            total_required_state_bytes,
+            state_allocations,
+            type_storage_bounds,
+            total_channel_bytes,
+            channel_allocations,
+            clock_rates,
+            rate_transitions,
+            total_rate_transition_state_bytes,
+        },
+        required_unconnected_inputs,
+    ))
 }
 
 fn resolve_clock_rates(
@@ -2624,6 +2686,36 @@ mod tests {
             analyze_graph(&required_document, &required_registry),
             Err(GraphAnalysisError::RequiredInputUnconnected(endpoint(1, 1)))
         );
+        let draft = analyze_graph_draft(&required_document, &required_registry).unwrap();
+        assert_eq!(draft.required_unconnected_inputs(), &[endpoint(1, 1)]);
+        assert!(!draft.is_complete());
+
+        let missing_then_unknown = GraphDocument::try_new(
+            0,
+            graph_schema(),
+            vec![clock()],
+            vec![
+                node(
+                    1,
+                    "test.sink",
+                    vec![port(1, "value")],
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                node(2, "test.unknown", Vec::new(), Vec::new(), Vec::new()),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            analyze_graph(&missing_then_unknown, &required_registry),
+            Err(GraphAnalysisError::RequiredInputUnconnected(endpoint(1, 1)))
+        );
+        assert!(matches!(
+            analyze_graph_draft(&missing_then_unknown, &required_registry),
+            Err(GraphAnalysisError::UnresolvedNode { node, .. })
+                if node == GraphNodeId::new(2)
+        ));
 
         let optional_sink = NodeSchema::new(
             NodeKind::new("test.sink", 1),
