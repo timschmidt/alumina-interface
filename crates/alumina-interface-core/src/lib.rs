@@ -82,7 +82,8 @@ pub use machine_profile::{
 pub use motion_schedule::{
     CanonicalScheduledProgram2, CertifiedJerkSchedule2, CertifiedTravelEnvelope2,
     MotionScheduleError, MotionScheduleResult, ScalarMotionLimits2, ScheduledLoweringEvidence2,
-    ScheduledLoweringLimits, ScheduledMachinePoint2, TravelBoundary, certify_jerk_schedule,
+    ScheduledLoweringLimits, ScheduledMachinePoint2, TimerDilationPolicy,
+    TimerLatticeScheduleReport2, TravelBoundary, certify_jerk_schedule,
     lower_certified_schedule_to_v1,
 };
 pub use partition::{

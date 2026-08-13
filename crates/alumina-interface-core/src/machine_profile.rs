@@ -490,7 +490,7 @@ pub struct MachineResolutionBudget2 {
     command_lattice_error_mm: Real,
     calibration_error_mm: Real,
     following_error_mm: Real,
-    timer_position_error_mm: Real,
+    output_grid_position_error_mm: Real,
     required_total_error_mm: Real,
 }
 
@@ -551,9 +551,10 @@ impl MachineResolutionBudget2 {
         let calibration_error_mm = vector_norm2(&calibration_axis)?;
         let following_error_mm = vector_norm2(&following_axis)?;
         let maximum_vector_velocity_mm_per_second = vector_norm2(&velocity_axis_mm)?;
-        let half_tick_seconds =
-            (Real::one() / (Real::from(2) * Real::from(profile.timer_ticks_per_second())))?;
-        let timer_position_error_mm = maximum_vector_velocity_mm_per_second * half_tick_seconds;
+        let output_quantum_seconds = (Real::from(profile.output_quantum_cycles())
+            / Real::from(profile.timer_ticks_per_second()))?;
+        let output_grid_position_error_mm =
+            maximum_vector_velocity_mm_per_second * output_quantum_seconds;
         let requested_total_error_mm_exact = requested_total_error_mm;
         let source_curve_allocation_mm_exact = source_curve_allocation_mm;
         let controller_interpolation_allocation_mm_exact = controller_interpolation_allocation_mm;
@@ -566,7 +567,7 @@ impl MachineResolutionBudget2 {
             + command_lattice_error_mm.clone()
             + calibration_error_mm.clone()
             + following_error_mm.clone()
-            + timer_position_error_mm.clone();
+            + output_grid_position_error_mm.clone();
         match compare_reals(
             &required_total_error_mm,
             &requested_total_error_mm,
@@ -588,7 +589,7 @@ impl MachineResolutionBudget2 {
                 command_lattice_error_mm,
                 calibration_error_mm,
                 following_error_mm,
-                timer_position_error_mm,
+                output_grid_position_error_mm,
                 required_total_error_mm,
             }),
             Some(Ordering::Greater) => Err(MachineProfileError::ErrorBudgetExceeded),
@@ -661,9 +662,14 @@ impl MachineResolutionBudget2 {
         &self.following_error_mm
     }
 
-    /// Half-tick positional component at maximum vector velocity.
-    pub const fn timer_position_error_mm(&self) -> &Real {
-        &self.timer_position_error_mm
+    /// One-output-quantum positional component at maximum vector velocity.
+    ///
+    /// Timer lowering ceilings each factor-scaled interval, so its retained
+    /// grid-only padding is strictly below this duration. Intentional exact
+    /// schedule dilation is reported separately and is not misclassified as a
+    /// spatial approximation error.
+    pub const fn output_grid_position_error_mm(&self) -> &Real {
+        &self.output_grid_position_error_mm
     }
 
     /// Sum proven no greater than the requested total.
@@ -892,8 +898,8 @@ mod tests {
         MachineCompileError, MotionCompilePolicy2, compile_certified_chord_program,
     };
     use crate::motion_schedule::{
-        MotionScheduleError, ScheduledLoweringLimits, TravelBoundary, certify_jerk_schedule,
-        lower_certified_schedule_to_v1,
+        MotionScheduleError, ScheduledLoweringLimits, TimerDilationPolicy, TravelBoundary,
+        certify_jerk_schedule, lower_certified_schedule_to_v1,
     };
     use crate::partition::{
         MachinePartitionError, MachinePartitionPolicy2, package_canonical_scheduled_program,
@@ -911,6 +917,7 @@ mod tests {
         FactEvidence, Rational as ConfigurationRational, SignalPolarity,
     };
     use alumina_machine_ir::{BlockValidationLimits, EXECUTION_BLOCK_BYTES, ValidationLimits};
+    use alumina_motion::MotionError;
     use alumina_sim::motion::{CachedStepperReplayError, replay_cached_stepper_partition};
     use alumina_storage::{CacheLimits, UploadId, sha256};
     use hypercurve::{
@@ -1178,7 +1185,7 @@ mod tests {
             budget.command_lattice_error_mm(),
             budget.calibration_error_mm(),
             budget.following_error_mm(),
-            budget.timer_position_error_mm(),
+            budget.output_grid_position_error_mm(),
         ] {
             assert!(matches!(
                 compare_reals(component, &Real::zero(), PredicatePolicy::STRICT).value(),
@@ -1563,17 +1570,13 @@ mod tests {
 
     #[test]
     fn exact_diagonal_g1_uses_dense_axis_projection_and_lowers_to_terminal_steps() {
-        let mut records = machine_records();
-        for record in &mut records {
-            let ConfigurationRecord::Scalar(scalar) = record else {
-                continue;
-            };
-            if scalar.fact == ScalarFact::AxisVelocityLimitMetresPerSecond {
-                scalar.value = wire_rational(1, 1_000);
-                scalar.uncertainty = wire_rational(0, 1);
-            }
+        let profile = profile_from(&machine_records()).unwrap();
+        for axis in profile.axes() {
+            assert_eq!(
+                axis.effective_velocity_limit_metres_per_second(),
+                axis.step_rate_velocity_limit_metres_per_second()
+            );
         }
-        let profile = profile_from(&records).unwrap();
         let source = CurvePath2::try_new(vec![
             Curve2::new(CurveGeometry2::Line(
                 LineSeg2::try_new(
@@ -1650,6 +1653,26 @@ mod tests {
         assert!(schedule.lookahead_plan().all_satisfied());
         assert!(schedule.jerk_report().all_satisfied());
 
+        let no_dilation = ScheduledLoweringLimits::try_new_with_timer_dilation(
+            ScheduledLoweringLimits::INTERACTIVE.maximum_points(),
+            TimerDilationPolicy::try_new(1, 1).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            lower_certified_schedule_to_v1(
+                &schedule,
+                &profile,
+                &budget,
+                Rational::fraction(1, 1_000).unwrap(),
+                no_dilation,
+            ),
+            Err(MotionScheduleError::TimerDilationBudgetExceeded {
+                maximum_factor_numerator: 1,
+                factor_denominator: 1,
+                rejection: MotionError::PulseBoundary { axis: 1 },
+            })
+        ));
+
         let lowered = lower_certified_schedule_to_v1(
             &schedule,
             &profile,
@@ -1662,7 +1685,87 @@ mod tests {
             lowered.points().last().unwrap().steps(),
             [CanonicalStep::new(9_600), CanonicalStep::new(12_800)]
         );
+        let timer_lattice = lowered.evidence().timer_lattice_schedule();
+        assert_eq!(timer_lattice.selected_factor_numerator(), 4_158);
+        assert_eq!(timer_lattice.selected_factor_denominator(), 4_096);
+        assert_eq!(timer_lattice.maximum_factor_numerator(), 65_536);
+        assert_eq!(
+            timer_lattice.selected_factor(),
+            Rational::fraction(2_079, 2_048).unwrap()
+        );
+        assert_eq!(timer_lattice.candidate_replays(), 20);
+        assert_eq!(
+            timer_lattice.unit_factor_rejection(),
+            Some(MotionError::PulseBoundary { axis: 1 })
+        );
+        assert_eq!(
+            timer_lattice.predecessor_rejection(),
+            Some(MotionError::Rate { axis: 1 })
+        );
+        assert!(
+            timer_lattice.scheduled_total_time_seconds() > timer_lattice.ideal_total_time_seconds()
+        );
+        assert!(
+            timer_lattice.maximum_output_grid_padding_seconds()
+                < &(Real::one() / Real::from(profile.timer_ticks_per_second())).unwrap()
+        );
         assert!(lowered.executor_preflight().segment_count > 0);
+    }
+
+    #[test]
+    fn timer_lowering_rounds_each_interval_up_to_the_exact_output_grid() {
+        let mut records = machine_records();
+        for record in &mut records {
+            let ConfigurationRecord::Scalar(scalar) = record else {
+                continue;
+            };
+            if scalar.fact == ScalarFact::StepperOutputQuantumCycles {
+                scalar.value = wire_rational(4, 1);
+            }
+        }
+        let profile = profile_from(&records).unwrap();
+        let source = representative_metric_path().unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+
+        for pair in lowered.points().windows(2) {
+            let duration_cycles = pair[1].tick().get() - pair[0].tick().get();
+            assert!(duration_cycles.is_multiple_of(4));
+            let actual_duration = (Real::from(duration_cycles)
+                / Real::from(profile.timer_ticks_per_second()))
+            .unwrap();
+            let ideal_duration = pair[1].ideal_time_seconds() - pair[0].ideal_time_seconds();
+            assert!(actual_duration >= ideal_duration);
+        }
+        let timer_lattice = lowered.evidence().timer_lattice_schedule();
+        assert!(
+            timer_lattice.maximum_output_grid_padding_seconds()
+                < &(Real::from(4) / Real::from(profile.timer_ticks_per_second())).unwrap()
+        );
+        assert_eq!(
+            lowered.executor_preflight().end_tick.0,
+            lowered.points().last().unwrap().tick().get()
+        );
     }
 
     #[test]
@@ -1949,6 +2052,14 @@ mod tests {
         assert!(matches!(
             ScheduledLoweringLimits::try_new(1),
             Err(MotionScheduleError::InvalidLoweringLimits)
+        ));
+        assert!(matches!(
+            TimerDilationPolicy::try_new(0, 1),
+            Err(MotionScheduleError::InvalidTimerDilationPolicy)
+        ));
+        assert!(matches!(
+            TimerDilationPolicy::try_new(2, 1),
+            Err(MotionScheduleError::InvalidTimerDilationPolicy)
         ));
     }
 

@@ -45,17 +45,21 @@ prototype.
   transmission facts, uncertainty intervals, travel, pulse-rate ceiling,
   velocity/acceleration/jerk/following limits, device clock, and backend output
   quantum. A machine-wide resolution certificate composes source and controller
-  allocations with endpoint, DDA, calibration, following, and half-tick
-  position bounds before scheduling.
+  allocations with endpoint, DDA, calibration, following, and one-output-quantum
+  position bounds before scheduling. Intentional replay-proved time dilation is
+  reported separately rather than mislabeled as spatial error.
 - For an all-line metric route, Hyperpath now projects every dense axis's exact
   velocity, acceleration, and jerk limits through the retained constant
   `|dq_i/ds|`. It selects route-wide scalar minima, retains the first exact
   feed/acceleration/jerk bottleneck, and replays every span/axis inequality plus
   those equalities through Hypersolve. A 3-4-5 diagonal regression obtains the
-  exact `5/4` utilization factor and lowers through production preflight under
-  an explicitly configured electrical-rate margin. Mixed curved routes keep
-  the earlier conservative direction-independent envelope until their
-  higher-derivative terms are certified.
+  exact `5/4` utilization factor. At the exact continuous electrical ceiling,
+  factor one is rejected by production preflight; one-sided interval
+  quantization and a bounded `1/4096` rational-factor search select exactly
+  `4158/4096`, prove the immediately smaller candidate fails, and lower to the
+  expected terminal steps. Mixed curved routes keep the earlier conservative
+  direction-independent envelope until their higher-derivative terms are
+  certified.
 - The machine compiler preserves lines/arcs losslessly and reduces a polynomial
   cubic only under an exact pointwise positional certificate, a 16,384-element
   bound, and a depth bound. Hyperpath now derives speed nodes with exact
@@ -68,9 +72,11 @@ prototype.
   chord boundary remain exact stops. The browser evaluates this dedicated
   metric path—not renderer chords—while subdividing those phases under the
   exact `A*dt²/8` interpolation bound. It rounds only at the configured
-  step/tick lattices, rejects any phase that would exceed the caller-owned
-  131,072-point interactive allocation before fallible reservation, and then
-  replays every emitted segment through the
+  step/output lattices, rejects any phase that would exceed the caller-owned
+  131,072-point interactive allocation before fallible reservation, then
+  rounds each ideal interval upward to the exact output quantum and searches a
+  caller-bounded rational time-dilation lattice through complete production
+  replays. It replays every emitted segment through the
   allocation-free production stepper executor's pulse, rate, direction,
   enable, output-grid, continuity, overflow, and terminal checks.
 - Phase construction reads the selected lookahead boundary nodes. A zero/zero
@@ -80,8 +86,10 @@ prototype.
   kinematic replay. Dedicated exact-line tests lower positive G1 motion through
   production executor preflight; curvature-bearing joins remain disabled. A
   projected continuous limit which lands exactly on an electrical pulse ceiling
-  is still allowed to fail later timer-lattice preflight; the compiler does not
-  invent unproved rounding headroom.
+  now receives only replay-proved timer-lattice headroom: factor one and the
+  immediately smaller factor-grid candidate remain retained failures, while an
+  exhausted caller ceiling still fails closed. No arbitrary floating-point
+  margin is inserted.
 - Before scheduling, Hypercurve's complete native source bounding box is
   compared exactly with the uncertainty-reduced usable travel from the same
   configuration. This catches arc extrema between interpolation samples and
@@ -95,7 +103,9 @@ prototype.
   source-to-motion certificate, physical/error policy, executor results, and
   content-addressed partition identities. The same
   representative test binary compiles for WASM. This remains software evidence,
-  not TinyBee timing or motion qualification.
+  not TinyBee timing or motion qualification. V2 binds the resulting canonical
+  stream but not every affine/lookahead/jerk/timer-search decision row; a new V3
+  transcript is the next evidence boundary rather than a compatibility layer.
 - The shell now opens an offline Machine/CAM inspector by default. One
   canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
   travel proof, resolution-budget decomposition, retained-path diagnostic

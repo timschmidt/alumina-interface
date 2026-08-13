@@ -96,7 +96,12 @@ envelope contains all of the following conservative components:
 - Euclidean one-step DDA tracking error within a segment;
 - command-density/calibration uncertainty over the complete usable travel;
 - configured following error; and
-- half a device tick of position at the maximum vector velocity.
+- one complete output quantum of position at the maximum vector velocity.
+
+The last component bounds the strictly smaller grid-only padding introduced by
+one-sided interval ceiling. A selected exact time-dilation factor changes the
+canonical reference schedule intentionally and is reported as time policy, not
+silently charged to a spatial approximation budget.
 
 An all-line/arc path uses no source-curve approximation, so its actual bound is
 zero even when the machine policy reserves a positive allocation. A general
@@ -134,8 +139,9 @@ metric carrier is a line. Its exact Cartesian derivatives are
 the scalar limit of two equal X/Y axes to rise by exactly `5/4`, rather than
 discarding usable vector capacity through the old axis minimum. The dedicated
 two-line G1 regression retains that exact ratio, independently replays four
-span/axis rows, and lowers to terminal steps `[9600, 12800]` under an explicitly
-configured velocity below the electrical ceiling.
+span/axis rows, and lowers to terminal steps `[9600, 12800]` from the exact
+continuous electrical ceiling through the replay-proved timer-lattice factor
+`4158/4096`.
 
 This affine formula is deliberately not applied to arcs or nonlinear
 kinematics. Those cases also contain higher derivatives of the coordinate map.
@@ -212,21 +218,24 @@ maximum_spatial_acceleration × interval_time² / 8
 
 Every certified metric line or arc is evaluated exactly at the resulting path
 fractions. The selected point retains both its original source index and its
-motion-element index. Coordinates and cumulative times are then independently
-rounded to the configured step and tick lattices. A subdivision may
-legitimately quantize to zero steps while consuming time; this is an
-intentional hold segment, not a dropped part of the schedule. Collapsed tick
-boundaries, integer overflow, or an unresolved interpolation predicate reject
-the lowering.
+motion-element index. Coordinates are rounded to the configured step lattice.
+Timer lowering treats each retained ideal interval independently: after an
+exact rational dilation factor is applied, its duration is ceiled to an integer
+multiple of the configured output quantum. Consequently no emitted interval is
+shorter than its retained ideal interval. A subdivision may legitimately
+quantize to zero steps while consuming time; this is an intentional hold
+segment, not a dropped part of the schedule. Integer overflow or an unresolved
+interpolation/timer predicate rejects the lowering.
 
-`ScheduledLoweringLimits` supplies a caller-owned retained-point budget. The
-lowerer checks the complete post-phase point count with checked arithmetic and
-uses fallible bounded reservations before it appends points or allocates the
-canonical segment vector. Thus an imported dynamics profile that implies an
-extreme exact subdivision count fails before browser memory growth. The
-interactive policy currently permits at most 131,072 retained points,
-including the initial point; this resource limit is distinct from the physical
-interpolation-error certificate.
+`ScheduledLoweringLimits` supplies a caller-owned retained-point budget and a
+`TimerDilationPolicy`. The lowerer checks the complete post-phase point count
+with checked arithmetic and uses fallible bounded reservations before it
+appends points or allocates candidate vectors. Thus an imported dynamics
+profile that implies an extreme exact subdivision count fails before browser
+memory growth. The interactive policy permits at most 131,072 retained points
+and factors in exact increments of `1/4096` through a maximum factor of 16.
+These resource/search limits are distinct from the physical interpolation
+certificate.
 
 Before the program is exposed, `alumina-motion::preflight_stepper_segments`
 feeds every segment through the production `StepperExecutor` validation path.
@@ -237,12 +246,24 @@ legal finish. The compiler uses zero allowed lateness; runtime lateness remains
 a separate board-qualified policy.
 
 The projected continuous feed may equal an axis's exact electrical pulse-rate
-ceiling. Independent coordinate/time rounding can then leave no representable
-one-tick margin, and production preflight is allowed to reject with a pulse
-boundary fault. The current successful diagonal regression supplies explicit
-configured headroom. A future timer-lattice planner must derive any tighter
-reserve from the actual output quantum and segment construction; no arbitrary
-floating safety factor is inserted here.
+ceiling. Coordinate rounding and centered output-grid edge placement can then
+leave no realizable pulse boundary even though the continuous inequality is
+equal. The lowerer first replays factor one. Only timing-pressure failures
+classified by `alumina-motion` may enter dilation; structural, identity, grid,
+overflow, state, and deadline errors return immediately. Candidate interval
+durations, centered start offsets, terminal gaps, rate, pulse-low, setup, and
+hold inequalities are monotone in the factor, so an exact binary search selects
+the smallest numerator on the caller's factor lattice. The accepted complete
+stream and its immediately smaller candidate are both replayed through the
+unchanged production executor.
+
+`TimerLatticeScheduleReport2` retains the exact selected factor, replay count,
+factor-one rejection, predecessor rejection, ideal and canonical total times,
+maximum cumulative delay, maximum segment extension, and strictly
+sub-quantum grid padding. The exact 3-4-5 ceiling regression retains
+`PulseBoundary { axis: 1 }` at factor one, `Rate { axis: 1 }` at `4157/4096`,
+and selects `4158/4096` before ending at `[9600, 12800]`. A policy capped at one
+fails closed. No floating safety factor or weakened firmware check exists.
 
 ## Cache, simulation, and evidence
 
@@ -251,6 +272,14 @@ capability digests to equal the target partition policy. It checks the executor
 preflight terminal facts, constructs real chained 512-byte execution blocks,
 replays them with `MotionStreamValidator`, and lets `alumina-storage` produce
 the immutable object, chunk, and manifest identities.
+
+`ALMEVD02` binds those resulting canonical bytes, terminal timing, source,
+metric path, source approximation, machine identities, and selected error
+allocations. It does not yet serialize the affine-projection, lookahead,
+component-refinement, jerk, or timer-factor search transcripts themselves. The
+in-memory program retains and displays them, but a greenfield evidence V3 must
+bind their policies and rows explicitly; final output identity is not a
+substitute for planner-decision identity.
 
 `alumina-sim::replay_cached_stepper_partition` consumes the resulting bytes and
 real `JobDescriptor`. It first checks the complete byte length, object kind, and
@@ -301,8 +330,10 @@ performed during packaging.
   routes retain the most conservative axis-wide envelope; curved derivative
   projection, span-local limits, and non-Cartesian kinematics remain future
   work.
-- A continuous projected limit at the exact pulse-rate ceiling can still fail
-  timer-lattice preflight. Exact output-quantum headroom selection remains open.
+- Exact output-quantum headroom is selected on a caller-owned rational factor
+  lattice and complete production replay remains authoritative. Global
+  multi-MCU selection of one shared retiming factor and direct native jerk IR
+  remain open.
 - Firmware V1 follows the certified smooth schedule through bounded
   constant-velocity segments; it does not run an onboard jerk planner.
 - Configured source/command travel containment does not by itself prove tool,

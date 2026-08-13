@@ -36,7 +36,7 @@ use hyperpath::{
 use hyperreal::{Problem, Rational, Real};
 
 use crate::boundary::{BoundaryError, CanonicalCycle, CanonicalStep, canonical_motion_segment};
-use crate::compiler::{MachineCompileError, certified_u64_round, half_lattice_unit, quantize_axis};
+use crate::compiler::{MachineCompileError, half_lattice_unit, quantize_axis};
 use crate::machine_profile::{MachineDynamicsProfile2, MachineResolutionBudget2};
 use crate::toolpath::{
     CertifiedMetricPath2, MetricPathApproximationLimits2, ToolpathError, certify_metric_path,
@@ -435,8 +435,98 @@ pub struct ScheduledLoweringEvidence2 {
     maximum_position_quantization_error_mm: Real,
     maximum_step_event_tracking_error_mm: Real,
     maximum_curve_to_canonical_error_mm: Real,
-    maximum_timer_boundary_error_seconds: Real,
-    maximum_segment_duration_error_seconds: Real,
+    timer_lattice_schedule: TimerLatticeScheduleReport2,
+}
+
+/// Exact report for one-sided timer quantization and bounded time dilation.
+///
+/// The selected factor is the smallest value on the caller's rational factor
+/// lattice whose complete canonical stream passes the unchanged production
+/// stepper preflight. Every individual segment duration is rounded upward to
+/// the configured output quantum after applying that factor, so no segment is
+/// shorter than its retained ideal schedule interval.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimerLatticeScheduleReport2 {
+    selected_factor_numerator: u32,
+    selected_factor_denominator: u32,
+    maximum_factor_numerator: u32,
+    candidate_replays: u32,
+    unit_factor_rejection: Option<MotionError>,
+    predecessor_rejection: Option<MotionError>,
+    ideal_total_time_seconds: Real,
+    scheduled_total_time_seconds: Real,
+    maximum_cumulative_delay_seconds: Real,
+    maximum_segment_extension_seconds: Real,
+    maximum_output_grid_padding_seconds: Real,
+}
+
+impl TimerLatticeScheduleReport2 {
+    /// Exact selected time-dilation factor.
+    pub fn selected_factor(&self) -> Rational {
+        Rational::fraction(
+            i64::from(self.selected_factor_numerator),
+            u64::from(self.selected_factor_denominator),
+        )
+        .expect("validated timer-dilation factor remains a positive rational")
+    }
+
+    /// Numerator on the caller-selected factor lattice.
+    pub const fn selected_factor_numerator(&self) -> u32 {
+        self.selected_factor_numerator
+    }
+
+    /// Denominator defining the caller-selected factor resolution.
+    pub const fn selected_factor_denominator(&self) -> u32 {
+        self.selected_factor_denominator
+    }
+
+    /// Inclusive caller-owned search ceiling numerator on the same lattice.
+    pub const fn maximum_factor_numerator(&self) -> u32 {
+        self.maximum_factor_numerator
+    }
+
+    /// Number of complete production-preflight candidate replays.
+    pub const fn candidate_replays(&self) -> u32 {
+        self.candidate_replays
+    }
+
+    /// Exact production failure at factor one, if dilation was required.
+    pub const fn unit_factor_rejection(&self) -> Option<MotionError> {
+        self.unit_factor_rejection
+    }
+
+    /// Exact failure at the immediately smaller factor-grid value.
+    ///
+    /// This is `None` only when factor one already passed.
+    pub const fn predecessor_rejection(&self) -> Option<MotionError> {
+        self.predecessor_rejection
+    }
+
+    /// Retained exact traversal time before output-grid lowering.
+    pub const fn ideal_total_time_seconds(&self) -> &Real {
+        &self.ideal_total_time_seconds
+    }
+
+    /// Exact canonical end tick converted back to seconds.
+    pub const fn scheduled_total_time_seconds(&self) -> &Real {
+        &self.scheduled_total_time_seconds
+    }
+
+    /// Largest nonnegative scheduled-minus-ideal cumulative delay.
+    pub const fn maximum_cumulative_delay_seconds(&self) -> &Real {
+        &self.maximum_cumulative_delay_seconds
+    }
+
+    /// Largest nonnegative extension of one retained ideal interval.
+    pub const fn maximum_segment_extension_seconds(&self) -> &Real {
+        &self.maximum_segment_extension_seconds
+    }
+
+    /// Largest exact per-segment padding introduced solely by ceiling to the
+    /// output quantum after applying the selected factor.
+    pub const fn maximum_output_grid_padding_seconds(&self) -> &Real {
+        &self.maximum_output_grid_padding_seconds
+    }
 }
 
 /// Caller-owned memory bound for V1 schedule interpolation.
@@ -448,12 +538,55 @@ pub struct ScheduledLoweringEvidence2 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScheduledLoweringLimits {
     maximum_points: usize,
+    timer_dilation_policy: TimerDilationPolicy,
+}
+
+/// Caller-owned rational lattice and search ceiling for exact timer dilation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimerDilationPolicy {
+    factor_denominator: u32,
+    maximum_factor_numerator: u32,
+}
+
+impl TimerDilationPolicy {
+    /// Browser policy: factors in increments of `1/4096`, up to exactly 16.
+    pub const INTERACTIVE: Self = Self {
+        factor_denominator: 4_096,
+        maximum_factor_numerator: 65_536,
+    };
+
+    /// Constructs a bounded exact factor lattice. Factor one is always the
+    /// first candidate, so the maximum numerator must be at least the
+    /// denominator.
+    pub const fn try_new(
+        factor_denominator: u32,
+        maximum_factor_numerator: u32,
+    ) -> MotionScheduleResult<Self> {
+        if factor_denominator == 0 || maximum_factor_numerator < factor_denominator {
+            return Err(MotionScheduleError::InvalidTimerDilationPolicy);
+        }
+        Ok(Self {
+            factor_denominator,
+            maximum_factor_numerator,
+        })
+    }
+
+    /// Denominator of every candidate factor.
+    pub const fn factor_denominator(self) -> u32 {
+        self.factor_denominator
+    }
+
+    /// Inclusive largest candidate numerator.
+    pub const fn maximum_factor_numerator(self) -> u32 {
+        self.maximum_factor_numerator
+    }
 }
 
 impl ScheduledLoweringLimits {
     /// Interactive browser policy for one lowered schedule.
     pub const INTERACTIVE: Self = Self {
         maximum_points: 131_072,
+        timer_dilation_policy: TimerDilationPolicy::INTERACTIVE,
     };
 
     /// Construct a caller-owned scheduled-point limit.
@@ -461,12 +594,34 @@ impl ScheduledLoweringLimits {
         if maximum_points < 2 {
             return Err(MotionScheduleError::InvalidLoweringLimits);
         }
-        Ok(Self { maximum_points })
+        Ok(Self {
+            maximum_points,
+            timer_dilation_policy: TimerDilationPolicy::INTERACTIVE,
+        })
+    }
+
+    /// Construct caller-owned point and timer-dilation bounds.
+    pub const fn try_new_with_timer_dilation(
+        maximum_points: usize,
+        timer_dilation_policy: TimerDilationPolicy,
+    ) -> MotionScheduleResult<Self> {
+        if maximum_points < 2 {
+            return Err(MotionScheduleError::InvalidLoweringLimits);
+        }
+        Ok(Self {
+            maximum_points,
+            timer_dilation_policy,
+        })
     }
 
     /// Maximum retained scheduled points, including the initial point.
     pub const fn maximum_points(self) -> usize {
         self.maximum_points
+    }
+
+    /// Exact factor lattice and maximum accepted dilation.
+    pub const fn timer_dilation_policy(self) -> TimerDilationPolicy {
+        self.timer_dilation_policy
     }
 }
 
@@ -516,14 +671,9 @@ impl ScheduledLoweringEvidence2 {
         &self.maximum_curve_to_canonical_error_mm
     }
 
-    /// Half-tick cumulative boundary error.
-    pub const fn maximum_timer_boundary_error_seconds(&self) -> &Real {
-        &self.maximum_timer_boundary_error_seconds
-    }
-
-    /// One-tick segment-duration error.
-    pub const fn maximum_segment_duration_error_seconds(&self) -> &Real {
-        &self.maximum_segment_duration_error_seconds
+    /// Exact timer/output-lattice selection and production replay report.
+    pub const fn timer_lattice_schedule(&self) -> &TimerLatticeScheduleReport2 {
+        &self.timer_lattice_schedule
     }
 }
 
@@ -822,8 +972,11 @@ fn lossless_line_join_can_move(
 /// `A*dt²/8` is no greater than `maximum_interpolation_error_mm`, where `A`
 /// is the conservative full spatial acceleration envelope. Source points are
 /// evaluated exactly from the certified metric line/arc path, then coordinates
-/// and cumulative times are independently rounded to the configured step and
-/// tick lattices. The retained source-to-motion bound remains additive evidence.
+/// are rounded to the configured step lattice. Each exact ideal interval is
+/// dilated by the smallest admitted factor on the caller's rational search
+/// lattice and rounded upward to the output quantum. The complete candidate and
+/// its immediate predecessor are replayed through the production executor. The
+/// retained source-to-motion bound remains additive evidence.
 pub fn lower_certified_schedule_to_v1(
     schedule: &CertifiedJerkSchedule2,
     profile: &MachineDynamicsProfile2,
@@ -882,9 +1035,6 @@ pub fn lower_certified_schedule_to_v1(
         + maximum_interpolation_error_mm.clone()
         + maximum_position_quantization_error_mm.clone()
         + maximum_step_event_tracking_error_mm.clone();
-    let timer_frequency = Real::from(profile.timer_ticks_per_second());
-    let maximum_timer_boundary_error_seconds = (Real::one() / (Real::from(2) * &timer_frequency))?;
-    let maximum_segment_duration_error_seconds = (Real::one() / &timer_frequency)?;
 
     let mut points = Vec::new();
     let mut cumulative_time = Real::zero();
@@ -1011,16 +1161,340 @@ pub fn lower_certified_schedule_to_v1(
         }
     }
 
-    let mut segments = Vec::new();
-    segments
-        .try_reserve_exact(points.len().saturating_sub(1))
+    let initial_position = points
+        .first()
+        .map(|point| [point.steps[0].get(), point.steps[1].get()])
+        .ok_or(MotionScheduleError::MetricPathMismatch)?;
+    let selected_timer = select_timer_lattice_schedule(
+        &points,
+        profile,
+        initial_position,
+        limits.timer_dilation_policy(),
+    )?;
+    for (point, tick) in points.iter_mut().zip(&selected_timer.ticks) {
+        point.tick = *tick;
+    }
+
+    Ok(CanonicalScheduledProgram2 {
+        configuration_digest: profile.configuration_digest(),
+        capability_digest: profile.capability_digest(),
+        source: schedule.source.clone(),
+        metric_path: schedule.metric_path.clone(),
+        timer_ticks_per_second: profile.timer_ticks_per_second(),
+        output_quantum_cycles: profile.output_quantum_cycles(),
+        resolution_budget: resolution_budget.clone(),
+        points,
+        segments: selected_timer.segments,
+        executor_preflight: selected_timer.executor_preflight,
+        evidence: ScheduledLoweringEvidence2 {
+            maximum_source_to_motion_error_mm_exact,
+            maximum_source_to_motion_error_mm,
+            requested_interpolation_error_mm_exact: maximum_interpolation_error_mm_exact,
+            requested_interpolation_error_mm: maximum_interpolation_error_mm,
+            maximum_chord_interpolation_error_mm,
+            maximum_axis_quantization_error_mm,
+            maximum_position_quantization_error_mm,
+            maximum_step_event_tracking_error_mm,
+            maximum_curve_to_canonical_error_mm,
+            timer_lattice_schedule: selected_timer.report,
+        },
+    })
+}
+
+struct TimerCandidate2 {
+    ticks: Vec<CanonicalCycle>,
+    segments: Vec<ExecutionSegment<2>>,
+    executor_preflight: Result<StepperPreflightSummary<2>, MotionError>,
+    ideal_total_time_seconds: Real,
+    scheduled_total_time_seconds: Real,
+    maximum_cumulative_delay_seconds: Real,
+    maximum_segment_extension_seconds: Real,
+    maximum_output_grid_padding_seconds: Real,
+}
+
+struct SelectedTimerLatticeSchedule2 {
+    ticks: Vec<CanonicalCycle>,
+    segments: Vec<ExecutionSegment<2>>,
+    executor_preflight: StepperPreflightSummary<2>,
+    report: TimerLatticeScheduleReport2,
+}
+
+struct TimerSelectionEvidence {
+    selected_factor_numerator: u32,
+    selected_factor_denominator: u32,
+    maximum_factor_numerator: u32,
+    candidate_replays: u32,
+    unit_factor_rejection: Option<MotionError>,
+    predecessor_rejection: Option<MotionError>,
+}
+
+fn select_timer_lattice_schedule(
+    points: &[ScheduledMachinePoint2],
+    profile: &MachineDynamicsProfile2,
+    initial_position: [i64; 2],
+    policy: TimerDilationPolicy,
+) -> MotionScheduleResult<SelectedTimerLatticeSchedule2> {
+    let denominator = policy.factor_denominator();
+    let maximum_numerator = policy.maximum_factor_numerator();
+    let mut candidate_replays = 0_u32;
+
+    let unit_candidate =
+        build_timer_candidate(points, profile, initial_position, denominator, denominator)?;
+    candidate_replays =
+        candidate_replays
+            .checked_add(1)
+            .ok_or(MotionScheduleError::IntegerOverflow {
+                domain: "timer-dilation candidate replay count",
+            })?;
+    match unit_candidate.executor_preflight {
+        Ok(executor_preflight) => Ok(finish_timer_selection(
+            unit_candidate,
+            executor_preflight,
+            TimerSelectionEvidence {
+                selected_factor_numerator: denominator,
+                selected_factor_denominator: denominator,
+                maximum_factor_numerator: maximum_numerator,
+                candidate_replays,
+                unit_factor_rejection: None,
+                predecessor_rejection: None,
+            },
+        )),
+        Err(error) if !error.is_time_dilation_candidate() => {
+            Err(MotionScheduleError::ExecutorPreflight(error))
+        }
+        Err(unit_rejection) => {
+            if maximum_numerator == denominator {
+                return Err(MotionScheduleError::TimerDilationBudgetExceeded {
+                    maximum_factor_numerator: maximum_numerator,
+                    factor_denominator: denominator,
+                    rejection: unit_rejection,
+                });
+            }
+
+            let maximum_candidate = build_timer_candidate(
+                points,
+                profile,
+                initial_position,
+                maximum_numerator,
+                denominator,
+            )?;
+            candidate_replays =
+                candidate_replays
+                    .checked_add(1)
+                    .ok_or(MotionScheduleError::IntegerOverflow {
+                        domain: "timer-dilation candidate replay count",
+                    })?;
+            match maximum_candidate.executor_preflight {
+                Ok(_) => {}
+                Err(error) if !error.is_time_dilation_candidate() => {
+                    return Err(MotionScheduleError::ExecutorPreflight(error));
+                }
+                Err(rejection) => {
+                    return Err(MotionScheduleError::TimerDilationBudgetExceeded {
+                        maximum_factor_numerator: maximum_numerator,
+                        factor_denominator: denominator,
+                        rejection,
+                    });
+                }
+            }
+
+            // Each candidate duration is q*ceil(factor*ideal/q), hence is
+            // monotone in the factor. Centered first-edge offsets and terminal
+            // gaps are also monotone in duration, as are the production rate,
+            // pulse-low, setup, and hold inequalities. A passing candidate
+            // therefore makes every larger numerator pass unless a structural
+            // or arithmetic failure occurs; those are never treated as timing
+            // pressure above.
+            let mut rejected_numerator = denominator;
+            let mut admitted_numerator = maximum_numerator;
+            while admitted_numerator - rejected_numerator > 1 {
+                let candidate_numerator =
+                    rejected_numerator + (admitted_numerator - rejected_numerator) / 2;
+                let candidate = build_timer_candidate(
+                    points,
+                    profile,
+                    initial_position,
+                    candidate_numerator,
+                    denominator,
+                )?;
+                candidate_replays = candidate_replays.checked_add(1).ok_or(
+                    MotionScheduleError::IntegerOverflow {
+                        domain: "timer-dilation candidate replay count",
+                    },
+                )?;
+                match candidate.executor_preflight {
+                    Ok(_) => admitted_numerator = candidate_numerator,
+                    Err(error) if error.is_time_dilation_candidate() => {
+                        rejected_numerator = candidate_numerator;
+                    }
+                    Err(error) => return Err(MotionScheduleError::ExecutorPreflight(error)),
+                }
+            }
+
+            let selected = build_timer_candidate(
+                points,
+                profile,
+                initial_position,
+                admitted_numerator,
+                denominator,
+            )?;
+            candidate_replays =
+                candidate_replays
+                    .checked_add(1)
+                    .ok_or(MotionScheduleError::IntegerOverflow {
+                        domain: "timer-dilation candidate replay count",
+                    })?;
+            let executor_preflight = selected
+                .executor_preflight
+                .map_err(MotionScheduleError::ExecutorPreflight)?;
+
+            let predecessor = build_timer_candidate(
+                points,
+                profile,
+                initial_position,
+                admitted_numerator - 1,
+                denominator,
+            )?;
+            candidate_replays =
+                candidate_replays
+                    .checked_add(1)
+                    .ok_or(MotionScheduleError::IntegerOverflow {
+                        domain: "timer-dilation candidate replay count",
+                    })?;
+            let predecessor_rejection = match predecessor.executor_preflight {
+                Err(error) if error.is_time_dilation_candidate() => error,
+                Err(error) => return Err(MotionScheduleError::ExecutorPreflight(error)),
+                Ok(_) => {
+                    return Err(MotionScheduleError::TimerDilationMinimalityUncertified {
+                        selected_factor_numerator: admitted_numerator,
+                        factor_denominator: denominator,
+                    });
+                }
+            };
+
+            Ok(finish_timer_selection(
+                selected,
+                executor_preflight,
+                TimerSelectionEvidence {
+                    selected_factor_numerator: admitted_numerator,
+                    selected_factor_denominator: denominator,
+                    maximum_factor_numerator: maximum_numerator,
+                    candidate_replays,
+                    unit_factor_rejection: Some(unit_rejection),
+                    predecessor_rejection: Some(predecessor_rejection),
+                },
+            ))
+        }
+    }
+}
+
+fn finish_timer_selection(
+    candidate: TimerCandidate2,
+    executor_preflight: StepperPreflightSummary<2>,
+    selection: TimerSelectionEvidence,
+) -> SelectedTimerLatticeSchedule2 {
+    SelectedTimerLatticeSchedule2 {
+        ticks: candidate.ticks,
+        segments: candidate.segments,
+        executor_preflight,
+        report: TimerLatticeScheduleReport2 {
+            selected_factor_numerator: selection.selected_factor_numerator,
+            selected_factor_denominator: selection.selected_factor_denominator,
+            maximum_factor_numerator: selection.maximum_factor_numerator,
+            candidate_replays: selection.candidate_replays,
+            unit_factor_rejection: selection.unit_factor_rejection,
+            predecessor_rejection: selection.predecessor_rejection,
+            ideal_total_time_seconds: candidate.ideal_total_time_seconds,
+            scheduled_total_time_seconds: candidate.scheduled_total_time_seconds,
+            maximum_cumulative_delay_seconds: candidate.maximum_cumulative_delay_seconds,
+            maximum_segment_extension_seconds: candidate.maximum_segment_extension_seconds,
+            maximum_output_grid_padding_seconds: candidate.maximum_output_grid_padding_seconds,
+        },
+    }
+}
+
+fn build_timer_candidate(
+    points: &[ScheduledMachinePoint2],
+    profile: &MachineDynamicsProfile2,
+    initial_position: [i64; 2],
+    factor_numerator: u32,
+    factor_denominator: u32,
+) -> MotionScheduleResult<TimerCandidate2> {
+    if points.len() < 2 || factor_denominator == 0 || factor_numerator < factor_denominator {
+        return Err(MotionScheduleError::InvalidTimerDilationPolicy);
+    }
+    let factor = Real::from(Rational::fraction(
+        i64::from(factor_numerator),
+        u64::from(factor_denominator),
+    )?);
+    let timer_frequency = Real::from(profile.timer_ticks_per_second());
+    let output_quantum = u64::from(profile.output_quantum_cycles());
+    let output_quantum_real = Real::from(output_quantum);
+    let one_quantum_seconds = (&output_quantum_real / &timer_frequency)?;
+
+    let mut ticks = Vec::new();
+    ticks
+        .try_reserve_exact(points.len())
         .map_err(|_| MotionScheduleError::AllocationOverflow {
-            domain: "canonical schedule segments",
+            domain: "timer-lattice candidate ticks",
         })?;
+    ticks.push(CanonicalCycle::new(0));
+    let mut segments = Vec::new();
+    segments.try_reserve_exact(points.len() - 1).map_err(|_| {
+        MotionScheduleError::AllocationOverflow {
+            domain: "timer-lattice candidate segments",
+        }
+    })?;
+
+    let mut cumulative_tick = 0_u64;
+    let mut scheduled_time = Real::zero();
+    let mut maximum_cumulative_delay = Real::zero();
+    let mut maximum_segment_extension = Real::zero();
+    let mut maximum_output_grid_padding = Real::zero();
     for (segment_index, pair) in points.windows(2).enumerate() {
-        if pair[1].tick <= pair[0].tick {
+        let ideal_duration = &pair[1].ideal_time_seconds - &pair[0].ideal_time_seconds;
+        require_positive(&ideal_duration, "retained ideal segment duration")?;
+        let scaled_ideal_duration = &ideal_duration * &factor;
+        let required_output_frames = ((&scaled_ideal_duration * &timer_frequency)
+            / &output_quantum_real)?
+            .ceil_certified()?;
+        let output_frames = u64::try_from(required_output_frames).map_err(|_| {
+            MotionScheduleError::IntegerOverflow {
+                domain: "timer-lattice segment frame count",
+            }
+        })?;
+        let duration = output_frames.checked_mul(output_quantum).ok_or(
+            MotionScheduleError::IntegerOverflow {
+                domain: "timer-lattice segment duration",
+            },
+        )?;
+        if duration == 0 {
             return Err(MotionScheduleError::TickBoundaryCollapsed { segment_index });
         }
+        let next_tick =
+            cumulative_tick
+                .checked_add(duration)
+                .ok_or(MotionScheduleError::IntegerOverflow {
+                    domain: "timer-lattice cumulative tick",
+                })?;
+        let actual_duration = (Real::from(duration) / &timer_frequency)?;
+        let grid_padding = &actual_duration - &scaled_ideal_duration;
+        certify_nonnegative_timer_value(&grid_padding)?;
+        match compare_reals(&grid_padding, &one_quantum_seconds, PredicatePolicy::STRICT).value() {
+            Some(Ordering::Less) => {}
+            Some(Ordering::Equal | Ordering::Greater) | None => {
+                return Err(MotionScheduleError::TimerQuantizationUncertified);
+            }
+        }
+        let segment_extension = &actual_duration - &ideal_duration;
+        certify_nonnegative_timer_value(&segment_extension)?;
+        scheduled_time += &actual_duration;
+        let cumulative_delay = &scheduled_time - &pair[1].ideal_time_seconds;
+        certify_nonnegative_timer_value(&cumulative_delay)?;
+        maximum_output_grid_padding = maximum_real(maximum_output_grid_padding, grid_padding)?;
+        maximum_segment_extension = maximum_real(maximum_segment_extension, segment_extension)?;
+        maximum_cumulative_delay = maximum_real(maximum_cumulative_delay, cumulative_delay)?;
+
         let delta = [
             pair[1].steps[0]
                 .get()
@@ -1036,44 +1510,37 @@ pub fn lower_certified_schedule_to_v1(
                 })?,
         ];
         segments.push(canonical_motion_segment(
-            pair[0].tick,
-            pair[1].tick,
+            CanonicalCycle::new(cumulative_tick),
+            CanonicalCycle::new(next_tick),
             [CanonicalStep::new(delta[0]), CanonicalStep::new(delta[1])],
         )?);
+        ticks.push(CanonicalCycle::new(next_tick));
+        cumulative_tick = next_tick;
     }
 
-    let initial_position = points
-        .first()
-        .map(|point| [point.steps[0].get(), point.steps[1].get()])
+    let ideal_total_time_seconds = points
+        .last()
+        .map(|point| point.ideal_time_seconds.clone())
         .ok_or(MotionScheduleError::MetricPathMismatch)?;
     let executor_preflight =
-        preflight_stepper_segments(profile.stepper_timing(0), initial_position, &segments)?;
-
-    Ok(CanonicalScheduledProgram2 {
-        configuration_digest: profile.configuration_digest(),
-        capability_digest: profile.capability_digest(),
-        source: schedule.source.clone(),
-        metric_path: schedule.metric_path.clone(),
-        timer_ticks_per_second: profile.timer_ticks_per_second(),
-        output_quantum_cycles: profile.output_quantum_cycles(),
-        resolution_budget: resolution_budget.clone(),
-        points,
+        preflight_stepper_segments(profile.stepper_timing(0), initial_position, &segments);
+    Ok(TimerCandidate2 {
+        ticks,
         segments,
         executor_preflight,
-        evidence: ScheduledLoweringEvidence2 {
-            maximum_source_to_motion_error_mm_exact,
-            maximum_source_to_motion_error_mm,
-            requested_interpolation_error_mm_exact: maximum_interpolation_error_mm_exact,
-            requested_interpolation_error_mm: maximum_interpolation_error_mm,
-            maximum_chord_interpolation_error_mm,
-            maximum_axis_quantization_error_mm,
-            maximum_position_quantization_error_mm,
-            maximum_step_event_tracking_error_mm,
-            maximum_curve_to_canonical_error_mm,
-            maximum_timer_boundary_error_seconds,
-            maximum_segment_duration_error_seconds,
-        },
+        ideal_total_time_seconds,
+        scheduled_total_time_seconds: scheduled_time,
+        maximum_cumulative_delay_seconds: maximum_cumulative_delay,
+        maximum_segment_extension_seconds: maximum_segment_extension,
+        maximum_output_grid_padding_seconds: maximum_output_grid_padding,
     })
+}
+
+fn certify_nonnegative_timer_value(value: &Real) -> MotionScheduleResult<()> {
+    match classify_real_sign(value, PredicatePolicy::STRICT).value() {
+        Some(Sign::Zero | Sign::Positive) => Ok(()),
+        Some(Sign::Negative) | None => Err(MotionScheduleError::TimerQuantizationUncertified),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1112,11 +1579,6 @@ fn push_scheduled_point(
         1,
     )?;
     certify_canonical_position_inside_travel([x, y], profile, point_index)?;
-    let tick = certified_u64_round(
-        &(ideal_time_seconds.clone() * Real::from(profile.timer_ticks_per_second())),
-        "scheduled timer boundary",
-        point_index,
-    )?;
     points.push(ScheduledMachinePoint2 {
         source_element: provenance.source_element,
         motion_element: provenance.motion_element,
@@ -1125,7 +1587,9 @@ fn push_scheduled_point(
         exact_point_mm,
         ideal_time_seconds,
         steps: [x, y],
-        tick: CanonicalCycle::new(tick),
+        // Timer/output-lattice selection occurs transactionally after every
+        // spatial point is retained. No partially timed program is exposed.
+        tick: CanonicalCycle::new(0),
     });
     Ok(())
 }
@@ -1416,6 +1880,8 @@ pub enum MotionScheduleError {
     SourceApproximationAllocationExceeded,
     /// A lowering policy must retain at least an initial and final point.
     InvalidLoweringLimits,
+    /// Timer-dilation factor lattice was empty or excluded factor one.
+    InvalidTimerDilationPolicy,
     /// The proposed interpolation exceeds the caller-owned point budget.
     PointBudgetExceeded {
         /// Number of points required after the current phase.
@@ -1439,6 +1905,24 @@ pub enum MotionScheduleError {
     TickBoundaryCollapsed {
         /// Zero-based V1 segment index.
         segment_index: usize,
+    },
+    /// One-sided output-grid construction failed an exact sign or quantum bound.
+    TimerQuantizationUncertified,
+    /// No candidate through the caller-owned factor ceiling passed production preflight.
+    TimerDilationBudgetExceeded {
+        /// Inclusive largest candidate numerator.
+        maximum_factor_numerator: u32,
+        /// Shared candidate denominator.
+        factor_denominator: u32,
+        /// Exact production rejection at the ceiling.
+        rejection: MotionError,
+    },
+    /// The candidate immediately below the selected factor unexpectedly passed.
+    TimerDilationMinimalityUncertified {
+        /// Selected factor numerator.
+        selected_factor_numerator: u32,
+        /// Shared candidate denominator.
+        factor_denominator: u32,
     },
     /// At least one jerk phase, sum, or continuity condition did not certify.
     JerkScheduleUncertified {
@@ -1531,6 +2015,9 @@ impl fmt::Display for MotionScheduleError {
             Self::InvalidLoweringLimits => {
                 formatter.write_str("scheduled lowering requires a point budget of at least two")
             }
+            Self::InvalidTimerDilationPolicy => formatter.write_str(
+                "timer dilation requires a positive denominator and a ceiling of at least one",
+            ),
             Self::PointBudgetExceeded { required, maximum } => write!(
                 formatter,
                 "scheduled lowering requires {required} points but the caller permits {maximum}"
@@ -1547,6 +2034,24 @@ impl fmt::Display for MotionScheduleError {
             Self::TickBoundaryCollapsed { segment_index } => write!(
                 formatter,
                 "scheduled interval {segment_index} collapsed on the timer lattice"
+            ),
+            Self::TimerQuantizationUncertified => formatter.write_str(
+                "one-sided timer/output-grid quantization did not certify its exact bounds",
+            ),
+            Self::TimerDilationBudgetExceeded {
+                maximum_factor_numerator,
+                factor_denominator,
+                rejection,
+            } => write!(
+                formatter,
+                "timer dilation through {maximum_factor_numerator}/{factor_denominator} remained infeasible: {rejection:?}"
+            ),
+            Self::TimerDilationMinimalityUncertified {
+                selected_factor_numerator,
+                factor_denominator,
+            } => write!(
+                formatter,
+                "timer dilation {selected_factor_numerator}/{factor_denominator} passed but its immediate predecessor also passed"
             ),
             Self::JerkScheduleUncertified { element } => write!(
                 formatter,

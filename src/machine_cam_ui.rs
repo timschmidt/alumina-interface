@@ -760,7 +760,11 @@ impl MachineCamWorkspace {
                     real_row(ui, "command lattice", budget.command_lattice_error_mm());
                     real_row(ui, "calibration", budget.calibration_error_mm());
                     real_row(ui, "following", budget.following_error_mm());
-                    real_row(ui, "timer position", budget.timer_position_error_mm());
+                    real_row(
+                        ui,
+                        "output-grid position",
+                        budget.output_grid_position_error_mm(),
+                    );
                     real_row(
                         ui,
                         "certified required total",
@@ -1074,6 +1078,7 @@ impl MachineCamWorkspace {
             program.points().len(),
             ScheduledLoweringLimits::INTERACTIVE.maximum_points()
         ));
+        let timer_lattice = evidence.timer_lattice_schedule();
         egui::Grid::new("lowering_evidence")
             .num_columns(2)
             .striped(true)
@@ -1110,10 +1115,30 @@ impl MachineCamWorkspace {
                 );
                 real_row(
                     ui,
-                    "timer boundary error (s)",
-                    evidence.maximum_timer_boundary_error_seconds(),
+                    "maximum timer cumulative delay (s)",
+                    timer_lattice.maximum_cumulative_delay_seconds(),
+                );
+                real_row(
+                    ui,
+                    "maximum segment extension (s)",
+                    timer_lattice.maximum_segment_extension_seconds(),
+                );
+                real_row(
+                    ui,
+                    "maximum output-grid padding (s)",
+                    timer_lattice.maximum_output_grid_padding_seconds(),
                 );
             });
+        ui.monospace(format!(
+            "timer lattice: selected factor {} on 1/{} grid through {}/{} ({} complete preflight replays) · factor-one rejection {:?} · immediate predecessor {:?}",
+            timer_lattice.selected_factor(),
+            timer_lattice.selected_factor_denominator(),
+            timer_lattice.maximum_factor_numerator(),
+            timer_lattice.selected_factor_denominator(),
+            timer_lattice.candidate_replays(),
+            timer_lattice.unit_factor_rejection(),
+            timer_lattice.predecessor_rejection()
+        ));
         let preflight = program.executor_preflight();
         ui.monospace(format!(
             "preflight: {} segments · end tick {} · terminal {:?} · rising edges {:?} · disable legal at cycle {}",

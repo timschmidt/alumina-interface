@@ -20,7 +20,7 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `d85eec9aa6bcde54ebbfd5ac08a3ac72d2f244e9` | concurrent tracked edits in `src/bezier_offset.rs`; post-qualification observed diff SHA-256 `c1583f1c371c28ab32f30435f4bdcd07d74e42bcd2c0d6f60bb3c1f991e4b08e` |
+| `hypercurve` | `72bc0c7f0514b41144d941f2382dc458ffb828d8` | concurrent tracked edits in `src/bezier_offset.rs`, `src/bezier_region.rs`, and `src/curve.rs`; tested diff SHA-256 `a729d67db6f1767d588e822fa23a87127cb7f27a18d3fb0d039b2fbf093b322e` |
 | `hyperpath` | `d792aa8dc843218b26fc0d1730033e5cd06bdf2f` | clean; adds exact N-axis affine velocity/acceleration/jerk projection and bottleneck replay to diagonal length, acceleration lookahead, monotonic transitions, and component-local jerk refinement |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
 | `hypersolve` | `cec630b0fb121fa6ec7fe99e9780c8f020f92d61` | clean |
@@ -50,8 +50,15 @@ check completed against the earlier same-HEAD tracked diff SHA-256
 `491ddc3ad6cd04e92a4a22ca4c21b7e1617193522e947b1169d1ecbcb96303ce`.
 The subsequent affine axis-projection checkpoint's native/WASM tests, strict
 checks, optimized bundle, decompression checks, corrected software-WebGL
-loopback render, and final core check completed against the current table
-state.
+loopback render, and final core check completed against its separately recorded
+HEAD `d85eec9aa6bcde54ebbfd5ac08a3ac72d2f244e9` and tracked diff SHA-256
+`c1583f1c371c28ab32f30435f4bdcd07d74e42bcd2c0d6f60bb3c1f991e4b08e`.
+The exact timer-lattice checkpoint's final native/WASM tests, strict Clippy and
+rustdoc, complete WASM test-target link, source/license audit, optimized bundle,
+compression checks, long-budget software-WebGL loopback render, and final core
+check completed against the current table state. Pre/post snapshots around the
+gate batch and the subsequent production rebuild retained the same HEAD,
+tracked file set, and diff digest.
 
 Hypercurve advanced through multiple coherent and temporarily non-compiling
 states while this work was underway and is expected to continue changing. This

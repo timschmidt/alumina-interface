@@ -119,7 +119,9 @@ and content-addressed partition. See
   line-to-line G1 joins may remain moving; the cubic uses bounded
   source-to-motion chords with a full stop at each join. Mixed curved routes
   retain conservative axis-wide limits. Blends, curvature-bearing continuity,
-  broader exact families, kinematics, exact timer-lattice headroom, and
-  qualified hardware timing remain open.
+  broader exact families, kinematics, shared multi-MCU retiming-factor
+  selection, and qualified hardware timing remain open. The local program's
+  exact timer/output-lattice headroom is already selected by bounded rational
+  search and complete production preflight before packaging.
 - Passing software replay does not qualify SD media, a board, or physical
   motion. No board is flashed or energized by packaging or its tests.

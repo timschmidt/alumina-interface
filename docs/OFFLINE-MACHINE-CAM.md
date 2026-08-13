@@ -27,8 +27,10 @@ bytes it reconstructs:
    no eligible lossless line-to-line G1 join and therefore retains four
    constant-jerk phases per metric element;
 8. exact interpolation under a 131,072-point browser budget, followed by
-   configured step/tick lattice lowering;
-9. production `StepperExecutor` electrical and terminal preflight;
+   configured step/output-lattice lowering and the smallest admitted rational
+   timer-dilation factor on the caller's bounded search grid;
+9. production `StepperExecutor` electrical and terminal preflight, including
+   retained factor-one and immediate-predecessor rejection evidence;
 10. chained canonical blocks, independently hashed upload chunks, and the
    immutable SD-cache publication;
 11. deterministic `RealtimeJob` plus `CachedStepperExecutor` event replay; and
@@ -67,6 +69,8 @@ The inspector exposes:
 - every two- or four-phase endpoint state for each retained metric element;
 - an exact selected metric point with source/motion provenance beside its
   canonical step/tick coordinate;
+- exact timer-dilation factor, replay count, factor-one/predecessor failures,
+  cumulative delay, segment extension, and output-grid padding;
 - a selected firmware segment and complete executor-preflight terminal facts;
 - partition object/manifest/chunk identities and cache horizons;
 - event replay step counts, output transaction count, terminal state, and
@@ -111,7 +115,7 @@ At checkpoint implementation time:
 - all 28 application tests passed, including a complete headless egui frame,
   deterministic configuration/source-to-event replay, and transactional
   rejection;
-- all 115 exact-core tests plus the compile-fail value-boundary test passed,
+- all 117 exact-core tests plus the compile-fail value-boundary test passed,
   including bounded cubic source reduction, exact diagonal metric length,
   jerk-feasible exact-line G1 motion, curvature-bearing G1/reversal stops,
   native source-envelope travel rejection, post-rounding containment,
@@ -120,16 +124,19 @@ At checkpoint implementation time:
 - native and `wasm32-unknown-unknown` strict Clippy passed for the complete
   workspace, and every workspace test target linked for WASM;
 - strict rustdoc and the local-source/license policy audit passed;
-- the optimized 5,384,033-byte WASM validated with `wasm-tools`; its
-  2,424,991-byte gzip and 1,942,999-byte Brotli forms passed integrity checks,
+- the optimized 5,403,381-byte WASM validated with `wasm-tools`; its
+  2,431,866-byte gzip and 1,949,157-byte Brotli forms passed integrity checks,
   and the uncompressed artifact has SHA-256
-  `8785de3c63b5f2059fe942e44125a0f3f4bcc79b475dd04a5f48189871d9a798`;
+  `144aaa48985cfc3f0c870b7592197b6d3012b26c22717481ee29e74137ec07db`;
 - headless Chromium loaded the bundle and dedicated worker over loopback with
   software WebGL, then visibly rendered the complete default Machine/CAM
   inspector, line/arc/cubic motion plot, source-to-motion certificate, and the
   exact acceleration/jerk-feasible status for 35 nodes, 33 joins, and 34 spans,
   zero eligible positive components in the default line/arc/cubic fixture, and
-  the active lossless-line G1-only policy; and
+  the active lossless-line G1-only policy. The same view reported selected
+  timer factor `1`, the complete `1/4096` through `65536/4096` policy lattice,
+  one complete preflight replay, and no factor-one or predecessor rejection;
+  and
 - no WLAN or physical board operation occurred.
 
 This is development evidence against the current sibling working trees, not a
