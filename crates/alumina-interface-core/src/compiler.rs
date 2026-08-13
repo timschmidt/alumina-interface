@@ -11,6 +11,7 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use alumina_machine_ir::ExecutionSegment;
+use alumina_protocol::Digest;
 use hypercurve::{
     BezierFlatteningOptions, Classification, CurveContext, CurveError, CurvePath2, ExactCurveError,
     Point2 as CurvePoint2, UncertaintyReason,
@@ -19,14 +20,18 @@ use hyperlimit::{PredicatePolicy, compare_reals};
 use hyperreal::{Problem, Rational, Real};
 
 use crate::boundary::{BoundaryError, CanonicalCycle, CanonicalStep, canonical_motion_segment};
+use crate::machine_profile::{MachineDynamicsProfile2, MachineResolutionBudget2};
 use crate::toolpath::{ToolpathError, representative_curve_path};
 
 /// Result type for exact-to-canonical path compilation.
 pub type MachineCompileResult<T> = Result<T, MachineCompileError>;
 
 /// Exact machine and compiler facts selected for a two-axis path compilation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MotionCompilePolicy2 {
+    machine_configuration_digest: Digest,
+    capability_digest: Digest,
+    resolution_budget: Option<MachineResolutionBudget2>,
     steps_per_millimetre: [Rational; 2],
     timer_ticks_per_second: u64,
     feed_millimetres_per_second: Rational,
@@ -36,7 +41,7 @@ pub struct MotionCompilePolicy2 {
 
 impl MotionCompilePolicy2 {
     /// Validate and retain exact machine-lattice and approximation policy facts.
-    pub fn try_new(
+    pub(crate) fn try_new(
         steps_per_millimetre: [Rational; 2],
         timer_ticks_per_second: u64,
         feed_millimetres_per_second: Rational,
@@ -72,12 +77,82 @@ impl MotionCompilePolicy2 {
             ));
         }
         Ok(Self {
+            machine_configuration_digest: Digest::ZERO,
+            capability_digest: Digest::ZERO,
+            resolution_budget: None,
             steps_per_millimetre,
             timer_ticks_per_second,
             feed_millimetres_per_second,
             maximum_source_chord_error_mm,
             maximum_subdivision_depth,
         })
+    }
+
+    /// Constructs a production policy only from one validated machine profile
+    /// and an error budget certified for the same configuration/capability.
+    pub fn from_machine_profile(
+        profile: &MachineDynamicsProfile2,
+        resolution_budget: &MachineResolutionBudget2,
+        feed_millimetres_per_second: Rational,
+        maximum_source_chord_error_mm: Rational,
+        maximum_subdivision_depth: usize,
+    ) -> MachineCompileResult<Self> {
+        if resolution_budget.configuration_digest() != profile.configuration_digest()
+            || resolution_budget.capability_digest() != profile.capability_digest()
+        {
+            return Err(MachineCompileError::MachineIdentityMismatch);
+        }
+        if maximum_source_chord_error_mm
+            > resolution_budget.source_curve_allocation_mm_exact().clone()
+        {
+            return Err(MachineCompileError::SourceErrorBudgetExceeded);
+        }
+        for (axis, machine_axis) in profile.axes().iter().enumerate() {
+            let limit_mm_per_second =
+                machine_axis.effective_velocity_limit_metres_per_second() * Rational::from(1_000);
+            if feed_millimetres_per_second > limit_mm_per_second {
+                return Err(MachineCompileError::FeedLimitExceeded { axis });
+            }
+        }
+
+        let mut policy = Self::try_new(
+            [
+                profile.axes()[0]
+                    .command_density_steps_per_millimetre()
+                    .nominal()
+                    .clone(),
+                profile.axes()[1]
+                    .command_density_steps_per_millimetre()
+                    .nominal()
+                    .clone(),
+            ],
+            profile.timer_ticks_per_second(),
+            feed_millimetres_per_second,
+            maximum_source_chord_error_mm,
+            maximum_subdivision_depth,
+        )?;
+        policy.machine_configuration_digest = profile.configuration_digest();
+        policy.capability_digest = profile.capability_digest();
+        policy.resolution_budget = Some(resolution_budget.clone());
+        Ok(policy)
+    }
+
+    /// Exact active machine-configuration identity, absent only for the fixed
+    /// non-production representative fixture.
+    pub fn machine_configuration_digest(&self) -> Option<Digest> {
+        (!self.machine_configuration_digest.is_zero()).then_some(self.machine_configuration_digest)
+    }
+
+    /// Exact immutable board-capability identity, absent only for the fixed
+    /// non-production representative fixture.
+    pub fn capability_digest(&self) -> Option<Digest> {
+        (!self.capability_digest.is_zero()).then_some(self.capability_digest)
+    }
+
+    /// Full physical and numerical error decomposition retained by a
+    /// machine-bound policy.
+    pub const fn resolution_budget(&self) -> Option<&MachineResolutionBudget2> {
+        self.resolution_budget.as_ref()
     }
 
     /// Borrow exact axis command densities in steps per millimetre.
@@ -447,11 +522,11 @@ pub fn compile_representative_program() -> MachineCompileResult<CanonicalPathPro
     compile_certified_chord_program(&source, &policy)
 }
 
-fn half_lattice_unit(steps_per_millimetre: &Rational) -> Result<Real, Problem> {
+pub(crate) fn half_lattice_unit(steps_per_millimetre: &Rational) -> Result<Real, Problem> {
     Real::one() / (Real::from(2) * Real::from(steps_per_millimetre.clone()))
 }
 
-fn quantize_axis(
+pub(crate) fn quantize_axis(
     coordinate_mm: &Real,
     steps_per_millimetre: &Rational,
     maximum_error_mm: &Real,
@@ -476,7 +551,7 @@ fn quantize_axis(
     Ok((CanonicalStep::new(steps), signed_error_mm))
 }
 
-fn certified_u64_round(
+pub(crate) fn certified_u64_round(
     value: &Real,
     domain: &'static str,
     index: usize,
@@ -506,6 +581,15 @@ fn certify_bound(
 pub enum MachineCompileError {
     /// A static machine/compiler policy fact was invalid.
     InvalidPolicy(&'static str),
+    /// A resolution certificate belonged to a different machine identity.
+    MachineIdentityMismatch,
+    /// Requested scalar path feed exceeded a conservative per-axis ceiling.
+    FeedLimitExceeded {
+        /// Axis imposing the limit.
+        axis: usize,
+    },
+    /// Requested curve approximation exceeded its certified allocation.
+    SourceErrorBudgetExceeded,
     /// The representative exact source fixture failed to construct.
     SourceFixture(ToolpathError),
     /// Hypercurve rejected motion-specific subdivision options.
@@ -566,6 +650,15 @@ impl fmt::Display for MachineCompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPolicy(reason) => write!(formatter, "invalid motion policy: {reason}"),
+            Self::MachineIdentityMismatch => {
+                formatter.write_str("machine profile and resolution budget identities do not match")
+            }
+            Self::FeedLimitExceeded { axis } => write!(
+                formatter,
+                "requested path feed exceeds conservative axis {axis} velocity"
+            ),
+            Self::SourceErrorBudgetExceeded => formatter
+                .write_str("source-curve approximation exceeds its certified error allocation"),
             Self::SourceFixture(source) => {
                 write!(formatter, "exact source fixture failed: {source}")
             }

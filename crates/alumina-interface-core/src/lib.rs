@@ -13,8 +13,11 @@ pub mod compiler;
 pub mod diagnostics;
 pub mod global_job;
 pub mod graph;
+pub mod machine_profile;
+pub mod motion_schedule;
 pub mod partition;
 pub mod scene;
+pub mod schedule_evidence;
 pub mod toolpath;
 
 pub use board_explorer::{
@@ -66,12 +69,27 @@ pub use graph::{
     lower_graph_deployment, replay_graph_document, replay_graph_probes, replay_graph_trace,
     simulate_graph,
 };
+pub use machine_profile::{
+    ExactInterval, MachineDynamicsProfile2, MachineProfileError, MachineProfileResult,
+    MachineResolutionBudget2, StepperAxisMachineProfile,
+};
+pub use motion_schedule::{
+    CanonicalScheduledProgram2, CertifiedExactStopSchedule2, MotionScheduleError,
+    MotionScheduleResult, ScalarMotionLimits2, ScheduledLoweringEvidence2, ScheduledMachinePoint2,
+    certify_exact_stop_jerk_schedule, lower_certified_schedule_to_v1,
+};
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
     MachinePartitionPolicy2, MachinePartitionResult, package_canonical_program,
-    representative_partition_policy, representative_partition_policy_for,
+    package_canonical_scheduled_program, representative_partition_policy,
+    representative_partition_policy_for,
 };
 pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
+pub use schedule_evidence::{
+    CanonicalScheduleEvidence2, ScheduleEvidenceError, ScheduleEvidenceResult,
+    build_canonical_schedule_evidence, replay_canonical_schedule_evidence,
+    verify_canonical_schedule_evidence_bytes,
+};
 pub use toolpath::{
     ToolpathError, ToolpathResult, promote_metric_path, representative_curve_path,
     representative_curve_region, representative_feed_certificate, representative_metric_path,

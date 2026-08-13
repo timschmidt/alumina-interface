@@ -13,11 +13,12 @@ Hypercurve source path
     ├─ certified subdivision ─> Hypergraphics exact display chords ─> GPU
     │                           (presentation evidence only)
     ├─ lossless family promotion ─> Hyperpath metric objects ─> Hypersolve replay
-    └─ motion-specific certified subdivision ─> exact chord metric
-                                                ─> step/timer lattices
-                                                ─> alumina-machine-ir
-                                                ─> chained execution blocks
-                                                ─> content-addressed SD artifact
+    │   └─ machine-bound exact-stop/jerk schedule
+    │       ─> certified V1 interpolation ─> configured step/timer lattices
+    │       ─> production executor preflight ─> cached partition + evidence
+    └─ general-curve certified subdivision ─> exact chord metric
+                                              ─> step/timer lattices
+                                              ─> development machine IR
 ```
 
 The paths are intentionally one-way and disjoint. A display chord remains an
@@ -39,11 +40,21 @@ to be PH. A later compiler stage must either prove and promote the appropriate
 family or retain certified metric approximation evidence designed for motion,
 not reuse renderer tessellation.
 
-The current canonical compiler provides that separate approximation boundary:
-it invokes Hypercurve subdivision itself with a motion policy, computes the
-exact length of the resulting chord path, and schedules constant feed against
-that compiled path. This does not claim a lossless general-Bezier metric or
-reuse the Hypergraphics output.
+The general-curve compiler retains a separate approximation boundary: it invokes
+Hypercurve subdivision itself with a motion policy, computes the exact length
+of the resulting chord path, and schedules constant feed against that compiled
+path. This remains useful bounded geometry evidence, but it does not claim a
+lossless general-Bezier metric or a certified jerk schedule and never reuses
+Hypergraphics output.
+
+The machine-bound V1 path accepts the losslessly promoted line/arc subset. It
+derives dynamics, electrical timing, physical uncertainty, step density, timer
+frequency, and output quantum from canonical Configuration V5 rather than a
+second UI schema. Hyperpath/Hypersolve certify zero-radius exact-stop lookahead
+and a four-phase jerk schedule for every retained element. A separate proof
+bounds its approximation by firmware constant-velocity segments, after which
+the production stepper executor is replayed before cache packaging. See
+`EXACT-MACHINE-SCHEDULING.md`.
 
 After canonical quantization, `partition.rs` queries the firmware schema's exact
 per-block record capacity, applies the caller's firmware horizon bound, and
@@ -90,15 +101,24 @@ retains independently reported path/role certainty, and certifies each loop's
 display chords. Material and hole colors come from authoritative roles, never
 from line-mesh winding.
 
+The machine-bound fixture uses a real canonical two-axis TinyBee configuration,
+including exact 1 MHz device time, one-cycle output quantum, 1,600 nominal
+steps/mm, electrical pulse constraints, dynamics, calibration uncertainty, and
+following error. It schedules the retained four-unit line and radius-two
+semicircle, stops exactly at their unblended join, lowers the result under a
+`1/1000 mm` controller-interpolation bound, and finishes at `[12800, 0]` steps.
+The same fixture passes production electrical preflight, real cache packaging,
+event-level simulator replay, deterministic evidence reconstruction, identity
+substitution rejection, and evidence-tamper rejection. Its complete test code
+also compiles as a `wasm32-unknown-unknown` test binary.
+
 ## Required next boundaries
 
 - add certified filled-region triangulation without reclassifying display chords;
 - promote supported PH curves and replace chord-feed approximation where an
   exact or tighter certified source-curve metric is available;
-- add machine capabilities and bounded physical calibration inputs;
-- derive every global/participant identity from canonical source, configuration,
-  compiler, resource, and evidence objects rather than fixture sentinels;
-- quantify geometric, timing, and actuator error at configured machine
-  resolution before emitting `alumina-machine-ir`;
-- certify lookahead, acceleration, jerk, and multi-axis scheduling against the
-  retained path rather than display geometry.
+- add certified nonzero-radius blends and longer-range velocity optimization;
+- add direction-aware axis envelopes, broader kinematics, and more than two axes;
+- extend canonical source evidence beyond exact-rational lines and arcs; and
+- qualify physical timing, calibration, following, and safety behavior on each
+  board/machine combination without weakening the exact software envelope.

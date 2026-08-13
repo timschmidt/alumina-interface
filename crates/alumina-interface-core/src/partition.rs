@@ -23,6 +23,7 @@ use alumina_storage::{
 };
 
 use crate::compiler::CanonicalPathProgram2;
+use crate::motion_schedule::CanonicalScheduledProgram2;
 
 /// Result type for canonical per-MCU packaging.
 pub type MachinePartitionResult<T> = Result<T, MachinePartitionError>;
@@ -300,7 +301,82 @@ pub fn package_canonical_program(
     program: &CanonicalPathProgram2,
     policy: MachinePartitionPolicy2,
 ) -> MachinePartitionResult<CanonicalMachinePartition2> {
-    let segments = program.segments();
+    if program
+        .policy()
+        .machine_configuration_digest()
+        .is_some_and(|digest| digest != policy.config_digest)
+        || program
+            .policy()
+            .capability_digest()
+            .is_some_and(|digest| digest != policy.capability_digest)
+    {
+        return Err(MachinePartitionError::ProgramIdentityMismatch);
+    }
+    let first_point = program
+        .points()
+        .first()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    let last_point = program
+        .points()
+        .last()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    package_canonical_segments(
+        program.segments(),
+        [first_point.steps()[0].get(), first_point.steps()[1].get()],
+        [last_point.steps()[0].get(), last_point.steps()[1].get()],
+        program.policy().timer_ticks_per_second(),
+        policy,
+    )
+}
+
+/// Package a machine-bound, jerk-schedule-derived program only when its
+/// configuration and board identities exactly match the target partition.
+pub fn package_canonical_scheduled_program(
+    program: &CanonicalScheduledProgram2,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<CanonicalMachinePartition2> {
+    if program.configuration_digest() != policy.config_digest
+        || program.capability_digest() != policy.capability_digest
+    {
+        return Err(MachinePartitionError::ProgramIdentityMismatch);
+    }
+    let first_point = program
+        .points()
+        .first()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    let last_point = program
+        .points()
+        .last()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    let initial_position = [first_point.steps()[0].get(), first_point.steps()[1].get()];
+    let final_position = [last_point.steps()[0].get(), last_point.steps()[1].get()];
+    let preflight = program.executor_preflight();
+    if preflight.position != final_position
+        || preflight.end_tick
+            != program
+                .segments()
+                .last()
+                .ok_or(MachinePartitionError::EmptyProgram)?
+                .end_tick
+    {
+        return Err(MachinePartitionError::TerminalMismatch);
+    }
+    package_canonical_segments(
+        program.segments(),
+        initial_position,
+        final_position,
+        program.timer_ticks_per_second(),
+        policy,
+    )
+}
+
+fn package_canonical_segments(
+    segments: &[alumina_machine_ir::ExecutionSegment<2>],
+    initial_position: [i64; 2],
+    expected_final: [i64; 2],
+    local_timer_hz: u64,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<CanonicalMachinePartition2> {
     let first = segments
         .first()
         .ok_or(MachinePartitionError::EmptyProgram)?;
@@ -383,15 +459,6 @@ pub fn package_canonical_program(
     }
     let terminal_progress = validator.finish()?;
 
-    let first_point = program
-        .points()
-        .first()
-        .ok_or(MachinePartitionError::EmptyProgram)?;
-    let last_point = program
-        .points()
-        .last()
-        .ok_or(MachinePartitionError::EmptyProgram)?;
-    let initial_position = [first_point.steps()[0].get(), first_point.steps()[1].get()];
     let final_position = [
         initial_position[0]
             .checked_add(terminal_progress.position[0])
@@ -400,7 +467,6 @@ pub fn package_canonical_program(
             .checked_add(terminal_progress.position[1])
             .ok_or(MachinePartitionError::TerminalMismatch)?,
     ];
-    let expected_final = [last_point.steps()[0].get(), last_point.steps()[1].get()];
     let expected_end_tick = segments
         .last()
         .ok_or(MachinePartitionError::EmptyProgram)?
@@ -469,7 +535,7 @@ pub fn package_canonical_program(
         block_count,
         maximum_segments_per_block,
         maximum_observed_block_ticks,
-        local_timer_hz: program.policy().timer_ticks_per_second(),
+        local_timer_hz,
         initial_position,
         final_position,
         terminal_progress,
@@ -534,6 +600,8 @@ pub fn representative_partition_policy_for(
 pub enum MachinePartitionError {
     /// One identity, admission bound, or storage bound was invalid.
     InvalidPolicy(&'static str),
+    /// Program configuration/capability identity did not match the partition target.
+    ProgramIdentityMismatch,
     /// No canonical segment was available to package.
     EmptyProgram,
     /// Full cached partitions begin at stream-relative tick zero.
@@ -563,6 +631,8 @@ impl fmt::Display for MachinePartitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPolicy(reason) => write!(formatter, "invalid partition policy: {reason}"),
+            Self::ProgramIdentityMismatch => formatter
+                .write_str("canonical program identity does not match the partition target"),
             Self::EmptyProgram => formatter.write_str("canonical program contains no segments"),
             Self::ProgramMustStartAtZero => {
                 formatter.write_str("cached partition must begin at stream tick zero")

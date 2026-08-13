@@ -1,0 +1,1469 @@
+//! Exact machine dynamics and resolution facts derived from canonical configuration.
+//!
+//! This module does not accept a second UI-local machine schema. Its only input
+//! is a [`ConfigurationDocumentView`] that already passed the firmware's board,
+//! resource, semantic, and SHA-256 validation. Physical uncertainty remains an
+//! interval until a conservative bound is selected for scheduling or error
+//! allocation.
+
+use std::cmp::Ordering;
+use std::error::Error as StdError;
+use std::fmt;
+
+use alumina_config::{
+    AxisDriverControl, BindingRole, ConfigurationDocumentView, ConfigurationError,
+    ConfigurationIdentity, ExactScalar, ResourceBinding, ScalarFact,
+};
+use alumina_motion::{AxisTiming, StepperTiming};
+use alumina_protocol::Digest;
+use hyperlimit::{PredicatePolicy, compare_reals};
+use hyperreal::{Problem, Rational, Real};
+
+/// Result type for canonical machine-profile derivation.
+pub type MachineProfileResult<T> = Result<T, MachineProfileError>;
+
+/// Exact nominal value and closed uncertainty interval in the fact's units.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExactInterval {
+    nominal: Rational,
+    lower: Rational,
+    upper: Rational,
+}
+
+impl ExactInterval {
+    fn from_scalar(scalar: ExactScalar) -> MachineProfileResult<Self> {
+        let nominal = convert_rational(scalar.value)?;
+        let uncertainty = convert_rational(scalar.uncertainty)?;
+        Ok(Self {
+            lower: &nominal - &uncertainty,
+            upper: &nominal + &uncertainty,
+            nominal,
+        })
+    }
+
+    fn require_positive_lower(self, instance: u16, fact: ScalarFact) -> MachineProfileResult<Self> {
+        if self.lower <= Rational::zero() {
+            return Err(MachineProfileError::NonPositiveLowerBound { instance, fact });
+        }
+        Ok(self)
+    }
+
+    fn divided_by_positive_integer(&self, divisor: u64) -> Self {
+        let divisor = Rational::from(divisor);
+        Self {
+            nominal: &self.nominal / &divisor,
+            lower: &self.lower / &divisor,
+            upper: &self.upper / divisor,
+        }
+    }
+
+    /// Exact nominal value.
+    pub const fn nominal(&self) -> &Rational {
+        &self.nominal
+    }
+
+    /// Inclusive conservative lower endpoint.
+    pub const fn lower(&self) -> &Rational {
+        &self.lower
+    }
+
+    /// Inclusive conservative upper endpoint.
+    pub const fn upper(&self) -> &Rational {
+        &self.upper
+    }
+}
+
+/// Exact resource, transmission, uncertainty, and dynamics facts for one axis.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StepperAxisMachineProfile {
+    instance: u16,
+    step: ResourceBinding,
+    direction: ResourceBinding,
+    driver_control: ResourceBinding,
+    driver_control_action: AxisDriverControl,
+    full_steps_per_turn: ExactInterval,
+    microsteps: ExactInterval,
+    motor_turns_per_output_turn: ExactInterval,
+    travel_metres_per_output_turn: ExactInterval,
+    calibration_scale: ExactInterval,
+    command_density_steps_per_metre: ExactInterval,
+    command_density_steps_per_millimetre: ExactInterval,
+    position_minimum_metres: ExactInterval,
+    position_maximum_metres: ExactInterval,
+    usable_position_minimum_metres: Rational,
+    usable_position_maximum_metres: Rational,
+    configured_velocity_limit_metres_per_second: ExactInterval,
+    effective_step_frequency_hz: Rational,
+    step_rate_velocity_limit_metres_per_second: Rational,
+    effective_velocity_limit_metres_per_second: Rational,
+    acceleration_limit_metres_per_second_squared: ExactInterval,
+    effective_acceleration_limit_metres_per_second_squared: Rational,
+    jerk_limit_metres_per_second_cubed: ExactInterval,
+    effective_jerk_limit_metres_per_second_cubed: Rational,
+    following_error_metres: ExactInterval,
+    maximum_following_error_metres: Rational,
+}
+
+impl StepperAxisMachineProfile {
+    fn derive(
+        view: ConfigurationDocumentView<'_>,
+        instance: u16,
+        timer_ticks_per_second: u64,
+    ) -> MachineProfileResult<Self> {
+        let step = required_binding(view, instance, BindingRole::AxisStep)?;
+        let direction = required_binding(view, instance, BindingRole::AxisDirection)?;
+        let enable = view.binding(instance, BindingRole::AxisEnable)?;
+        let disable = view.binding(instance, BindingRole::AxisDisable)?;
+        let (driver_control, driver_control_action) = match (enable, disable) {
+            (Some(binding), None) => (binding, AxisDriverControl::Enable),
+            (None, Some(binding)) => (binding, AxisDriverControl::Disable),
+            _ => return Err(MachineProfileError::InvalidDriverControl { instance }),
+        };
+
+        let full_steps_per_turn =
+            positive_scalar_interval(view, instance, ScalarFact::AxisFullStepsPerTurn)?;
+        let microsteps = positive_scalar_interval(view, instance, ScalarFact::AxisMicrosteps)?;
+        let motor_turns_per_output_turn =
+            positive_scalar_interval(view, instance, ScalarFact::AxisMotorTurnsPerOutputTurn)?;
+        let travel_metres_per_output_turn =
+            positive_scalar_interval(view, instance, ScalarFact::AxisTravelMetresPerOutputTurn)?;
+        let calibration_scale =
+            positive_scalar_interval(view, instance, ScalarFact::AxisCalibrationScale)?;
+
+        let numerator_nominal = &full_steps_per_turn.nominal
+            * &microsteps.nominal
+            * &motor_turns_per_output_turn.nominal
+            * &calibration_scale.nominal;
+        let numerator_lower = &full_steps_per_turn.lower
+            * &microsteps.lower
+            * &motor_turns_per_output_turn.lower
+            * &calibration_scale.lower;
+        let numerator_upper = &full_steps_per_turn.upper
+            * &microsteps.upper
+            * &motor_turns_per_output_turn.upper
+            * &calibration_scale.upper;
+        let command_density_steps_per_metre = ExactInterval {
+            nominal: numerator_nominal / &travel_metres_per_output_turn.nominal,
+            lower: numerator_lower / &travel_metres_per_output_turn.upper,
+            upper: numerator_upper / &travel_metres_per_output_turn.lower,
+        };
+        let command_density_steps_per_millimetre =
+            command_density_steps_per_metre.divided_by_positive_integer(1_000);
+
+        let position_minimum_metres =
+            scalar_interval(view, instance, ScalarFact::AxisPositionMinimumMetres)?;
+        let position_maximum_metres =
+            scalar_interval(view, instance, ScalarFact::AxisPositionMaximumMetres)?;
+        let usable_position_minimum_metres = position_minimum_metres.upper.clone();
+        let usable_position_maximum_metres = position_maximum_metres.lower.clone();
+        if usable_position_minimum_metres >= usable_position_maximum_metres {
+            return Err(MachineProfileError::EmptyUsableTravel { instance });
+        }
+
+        let configured_velocity_limit_metres_per_second =
+            positive_scalar_interval(view, instance, ScalarFact::AxisVelocityLimitMetresPerSecond)?;
+        let pulse_period_cycles = step
+            .minimum_active_cycles
+            .checked_add(step.minimum_inactive_cycles)
+            .ok_or(MachineProfileError::PulseTimingOverflow { instance })?;
+        let cycle_limited_frequency_hz =
+            Rational::from(timer_ticks_per_second) / Rational::from(pulse_period_cycles);
+        let effective_step_frequency_hz = minimum_rational(
+            Rational::from(step.maximum_frequency_hz),
+            cycle_limited_frequency_hz,
+        );
+        let step_rate_velocity_limit_metres_per_second =
+            &effective_step_frequency_hz / &command_density_steps_per_metre.upper;
+        let effective_velocity_limit_metres_per_second = minimum_rational(
+            configured_velocity_limit_metres_per_second.lower.clone(),
+            step_rate_velocity_limit_metres_per_second.clone(),
+        );
+
+        let acceleration_limit_metres_per_second_squared = positive_scalar_interval(
+            view,
+            instance,
+            ScalarFact::AxisAccelerationLimitMetresPerSecondSquared,
+        )?;
+        let effective_acceleration_limit_metres_per_second_squared =
+            acceleration_limit_metres_per_second_squared.lower.clone();
+        let jerk_limit_metres_per_second_cubed = positive_scalar_interval(
+            view,
+            instance,
+            ScalarFact::AxisJerkLimitMetresPerSecondCubed,
+        )?;
+        let effective_jerk_limit_metres_per_second_cubed =
+            jerk_limit_metres_per_second_cubed.lower.clone();
+        let following_error_metres =
+            scalar_interval(view, instance, ScalarFact::AxisFollowingErrorMetres)?;
+        let maximum_following_error_metres = following_error_metres.upper.clone();
+
+        Ok(Self {
+            instance,
+            step,
+            direction,
+            driver_control,
+            driver_control_action,
+            full_steps_per_turn,
+            microsteps,
+            motor_turns_per_output_turn,
+            travel_metres_per_output_turn,
+            calibration_scale,
+            command_density_steps_per_metre,
+            command_density_steps_per_millimetre,
+            position_minimum_metres,
+            position_maximum_metres,
+            usable_position_minimum_metres,
+            usable_position_maximum_metres,
+            configured_velocity_limit_metres_per_second,
+            effective_step_frequency_hz,
+            step_rate_velocity_limit_metres_per_second,
+            effective_velocity_limit_metres_per_second,
+            acceleration_limit_metres_per_second_squared,
+            effective_acceleration_limit_metres_per_second_squared,
+            jerk_limit_metres_per_second_cubed,
+            effective_jerk_limit_metres_per_second_cubed,
+            following_error_metres,
+            maximum_following_error_metres,
+        })
+    }
+
+    /// Logical dense axis instance.
+    pub const fn instance(&self) -> u16 {
+        self.instance
+    }
+
+    /// Validated step-output resource and pulse/rate bounds.
+    pub const fn step_binding(&self) -> ResourceBinding {
+        self.step
+    }
+
+    /// Validated direction resource and setup/hold bounds.
+    pub const fn direction_binding(&self) -> ResourceBinding {
+        self.direction
+    }
+
+    /// Validated driver-control resource and setup/hold bounds.
+    pub const fn driver_control_binding(&self) -> ResourceBinding {
+        self.driver_control
+    }
+
+    /// Whether the driver-control binding asserts enable or disable.
+    pub const fn driver_control_action(&self) -> AxisDriverControl {
+        self.driver_control_action
+    }
+
+    /// Motor full steps per motor turn.
+    pub const fn full_steps_per_turn(&self) -> &ExactInterval {
+        &self.full_steps_per_turn
+    }
+
+    /// Configured microsteps per full step.
+    pub const fn microsteps(&self) -> &ExactInterval {
+        &self.microsteps
+    }
+
+    /// Motor turns per output turn.
+    pub const fn motor_turns_per_output_turn(&self) -> &ExactInterval {
+        &self.motor_turns_per_output_turn
+    }
+
+    /// Linear travel per output turn.
+    pub const fn travel_metres_per_output_turn(&self) -> &ExactInterval {
+        &self.travel_metres_per_output_turn
+    }
+
+    /// Dimensionless command-density calibration multiplier.
+    pub const fn calibration_scale(&self) -> &ExactInterval {
+        &self.calibration_scale
+    }
+
+    /// Derived commanded steps per metre, including all source uncertainty.
+    pub const fn command_density_steps_per_metre(&self) -> &ExactInterval {
+        &self.command_density_steps_per_metre
+    }
+
+    /// Derived commanded steps per millimetre, including all source uncertainty.
+    pub const fn command_density_steps_per_millimetre(&self) -> &ExactInterval {
+        &self.command_density_steps_per_millimetre
+    }
+
+    /// Configured lower travel fact and its uncertainty interval.
+    pub const fn position_minimum_metres(&self) -> &ExactInterval {
+        &self.position_minimum_metres
+    }
+
+    /// Configured upper travel fact and its uncertainty interval.
+    pub const fn position_maximum_metres(&self) -> &ExactInterval {
+        &self.position_maximum_metres
+    }
+
+    /// Lowest command position guaranteed inside every admitted travel interval.
+    pub const fn usable_position_minimum_metres(&self) -> &Rational {
+        &self.usable_position_minimum_metres
+    }
+
+    /// Highest command position guaranteed inside every admitted travel interval.
+    pub const fn usable_position_maximum_metres(&self) -> &Rational {
+        &self.usable_position_maximum_metres
+    }
+
+    /// Configured velocity limit and physical uncertainty interval.
+    pub const fn configured_velocity_limit_metres_per_second(&self) -> &ExactInterval {
+        &self.configured_velocity_limit_metres_per_second
+    }
+
+    /// Conservative velocity ceiling imposed solely by maximum step frequency.
+    pub const fn effective_step_frequency_hz(&self) -> &Rational {
+        &self.effective_step_frequency_hz
+    }
+
+    /// Conservative velocity ceiling imposed by maximum step frequency and pulse timing.
+    pub const fn step_rate_velocity_limit_metres_per_second(&self) -> &Rational {
+        &self.step_rate_velocity_limit_metres_per_second
+    }
+
+    /// Lesser of the uncertain configured limit and the step-frequency limit.
+    pub const fn effective_velocity_limit_metres_per_second(&self) -> &Rational {
+        &self.effective_velocity_limit_metres_per_second
+    }
+
+    /// Configured acceleration limit and physical uncertainty interval.
+    pub const fn acceleration_limit_metres_per_second_squared(&self) -> &ExactInterval {
+        &self.acceleration_limit_metres_per_second_squared
+    }
+
+    /// Conservative acceleration limit used by scheduling.
+    pub const fn effective_acceleration_limit_metres_per_second_squared(&self) -> &Rational {
+        &self.effective_acceleration_limit_metres_per_second_squared
+    }
+
+    /// Configured jerk limit and physical uncertainty interval.
+    pub const fn jerk_limit_metres_per_second_cubed(&self) -> &ExactInterval {
+        &self.jerk_limit_metres_per_second_cubed
+    }
+
+    /// Conservative jerk limit used by scheduling.
+    pub const fn effective_jerk_limit_metres_per_second_cubed(&self) -> &Rational {
+        &self.effective_jerk_limit_metres_per_second_cubed
+    }
+
+    /// Configured following-error fact and uncertainty interval.
+    pub const fn following_error_metres(&self) -> &ExactInterval {
+        &self.following_error_metres
+    }
+
+    /// Conservative physical following-error bound.
+    pub const fn maximum_following_error_metres(&self) -> &Rational {
+        &self.maximum_following_error_metres
+    }
+}
+
+/// Two-axis exact machine profile consumed by the current canonical compiler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MachineDynamicsProfile2 {
+    identity: ConfigurationIdentity,
+    timer_ticks_per_second: u64,
+    output_quantum_cycles: u32,
+    axes: [StepperAxisMachineProfile; 2],
+}
+
+impl MachineDynamicsProfile2 {
+    /// Derives a dense two-axis stepper profile from already validated bytes.
+    /// Mixed, sparse, or wider machine layouts are rejected rather than
+    /// silently projecting away configured motion axes.
+    pub fn from_configuration(view: ConfigurationDocumentView<'_>) -> MachineProfileResult<Self> {
+        let identity = view.identity();
+        if identity.summary.stepper_axes != 2 || identity.summary.foc_axes != 0 {
+            return Err(MachineProfileError::UnsupportedAxisLayout {
+                steppers: identity.summary.stepper_axes,
+                foc: identity.summary.foc_axes,
+            });
+        }
+        let timer = required_scalar(view, 0, ScalarFact::TimerTickHertz)?;
+        let timer_ticks_per_second = u64::try_from(timer.value.numerator).map_err(|_| {
+            MachineProfileError::InvalidTimerTick {
+                numerator: timer.value.numerator,
+                denominator: timer.value.denominator,
+            }
+        })?;
+        if timer_ticks_per_second == 0
+            || timer.value.denominator != 1
+            || timer.uncertainty.numerator != 0
+        {
+            return Err(MachineProfileError::InvalidTimerTick {
+                numerator: timer.value.numerator,
+                denominator: timer.value.denominator,
+            });
+        }
+        let output_quantum = required_scalar(view, 0, ScalarFact::StepperOutputQuantumCycles)?;
+        let output_quantum_cycles =
+            u32::try_from(output_quantum.value.numerator).map_err(|_| {
+                MachineProfileError::InvalidOutputQuantum {
+                    numerator: output_quantum.value.numerator,
+                    denominator: output_quantum.value.denominator,
+                }
+            })?;
+        if output_quantum_cycles == 0
+            || output_quantum.value.denominator != 1
+            || output_quantum.uncertainty.numerator != 0
+        {
+            return Err(MachineProfileError::InvalidOutputQuantum {
+                numerator: output_quantum.value.numerator,
+                denominator: output_quantum.value.denominator,
+            });
+        }
+        Ok(Self {
+            identity,
+            timer_ticks_per_second,
+            output_quantum_cycles,
+            axes: [
+                StepperAxisMachineProfile::derive(view, 0, timer_ticks_per_second)?,
+                StepperAxisMachineProfile::derive(view, 1, timer_ticks_per_second)?,
+            ],
+        })
+    }
+
+    /// Exact canonical configuration identity behind every derived fact.
+    pub const fn configuration_identity(&self) -> ConfigurationIdentity {
+        self.identity
+    }
+
+    /// Canonical configuration SHA-256.
+    pub const fn configuration_digest(&self) -> Digest {
+        self.identity.digest
+    }
+
+    /// Board capability SHA-256 to which the configuration was validated.
+    pub const fn capability_digest(&self) -> Digest {
+        self.identity.capability_digest
+    }
+
+    /// Exact integer `DeviceCycle` frequency.
+    pub const fn timer_ticks_per_second(&self) -> u64 {
+        self.timer_ticks_per_second
+    }
+
+    /// Smallest addressable output interval in device cycles.
+    pub const fn output_quantum_cycles(&self) -> u32 {
+        self.output_quantum_cycles
+    }
+
+    /// Production step/direction electrical policy derived from the same
+    /// canonical records used for CAM. Lateness does not alter ideal event
+    /// times, but is retained for byte-identical executor replay.
+    pub fn stepper_timing(&self, maximum_lateness_cycles: u32) -> StepperTiming<2> {
+        StepperTiming {
+            axes: self.axes.each_ref().map(|axis| AxisTiming {
+                pulse_high_cycles: axis.step.minimum_active_cycles,
+                pulse_low_cycles: axis.step.minimum_inactive_cycles,
+                direction_setup_cycles: axis.direction.minimum_active_cycles,
+                direction_hold_cycles: axis.direction.minimum_inactive_cycles,
+                enable_setup_cycles: axis.driver_control.minimum_active_cycles,
+                enable_hold_cycles: axis.driver_control.minimum_inactive_cycles,
+                maximum_step_frequency_hz: axis.step.maximum_frequency_hz,
+            }),
+            device_cycle_hz: self.timer_ticks_per_second,
+            output_quantum_cycles: self.output_quantum_cycles,
+            maximum_lateness_cycles,
+        }
+    }
+
+    /// Dense X/Y axis profiles.
+    pub const fn axes(&self) -> &[StepperAxisMachineProfile; 2] {
+        &self.axes
+    }
+}
+
+/// Certified decomposition of the first unavoidable two-axis error floor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineResolutionBudget2 {
+    configuration_digest: Digest,
+    capability_digest: Digest,
+    requested_total_error_mm_exact: Rational,
+    source_curve_allocation_mm_exact: Rational,
+    controller_interpolation_allocation_mm_exact: Rational,
+    requested_total_error_mm: Real,
+    source_curve_allocation_mm: Real,
+    controller_interpolation_allocation_mm: Real,
+    endpoint_quantization_error_mm: Real,
+    step_event_tracking_error_mm: Real,
+    command_lattice_error_mm: Real,
+    calibration_error_mm: Real,
+    following_error_mm: Real,
+    timer_position_error_mm: Real,
+    required_total_error_mm: Real,
+}
+
+impl MachineResolutionBudget2 {
+    /// Computes conservative machine-wide components and proves their sum fits
+    /// the requested total. Calibration error is bounded over the complete
+    /// usable travel relative to machine coordinate zero; a later per-job
+    /// certificate may tighten that extent but may not exceed this envelope.
+    pub fn certify(
+        profile: &MachineDynamicsProfile2,
+        requested_total_error_mm: Rational,
+        source_curve_allocation_mm: Rational,
+        controller_interpolation_allocation_mm: Rational,
+    ) -> MachineProfileResult<Self> {
+        if requested_total_error_mm <= Rational::zero()
+            || source_curve_allocation_mm < Rational::zero()
+            || controller_interpolation_allocation_mm < Rational::zero()
+        {
+            return Err(MachineProfileError::InvalidErrorBudget);
+        }
+
+        let mut endpoint_lattice_axis = Vec::with_capacity(2);
+        let mut step_event_axis = Vec::with_capacity(2);
+        let mut calibration_axis = Vec::with_capacity(2);
+        let mut following_axis = Vec::with_capacity(2);
+        let mut velocity_axis_mm = Vec::with_capacity(2);
+        for axis in profile.axes() {
+            let half_step_mm = Rational::one()
+                / (Rational::from(2) * axis.command_density_steps_per_millimetre().lower());
+            endpoint_lattice_axis.push(Real::from(half_step_mm));
+            step_event_axis.push(Real::from(
+                Rational::one() / axis.command_density_steps_per_millimetre().lower(),
+            ));
+
+            let density = axis.command_density_steps_per_metre();
+            let lower_scale_error = (density.nominal() / density.lower()) - Rational::one();
+            let upper_scale_error = Rational::one() - (density.nominal() / density.upper());
+            let maximum_scale_error = maximum_rational(lower_scale_error, upper_scale_error);
+            let maximum_extent_metres = maximum_rational(
+                absolute_rational(axis.usable_position_minimum_metres()),
+                absolute_rational(axis.usable_position_maximum_metres()),
+            );
+            calibration_axis.push(Real::from(
+                maximum_extent_metres * Rational::from(1_000) * maximum_scale_error,
+            ));
+            following_axis.push(Real::from(
+                axis.maximum_following_error_metres() * Rational::from(1_000),
+            ));
+            velocity_axis_mm.push(Real::from(
+                axis.effective_velocity_limit_metres_per_second() * Rational::from(1_000),
+            ));
+        }
+
+        let endpoint_quantization_error_mm = vector_norm2(&endpoint_lattice_axis)?;
+        let step_event_tracking_error_mm = vector_norm2(&step_event_axis)?;
+        let command_lattice_error_mm =
+            endpoint_quantization_error_mm.clone() + step_event_tracking_error_mm.clone();
+        let calibration_error_mm = vector_norm2(&calibration_axis)?;
+        let following_error_mm = vector_norm2(&following_axis)?;
+        let maximum_vector_velocity_mm_per_second = vector_norm2(&velocity_axis_mm)?;
+        let half_tick_seconds =
+            (Real::one() / (Real::from(2) * Real::from(profile.timer_ticks_per_second())))?;
+        let timer_position_error_mm = maximum_vector_velocity_mm_per_second * half_tick_seconds;
+        let requested_total_error_mm_exact = requested_total_error_mm;
+        let source_curve_allocation_mm_exact = source_curve_allocation_mm;
+        let controller_interpolation_allocation_mm_exact = controller_interpolation_allocation_mm;
+        let requested_total_error_mm = Real::from(requested_total_error_mm_exact.clone());
+        let source_curve_allocation_mm = Real::from(source_curve_allocation_mm_exact.clone());
+        let controller_interpolation_allocation_mm =
+            Real::from(controller_interpolation_allocation_mm_exact.clone());
+        let required_total_error_mm = source_curve_allocation_mm.clone()
+            + controller_interpolation_allocation_mm.clone()
+            + command_lattice_error_mm.clone()
+            + calibration_error_mm.clone()
+            + following_error_mm.clone()
+            + timer_position_error_mm.clone();
+        match compare_reals(
+            &required_total_error_mm,
+            &requested_total_error_mm,
+            PredicatePolicy::STRICT,
+        )
+        .value()
+        {
+            Some(Ordering::Less | Ordering::Equal) => Ok(Self {
+                configuration_digest: profile.configuration_digest(),
+                capability_digest: profile.capability_digest(),
+                requested_total_error_mm_exact,
+                source_curve_allocation_mm_exact,
+                controller_interpolation_allocation_mm_exact,
+                requested_total_error_mm,
+                source_curve_allocation_mm,
+                controller_interpolation_allocation_mm,
+                endpoint_quantization_error_mm,
+                step_event_tracking_error_mm,
+                command_lattice_error_mm,
+                calibration_error_mm,
+                following_error_mm,
+                timer_position_error_mm,
+                required_total_error_mm,
+            }),
+            Some(Ordering::Greater) => Err(MachineProfileError::ErrorBudgetExceeded),
+            None => Err(MachineProfileError::ErrorBudgetPredicateUnresolved),
+        }
+    }
+
+    /// Canonical configuration identity for which this budget was certified.
+    pub const fn configuration_digest(&self) -> Digest {
+        self.configuration_digest
+    }
+
+    /// Immutable board capability identity for which this budget was certified.
+    pub const fn capability_digest(&self) -> Digest {
+        self.capability_digest
+    }
+
+    /// Requested total as the caller's exact rational input.
+    pub const fn requested_total_error_mm_exact(&self) -> &Rational {
+        &self.requested_total_error_mm_exact
+    }
+
+    /// Source allocation as the caller's exact rational input.
+    pub const fn source_curve_allocation_mm_exact(&self) -> &Rational {
+        &self.source_curve_allocation_mm_exact
+    }
+
+    /// Controller interpolation allocation as the caller's exact rational input.
+    pub const fn controller_interpolation_allocation_mm_exact(&self) -> &Rational {
+        &self.controller_interpolation_allocation_mm_exact
+    }
+
+    /// Requested total positional error in millimetres.
+    pub const fn requested_total_error_mm(&self) -> &Real {
+        &self.requested_total_error_mm
+    }
+
+    /// Caller-owned source-curve approximation allocation.
+    pub const fn source_curve_allocation_mm(&self) -> &Real {
+        &self.source_curve_allocation_mm
+    }
+
+    /// Caller-owned V1 constant-segment interpolation allocation.
+    pub const fn controller_interpolation_allocation_mm(&self) -> &Real {
+        &self.controller_interpolation_allocation_mm
+    }
+
+    /// Worst-case Euclidean nearest-endpoint quantization component.
+    pub const fn endpoint_quantization_error_mm(&self) -> &Real {
+        &self.endpoint_quantization_error_mm
+    }
+
+    /// Worst-case Euclidean DDA step-event tracking component.
+    pub const fn step_event_tracking_error_mm(&self) -> &Real {
+        &self.step_event_tracking_error_mm
+    }
+
+    /// Sum of endpoint quantization and within-segment DDA tracking components.
+    pub const fn command_lattice_error_mm(&self) -> &Real {
+        &self.command_lattice_error_mm
+    }
+
+    /// Worst-case full-travel density/calibration component.
+    pub const fn calibration_error_mm(&self) -> &Real {
+        &self.calibration_error_mm
+    }
+
+    /// Worst-case Euclidean configured following-error component.
+    pub const fn following_error_mm(&self) -> &Real {
+        &self.following_error_mm
+    }
+
+    /// Half-tick positional component at maximum vector velocity.
+    pub const fn timer_position_error_mm(&self) -> &Real {
+        &self.timer_position_error_mm
+    }
+
+    /// Sum proven no greater than the requested total.
+    pub const fn required_total_error_mm(&self) -> &Real {
+        &self.required_total_error_mm
+    }
+}
+
+fn vector_norm2(components: &[Real]) -> Result<Real, Problem> {
+    let mut squared = Real::zero();
+    for component in components {
+        squared += component * component;
+    }
+    squared.sqrt()
+}
+
+fn required_binding(
+    view: ConfigurationDocumentView<'_>,
+    instance: u16,
+    role: BindingRole,
+) -> MachineProfileResult<ResourceBinding> {
+    view.binding(instance, role)?
+        .ok_or(MachineProfileError::MissingBinding { instance, role })
+}
+
+fn required_scalar(
+    view: ConfigurationDocumentView<'_>,
+    instance: u16,
+    fact: ScalarFact,
+) -> MachineProfileResult<ExactScalar> {
+    view.scalar(instance, fact)?
+        .ok_or(MachineProfileError::MissingScalar { instance, fact })
+}
+
+fn scalar_interval(
+    view: ConfigurationDocumentView<'_>,
+    instance: u16,
+    fact: ScalarFact,
+) -> MachineProfileResult<ExactInterval> {
+    ExactInterval::from_scalar(required_scalar(view, instance, fact)?)
+}
+
+fn positive_scalar_interval(
+    view: ConfigurationDocumentView<'_>,
+    instance: u16,
+    fact: ScalarFact,
+) -> MachineProfileResult<ExactInterval> {
+    scalar_interval(view, instance, fact)?.require_positive_lower(instance, fact)
+}
+
+fn convert_rational(value: alumina_config::Rational) -> MachineProfileResult<Rational> {
+    Rational::fraction(value.numerator, value.denominator).map_err(MachineProfileError::Arithmetic)
+}
+
+fn minimum_rational(left: Rational, right: Rational) -> Rational {
+    if left <= right { left } else { right }
+}
+
+fn maximum_rational(left: Rational, right: Rational) -> Rational {
+    if left >= right { left } else { right }
+}
+
+fn absolute_rational(value: &Rational) -> Rational {
+    if value.is_negative() {
+        -value
+    } else {
+        value.clone()
+    }
+}
+
+/// Failure to derive or certify a canonical machine profile.
+#[derive(Debug)]
+pub enum MachineProfileError {
+    /// Canonical configuration inspection unexpectedly failed.
+    Configuration(ConfigurationError),
+    /// Hyper exact arithmetic rejected an operation.
+    Arithmetic(Problem),
+    /// The current compiler requires exactly two dense stepper axes and no FOC axis.
+    UnsupportedAxisLayout {
+        /// Configured stepper-axis count.
+        steppers: u8,
+        /// Configured FOC-axis count.
+        foc: u8,
+    },
+    /// A required exact fact was absent.
+    MissingScalar {
+        /// Logical instance.
+        instance: u16,
+        /// Required fact.
+        fact: ScalarFact,
+    },
+    /// A required resource binding was absent.
+    MissingBinding {
+        /// Logical instance.
+        instance: u16,
+        /// Required binding role.
+        role: BindingRole,
+    },
+    /// The axis did not have exactly one enable/disable control semantic.
+    InvalidDriverControl {
+        /// Logical axis instance.
+        instance: u16,
+    },
+    /// Physical uncertainty reached or crossed zero for a divisive or limit fact.
+    NonPositiveLowerBound {
+        /// Logical fact instance.
+        instance: u16,
+        /// Fact whose lower endpoint was not positive.
+        fact: ScalarFact,
+    },
+    /// Conservative position-bound intersection was empty.
+    EmptyUsableTravel {
+        /// Logical axis instance.
+        instance: u16,
+    },
+    /// Pulse-high plus pulse-low timing overflowed.
+    PulseTimingOverflow {
+        /// Logical axis instance.
+        instance: u16,
+    },
+    /// The global time-base fact was not a positive exact integer.
+    InvalidTimerTick {
+        /// Encoded numerator.
+        numerator: i64,
+        /// Encoded denominator.
+        denominator: u64,
+    },
+    /// The global stepper output quantum was not a positive exact `u32`.
+    InvalidOutputQuantum {
+        /// Encoded numerator.
+        numerator: i64,
+        /// Encoded denominator.
+        denominator: u64,
+    },
+    /// Requested or source error allocation had an invalid sign.
+    InvalidErrorBudget,
+    /// Unavoidable components exceeded the requested total.
+    ErrorBudgetExceeded,
+    /// Hyperlimit could not decide the final exact budget predicate.
+    ErrorBudgetPredicateUnresolved,
+}
+
+impl fmt::Display for MachineProfileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Configuration(source) => {
+                write!(formatter, "canonical configuration inspection failed: {source:?}")
+            }
+            Self::Arithmetic(source) => write!(formatter, "exact machine arithmetic failed: {source}"),
+            Self::UnsupportedAxisLayout { steppers, foc } => write!(
+                formatter,
+                "the two-axis compiler cannot consume {steppers} stepper and {foc} FOC axes"
+            ),
+            Self::MissingScalar { instance, fact } => {
+                write!(formatter, "axis {instance} is missing exact fact {fact:?}")
+            }
+            Self::MissingBinding { instance, role } => {
+                write!(formatter, "axis {instance} is missing binding {role:?}")
+            }
+            Self::InvalidDriverControl { instance } => write!(
+                formatter,
+                "axis {instance} does not have exactly one enable/disable binding"
+            ),
+            Self::NonPositiveLowerBound { instance, fact } => write!(
+                formatter,
+                "axis {instance} fact {fact:?} has a nonpositive uncertainty lower bound"
+            ),
+            Self::EmptyUsableTravel { instance } => write!(
+                formatter,
+                "axis {instance} has no travel common to all admitted uncertainty"
+            ),
+            Self::PulseTimingOverflow { instance } => {
+                write!(formatter, "axis {instance} pulse timing overflowed")
+            }
+            Self::InvalidTimerTick {
+                numerator,
+                denominator,
+            } => write!(
+                formatter,
+                "timer tick frequency {numerator}/{denominator} is not a positive exact integer"
+            ),
+            Self::InvalidOutputQuantum {
+                numerator,
+                denominator,
+            } => write!(
+                formatter,
+                "stepper output quantum {numerator}/{denominator} is not a positive exact u32"
+            ),
+            Self::InvalidErrorBudget => formatter.write_str("machine error budget is invalid"),
+            Self::ErrorBudgetExceeded => formatter.write_str(
+                "machine resolution, calibration, following, timing, and source allocations exceed the requested error",
+            ),
+            Self::ErrorBudgetPredicateUnresolved => {
+                formatter.write_str("the exact machine error-budget predicate remained unresolved")
+            }
+        }
+    }
+}
+
+impl StdError for MachineProfileError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Arithmetic(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<ConfigurationError> for MachineProfileError {
+    fn from(value: ConfigurationError) -> Self {
+        Self::Configuration(value)
+    }
+}
+
+impl From<Problem> for MachineProfileError {
+    fn from(value: Problem) -> Self {
+        Self::Arithmetic(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boundary::CanonicalStep;
+    use crate::compiler::{
+        MachineCompileError, MotionCompilePolicy2, compile_certified_chord_program,
+    };
+    use crate::motion_schedule::{
+        certify_exact_stop_jerk_schedule, lower_certified_schedule_to_v1,
+    };
+    use crate::partition::{
+        MachinePartitionError, MachinePartitionPolicy2, package_canonical_scheduled_program,
+    };
+    use crate::schedule_evidence::{
+        ScheduleEvidenceError, build_canonical_schedule_evidence,
+        replay_canonical_schedule_evidence, verify_canonical_schedule_evidence_bytes,
+    };
+    use crate::toolpath::{representative_curve_path, representative_metric_path};
+    use alumina_board::{OwnerDomain, ResourceId};
+    use alumina_config::{
+        BindingFlags, ConfigurationFlags, ConfigurationHeader, ConfigurationRecord, ExactScalar,
+        FactEvidence, Rational as ConfigurationRational, SignalPolarity,
+    };
+    use alumina_machine_ir::{BlockValidationLimits, EXECUTION_BLOCK_BYTES, ValidationLimits};
+    use alumina_sim::motion::{CachedStepperReplayError, replay_cached_stepper_partition};
+    use alumina_storage::{CacheLimits, UploadId, sha256};
+
+    fn wire_rational(numerator: i64, denominator: u64) -> ConfigurationRational {
+        ConfigurationRational::new(numerator, denominator).unwrap()
+    }
+
+    fn binding(
+        instance: u16,
+        role: BindingRole,
+        resource: ResourceId,
+        polarity: SignalPolarity,
+    ) -> ConfigurationRecord {
+        let safety = role == BindingRole::EmergencyStop;
+        ConfigurationRecord::Binding(ResourceBinding {
+            instance,
+            role,
+            resource,
+            owner: OwnerDomain::Realtime,
+            polarity,
+            flags: BindingFlags(if safety {
+                BindingFlags::REQUIRED_INTERLOCK
+            } else {
+                0
+            }),
+            minimum_active_cycles: 48,
+            minimum_inactive_cycles: 48,
+            maximum_frequency_hz: if safety { 0 } else { 100_000 },
+            watchdog_cycles: 240_000,
+        })
+    }
+
+    fn scalar(
+        instance: u16,
+        fact: ScalarFact,
+        numerator: i64,
+        denominator: u64,
+        uncertainty_numerator: i64,
+        uncertainty_denominator: u64,
+    ) -> ConfigurationRecord {
+        ConfigurationRecord::Scalar(ExactScalar {
+            instance,
+            fact,
+            value: wire_rational(numerator, denominator),
+            uncertainty: wire_rational(uncertainty_numerator, uncertainty_denominator),
+            evidence: FactEvidence::Measured,
+        })
+    }
+
+    fn axis_scalars(instance: u16) -> Vec<ConfigurationRecord> {
+        vec![
+            scalar(instance, ScalarFact::AxisFullStepsPerTurn, 200, 1, 0, 1),
+            scalar(instance, ScalarFact::AxisMicrosteps, 16, 1, 0, 1),
+            scalar(
+                instance,
+                ScalarFact::AxisMotorTurnsPerOutputTurn,
+                1,
+                1,
+                0,
+                1,
+            ),
+            scalar(
+                instance,
+                ScalarFact::AxisTravelMetresPerOutputTurn,
+                1,
+                500,
+                0,
+                1,
+            ),
+            scalar(
+                instance,
+                ScalarFact::AxisCalibrationScale,
+                1,
+                1,
+                1,
+                1_000_000,
+            ),
+            scalar(instance, ScalarFact::AxisPositionMinimumMetres, 0, 1, 0, 1),
+            scalar(instance, ScalarFact::AxisPositionMaximumMetres, 3, 10, 0, 1),
+            scalar(
+                instance,
+                ScalarFact::AxisVelocityLimitMetresPerSecond,
+                1,
+                20,
+                1,
+                1_000,
+            ),
+            scalar(
+                instance,
+                ScalarFact::AxisAccelerationLimitMetresPerSecondSquared,
+                1,
+                2,
+                1,
+                100,
+            ),
+            scalar(
+                instance,
+                ScalarFact::AxisJerkLimitMetresPerSecondCubed,
+                5,
+                1,
+                1,
+                10,
+            ),
+            scalar(
+                instance,
+                ScalarFact::AxisFollowingErrorMetres,
+                1,
+                100_000,
+                1,
+                500_000,
+            ),
+        ]
+    }
+
+    fn machine_records() -> Vec<ConfigurationRecord> {
+        let mut records = vec![
+            binding(
+                0,
+                BindingRole::AxisStep,
+                ResourceId::I2sOut { engine: 0, bit: 1 },
+                SignalPolarity::ActiveHigh,
+            ),
+            binding(
+                0,
+                BindingRole::AxisDirection,
+                ResourceId::I2sOut { engine: 0, bit: 2 },
+                SignalPolarity::ActiveHigh,
+            ),
+            binding(
+                0,
+                BindingRole::AxisDisable,
+                ResourceId::I2sOut { engine: 0, bit: 0 },
+                SignalPolarity::ActiveHigh,
+            ),
+            binding(
+                0,
+                BindingRole::EmergencyStop,
+                ResourceId::Gpio(33),
+                SignalPolarity::ActiveLow,
+            ),
+            binding(
+                1,
+                BindingRole::AxisStep,
+                ResourceId::I2sOut { engine: 0, bit: 4 },
+                SignalPolarity::ActiveHigh,
+            ),
+            binding(
+                1,
+                BindingRole::AxisDirection,
+                ResourceId::I2sOut { engine: 0, bit: 5 },
+                SignalPolarity::ActiveHigh,
+            ),
+            binding(
+                1,
+                BindingRole::AxisDisable,
+                ResourceId::I2sOut { engine: 0, bit: 3 },
+                SignalPolarity::ActiveHigh,
+            ),
+        ];
+        records.extend(axis_scalars(0));
+        records.push(scalar(0, ScalarFact::TimerTickHertz, 1_000_000, 1, 0, 1));
+        records.push(scalar(
+            0,
+            ScalarFact::StepperOutputQuantumCycles,
+            1,
+            1,
+            0,
+            1,
+        ));
+        records.extend(axis_scalars(1));
+        records.sort_by_key(|record| record.canonical_order_key());
+        records
+    }
+
+    fn document(records: &[ConfigurationRecord]) -> (Vec<u8>, Digest) {
+        let realtime_record_count = records
+            .iter()
+            .filter(|record| record.realtime_relevant())
+            .count();
+        let header = ConfigurationHeader {
+            capability_digest: board_mks_tinybee::CAPABILITY_DIGEST,
+            record_count: u16::try_from(records.len()).unwrap(),
+            realtime_record_count: u16::try_from(realtime_record_count).unwrap(),
+            flags: ConfigurationFlags(ConfigurationFlags::MOTION),
+        };
+        let mut bytes = Vec::from(header.encode().unwrap());
+        for record in records {
+            bytes.extend_from_slice(&record.encode().unwrap());
+        }
+        let digest = sha256(&bytes).digest;
+        (bytes, digest)
+    }
+
+    fn profile_from(
+        records: &[ConfigurationRecord],
+    ) -> MachineProfileResult<MachineDynamicsProfile2> {
+        let (bytes, digest) = document(records);
+        let view =
+            ConfigurationDocumentView::decode::<32>(&board_mks_tinybee::PACKAGE, &bytes, digest)
+                .unwrap();
+        MachineDynamicsProfile2::from_configuration(view)
+    }
+
+    #[test]
+    fn canonical_configuration_derives_exact_conservative_machine_limits() {
+        let profile = profile_from(&machine_records()).unwrap();
+        assert_eq!(profile.timer_ticks_per_second(), 1_000_000);
+        assert_eq!(profile.output_quantum_cycles(), 1);
+        assert_eq!(
+            profile.capability_digest(),
+            board_mks_tinybee::CAPABILITY_DIGEST
+        );
+        let x = &profile.axes()[0];
+        assert_eq!(x.instance(), 0);
+        assert_eq!(x.driver_control_action(), AxisDriverControl::Disable);
+        assert_eq!(
+            x.command_density_steps_per_metre().nominal(),
+            &Rational::from(1_600_000)
+        );
+        assert_eq!(
+            x.command_density_steps_per_millimetre().nominal(),
+            &Rational::from(1_600)
+        );
+        assert_eq!(
+            x.command_density_steps_per_metre().lower(),
+            &(Rational::from(1_600_000) * Rational::fraction(999_999, 1_000_000).unwrap())
+        );
+        assert_eq!(
+            x.effective_step_frequency_hz(),
+            &Rational::fraction(31_250, 3).unwrap()
+        );
+        assert_eq!(
+            x.effective_velocity_limit_metres_per_second(),
+            &(&Rational::fraction(31_250, 3).unwrap()
+                / x.command_density_steps_per_metre().upper())
+        );
+        assert_eq!(
+            x.effective_acceleration_limit_metres_per_second_squared(),
+            &Rational::fraction(49, 100).unwrap()
+        );
+        assert_eq!(
+            x.effective_jerk_limit_metres_per_second_cubed(),
+            &Rational::fraction(49, 10).unwrap()
+        );
+        assert_eq!(
+            x.maximum_following_error_metres(),
+            &Rational::fraction(3, 250_000).unwrap()
+        );
+    }
+
+    #[test]
+    fn machine_resolution_budget_accounts_for_every_physical_floor() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::fraction(1, 100).unwrap(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        for component in [
+            budget.command_lattice_error_mm(),
+            budget.calibration_error_mm(),
+            budget.following_error_mm(),
+            budget.timer_position_error_mm(),
+        ] {
+            assert!(matches!(
+                compare_reals(component, &Real::zero(), PredicatePolicy::STRICT).value(),
+                Some(Ordering::Greater)
+            ));
+        }
+        assert!(matches!(
+            compare_reals(
+                budget.required_total_error_mm(),
+                budget.requested_total_error_mm(),
+                PredicatePolicy::STRICT,
+            )
+            .value(),
+            Some(Ordering::Less | Ordering::Equal)
+        ));
+        assert!(matches!(
+            MachineResolutionBudget2::certify(
+                &profile,
+                Rational::fraction(1, 1_000).unwrap(),
+                Rational::zero(),
+                Rational::zero(),
+            ),
+            Err(MachineProfileError::ErrorBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn compiler_policy_is_bound_to_configuration_limits_and_resolution_evidence() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::fraction(1, 100).unwrap(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let policy = MotionCompilePolicy2::from_machine_profile(
+            &profile,
+            &budget,
+            Rational::from(5),
+            Rational::fraction(1, 1_024).unwrap(),
+            24,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.machine_configuration_digest(),
+            Some(profile.configuration_digest())
+        );
+        assert_eq!(
+            policy.capability_digest(),
+            Some(profile.capability_digest())
+        );
+        assert_eq!(
+            policy.steps_per_millimetre(),
+            &[Rational::from(1_600), Rational::from(1_600)]
+        );
+        assert_eq!(policy.resolution_budget(), Some(&budget));
+
+        let program =
+            compile_certified_chord_program(&representative_curve_path().unwrap(), &policy)
+                .unwrap();
+        assert!(!program.segments().is_empty());
+        assert!(matches!(
+            MotionCompilePolicy2::from_machine_profile(
+                &profile,
+                &budget,
+                Rational::from(50),
+                Rational::fraction(1, 1_024).unwrap(),
+                24,
+            ),
+            Err(MachineCompileError::FeedLimitExceeded { axis: 0 })
+        ));
+        assert!(matches!(
+            MotionCompilePolicy2::from_machine_profile(
+                &profile,
+                &budget,
+                Rational::from(10),
+                Rational::fraction(1, 50).unwrap(),
+                24,
+            ),
+            Err(MachineCompileError::SourceErrorBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn retained_line_arc_path_gets_exact_stop_lookahead_and_four_phase_jerk_replay() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = representative_metric_path().unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(&source, &profile).unwrap();
+
+        assert_eq!(
+            schedule.configuration_digest(),
+            profile.configuration_digest()
+        );
+        assert_eq!(schedule.route().len(), 2);
+        assert_eq!(schedule.phases().len(), 2);
+        assert!(schedule.phases().iter().all(|phases| phases.len() == 4));
+        assert_eq!(schedule.lookahead().corner_feeds, vec![Real::zero()]);
+        assert_eq!(schedule.lookahead().corner_radii, vec![Real::zero()]);
+        assert!(schedule.lookahead_report().all_satisfied());
+        assert!(schedule.jerk_report().all_satisfied());
+        assert_eq!(
+            schedule.total_path_length_mm(),
+            &(Real::from(4) + Real::from(2) * Real::pi())
+        );
+        for phases in schedule.phases() {
+            assert_eq!(phases[0].ramp.start_feed, Real::zero());
+            assert_eq!(phases[0].ramp.start_acceleration, Real::zero());
+            assert_eq!(phases[3].ramp.end_feed, Real::zero());
+            assert_eq!(phases[3].ramp.end_acceleration, Real::zero());
+        }
+
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            lowered.configuration_digest(),
+            profile.configuration_digest()
+        );
+        assert_eq!(lowered.points().len(), lowered.segments().len() + 1);
+        assert_eq!(
+            lowered.points().first().unwrap().steps(),
+            [CanonicalStep::new(0); 2]
+        );
+        assert_eq!(
+            lowered.points().last().unwrap().steps(),
+            [CanonicalStep::new(12_800), CanonicalStep::new(0)]
+        );
+        assert!(
+            lowered
+                .points()
+                .windows(2)
+                .all(|pair| pair[0].tick() < pair[1].tick())
+        );
+        assert!(
+            lowered
+                .segments()
+                .windows(2)
+                .all(|pair| pair[0].end_tick == pair[1].start_tick)
+        );
+        assert!(matches!(
+            compare_reals(
+                lowered.evidence().maximum_chord_interpolation_error_mm(),
+                lowered.evidence().requested_interpolation_error_mm(),
+                PredicatePolicy::STRICT,
+            )
+            .value(),
+            Some(Ordering::Less | Ordering::Equal)
+        ));
+        assert!(matches!(
+            lower_certified_schedule_to_v1(
+                &schedule,
+                &profile,
+                &budget,
+                Rational::fraction(1, 50).unwrap(),
+            ),
+            Err(crate::motion_schedule::MotionScheduleError::InterpolationAllocationExceeded)
+        ));
+
+        let partition_policy = MachinePartitionPolicy2::try_new(
+            [0x41; 16],
+            profile.capability_digest(),
+            profile.configuration_digest(),
+            BlockValidationLimits {
+                maximum_block_ticks: 10_000_000,
+                segment: ValidationLimits {
+                    maximum_segment_ticks: 10_000_000,
+                    maximum_steps_per_segment: 100_000,
+                },
+            },
+            UploadId(0x1122_3344_5566_7788),
+            700,
+            CacheLimits {
+                maximum_object_bytes: 4 * 1024 * 1024,
+                maximum_chunk_bytes: 1_024,
+                maximum_chunks: 10_000,
+            },
+        )
+        .unwrap();
+        let partition = package_canonical_scheduled_program(&lowered, partition_policy).unwrap();
+        assert_eq!(partition.local_timer_hz(), 1_000_000);
+        assert_eq!(partition.initial_position(), [0, 0]);
+        assert_eq!(partition.final_position(), [12_800, 0]);
+        assert_eq!(
+            partition.terminal_progress().end_tick,
+            lowered.executor_preflight().end_tick
+        );
+        let replay = replay_cached_stepper_partition::<2>(
+            partition.bytes(),
+            partition.job_descriptor(0x8877).unwrap(),
+            profile.stepper_timing(0),
+        )
+        .unwrap();
+        assert_eq!(replay.block_count, partition.block_count());
+        assert_eq!(replay.segment_count as usize, lowered.segments().len());
+        assert_eq!(replay.terminal_position, [12_800, 0]);
+        assert_eq!(replay.terminal_tick, lowered.executor_preflight().end_tick);
+        assert_eq!(
+            replay.terminal_block_digest,
+            partition.terminal_progress().block_digest
+        );
+        let mut corrupt_partition = partition.bytes().to_vec();
+        corrupt_partition[EXECUTION_BLOCK_BYTES - 1] ^= 1;
+        assert_eq!(
+            replay_cached_stepper_partition::<2>(
+                &corrupt_partition,
+                partition.job_descriptor(0x8877).unwrap(),
+                profile.stepper_timing(0),
+            ),
+            Err(CachedStepperReplayError::PartitionIdentity)
+        );
+        let evidence = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
+        let rebuilt = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
+        assert_eq!(evidence, rebuilt);
+        assert!(!evidence.digest().is_zero());
+        assert!(!evidence.source_digest().is_zero());
+        assert_eq!(&evidence.encoded()[..8], b"ALMEVD01");
+        replay_canonical_schedule_evidence(&evidence, &lowered, &partition).unwrap();
+        let mut corrupt_evidence = evidence.encoded().to_vec();
+        corrupt_evidence[12] ^= 1;
+        assert_eq!(
+            verify_canonical_schedule_evidence_bytes(
+                &corrupt_evidence,
+                evidence.digest(),
+                &lowered,
+                &partition,
+            ),
+            Err(ScheduleEvidenceError::DigestMismatch)
+        );
+
+        let wrong_identity = MachinePartitionPolicy2::try_new(
+            [0x41; 16],
+            Digest([0x99; 32]),
+            profile.configuration_digest(),
+            partition_policy.block_limits(),
+            partition_policy.upload_id(),
+            partition_policy.storage_chunk_bytes(),
+            partition_policy.cache_limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            package_canonical_scheduled_program(&lowered, wrong_identity),
+            Err(MachinePartitionError::ProgramIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn missing_facts_and_nonpositive_uncertainty_bounds_fail_closed() {
+        let mut missing = machine_records();
+        missing.retain(|record| {
+            !matches!(
+                record,
+                ConfigurationRecord::Scalar(scalar)
+                    if scalar.instance == 1
+                        && scalar.fact == ScalarFact::AxisFollowingErrorMetres
+            )
+        });
+        assert!(matches!(
+            profile_from(&missing),
+            Err(MachineProfileError::MissingScalar {
+                instance: 1,
+                fact: ScalarFact::AxisFollowingErrorMetres,
+            })
+        ));
+
+        let mut nonpositive = machine_records();
+        for record in &mut nonpositive {
+            if let ConfigurationRecord::Scalar(scalar) = record
+                && scalar.instance == 0
+                && scalar.fact == ScalarFact::AxisCalibrationScale
+            {
+                scalar.uncertainty = wire_rational(1, 1);
+            }
+        }
+        assert!(matches!(
+            profile_from(&nonpositive),
+            Err(MachineProfileError::NonPositiveLowerBound {
+                instance: 0,
+                fact: ScalarFact::AxisCalibrationScale,
+            })
+        ));
+    }
+}

@@ -11,10 +11,12 @@ publish.workspace = true
 [dependencies]
 alumina-board.workspace = true
 alumina-capability.workspace = true
+alumina-config.workspace = true
 alumina-diagnostics.workspace = true
 alumina-graph-ir.workspace = true
 alumina-job.workspace = true
 alumina-machine-ir.workspace = true
+alumina-motion.workspace = true
 alumina-protocol.workspace = true
 alumina-storage.workspace = true
 csgrs.workspace = true

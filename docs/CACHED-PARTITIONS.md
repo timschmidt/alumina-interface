@@ -7,7 +7,7 @@ The browser compiler packages canonical integer motion using the real sibling
 ## One-way artifact pipeline
 
 ```text
-certified CanonicalPathProgram2
+certified CanonicalPathProgram2 or CanonicalScheduledProgram2
     -> firmware ExecutionSegment<2>
     -> firmware capacity + horizon partitioning
     -> chained 512-byte ExecutionBlock values
@@ -31,6 +31,14 @@ by firmware. Terminal tick, chain digest, relative displacement, and absolute
 final lattice position must reproduce the canonical program. A too-long block,
 bad identity, discontinuity, step limit, counter overflow, or terminal mismatch
 fails before storage identities are exposed.
+
+The machine-bound scheduled path adds two gates before this block replay.
+Program, partition, canonical configuration, and immutable capability identities
+must agree exactly, and the scheduled segments must already have passed the
+allocation-free production `StepperExecutor` preflight using the configuration's
+timer, pulse, setup/hold, maximum-frequency, and output-quantum facts. Packaging
+rechecks its terminal position and tick; it does not infer electrical validity
+from the more general machine-block validator.
 
 ## Storage and preparation identities
 
@@ -83,20 +91,30 @@ That later boundary preserves these local object/manifest/terminal identities;
 it does not reopen, reinterpret, or concatenate execution records. See
 `GLOBAL-JOB-MANIFEST.md`.
 
+The machine-bound line/arc fixture additionally replays the packaged bytes with
+`alumina-sim::replay_cached_stepper_partition`. That event-level path uses the
+real `JobDescriptor`, first rehashes the complete immutable object, then uses
+`RealtimeJob` and `CachedStepperExecutor`, advances to each exact deadline,
+acknowledges owned blocks in order, and requires terminal tick, position, step
+counts, finish cycle, and block digest to agree. Canonical
+`ALMEVD01` evidence then binds the exact-rational source, configuration,
+capability, budgets, executor facts, and content-addressed partition. See
+`EXACT-MACHINE-SCHEDULING.md`.
+
 ## Still outside this boundary
 
-- Fixture capability/configuration IDs are explicit sentinels, not device facts.
-  Executable production work must use authenticated capability and durably
-  active configuration digests.
-- The global multi-MCU manifest and owned participant binding now exist, but
-  fixture compiler/source/policy/machine/evidence identities remain sentinels
-  until their canonical producers land.
+- The older general-curve deterministic fixture still uses explicit sentinel
+  identities. The machine-bound scheduled path uses the canonical configuration
+  and capability digests, but a live device must still authenticate the
+  capability and report the configuration as durably active before execution.
 - The window-free compiler remains independent of transport. Its artifacts now
   have a browser Wi-Fi upload/retry/finalize and exact cache-reconciliation
-  consumer, but UI wiring, prepare/commit/confirm, and browser clock fitting
-  remain open.
-- Constant-feed chord scheduling is still the current upstream compiler model;
-  kinematics, lookahead, acceleration, jerk, physical calibration, following
-  error, and qualified hardware timing remain open.
+  consumer, plus a headless clock/prepare/install/confirm coordinator. Visible
+  workflow wiring and complete worker-owned cached-job driving remain open.
+- Two-axis line/arc motion now has exact-stop lookahead, certified jerk
+  scheduling, configuration-derived calibration/following bounds, and
+  production executor preflight. General curves still use the separate
+  constant-feed chord compiler; blends, broader kinematics, and qualified
+  hardware timing remain open.
 - Passing software replay does not qualify SD media, a board, or physical
   motion. No board is flashed or energized by packaging or its tests.

@@ -37,6 +37,27 @@ prototype.
   replays half-lattice/half-tick bounds through Hyperlimit, and emits the real
   `alumina-machine-ir::ExecutionSegment` type. The deterministic fixture uses
   80 steps/mm, 1 MHz ticks, 10 mm/s, and a `1/1024 mm` source-chord budget.
+- The production-oriented line/arc path now derives a two-axis dynamics profile
+  directly from validated canonical Configuration V5: exact resource and
+  transmission facts, uncertainty intervals, travel, pulse-rate ceiling,
+  velocity/acceleration/jerk/following limits, device clock, and backend output
+  quantum. A machine-wide resolution certificate composes source and controller
+  allocations with endpoint, DDA, calibration, following, and half-tick
+  position bounds before scheduling.
+- Hyperpath/Hypersolve certify zero-radius exact-stop lookahead and four exact
+  constant-jerk phases per retained source line/arc. The browser evaluates the
+  retained geometry—not renderer chords—while subdividing those phases under
+  the exact `A*dt²/8` interpolation bound. It rounds only at the configured
+  step/tick lattices and then replays every emitted segment through the
+  allocation-free production stepper executor's pulse, rate, direction,
+  enable, output-grid, continuity, overflow, and terminal checks.
+- The machine-bound program packages only into a partition with identical
+  capability/configuration digests. The resulting cached bytes run through an
+  event-level `RealtimeJob`/`CachedStepperExecutor` simulator, and canonical
+  `ALMEVD01` evidence binds exact-rational source, physical/error policy,
+  executor results, and content-addressed partition identities. The same
+  representative test binary compiles for WASM. This remains software evidence,
+  not TinyBee timing or motion qualification.
 - Canonical segments are deterministically partitioned using the firmware's
   queried record capacity and caller-owned horizon limits. Every chained
   512-byte block is independently replayed before `alumina-storage` creates the
@@ -178,6 +199,8 @@ The selected local revisions and any uncommitted source state are recorded in
 valid for development but cannot qualify a reproducible compiler release.
 The current curve and metric contract is in
 [`docs/EXACT-TOOLPATH.md`](docs/EXACT-TOOLPATH.md).
+The configuration-derived scheduling and executor-preflight contract is in
+[`docs/EXACT-MACHINE-SCHEDULING.md`](docs/EXACT-MACHINE-SCHEDULING.md).
 The immutable block/cache boundary is in
 [`docs/CACHED-PARTITIONS.md`](docs/CACHED-PARTITIONS.md).
 The global participant/manifest boundary is in
@@ -252,7 +275,8 @@ assets suitable for later embedding in `aluminafw`.
 ## Scope after this checkpoint
 
 The next interface milestones add supported general-curve metric compilation,
-capability-derived machine/error policy, live device identity/capability discovery,
+certified nonzero-radius blends, direction-aware and broader-axis kinematics,
+live device identity/capability discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, capability-negotiated live telemetry, oscilloscope/logic-analyzer
 views, groups, nested component dependency/cycle handling, editable instance
