@@ -13,6 +13,7 @@ use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
 mod analysis;
+mod component;
 mod control_fixture;
 mod deployment;
 mod document;
@@ -30,6 +31,13 @@ pub use analysis::{
     NodeInputChannelKind, NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract,
     NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind,
     analyze_graph, analyze_graph_draft,
+};
+pub use component::{
+    CanonicalGraphComponentEncoding, GRAPH_COMPONENT_MAGIC, GRAPH_COMPONENT_VERSION,
+    GraphComponentDocument, GraphComponentError, GraphComponentInput, GraphComponentInputId,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphComponentReplay,
+    GraphFrontPanelBinding, GraphFrontPanelItem, GraphFrontPanelItemId, GraphFrontPanelRect,
+    encode_graph_component, replay_graph_component,
 };
 pub use control_fixture::{
     RepresentativeControlSignal, RepresentativeExactControlError, RepresentativeExactControlGraph,

@@ -149,7 +149,10 @@ control UI never claims it can safely interpret or edit them.
 ## Current exclusions
 
 Node label/domain editing, composite and identity-bearing parameter editors,
-selection sets, groups/comments, subgraphs/components, front panels,
-collaborative diffs, and conflict-aware shared persistence remain later slices.
-`ALGW` grants no semantic admission, implementation, Service/Realtime opcode,
-resource, deployment, safety, or physical-output authority.
+selection sets, groups/comments, collaborative diffs, and conflict-aware shared
+persistence remain later slices. The separate canonical
+[`ALGC` V1 component package](GRAPH-COMPONENT-V1.md) now embeds an unchanged
+`ALGW` and adds a connector pane plus exact front-panel bindings; those facts
+are deliberately not smuggled into this workspace format. `ALGW` grants no
+semantic admission, implementation, Service/Realtime opcode, resource,
+deployment, safety, or physical-output authority.

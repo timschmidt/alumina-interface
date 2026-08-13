@@ -388,10 +388,14 @@ families. Its graph digest is
 V1 now has one fixed host-executable Stream/rate/exact-control subset, while
 deployed graph IR V2 has one capability-bound Service/Realtime lowering and
 portable executor; arbitrary documents remain non-executable.
-Subgraphs/components, multi-value state records, queue timeouts and additional
-policies, cases/loops/state machines, front panels, capability-generated editor
-nodes, composite/identity-bearing parameter and label/domain editors, workspace
-collaboration/conflict handling, broader resource claims, general host
-implementation admission, measured WCET/deadline analysis, physical HIL,
-output and motion opcodes, and protocol-resource nodes remain later M9 slices.
-No arbitrary graph document is sent to or interpreted by firmware.
+The separate canonical [`ALGC` V1 package](GRAPH-COMPONENT-V1.md) now provides
+bounded public-terminal mappings and exact front-panel bindings around one
+unchanged `ALGW`. Component instances, hierarchy lowering, recursive package
+dependencies, and general panel editing/execution remain open. Multi-value
+state records, queue timeouts and additional policies, cases/loops/state
+machines, capability-generated editor nodes, composite/identity-bearing
+parameter and label/domain editors, workspace collaboration/conflict handling,
+broader resource claims, general host implementation admission, measured
+WCET/deadline analysis, physical HIL, output and motion opcodes, and
+protocol-resource nodes remain later M9 slices. No arbitrary graph or component
+document is sent to or interpreted by firmware.

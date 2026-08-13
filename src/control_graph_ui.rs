@@ -7,12 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alumina_interface_core::graph::{
-    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphDocument, GraphLimits, GraphNodeId,
-    GraphNodePlacement, GraphNodePrototype, GraphSimulationRegistry, GraphTraceEntryKind,
-    GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory,
-    GraphWorkspaceLimits, NodeDefinition, NodeParameter, RepresentativeControlSignal,
-    RepresentativeExactControlGraph, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
-    compile_representative_exact_control_graph, encode_graph_workspace, replay_graph_workspace,
+    CanonicalGraphComponentEncoding, CanonicalGraphWorkspaceEncoding, ExecutionDomain,
+    GraphComponentDocument, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem, GraphFrontPanelItemId,
+    GraphFrontPanelRect, GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype,
+    GraphSimulationRegistry, GraphTraceEntryKind, GraphTypeId, GraphValue, GraphWireId,
+    GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits, NodeDefinition,
+    NodeParameter, RepresentativeControlSignal, RepresentativeExactControlGraph, TypeKind,
+    TypedGraphValue, WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
+    encode_graph_component, encode_graph_workspace, replay_graph_workspace,
 };
 use eframe::egui;
 use hyperreal::Rational;
@@ -93,11 +96,28 @@ struct TraceSeries {
     points: Vec<TracePoint>,
 }
 
+#[derive(Clone, Debug)]
+struct ComponentPackage {
+    document: GraphComponentDocument,
+    encoding: CanonicalGraphComponentEncoding,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentPanelItem {
+    name: String,
+    binding: GraphFrontPanelBinding,
+    rect: GraphFrontPanelRect,
+    value_type: GraphTypeId,
+    output_text: Option<String>,
+}
+
 /// Browser/native inspector for one shared exact control graph and trace.
 pub(crate) struct ExactControlWorkspace {
     fixture: RepresentativeExactControlGraph,
     workspace: GraphWorkspaceDocument,
     workspace_encoding: CanonicalGraphWorkspaceEncoding,
+    component: Option<ComponentPackage>,
+    component_status: String,
     history: GraphWorkspaceHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
@@ -125,12 +145,15 @@ impl ExactControlWorkspace {
         let fixture =
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
+        let component = representative_component(&workspace)?;
         let traces = trace_series(&fixture)?;
         let palette = control_palette(&fixture)?;
         let mut result = Self {
             fixture,
             workspace,
             workspace_encoding,
+            component: Some(component),
+            component_status: "canonical ALGC connector pane and front panel attached".to_owned(),
             history: GraphWorkspaceHistory::default(),
             presentation,
             traces,
@@ -204,6 +227,20 @@ impl ExactControlWorkspace {
             "workspace {}…",
             digest_prefix(self.workspace_encoding.digest().0)
         ));
+        if let Some(component) = &self.component {
+            ui.label(format!(
+                "Component: {} v{} · {} outputs / {} panel items · {} bytes",
+                component.document.name(),
+                component.document.component_version(),
+                component.document.outputs().len(),
+                component.document.panel_items().len(),
+                component.encoding.bytes().len()
+            ));
+            ui.monospace(format!(
+                "component {}…",
+                digest_prefix(component.encoding.digest().0)
+            ));
+        }
         ui.label(format!(
             "History: {} undo / {} redo · {} bytes",
             self.history.undo_len(),
@@ -293,6 +330,9 @@ impl ExactControlWorkspace {
             }
         });
         ui.label(&self.edit_status);
+        ui.separator();
+
+        self.show_front_panel(ui);
         ui.separator();
 
         let graph_height = (ui.available_height() * 0.5).clamp(230.0, 430.0);
@@ -454,6 +494,7 @@ impl ExactControlWorkspace {
             .filter(|node| self.workspace.graph().node(*node).is_some());
         self.persistence_dirty = true;
         self.persistence_attempted = false;
+        self.refresh_component();
         self.edit_status = format!(
             "{} canonical workspace; {semantic}",
             if redo { "redid" } else { "undid to" }
@@ -481,6 +522,226 @@ impl ExactControlWorkspace {
         if add_requested {
             self.add_palette_node();
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "canonical panel layout, exact control editing, and replay-only indicators remain one auditable egui frame operation"
+    )]
+    fn show_front_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Reusable component front panel");
+            if let Some(component) = &self.component {
+                ui.monospace(format!(
+                    "ALGC {}… · {} exact bindings",
+                    digest_prefix(component.encoding.digest().0),
+                    component.document.panel_items().len()
+                ));
+            }
+        });
+        ui.label(
+            "This first canonical component wraps the autonomous reference controller: exact parameter controls write ALGW through the normal transactional boundary, and output indicators read only the attached exact replay.",
+        );
+        let Some(component) = &self.component else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_status);
+            return;
+        };
+        let items = component
+            .document
+            .panel_items()
+            .iter()
+            .filter_map(|item| {
+                let value_type = component.document.panel_item_value_type(item.id())?;
+                let output_text = match item.binding() {
+                    GraphFrontPanelBinding::OutputIndicator(output) => {
+                        Some(self.component_output_text(&component.document, output))
+                    }
+                    GraphFrontPanelBinding::InputControl(_)
+                    | GraphFrontPanelBinding::ParameterControl { .. } => None,
+                };
+                Some(ComponentPanelItem {
+                    name: item.name().to_owned(),
+                    binding: item.binding(),
+                    rect: item.rect(),
+                    value_type,
+                    output_text,
+                })
+            })
+            .collect::<Vec<_>>();
+        let maximum_right = items
+            .iter()
+            .map(|item| {
+                u32::try_from(item.rect.x()).expect("validated ALGC panel x is nonnegative")
+                    + item.rect.width()
+            })
+            .max()
+            .unwrap_or(0);
+        let maximum_bottom = items
+            .iter()
+            .map(|item| {
+                u32::try_from(item.rect.y()).expect("validated ALGC panel y is nonnegative")
+                    + item.rect.height()
+            })
+            .max()
+            .unwrap_or(0);
+        let panel_size = egui::vec2(
+            display_panel_coordinate(maximum_right.saturating_add(20)).max(360.0),
+            display_panel_coordinate(maximum_bottom.saturating_add(20)).max(120.0),
+        );
+        let mut parameter_request = None;
+        egui::ScrollArea::both()
+            .id_salt("exact_control_component_front_panel")
+            .auto_shrink([false, false])
+            .max_height(285.0)
+            .show(ui, |ui| {
+                let (surface, painter) = ui.allocate_painter(panel_size, egui::Sense::hover());
+                painter.rect_filled(surface.rect, 5.0, egui::Color32::from_rgb(21, 25, 34));
+                paint_grid(&painter, surface.rect);
+                for item in &items {
+                    let rect = egui::Rect::from_min_size(
+                        surface.rect.min
+                            + egui::vec2(
+                                display_coordinate(item.rect.x()),
+                                display_coordinate(item.rect.y()),
+                            ),
+                        egui::vec2(
+                            display_panel_coordinate(item.rect.width()),
+                            display_panel_coordinate(item.rect.height()),
+                        ),
+                    );
+                    painter.rect_filled(rect, 5.0, egui::Color32::from_rgb(35, 44, 57));
+                    painter.rect_stroke(
+                        rect,
+                        5.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 119, 151)),
+                    );
+                    painter.text(
+                        rect.left_top() + egui::vec2(8.0, 6.0),
+                        egui::Align2::LEFT_TOP,
+                        panel_item_label(&item.name),
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+                    match item.binding {
+                        GraphFrontPanelBinding::ParameterControl { node, parameter } => {
+                            let Some(parameter_definition) = self
+                                .workspace
+                                .graph()
+                                .node(node)
+                                .and_then(|node| {
+                                    node.parameters()
+                                        .iter()
+                                        .find(|candidate| candidate.id() == parameter)
+                                })
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            let Some(initial) =
+                                parameter_edit_text(parameter_definition.value().value())
+                            else {
+                                painter.text(
+                                    rect.center_bottom() - egui::vec2(0.0, 7.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    "exact composite control is not rendered yet",
+                                    egui::FontId::monospace(9.5),
+                                    egui::Color32::YELLOW,
+                                );
+                                continue;
+                            };
+                            let maximum = parameter_text_limit(
+                                self.workspace.graph(),
+                                parameter_definition.value().value_type(),
+                            );
+                            let draft = self
+                                .parameter_drafts
+                                .entry((node, parameter))
+                                .or_insert(initial);
+                            let input_rect = egui::Rect::from_min_max(
+                                rect.left_top() + egui::vec2(8.0, 25.0),
+                                rect.right_bottom() - egui::vec2(57.0, 7.0),
+                            );
+                            let button_rect = egui::Rect::from_min_max(
+                                egui::pos2(input_rect.right() + 5.0, input_rect.top()),
+                                rect.right_bottom() - egui::vec2(7.0, 7.0),
+                            );
+                            let response = ui.put(
+                                input_rect,
+                                egui::TextEdit::singleline(draft).char_limit(maximum),
+                            );
+                            let apply = ui.put(button_rect, egui::Button::new("apply")).clicked()
+                                || (response.lost_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                            if apply {
+                                parameter_request = Some((node, parameter, draft.clone()));
+                            }
+                        }
+                        GraphFrontPanelBinding::OutputIndicator(_) => {
+                            painter.text(
+                                rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                item.output_text.as_deref().unwrap_or("no exact sample"),
+                                egui::FontId::monospace(11.0),
+                                if self.reference_trace_is_current() {
+                                    egui::Color32::from_rgb(122, 211, 185)
+                                } else {
+                                    egui::Color32::YELLOW
+                                },
+                            );
+                        }
+                        GraphFrontPanelBinding::InputControl(_) => {
+                            painter.text(
+                                rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                format!("runtime input · t{}", item.value_type.get()),
+                                egui::FontId::monospace(10.0),
+                                egui::Color32::GRAY,
+                            );
+                        }
+                    }
+                }
+            });
+        ui.weak(&self.component_status);
+        if let Some((node, parameter, text)) = parameter_request {
+            self.commit_parameter_text(node, parameter, &text);
+        }
+    }
+
+    fn component_output_text(
+        &self,
+        component: &GraphComponentDocument,
+        output: GraphComponentOutputId,
+    ) -> String {
+        if !self.reference_trace_is_current() {
+            return "exact replay detached after draft edit".to_owned();
+        }
+        let Some(endpoint) = component.output(output).map(GraphComponentOutput::source) else {
+            return "unresolved output binding".to_owned();
+        };
+        let Some(signal) = SIGNALS
+            .iter()
+            .copied()
+            .find(|signal| signal.endpoint() == endpoint)
+        else {
+            return format!(
+                "output #{}.{} has no replay probe",
+                endpoint.node.get(),
+                endpoint.port.get()
+            );
+        };
+        self.traces
+            .iter()
+            .find(|series| series.signal == signal)
+            .and_then(|series| {
+                series
+                    .points
+                    .iter()
+                    .find(|point| point.tick == self.cursor_tick)
+            })
+            .map_or_else(
+                || format!("no sample at tick {}", self.cursor_tick),
+                |point| format!("{} mm · tick {}", point.exact, point.tick),
+            )
     }
 
     #[allow(
@@ -1036,6 +1297,7 @@ impl ExactControlWorkspace {
             .retain(|(node, _), _| self.workspace.graph().node(*node).is_some());
         self.persistence_dirty = true;
         self.persistence_attempted = false;
+        self.refresh_component();
         self.edit_status = format!("{success}; {semantic}");
         true
     }
@@ -1088,7 +1350,24 @@ impl ExactControlWorkspace {
         self.parameter_drafts.clear();
         self.persistence_dirty = false;
         self.persistence_attempted = false;
+        self.refresh_component();
         Ok(())
+    }
+
+    fn refresh_component(&mut self) {
+        match representative_component(&self.workspace) {
+            Ok(component) => {
+                self.component = Some(component);
+                "canonical ALGC connector pane and front panel attached"
+                    .clone_into(&mut self.component_status);
+            }
+            Err(error) => {
+                self.component = None;
+                self.component_status = format!(
+                    "ALGC front panel detached from this draft without affecting ALGW: {error}"
+                );
+            }
+        }
     }
 
     fn import_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -1634,6 +1913,83 @@ fn initial_workspace(
     Ok((workspace, encoding, presentation))
 }
 
+fn representative_component(
+    workspace: &GraphWorkspaceDocument,
+) -> Result<ComponentPackage, String> {
+    let outputs = SIGNALS
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, signal)| {
+            let id = u32::try_from(index + 1)
+                .map_err(|_| "representative output identity overflowed".to_owned())?;
+            let name = match signal {
+                RepresentativeControlSignal::Error => "error",
+                RepresentativeControlSignal::IntegralPrior => "integral_prior",
+                RepresentativeControlSignal::ClampedController => "clamped_controller",
+                RepresentativeControlSignal::PermittedOutput => "permitted_output",
+            };
+            Ok(GraphComponentOutput::new(
+                GraphComponentOutputId::new(id),
+                name,
+                signal.endpoint(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let parameter_specs = [
+        (1, "proportional_gain", 8, 1, 20, 20),
+        (2, "integral_gain", 11, 1, 20, 84),
+        (3, "derivative_gain", 14, 1, 20, 148),
+        (4, "output_minimum", 17, 1, 240, 20),
+        (5, "output_maximum", 17, 2, 240, 84),
+        (6, "safe_output", 18, 1, 240, 148),
+    ];
+    let mut panel_items = parameter_specs
+        .into_iter()
+        .map(|(id, name, node, parameter, x, y)| {
+            GraphFrontPanelItem::new(
+                GraphFrontPanelItemId::new(id),
+                name,
+                GraphFrontPanelBinding::ParameterControl {
+                    node: GraphNodeId::new(node),
+                    parameter,
+                },
+                GraphFrontPanelRect::new(x, y, 200, 54),
+            )
+        })
+        .collect::<Vec<_>>();
+    let output_specs = [
+        (7, "error_indicator", 1, 20),
+        (8, "integral_prior_indicator", 2, 84),
+        (9, "clamped_controller_indicator", 3, 148),
+        (10, "permitted_output_indicator", 4, 212),
+    ];
+    panel_items.extend(output_specs.into_iter().map(|(id, name, output, y)| {
+        GraphFrontPanelItem::new(
+            GraphFrontPanelItemId::new(id),
+            name,
+            GraphFrontPanelBinding::OutputIndicator(GraphComponentOutputId::new(output)),
+            GraphFrontPanelRect::new(460, y, 240, 54),
+        )
+    }));
+    let document = GraphComponentDocument::try_new(
+        GraphComponentLimits::interactive(),
+        workspace.revision(),
+        1,
+        "control.reference_pid",
+        1,
+        5,
+        11,
+        workspace.clone(),
+        Vec::new(),
+        outputs,
+        panel_items,
+    )
+    .map_err(|error| error.to_string())?;
+    let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
+    Ok(ComponentPackage { document, encoding })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "layout admission, state-edge classification, ranking, and bounded placement stay together for auditability"
@@ -1951,6 +2307,10 @@ fn paint_grid(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
+fn panel_item_label(name: &str) -> String {
+    name.replace('_', " ")
+}
+
 fn paint_trace_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -2007,6 +2367,14 @@ fn trace_value_bounds(series: &[TraceSeries]) -> (f64, f64) {
     reason = "workspace coordinates are bounded to one million and exactly representable in display f32"
 )]
 fn display_coordinate(value: i32) -> f32 {
+    value as f32
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "front-panel coordinates are bounded to one million and exactly representable in display f32"
+)]
+fn display_panel_coordinate(value: u32) -> f32 {
     value as f32
 }
 
@@ -2113,7 +2481,7 @@ fn digest_prefix(digest: [u8; 32]) -> String {
 mod tests {
     use super::*;
     use alumina_interface_core::graph::{
-        GraphLimits, GraphPortId, NodeKind, replay_graph_workspace,
+        GraphLimits, GraphPortId, NodeKind, replay_graph_component, replay_graph_workspace,
     };
 
     #[test]
@@ -2171,6 +2539,61 @@ mod tests {
                 .schema(entry.prototype.kind())
                 .is_some()
         }));
+    }
+
+    #[test]
+    fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap();
+        assert_eq!(initial.encoding.bytes().len(), 4_099);
+        assert_eq!(
+            initial.encoding.digest().0,
+            [
+                0x20, 0x75, 0x9f, 0xd4, 0x76, 0xc4, 0x35, 0xec, 0xa5, 0x31, 0x82, 0x04, 0xc1, 0x04,
+                0x8e, 0xed, 0x81, 0x56, 0x24, 0x4f, 0x73, 0x9b, 0xb2, 0xdf, 0x54, 0x48, 0xa7, 0xf5,
+                0x80, 0xd3, 0x59, 0xd1,
+            ]
+        );
+        assert!(initial.document.inputs().is_empty());
+        assert_eq!(initial.document.outputs().len(), 4);
+        assert_eq!(initial.document.panel_items().len(), 10);
+        assert_eq!(
+            initial.document.workspace_digest(),
+            workspace.workspace_encoding.digest()
+        );
+        let replay = replay_graph_component(
+            initial.encoding.bytes(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &initial.document);
+        assert_eq!(replay.encoding(), &initial.encoding);
+
+        let initial_digest = initial.encoding.digest();
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "201");
+        let edited = workspace.component.as_ref().unwrap();
+        assert_ne!(edited.encoding.digest(), initial_digest);
+        assert_eq!(
+            edited.document.workspace_digest(),
+            workspace.workspace_encoding.digest()
+        );
+
+        workspace.delete_selected_node(GraphNodeId::new(18));
+        assert!(workspace.component.is_none());
+        assert!(workspace.component_status.contains("detached"));
+        workspace.navigate_history(false);
+        assert!(workspace.component.is_some());
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .workspace_digest(),
+            workspace.workspace_encoding.digest()
+        );
     }
 
     #[test]
