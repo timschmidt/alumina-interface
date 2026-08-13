@@ -892,6 +892,7 @@ mod tests {
         MachineCompileError, MotionCompilePolicy2, compile_certified_chord_program,
     };
     use crate::motion_schedule::{
+        MotionScheduleError, ScheduledLoweringLimits, TravelBoundary,
         certify_exact_stop_jerk_schedule, lower_certified_schedule_to_v1,
     };
     use crate::partition::{
@@ -1275,6 +1276,22 @@ mod tests {
         assert!(schedule.lookahead_report().all_satisfied());
         assert!(schedule.jerk_report().all_satisfied());
         assert_eq!(
+            schedule.travel_envelope().source_minimum_mm(),
+            &[Real::zero(), Real::zero()]
+        );
+        assert_eq!(
+            schedule.travel_envelope().source_maximum_mm(),
+            &[Real::from(8), Real::from(2)]
+        );
+        assert_eq!(
+            schedule.travel_envelope().usable_minimum_mm(),
+            &[Real::zero(), Real::zero()]
+        );
+        assert_eq!(
+            schedule.travel_envelope().usable_maximum_mm(),
+            &[Real::from(300), Real::from(300)]
+        );
+        assert_eq!(
             schedule.total_path_length_mm(),
             &(Real::from(4) + Real::from(2) * Real::pi())
         );
@@ -1297,6 +1314,7 @@ mod tests {
             &profile,
             &budget,
             Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
         )
         .unwrap();
         assert_eq!(
@@ -1339,6 +1357,7 @@ mod tests {
                 &profile,
                 &budget,
                 Rational::fraction(1, 50).unwrap(),
+                ScheduledLoweringLimits::INTERACTIVE,
             ),
             Err(crate::motion_schedule::MotionScheduleError::InterpolationAllocationExceeded)
         ));
@@ -1427,6 +1446,109 @@ mod tests {
         assert!(matches!(
             package_canonical_scheduled_program(&lowered, wrong_identity),
             Err(MachinePartitionError::ProgramIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn interpolation_point_allocation_is_caller_bounded() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = representative_metric_path().unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(&source, &profile).unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let limits = ScheduledLoweringLimits::try_new(2).unwrap();
+
+        assert_eq!(limits.maximum_points(), 2);
+        assert!(matches!(
+            lower_certified_schedule_to_v1(
+                &schedule,
+                &profile,
+                &budget,
+                Rational::fraction(1, 1_000).unwrap(),
+                limits,
+            ),
+            Err(MotionScheduleError::PointBudgetExceeded {
+                maximum: 2,
+                required,
+            }) if required > 2
+        ));
+        assert!(matches!(
+            ScheduledLoweringLimits::try_new(1),
+            Err(MotionScheduleError::InvalidLoweringLimits)
+        ));
+    }
+
+    #[test]
+    fn exact_source_envelope_must_fit_conservative_machine_travel() {
+        let mut records = machine_records();
+        for record in &mut records {
+            if let ConfigurationRecord::Scalar(scalar) = record
+                && scalar.instance == 0
+                && scalar.fact == ScalarFact::AxisPositionMaximumMetres
+            {
+                scalar.value = wire_rational(7, 1_000);
+            }
+        }
+        let profile = profile_from(&records).unwrap();
+        let source = representative_metric_path().unwrap();
+        assert!(matches!(
+            certify_exact_stop_jerk_schedule(&source, &profile),
+            Err(MotionScheduleError::TravelEnvelopeExceeded {
+                axis: 0,
+                boundary: TravelBoundary::Maximum,
+            })
+        ));
+    }
+
+    #[test]
+    fn rounded_canonical_points_must_remain_inside_usable_travel() {
+        let mut records = machine_records();
+        for record in &mut records {
+            if let ConfigurationRecord::Scalar(scalar) = record
+                && scalar.instance == 0
+            {
+                match scalar.fact {
+                    ScalarFact::AxisTravelMetresPerOutputTurn => {
+                        scalar.value = wire_rational(3, 500);
+                    }
+                    ScalarFact::AxisPositionMaximumMetres => {
+                        // 8.0003 mm admits the exact 8 mm endpoint, but the
+                        // selected 1600/3 steps/mm lattice rounds it outward to
+                        // 8.000625 mm and must therefore fail separately.
+                        scalar.value = wire_rational(80_003, 10_000_000);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let profile = profile_from(&records).unwrap();
+        let source = representative_metric_path().unwrap();
+        let schedule = certify_exact_stop_jerk_schedule(&source, &profile).unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            lower_certified_schedule_to_v1(
+                &schedule,
+                &profile,
+                &budget,
+                Rational::fraction(1, 1_000).unwrap(),
+                ScheduledLoweringLimits::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::CanonicalTravelExceeded {
+                axis: 0,
+                boundary: TravelBoundary::Maximum,
+                ..
+            })
         ));
     }
 

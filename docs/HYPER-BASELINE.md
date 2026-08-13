@@ -1,6 +1,6 @@
 # Local CSGRS/Hyper baseline
 
-Snapshot: 2026-08-12, from the shared workspace at
+Snapshot: 2026-08-13, from the shared workspace at
 `/home/tim/Documents/GitHub/workspace`.
 
 This interface does not resolve CSGRS or any Hyper crate from crates.io. Direct
@@ -20,10 +20,10 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `dc7aff02fd483fb532765c7e539cfeeddba7d57b` | tracked source modified by concurrent local development; tracked diff SHA-256 `c7f6c3c567b05646f1b1582b75ce42239539f75004c6721d4f5e6cd848b273b8` |
-| `hyperpath` | `e65506279d3cba99a23cf98bbd17be44126ec14d` | clean |
+| `hypercurve` | `3184bce0b5a42c30b2c3cace7032cbc26173592c` | clean at observation; ongoing local development is expected |
+| `hyperpath` | `1ed1b44fe2834656cb8b9c1188027aca759d3cd0` | clean; includes exact-stop lookahead corner support used here |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
-| `hypersolve` | `d8bfa6b113020d1588ce2b0e549235d1bb9bc205` | clean |
+| `hypersolve` | `cec630b0fb121fa6ec7fe99e9780c8f020f92d61` | clean |
 | `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
 
 ## Qualification rule
@@ -37,10 +37,17 @@ build executables are
 excluded from Cargo package sources but must still be removed or explicitly
 excluded before a whole-tree release digest is generated.
 
-The recorded Hypercurve and Hyperphysics tracked-diff digests were identical
-immediately before and after this checkpoint's native, WASM, documentation, and
-optimized-bundle qualification. That establishes the tested development
-snapshot; it does not convert either dirty tree into a release pin.
+Hypercurve's then-uncommitted tracked diff SHA-256
+`c2b1099005d6155c0c1043b93c1988e88c8cdd800b9f23acaf30eb29d0f48b60`
+was identical on both sides of the final native/WASM coherence checks and
+complete test run. That exact content was committed during the final bundle
+build as `3184bce0b5a42c30b2c3cace7032cbc26173592c`; diffing its parent to that
+commit produces the same digest, and the checkout was clean when artifact
+validation completed. Hypercurve is expected to continue changing, so the row
+is a tested observation rather than a promise that its checkout remains there.
+The Hyperphysics digest remained unchanged through qualification. These facts
+establish development evidence; they do not convert a moving or dirty sibling
+tree into a release pin.
 
 The baseline is advanced only as one set: update paths/patches if needed, run
 native and WASM compiler fixtures, run the full license scan, update every row,

@@ -18,6 +18,7 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> certified MachineResolutionBudget2
     -> retained Hypercurve line/arc source
     -> lossless Hyperpath metric promotion
+    -> native exact source-envelope / usable-travel proof
     -> exact-stop lookahead + four-phase jerk replay
     -> certified interpolation onto the firmware V1 segment model
     -> configured step/tick/output lattices
@@ -57,6 +58,29 @@ The configuration also supplies the exact integer device-cycle frequency and
 the backend's smallest addressable output interval. Firmware retains these V5
 facts and refuses to construct a stepper executor if they differ from the
 compiled Embassy clock or selected board backend.
+
+## Exact travel envelope
+
+Before lookahead or interpolation, `CertifiedTravelEnvelope2` asks Hypercurve
+for the complete retained path bounds and compares each exact minimum and
+maximum with the conservative usable travel interval derived from
+configuration uncertainty. Hypercurve evaluates native circular-arc cardinal
+extrema, so this proof covers a maximum or minimum between later interpolation
+samples. It does not infer bounds from emitted points or renderer chords.
+
+The certificate retains exact source and usable X/Y bounds in millimetres for
+inspection. A source coordinate beyond either configured boundary, an
+uncertified source bound, or an unresolved exact comparison fails before any
+schedule or canonical machine value is released. Regression coverage narrows
+the fixture's X travel to 7 mm and proves that its native 8 mm path maximum is
+rejected.
+
+Lowering performs a second proof after every exact coordinate is rounded to the
+configured step lattice. Each integer command is divided by the same exact
+nominal command density and compared with usable travel; an outward half-step
+rounding cannot escape merely because the source coordinate was inside. A
+regression uses a `1600/3 steps/mm` lattice whose exact 8 mm endpoint rounds to
+8.000625 mm and proves rejection against an 8.0003 mm limit.
 
 ## Machine-resolution budget
 
@@ -116,6 +140,15 @@ to zero steps while consuming time; this is an intentional hold segment, not a
 dropped part of the schedule. Collapsed tick boundaries, integer overflow, or
 an unresolved interpolation predicate reject the lowering.
 
+`ScheduledLoweringLimits` supplies a caller-owned retained-point budget. The
+lowerer checks the complete post-phase point count with checked arithmetic and
+uses fallible bounded reservations before it appends points or allocates the
+canonical segment vector. Thus an imported dynamics profile that implies an
+extreme exact subdivision count fails before browser memory growth. The
+interactive policy currently permits at most 131,072 retained points,
+including the initial point; this resource limit is distinct from the physical
+interpolation-error certificate.
+
 Before the program is exposed, `alumina-motion::preflight_stepper_segments`
 feeds every segment through the production `StepperExecutor` validation path.
 That allocation-free replay checks continuity, exact event rate, pulse high and
@@ -173,6 +206,10 @@ performed during packaging.
   utilization and non-Cartesian kinematics remain future work.
 - Firmware V1 follows the certified smooth schedule through bounded
   constant-velocity segments; it does not run an onboard jerk planner.
+- Configured source/command travel containment does not by itself prove tool,
+  fixture, or physical following-error clearance at a machine boundary. Those
+  margins must be present in configured usable travel or added by a later
+  job-specific clearance certificate.
 - Physical timer jitter, TinyBee PCM-short timing, driver behavior, mechanics,
   and safety response still require the documented disconnected-load and HIL
   qualification ladder. The current TinyBee motion package remains non-armable.

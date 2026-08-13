@@ -1,47 +1,66 @@
-//! Platform file exchange for canonical `ALGW` bytes.
+//! Platform file exchange for bounded canonical artifact bytes.
 //!
-//! This module never parses or trusts a workspace. It moves bounded bytes
-//! between the platform and `control_graph_ui`, whose canonical replay and
-//! audited semantic/layout admission remain authoritative.
+//! This module never parses or trusts an artifact. It only moves bounded bytes
+//! between the platform and an owning workspace, whose canonical replay and
+//! semantic admission remain authoritative.
 
 use eframe::egui;
 
-pub(crate) enum WorkspaceFileEvent {
+pub(crate) enum CanonicalFileEvent {
     Import(Result<Vec<u8>, String>),
     Export(Result<usize, String>),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CanonicalFileSpec {
+    label: &'static str,
+    extension: &'static str,
+}
+
+impl CanonicalFileSpec {
+    pub(crate) const fn new(label: &'static str, extension: &'static str) -> Self {
+        Self { label, extension }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
-pub(crate) struct WorkspaceFileBridge {
+pub(crate) struct CanonicalFileBridge {
     path: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl WorkspaceFileBridge {
+impl CanonicalFileBridge {
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         bytes: &[u8],
         maximum_import_bytes: usize,
         _download_name: &str,
-    ) -> Vec<WorkspaceFileEvent> {
+        spec: CanonicalFileSpec,
+    ) -> Vec<CanonicalFileEvent> {
         let mut events = Vec::new();
         ui.horizontal_wrapped(|ui| {
-            ui.label("ALGW file");
+            ui.label(spec.label);
             ui.add(
                 egui::TextEdit::singleline(&mut self.path)
                     .desired_width(300.0)
-                    .hint_text("/path/to/workspace.algw"),
+                    .hint_text(format!("/path/to/artifact.{}", spec.extension)),
             );
-            if ui.small_button("open").clicked() {
-                events.push(WorkspaceFileEvent::Import(read_bounded_file(
+            if ui
+                .small_button(format!("open .{}", spec.extension))
+                .clicked()
+            {
+                events.push(CanonicalFileEvent::Import(read_bounded_file(
                     &self.path,
                     maximum_import_bytes,
+                    spec.label,
                 )));
             }
             if ui.small_button("save exact bytes").clicked() {
-                events.push(WorkspaceFileEvent::Export(write_file(&self.path, bytes)));
+                events.push(CanonicalFileEvent::Export(write_file(
+                    &self.path, bytes, spec.label,
+                )));
             }
         });
         events
@@ -49,26 +68,26 @@ impl WorkspaceFileBridge {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_bounded_file(path: &str, maximum_bytes: usize) -> Result<Vec<u8>, String> {
+fn read_bounded_file(path: &str, maximum_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
     use std::io::Read as _;
 
     if path.is_empty() {
-        return Err("ALGW file path is empty".to_owned());
+        return Err(format!("{label} path is empty"));
     }
     let file =
-        std::fs::File::open(path).map_err(|error| format!("could not open ALGW file: {error}"))?;
+        std::fs::File::open(path).map_err(|error| format!("could not open {label}: {error}"))?;
     let maximum_plus_one = maximum_bytes
         .checked_add(1)
-        .ok_or_else(|| "ALGW file limit cannot be represented".to_owned())?;
+        .ok_or_else(|| format!("{label} limit cannot be represented"))?;
     let read_limit = u64::try_from(maximum_plus_one)
-        .map_err(|_| "ALGW file limit exceeds native reader width".to_owned())?;
+        .map_err(|_| format!("{label} limit exceeds native reader width"))?;
     let mut bytes = Vec::new();
     file.take(read_limit)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("could not read ALGW file: {error}"))?;
+        .map_err(|error| format!("could not read {label}: {error}"))?;
     if bytes.len() > maximum_bytes {
         Err(format!(
-            "ALGW file exceeds the {maximum_bytes}-byte admission limit"
+            "{label} exceeds the {maximum_bytes}-byte admission limit"
         ))
     } else {
         Ok(bytes)
@@ -76,24 +95,24 @@ fn read_bounded_file(path: &str, maximum_bytes: usize) -> Result<Vec<u8>, String
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_file(path: &str, bytes: &[u8]) -> Result<usize, String> {
+fn write_file(path: &str, bytes: &[u8], label: &str) -> Result<usize, String> {
     use std::io::Write as _;
 
     if path.is_empty() {
-        return Err("ALGW file path is empty".to_owned());
+        return Err(format!("{label} path is empty"));
     }
     let mut file = std::fs::File::create(path)
-        .map_err(|error| format!("could not create ALGW file: {error}"))?;
+        .map_err(|error| format!("could not create {label}: {error}"))?;
     file.write_all(bytes)
-        .map_err(|error| format!("could not write ALGW file: {error}"))?;
+        .map_err(|error| format!("could not write {label}: {error}"))?;
     file.sync_all()
-        .map_err(|error| format!("could not sync ALGW file: {error}"))?;
+        .map_err(|error| format!("could not sync {label}: {error}"))?;
     Ok(bytes.len())
 }
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
-pub(crate) struct WorkspaceFileBridge {
+pub(crate) struct CanonicalFileBridge {
     pending: Option<PendingImport>,
 }
 
@@ -108,14 +127,15 @@ struct PendingImport {
 type PendingImportResult = std::rc::Rc<std::cell::RefCell<Option<Result<Vec<u8>, String>>>>;
 
 #[cfg(target_arch = "wasm32")]
-impl WorkspaceFileBridge {
+impl CanonicalFileBridge {
     pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         bytes: &[u8],
         maximum_import_bytes: usize,
         download_name: &str,
-    ) -> Vec<WorkspaceFileEvent> {
+        spec: CanonicalFileSpec,
+    ) -> Vec<CanonicalFileEvent> {
         let mut events = Vec::new();
         if let Some(result) = self
             .pending
@@ -125,23 +145,26 @@ impl WorkspaceFileBridge {
             if let Some(pending) = self.pending.take() {
                 pending.input.remove();
             }
-            events.push(WorkspaceFileEvent::Import(result));
+            events.push(CanonicalFileEvent::Import(result));
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label("ALGW file");
+            ui.label(spec.label);
             if ui.small_button("download exact bytes").clicked() {
-                events.push(WorkspaceFileEvent::Export(
+                events.push(CanonicalFileEvent::Export(
                     download_workspace(download_name, bytes).map(|()| bytes.len()),
                 ));
             }
             let waiting = self.pending.is_some();
             if ui
-                .add_enabled(!waiting, egui::Button::new("open .algw"))
+                .add_enabled(
+                    !waiting,
+                    egui::Button::new(format!("open .{}", spec.extension)),
+                )
                 .clicked()
             {
-                match PendingImport::start(maximum_import_bytes) {
+                match PendingImport::start(maximum_import_bytes, spec) {
                     Ok(pending) => self.pending = Some(pending),
-                    Err(error) => events.push(WorkspaceFileEvent::Import(Err(error))),
+                    Err(error) => events.push(CanonicalFileEvent::Import(Err(error))),
                 }
             }
             if waiting {
@@ -161,7 +184,7 @@ impl WorkspaceFileBridge {
 
 #[cfg(target_arch = "wasm32")]
 impl PendingImport {
-    fn start(maximum_bytes: usize) -> Result<Self, String> {
+    fn start(maximum_bytes: usize, spec: CanonicalFileSpec) -> Result<Self, String> {
         use wasm_bindgen::JsCast as _;
 
         let document = web_sys::window()
@@ -173,7 +196,7 @@ impl PendingImport {
             .dyn_into::<web_sys::HtmlInputElement>()
             .map_err(|element| js_error(&element.into()))?;
         input.set_type("file");
-        input.set_accept(".algw,application/octet-stream");
+        input.set_accept(&format!(".{},application/octet-stream", spec.extension));
         input
             .set_attribute("hidden", "")
             .map_err(|value| js_error(&value))?;
@@ -191,21 +214,24 @@ impl PendingImport {
                 if event.type_() == "cancel" {
                     set_import_result(
                         &callback_result,
-                        Err("browser file selection was cancelled".to_owned()),
+                        Err(format!("{} selection was cancelled", spec.label)),
                     );
                     return;
                 }
                 let Some(file) = callback_input.files().and_then(|files| files.get(0)) else {
                     set_import_result(
                         &callback_result,
-                        Err("browser file selection did not contain a file".to_owned()),
+                        Err(format!("{} selection did not contain a file", spec.label)),
                     );
                     return;
                 };
                 let Ok(maximum) = u32::try_from(maximum_bytes) else {
                     set_import_result(
                         &callback_result,
-                        Err("ALGW browser admission limit exceeds u32".to_owned()),
+                        Err(format!(
+                            "{} browser admission limit exceeds u32",
+                            spec.label
+                        )),
                     );
                     return;
                 };
@@ -214,7 +240,8 @@ impl PendingImport {
                     set_import_result(
                         &callback_result,
                         Err(format!(
-                            "ALGW file exceeds the {maximum_bytes}-byte admission limit"
+                            "{} exceeds the {maximum_bytes}-byte admission limit",
+                            spec.label
                         )),
                     );
                     return;
@@ -228,7 +255,8 @@ impl PendingImport {
                             let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
                             if bytes.len() > maximum_bytes {
                                 Err(format!(
-                                    "ALGW file exceeds the {maximum_bytes}-byte admission limit"
+                                    "{} exceeds the {maximum_bytes}-byte admission limit",
+                                    spec.label
                                 ))
                             } else {
                                 Ok(bytes)
@@ -324,10 +352,16 @@ mod tests {
         let path = temporary_path("exact");
         let path_text = path.to_string_lossy();
         let bytes = b"ALGW canonical fixture bytes";
-        assert_eq!(write_file(&path_text, bytes).unwrap(), bytes.len());
-        assert_eq!(read_bounded_file(&path_text, bytes.len()).unwrap(), bytes);
+        assert_eq!(
+            write_file(&path_text, bytes, "test artifact").unwrap(),
+            bytes.len()
+        );
+        assert_eq!(
+            read_bounded_file(&path_text, bytes.len(), "test artifact").unwrap(),
+            bytes
+        );
         assert!(
-            read_bounded_file(&path_text, bytes.len() - 1)
+            read_bounded_file(&path_text, bytes.len() - 1, "test artifact")
                 .unwrap_err()
                 .contains("admission limit")
         );
@@ -336,11 +370,19 @@ mod tests {
 
     #[test]
     fn native_file_exchange_rejects_empty_and_missing_paths() {
-        assert!(read_bounded_file("", 10).unwrap_err().contains("empty"));
-        assert!(write_file("", b"x").unwrap_err().contains("empty"));
+        assert!(
+            read_bounded_file("", 10, "test artifact")
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(
+            write_file("", b"x", "test artifact")
+                .unwrap_err()
+                .contains("empty")
+        );
         let path = temporary_path("missing");
         assert!(
-            read_bounded_file(&path.to_string_lossy(), 10)
+            read_bounded_file(&path.to_string_lossy(), 10, "test artifact")
                 .unwrap_err()
                 .contains("could not open")
         );

@@ -8,6 +8,7 @@ pub mod cache_delivery;
 mod control_graph_ui;
 pub mod distributed_schedule;
 pub mod m7_simulation;
+mod machine_cam_ui;
 mod workspace_file;
 
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,7 @@ use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
 use crate::control_graph_ui::WORKSPACE_STORAGE_KEY;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
+use crate::machine_cam_ui::MachineCamWorkspace;
 #[cfg(target_arch = "wasm32")]
 use alumina_interface_client::worker::{
     ClockSamplingPolicy, DeviceConnectionRequest, DeviceSessionPhase, DeviceSessionSnapshot,
@@ -61,6 +63,7 @@ struct RenderResources {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceView {
+    MachineCam,
     Geometry,
     ExactControl,
 }
@@ -167,10 +170,12 @@ pub struct AluminaApp {
     representative_partition: Option<CanonicalMachinePartition2>,
     representative_global_job: Option<CanonicalGlobalJob2>,
     representative_m7_simulation: Option<RepresentativeM7SimulationReport>,
+    machine_cam: Option<MachineCamWorkspace>,
     exact_control: Option<ExactControlWorkspace>,
     resources: Option<Arc<Mutex<RenderResources>>>,
     setup_error: Option<String>,
     exact_control_error: Option<String>,
+    machine_cam_error: Option<String>,
     #[cfg(target_arch = "wasm32")]
     worker: Option<BrowserWorkerSupervisor>,
     #[cfg(target_arch = "wasm32")]
@@ -184,6 +189,10 @@ pub struct AluminaApp {
 impl AluminaApp {
     /// Construct the exact baseline scene and upload it through Hypergraphics.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "application construction keeps independently fallible exact workspaces and GPU resources explicit"
+    )]
     pub fn new(creation: &eframe::CreationContext<'_>) -> Self {
         let (scene, scene_error) = match ExactScene::baseline() {
             Ok(scene) => (scene, None),
@@ -238,6 +247,10 @@ impl AluminaApp {
                 None => (None, None),
             };
         let (exact_control, exact_control_error) = initialize_exact_control_workspace();
+        let (machine_cam, machine_cam_error) = match MachineCamWorkspace::try_new() {
+            Ok(workspace) => (Some(workspace), None),
+            Err(error) => (None, Some(format!("machine/CAM workspace failed: {error}"))),
+        };
         let (resources, renderer_error) = match creation.gl.as_deref() {
             Some(gl) => match unsafe { RenderResources::upload(gl, &scene) } {
                 Ok(resources) => (Some(Arc::new(Mutex::new(resources))), None),
@@ -257,13 +270,14 @@ impl AluminaApp {
             ),
         };
         Self {
-            workspace_view: WorkspaceView::ExactControl,
+            workspace_view: WorkspaceView::MachineCam,
             scene,
             camera: ExactCamera::default(),
             representative_program,
             representative_partition,
             representative_global_job,
             representative_m7_simulation,
+            machine_cam,
             exact_control,
             resources,
             setup_error: scene_error
@@ -271,6 +285,7 @@ impl AluminaApp {
                 .or(simulation_error)
                 .or(renderer_error),
             exact_control_error,
+            machine_cam_error,
             #[cfg(target_arch = "wasm32")]
             worker,
             #[cfg(target_arch = "wasm32")]
@@ -507,6 +522,11 @@ impl AluminaApp {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.workspace_view,
+                WorkspaceView::MachineCam,
+                "Machine/CAM",
+            );
+            ui.selectable_value(
+                &mut self.workspace_view,
                 WorkspaceView::Geometry,
                 "Exact geometry",
             );
@@ -518,6 +538,17 @@ impl AluminaApp {
         });
         ui.separator();
         match self.workspace_view {
+            WorkspaceView::MachineCam => match &self.machine_cam {
+                Some(workspace) => workspace.show_sidebar(ui),
+                None => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        self.machine_cam_error
+                            .as_deref()
+                            .unwrap_or("machine/CAM workspace is unavailable"),
+                    );
+                }
+            },
             WorkspaceView::Geometry => {
                 ui.label("Greenfield exact CAD/CAM baseline");
                 self.show_scene_status(ui);
@@ -542,6 +573,10 @@ impl AluminaApp {
             alumina_protocol::PROTOCOL_VERSION
         ));
         match self.workspace_view {
+            WorkspaceView::MachineCam => {
+                ui.label("Inspect exact configuration, schedules, cached IR, and replay evidence.");
+                ui.label("No machine value originates from this display projection.");
+            }
             WorkspaceView::Geometry => {
                 let tenth = ExactValue::<Millimetres>::parse_decimal("0.1")
                     .expect("static exact decimal is valid");
@@ -869,6 +904,24 @@ impl eframe::App for AluminaApp {
             .show(context, |ui| self.show_live_control(ui));
 
         egui::CentralPanel::default().show(context, |ui| match self.workspace_view {
+            WorkspaceView::MachineCam => match self.machine_cam.as_mut() {
+                Some(workspace) => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("machine_cam_workspace_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| workspace.show(ui));
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            self.machine_cam_error
+                                .as_deref()
+                                .unwrap_or("machine/CAM workspace is unavailable"),
+                        );
+                    });
+                }
+            },
             WorkspaceView::Geometry => self.show_geometry_workspace(ui),
             WorkspaceView::ExactControl => match self.exact_control.as_mut() {
                 Some(workspace) => {

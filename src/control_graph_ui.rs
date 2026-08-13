@@ -44,7 +44,7 @@ use alumina_sim::diagnostics::tinybee_diagnostic_fixture;
 use eframe::egui;
 use hyperreal::Rational;
 
-use crate::workspace_file::{WorkspaceFileBridge, WorkspaceFileEvent};
+use crate::workspace_file::{CanonicalFileBridge, CanonicalFileEvent, CanonicalFileSpec};
 
 const MAXIMUM_VISIBLE_NODES: usize = 256;
 const MAXIMUM_VISIBLE_WIRES: usize = 1_024;
@@ -61,6 +61,7 @@ const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
 const PERSISTED_WORKSPACE_PREFIX: &str = "algw1:";
 const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
+const ALGW_FILE: CanonicalFileSpec = CanonicalFileSpec::new("ALGW file", "algw");
 const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(96, 169, 232),
     egui::Color32::from_rgb(241, 178, 84),
@@ -1040,7 +1041,7 @@ pub(crate) struct ExactControlWorkspace {
     persistence_dirty: bool,
     persistence_attempted: bool,
     file_status: String,
-    file_bridge: WorkspaceFileBridge,
+    file_bridge: CanonicalFileBridge,
     cursor_tick: u64,
 }
 
@@ -1083,7 +1084,7 @@ impl ExactControlWorkspace {
             persistence_dirty: persisted.is_none(),
             persistence_attempted: false,
             file_status: "canonical workspace has not been exported this session".to_owned(),
-            file_bridge: WorkspaceFileBridge::default(),
+            file_bridge: CanonicalFileBridge::default(),
             cursor_tick: 0,
         };
         if let Some(persisted) = persisted {
@@ -1352,10 +1353,11 @@ impl ExactControlWorkspace {
             self.workspace_encoding.bytes(),
             GraphWorkspaceLimits::interactive().maximum_workspace_bytes,
             &download_name,
+            ALGW_FILE,
         );
         for event in events {
             match event {
-                WorkspaceFileEvent::Import(Ok(bytes)) => {
+                CanonicalFileEvent::Import(Ok(bytes)) => {
                     match self.import_workspace_bytes(&bytes) {
                         Ok(()) => {
                             self.file_status = format!(
@@ -1369,13 +1371,13 @@ impl ExactControlWorkspace {
                         }
                     }
                 }
-                WorkspaceFileEvent::Import(Err(error)) => {
+                CanonicalFileEvent::Import(Err(error)) => {
                     self.file_status = format!("ALGW file read rejected: {error}");
                 }
-                WorkspaceFileEvent::Export(Ok(bytes)) => {
+                CanonicalFileEvent::Export(Ok(bytes)) => {
                     self.file_status = format!("exported {bytes} exact canonical ALGW bytes");
                 }
-                WorkspaceFileEvent::Export(Err(error)) => {
+                CanonicalFileEvent::Export(Err(error)) => {
                     self.file_status = format!("ALGW export failed: {error}");
                 }
             }

@@ -1,0 +1,114 @@
+# Offline machine/CAM inspector checkpoint
+
+Snapshot: 2026-08-13. This checkpoint advances work that does not require
+changing the workstation's Wi-Fi association. The connected bare MKS TinyBee
+V1.0 was not contacted, reset, flashed, or driven.
+
+## Visible authority chain
+
+The application opens the Machine/CAM workspace by default. It owns no second
+machine model: its input is a canonical firmware-schema `ALMCFG05` document
+validated against the primary 8 MiB `mks-tinybee-v1` package. From those exact
+bytes it reconstructs:
+
+1. the capability/configuration identity and exact two-axis resource profile;
+2. conservative command-density, electrical-rate, travel, dynamics,
+   calibration, following-error, and timer facts;
+3. a complete machine-resolution budget;
+4. the retained exact line/native-semicircle Hypercurve path;
+5. a native-extrema travel-envelope certificate;
+6. Hyperpath/Hypersolve exact-stop lookahead and four constant-jerk phases per
+   source element;
+7. exact interpolation under a 131,072-point browser budget, followed by
+   configured step/tick lattice lowering;
+8. production `StepperExecutor` electrical and terminal preflight;
+9. chained canonical blocks, independently hashed upload chunks, and the
+   immutable SD-cache publication;
+10. deterministic `RealtimeJob` plus `CachedStepperExecutor` event replay; and
+11. a reconstructed canonical `ALMEVD01` transcript.
+
+The default fixture declares its facts as declared—not measured—and includes
+the cached-autonomous policy bit. The board package remains non-armable because
+its physical visual, polarity, and timing HIL gates are still open.
+
+Travel is checked twice: the complete native source envelope must fit before
+scheduling, and every rounded integer command must still fit after division by
+the exact command density. This separates between-sample curve extrema from an
+outward step-lattice rounding and closes both paths independently.
+
+## Presentation boundary
+
+Exact values remain visible as exact text. The path plot receives only a
+one-way finite projection through the core's named display boundary and then a
+second explicit conversion into egui's `f32` coordinate domain. The plot is a
+diagnostic view of exact scheduled samples; it is never an input to geometry,
+scheduling, or machine IR.
+
+The inspector exposes:
+
+- exact nominal/lower/upper axis facts and resource bindings;
+- source and usable travel envelopes;
+- every component of the machine-wide error budget;
+- exact aggregate length, time, feed, acceleration, and jerk limits;
+- all four phase endpoint states for each retained element;
+- an exact selected source point beside its canonical step/tick coordinate;
+- a selected firmware segment and complete executor-preflight terminal facts;
+- partition object/manifest/chunk identities and cache horizons;
+- event replay step counts, output transaction count, terminal state, and
+  finish cycle; and
+- evidence and exact-source SHA-256 identities.
+
+## Transactional file exchange
+
+The prior `ALGW`-specific platform bridge is now a generic bounded canonical
+artifact bridge while parsing authority remains in each owning workspace.
+Native paths and browser file selection/download support `.algw`, `.almcfg`,
+and `.almevd` without treating an extension as evidence.
+
+An imported configuration replaces visible state only after complete board
+validation, exact derivation, travel certification, scheduling, lowering,
+executor preflight, packaging, event replay, evidence construction, and
+evidence replay all succeed. A corrupt or semantically inadmissible candidate
+leaves the current machine state unchanged. Imported evidence is SHA-256
+checked against the current evidence identity and must equal the transcript
+freshly reconstructed from the current program and partition.
+
+Lowering checks the caller-owned point budget before each phase and uses
+fallible reservations for points and canonical segments. A semantically valid
+configuration that would demand pathological interpolation therefore fails
+transactionally before large browser allocation, rather than relying on the
+later 4 MiB cache admission limit.
+
+## Verification
+
+At checkpoint implementation time:
+
+- all 26 application tests passed, including a complete headless egui frame,
+  deterministic configuration-to-event replay, and transactional rejection;
+- all 101 exact-core tests plus the compile-fail value-boundary test passed,
+  including native arc-envelope travel rejection, post-rounding containment,
+  and caller-bounded interpolation allocation;
+- all 37 protocol-client tests and the exact-control integration test passed;
+- native and `wasm32-unknown-unknown` strict Clippy passed for the complete
+  workspace, and every workspace test target linked for WASM;
+- strict rustdoc and the local-source/license policy audit passed;
+- the optimized 5,322,110-byte WASM validated with `wasm-tools`; its
+  2,399,637-byte gzip and 1,922,975-byte Brotli forms both decompress to SHA-256
+  `f5c6d91db2f095edd8ac94bf7951026d0b08b020a48fbdff05e61e348fca301a`;
+- headless Chromium loaded the bundle and dedicated worker over loopback with
+  software WebGL, then visibly rendered the complete default Machine/CAM
+  inspector and its exact path plot; and
+- no WLAN or physical board operation occurred.
+
+This is development evidence against the current sibling working trees, not a
+physical qualification or reproducible release pin. The exact sibling revision
+and dirty-tree digests are recorded in `HYPER-BASELINE.md`.
+
+## Deferred physical work
+
+The browser worker, authenticated Wi-Fi protocols, loopback fixtures, and AP
+firmware remain in the repository, but this checkpoint does not associate the
+workstation with the Alumina AP. Physical AP/HTTP and SLogic validation resume
+only when a separate Internet path is available. The board photograph/hotspot
+gate likewise remains open until an operator-owned orthographic image of the
+actual fixture is added under a compatible license and reconciled to hardware.

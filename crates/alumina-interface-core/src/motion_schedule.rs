@@ -15,7 +15,8 @@ use alumina_machine_ir::ExecutionSegment;
 use alumina_motion::{MotionError, StepperPreflightSummary, preflight_stepper_segments};
 use alumina_protocol::Digest;
 use hypercurve::{
-    Classification, CurveContext, CurveError, CurveGeometry2, CurvePath2, Point2 as CurvePoint2,
+    Classification, CurveContext, CurveError, CurveGeometry2, CurvePath2, ExactCurveError,
+    Point2 as CurvePoint2,
 };
 use hyperlimit::{PredicatePolicy, Sign, classify_real_sign, compare_reals};
 use hyperpath::{
@@ -32,6 +33,119 @@ use crate::toolpath::{ToolpathError, promote_metric_path};
 
 /// Result type for exact feed scheduling.
 pub type MotionScheduleResult<T> = Result<T, MotionScheduleError>;
+
+/// Which side of a configured travel interval rejected retained source geometry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TravelBoundary {
+    /// The exact source envelope fell below the conservative usable minimum.
+    Minimum,
+    /// The exact source envelope exceeded the conservative usable maximum.
+    Maximum,
+}
+
+/// Exact proof that the complete retained source envelope fits usable machine travel.
+///
+/// This certificate is derived from Hypercurve's native line/arc extrema, not
+/// from interpolation samples. It therefore also covers an arc extremum that
+/// lies between later V1 command points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertifiedTravelEnvelope2 {
+    source_minimum_mm: [Real; 2],
+    source_maximum_mm: [Real; 2],
+    usable_minimum_mm: [Real; 2],
+    usable_maximum_mm: [Real; 2],
+}
+
+impl CertifiedTravelEnvelope2 {
+    fn certify(
+        source: &CurvePath2,
+        profile: &MachineDynamicsProfile2,
+    ) -> MotionScheduleResult<Self> {
+        let bounds = source.bounds()?;
+        let source_minimum_mm = [bounds.min_x().clone(), bounds.min_y().clone()];
+        let source_maximum_mm = [bounds.max_x().clone(), bounds.max_y().clone()];
+        let usable_minimum_mm = [
+            Real::from(profile.axes()[0].usable_position_minimum_metres() * Rational::from(1_000)),
+            Real::from(profile.axes()[1].usable_position_minimum_metres() * Rational::from(1_000)),
+        ];
+        let usable_maximum_mm = [
+            Real::from(profile.axes()[0].usable_position_maximum_metres() * Rational::from(1_000)),
+            Real::from(profile.axes()[1].usable_position_maximum_metres() * Rational::from(1_000)),
+        ];
+
+        for axis in 0..2 {
+            match compare_reals(
+                &source_minimum_mm[axis],
+                &usable_minimum_mm[axis],
+                PredicatePolicy::STRICT,
+            )
+            .value()
+            {
+                Some(Ordering::Less) => {
+                    return Err(MotionScheduleError::TravelEnvelopeExceeded {
+                        axis,
+                        boundary: TravelBoundary::Minimum,
+                    });
+                }
+                Some(Ordering::Equal | Ordering::Greater) => {}
+                None => {
+                    return Err(MotionScheduleError::TravelEnvelopePredicateUnresolved {
+                        axis,
+                        boundary: TravelBoundary::Minimum,
+                    });
+                }
+            }
+            match compare_reals(
+                &source_maximum_mm[axis],
+                &usable_maximum_mm[axis],
+                PredicatePolicy::STRICT,
+            )
+            .value()
+            {
+                Some(Ordering::Greater) => {
+                    return Err(MotionScheduleError::TravelEnvelopeExceeded {
+                        axis,
+                        boundary: TravelBoundary::Maximum,
+                    });
+                }
+                Some(Ordering::Less | Ordering::Equal) => {}
+                None => {
+                    return Err(MotionScheduleError::TravelEnvelopePredicateUnresolved {
+                        axis,
+                        boundary: TravelBoundary::Maximum,
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            source_minimum_mm,
+            source_maximum_mm,
+            usable_minimum_mm,
+            usable_maximum_mm,
+        })
+    }
+
+    /// Exact minimum source coordinate in millimetres for X and Y.
+    pub const fn source_minimum_mm(&self) -> &[Real; 2] {
+        &self.source_minimum_mm
+    }
+
+    /// Exact maximum source coordinate in millimetres for X and Y.
+    pub const fn source_maximum_mm(&self) -> &[Real; 2] {
+        &self.source_maximum_mm
+    }
+
+    /// Conservative usable machine minimum in millimetres for X and Y.
+    pub const fn usable_minimum_mm(&self) -> &[Real; 2] {
+        &self.usable_minimum_mm
+    }
+
+    /// Conservative usable machine maximum in millimetres for X and Y.
+    pub const fn usable_maximum_mm(&self) -> &[Real; 2] {
+        &self.usable_maximum_mm
+    }
+}
 
 /// Conservative scalar path limits valid for every two-axis tangent direction.
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +257,7 @@ pub struct CertifiedExactStopSchedule2 {
     configuration_digest: Digest,
     capability_digest: Digest,
     source: CurvePath2,
+    travel_envelope: CertifiedTravelEnvelope2,
     route: Vec<FeedPathElement>,
     tangent_spans: Vec<TangentSpan>,
     limits: ScalarMotionLimits2,
@@ -215,6 +330,37 @@ pub struct ScheduledLoweringEvidence2 {
     maximum_curve_to_canonical_error_mm: Real,
     maximum_timer_boundary_error_seconds: Real,
     maximum_segment_duration_error_seconds: Real,
+}
+
+/// Caller-owned memory bound for V1 schedule interpolation.
+///
+/// The limit counts retained scheduled points, including the initial point.
+/// It is checked before reserving or appending each phase's interpolation
+/// samples so an otherwise valid but pathological machine profile fails
+/// closed instead of requesting unbounded browser memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScheduledLoweringLimits {
+    maximum_points: usize,
+}
+
+impl ScheduledLoweringLimits {
+    /// Interactive browser policy for one lowered schedule.
+    pub const INTERACTIVE: Self = Self {
+        maximum_points: 131_072,
+    };
+
+    /// Construct a caller-owned scheduled-point limit.
+    pub const fn try_new(maximum_points: usize) -> MotionScheduleResult<Self> {
+        if maximum_points < 2 {
+            return Err(MotionScheduleError::InvalidLoweringLimits);
+        }
+        Ok(Self { maximum_points })
+    }
+
+    /// Maximum retained scheduled points, including the initial point.
+    pub const fn maximum_points(self) -> usize {
+        self.maximum_points
+    }
 }
 
 impl ScheduledLoweringEvidence2 {
@@ -348,6 +494,11 @@ impl CertifiedExactStopSchedule2 {
         &self.source
     }
 
+    /// Exact retained-path envelope certified inside conservative usable travel.
+    pub const fn travel_envelope(&self) -> &CertifiedTravelEnvelope2 {
+        &self.travel_envelope
+    }
+
     /// Losslessly promoted Hyperpath metric elements.
     pub fn route(&self) -> &[FeedPathElement] {
         &self.route
@@ -406,6 +557,7 @@ pub fn certify_exact_stop_jerk_schedule(
     profile: &MachineDynamicsProfile2,
 ) -> MotionScheduleResult<CertifiedExactStopSchedule2> {
     let route = promote_metric_path(source)?;
+    let travel_envelope = CertifiedTravelEnvelope2::certify(source, profile)?;
     let tangent_spans = route
         .iter()
         .map(tangent_span)
@@ -464,6 +616,7 @@ pub fn certify_exact_stop_jerk_schedule(
         configuration_digest: profile.configuration_digest(),
         capability_digest: profile.capability_digest(),
         source: source.clone(),
+        travel_envelope,
         route,
         tangent_spans,
         limits,
@@ -489,6 +642,7 @@ pub fn lower_certified_schedule_to_v1(
     profile: &MachineDynamicsProfile2,
     resolution_budget: &MachineResolutionBudget2,
     maximum_interpolation_error_mm: Rational,
+    limits: ScheduledLoweringLimits,
 ) -> MotionScheduleResult<CanonicalScheduledProgram2> {
     if schedule.configuration_digest != profile.configuration_digest()
         || schedule.capability_digest != profile.capability_digest()
@@ -572,6 +726,22 @@ pub fn lower_certified_schedule_to_v1(
                 }
             })?;
             let subdivisions = subdivisions.max(1);
+            let required_points = points.len().checked_add(subdivisions).ok_or(
+                MotionScheduleError::IntegerOverflow {
+                    domain: "scheduled point count",
+                },
+            )?;
+            if required_points > limits.maximum_points {
+                return Err(MotionScheduleError::PointBudgetExceeded {
+                    required: required_points,
+                    maximum: limits.maximum_points,
+                });
+            }
+            points.try_reserve(subdivisions).map_err(|_| {
+                MotionScheduleError::AllocationOverflow {
+                    domain: "scheduled points",
+                }
+            })?;
             let subdivisions_real = Real::from(u64::try_from(subdivisions).map_err(|_| {
                 MotionScheduleError::IntegerOverflow {
                     domain: "phase interpolation subdivision count",
@@ -631,7 +801,12 @@ pub fn lower_certified_schedule_to_v1(
         }
     }
 
-    let mut segments = Vec::with_capacity(points.len().saturating_sub(1));
+    let mut segments = Vec::new();
+    segments
+        .try_reserve_exact(points.len().saturating_sub(1))
+        .map_err(|_| MotionScheduleError::AllocationOverflow {
+            domain: "canonical schedule segments",
+        })?;
     for (segment_index, pair) in points.windows(2).enumerate() {
         if pair[1].tick <= pair[0].tick {
             return Err(MotionScheduleError::TickBoundaryCollapsed { segment_index });
@@ -722,6 +897,7 @@ fn push_scheduled_point(
         point_index,
         1,
     )?;
+    certify_canonical_position_inside_travel([x, y], profile, point_index)?;
     let tick = certified_u64_round(
         &(ideal_time_seconds.clone() * Real::from(profile.timer_ticks_per_second())),
         "scheduled timer boundary",
@@ -736,6 +912,55 @@ fn push_scheduled_point(
         steps: [x, y],
         tick: CanonicalCycle::new(tick),
     });
+    Ok(())
+}
+
+fn certify_canonical_position_inside_travel(
+    steps: [CanonicalStep; 2],
+    profile: &MachineDynamicsProfile2,
+    point_index: usize,
+) -> MotionScheduleResult<()> {
+    for (axis, step) in steps.into_iter().enumerate() {
+        let commanded_mm = (Real::from(step.get())
+            / Real::from(
+                profile.axes()[axis]
+                    .command_density_steps_per_millimetre()
+                    .nominal()
+                    .clone(),
+            ))?;
+        let usable_minimum_mm = Real::from(
+            profile.axes()[axis].usable_position_minimum_metres() * Rational::from(1_000),
+        );
+        let usable_maximum_mm = Real::from(
+            profile.axes()[axis].usable_position_maximum_metres() * Rational::from(1_000),
+        );
+        for (boundary, limit, outside) in [
+            (TravelBoundary::Minimum, usable_minimum_mm, Ordering::Less),
+            (
+                TravelBoundary::Maximum,
+                usable_maximum_mm,
+                Ordering::Greater,
+            ),
+        ] {
+            match compare_reals(&commanded_mm, &limit, PredicatePolicy::STRICT).value() {
+                Some(ordering) if ordering == outside => {
+                    return Err(MotionScheduleError::CanonicalTravelExceeded {
+                        point_index,
+                        axis,
+                        boundary,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    return Err(MotionScheduleError::CanonicalTravelPredicateUnresolved {
+                        point_index,
+                        axis,
+                        boundary,
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -912,6 +1137,8 @@ pub enum MotionScheduleError {
     MachineCompile(MachineCompileError),
     /// Hypercurve rejected exact source evaluation.
     CurveEvaluation(CurveError),
+    /// Hypercurve could not certify an exact source envelope.
+    SourceBounds(ExactCurveError),
     /// Canonical firmware segment construction rejected a boundary.
     CanonicalBoundary(BoundaryError),
     /// The production stepper executor rejected electrical timing or state transitions.
@@ -924,6 +1151,38 @@ pub enum MotionScheduleError {
     SourceShapeMismatch,
     /// Exact source evaluation remained undecided.
     SourceEvaluationUncertain,
+    /// The complete exact source envelope lies outside conservative usable travel.
+    TravelEnvelopeExceeded {
+        /// Dense machine axis index.
+        axis: usize,
+        /// Rejected side of the configured interval.
+        boundary: TravelBoundary,
+    },
+    /// Exact comparison between source envelope and usable travel remained undecided.
+    TravelEnvelopePredicateUnresolved {
+        /// Dense machine axis index.
+        axis: usize,
+        /// Undecided side of the configured interval.
+        boundary: TravelBoundary,
+    },
+    /// A rounded canonical command coordinate lies outside conservative usable travel.
+    CanonicalTravelExceeded {
+        /// Zero-based scheduled point index.
+        point_index: usize,
+        /// Dense machine axis index.
+        axis: usize,
+        /// Rejected side of the configured interval.
+        boundary: TravelBoundary,
+    },
+    /// A rounded command/travel comparison remained undecided.
+    CanonicalTravelPredicateUnresolved {
+        /// Zero-based scheduled point index.
+        point_index: usize,
+        /// Dense machine axis index.
+        axis: usize,
+        /// Undecided side of the configured interval.
+        boundary: TravelBoundary,
+    },
     /// A required physical or phase value was not positive.
     NonPositiveValue {
         /// Value domain.
@@ -940,6 +1199,20 @@ pub enum MotionScheduleError {
     InvalidInterpolationError,
     /// Requested V1 interpolation exceeded its machine-wide allocation.
     InterpolationAllocationExceeded,
+    /// A lowering policy must retain at least an initial and final point.
+    InvalidLoweringLimits,
+    /// The proposed interpolation exceeds the caller-owned point budget.
+    PointBudgetExceeded {
+        /// Number of points required after the current phase.
+        required: usize,
+        /// Maximum number of retained points allowed by the caller.
+        maximum: usize,
+    },
+    /// A bounded allocation could not be represented or reserved.
+    AllocationOverflow {
+        /// Allocation domain.
+        domain: &'static str,
+    },
     /// An integer lattice boundary exceeded its storage representation.
     IntegerOverflow {
         /// Boundary domain.
@@ -982,6 +1255,12 @@ impl fmt::Display for MotionScheduleError {
             Self::CurveEvaluation(source) => {
                 write!(formatter, "exact source evaluation failed: {source}")
             }
+            Self::SourceBounds(source) => {
+                write!(
+                    formatter,
+                    "exact source envelope certification failed: {source}"
+                )
+            }
             Self::CanonicalBoundary(source) => {
                 write!(formatter, "canonical firmware boundary failed: {source}")
             }
@@ -999,6 +1278,30 @@ impl fmt::Display for MotionScheduleError {
             Self::SourceEvaluationUncertain => {
                 formatter.write_str("exact source-path evaluation remained uncertain")
             }
+            Self::TravelEnvelopeExceeded { axis, boundary } => write!(
+                formatter,
+                "exact source envelope exceeds the usable axis {axis} {boundary:?} travel boundary"
+            ),
+            Self::TravelEnvelopePredicateUnresolved { axis, boundary } => write!(
+                formatter,
+                "exact source envelope comparison remained unresolved at axis {axis} {boundary:?} travel boundary"
+            ),
+            Self::CanonicalTravelExceeded {
+                point_index,
+                axis,
+                boundary,
+            } => write!(
+                formatter,
+                "canonical point {point_index} exceeds the usable axis {axis} {boundary:?} travel boundary after step rounding"
+            ),
+            Self::CanonicalTravelPredicateUnresolved {
+                point_index,
+                axis,
+                boundary,
+            } => write!(
+                formatter,
+                "canonical point {point_index} comparison remained unresolved at axis {axis} {boundary:?} travel boundary"
+            ),
             Self::NonPositiveValue { domain } => {
                 write!(formatter, "{domain} is not strictly positive")
             }
@@ -1015,6 +1318,16 @@ impl fmt::Display for MotionScheduleError {
             }
             Self::InterpolationAllocationExceeded => formatter
                 .write_str("V1 interpolation error exceeds its certified machine-wide allocation"),
+            Self::InvalidLoweringLimits => {
+                formatter.write_str("scheduled lowering requires a point budget of at least two")
+            }
+            Self::PointBudgetExceeded { required, maximum } => write!(
+                formatter,
+                "scheduled lowering requires {required} points but the caller permits {maximum}"
+            ),
+            Self::AllocationOverflow { domain } => {
+                write!(formatter, "bounded allocation failed for {domain}")
+            }
             Self::IntegerOverflow { domain } => {
                 write!(formatter, "{domain} exceeded canonical integer storage")
             }
@@ -1044,6 +1357,7 @@ impl StdError for MotionScheduleError {
             Self::Arithmetic(source) => Some(source),
             Self::MachineCompile(source) => Some(source),
             Self::CurveEvaluation(source) => Some(source),
+            Self::SourceBounds(source) => Some(source),
             Self::CanonicalBoundary(source) => Some(source),
             _ => None,
         }
@@ -1077,6 +1391,12 @@ impl From<MachineCompileError> for MotionScheduleError {
 impl From<CurveError> for MotionScheduleError {
     fn from(value: CurveError) -> Self {
         Self::CurveEvaluation(value)
+    }
+}
+
+impl From<ExactCurveError> for MotionScheduleError {
+    fn from(value: ExactCurveError) -> Self {
+        Self::SourceBounds(value)
     }
 }
 

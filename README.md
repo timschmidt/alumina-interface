@@ -48,9 +48,17 @@ prototype.
   constant-jerk phases per retained source line/arc. The browser evaluates the
   retained geometry—not renderer chords—while subdividing those phases under
   the exact `A*dt²/8` interpolation bound. It rounds only at the configured
-  step/tick lattices and then replays every emitted segment through the
+  step/tick lattices, rejects any phase that would exceed the caller-owned
+  131,072-point interactive allocation before fallible reservation, and then
+  replays every emitted segment through the
   allocation-free production stepper executor's pulse, rate, direction,
   enable, output-grid, continuity, overflow, and terminal checks.
+- Before scheduling, Hypercurve's complete native line/arc bounding box is
+  compared exactly with the uncertainty-reduced usable travel from the same
+  configuration. This catches arc extrema between interpolation samples and
+  fails before lowering when any exact boundary lies outside travel. Every
+  rounded canonical point is checked again, so an outward half-step cannot
+  escape the usable interval.
 - The machine-bound program packages only into a partition with identical
   capability/configuration digests. The resulting cached bytes run through an
   event-level `RealtimeJob`/`CachedStepperExecutor` simulator, and canonical
@@ -58,6 +66,16 @@ prototype.
   executor results, and content-addressed partition identities. The same
   representative test binary compiles for WASM. This remains software evidence,
   not TinyBee timing or motion qualification.
+- The shell now opens an offline Machine/CAM inspector by default. One
+  canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
+  travel proof, resolution-budget decomposition, retained-path diagnostic
+  projection, exact-stop/four-phase schedule tables, canonical points and
+  segments, production executor preflight, SD-cache identities, event-level
+  replay, and `ALMEVD01` evidence. Native and browser file exchange can replace
+  configuration state only after the entire chain reconstructs successfully;
+  evidence imports must equal a fresh reconstruction byte for byte. This view
+  initiates no device connection and has no arming or output authority. See
+  [`docs/OFFLINE-MACHINE-CAM.md`](docs/OFFLINE-MACHINE-CAM.md).
 - Canonical segments are deterministically partitioned using the firmware's
   queried record capacity and caller-owned horizon limits. Every chained
   512-byte block is independently replayed before `alumina-storage` creates the
@@ -201,6 +219,8 @@ The current curve and metric contract is in
 [`docs/EXACT-TOOLPATH.md`](docs/EXACT-TOOLPATH.md).
 The configuration-derived scheduling and executor-preflight contract is in
 [`docs/EXACT-MACHINE-SCHEDULING.md`](docs/EXACT-MACHINE-SCHEDULING.md).
+The visible offline machine/CAM and transactional artifact boundary is in
+[`docs/OFFLINE-MACHINE-CAM.md`](docs/OFFLINE-MACHINE-CAM.md).
 The immutable block/cache boundary is in
 [`docs/CACHED-PARTITIONS.md`](docs/CACHED-PARTITIONS.md).
 The global participant/manifest boundary is in
