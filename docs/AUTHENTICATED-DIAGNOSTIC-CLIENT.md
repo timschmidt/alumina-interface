@@ -34,6 +34,22 @@ and verifies its SHA-256 before exposing `record()`. A final validation failure
 clears partial bytes and restarts at offset zero rather than retaining ambiguous
 evidence.
 
+## Live target-context prerequisite
+
+The production worker now acquires the immutable `ALMCAP02` target document
+before later live resource diagnostics can be admitted. Its separate
+`CapabilityDownloadMachine` requests only contiguous, at-most-240-byte ranges,
+uses a zero expected digest for discovery, freezes the returned identity, and
+repeats the identical range after ambiguous transport loss. It bounds declared
+length before allocation and exposes bytes only after complete canonical decode
+and SHA-256 validation.
+
+Strict schema v3 carries progress separately from a one-time complete document.
+The rendering realm revalidates the document and identity before constructing
+the board-name-independent explorer. This supplies immutable resource context;
+it does not subscribe to telemetry, configure a capture, obtain a diagnostic
+lease, or convert a descriptive resource into an allowed operation.
+
 ## Offline transport evidence
 
 The tests drive these state machines through three progressively wider seams:
@@ -47,7 +63,8 @@ replace latest-only events, drop a live chunk, and then recover the authoritativ
 512-byte deterministic TinyBee capture through four 168-byte-or-smaller ranges.
 The same client crate is checked for `wasm32-unknown-unknown`.
 
-This does not yet connect the diagnostic machines to the visible worker/UI or a
-WebSocket event stream. The existing board explorer still displays the
-explicitly simulated fixture directly. No physical Wi-Fi, serial device, GPIO,
-or output authority is exercised.
+The telemetry and capture machines are not yet connected to the visible worker
+or a WebSocket event stream. The live explorer now receives the authenticated
+simulator capability document, while its offline fixtures remain available for
+deterministic UI tests. No physical Wi-Fi, serial device, GPIO, measurement,
+lease, or output authority is exercised.

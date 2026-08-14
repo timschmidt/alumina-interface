@@ -16,6 +16,8 @@ For each UI-local connection identity, the worker exclusively owns:
 - the boot-nonce-bound HTTP/native-protocol session;
 - the exact causal `DeviceClockModel`;
 - a separate monotonic `RuntimeHealthModel`;
+- a bounded contiguous `CapabilityDownloadMachine` and one-time publication
+  state;
 - the explicit Wi-Fi sampling/error policy; and
 - at most 64 accepted causal heartbeat records.
 
@@ -33,7 +35,9 @@ history, queue/deadline facts, and a redacted error. It never mutates a worker
 clock model or treats GPU/render time as a machine timestamp. Schema v2 also
 carries exact command/work/telemetry occupancies, service and real-time stack
 epochs, sample counters, headroom, freshness, and a separate bounded health
-failure diagnostic. The rendering realm reconstructs the native AHLT/ASWM
+failure diagnostic. Schema v3 adds capability phase, contiguous byte count,
+stable complete identity, and a separate bounded capability failure diagnostic.
+The rendering realm reconstructs the native AHLT/ASWM and capability
 relationships and rejects an invalid snapshot before inserting it.
 
 ## Lifecycle and recovery
@@ -59,6 +63,15 @@ authenticated session clears health evidence because its boot provenance is not
 yet known, while preserving the diagnostic that caused reauthentication; a
 validated boot change clears both evidence and prior-boot health failures.
 
+After each successful heartbeat, the worker may acquire at most four canonical
+capability ranges while the health deadline remains independently bounded. Each
+range is at most 240 bytes. Discovery uses a zero expected digest; every later
+range uses the first accepted identity and exact contiguous offset. A transport
+failure abandons only the pending side-effect-free range, so the next attempt
+repeats its digest, offset, and byte bound. Capability failure state never
+changes clock qualification or retained health evidence. A validated boot
+change clears the old capability bytes and one-time publication state.
+
 Firmware's replay window is global for one boot, so starting every replacement
 browser session at counter one is invalid. Browser sessions instead seed the
 authenticated counter with:
@@ -80,11 +93,15 @@ request an immediate probe, disconnect, and inspect clock/queue/deadline history
 The same panel shows exact queue depth/capacity/free counts, executor allocation,
 low exclusion, painted/unpainted bytes, observed maximum use, minimum headroom,
 scan/sweep counts, sample age, and RT freshness. It explicitly identifies the
-partial boot epoch and incremental convergence. It is deliberately labeled
-diagnostic-only. There are no arm, motion, process energy, or safety-reset
-controls in this checkpoint. Neither a clock-qualified snapshot nor a stack
-watermark proves safety-chain freshness, physical timing, transient stack depth,
-or sufficient production sizing.
+partial boot epoch and incremental convergence. After capability completion it
+also shows exact board/revision/chip/qualification, core assignment, memory,
+resource ownership/hazards/graph exposure, aliases, licensed visual/hotspot
+counts, HIL requirements, and the package's armable claim. It is deliberately
+labeled diagnostic-only. There are no arm, motion, process energy, or
+safety-reset controls in this checkpoint. Neither a clock-qualified snapshot,
+stack watermark, nor immutable capability document proves safety-chain
+freshness, physical timing, transient stack depth, or sufficient production
+sizing.
 
 ## Browser smoke evidence
 
@@ -108,12 +125,16 @@ reboot, latency spikes, or authenticated heartbeat traffic.
 seam. Served from the repository root, it creates the production worker without
 eframe,
 connects it to `alumina-sim-http` on localhost, and marks the DOM `passed` only
-after four authenticated observations yield a qualified exact interval and a
-schema-v2 health snapshot reports the exact expected queues, executor domains,
-samples, and fresh RT witness. A separate expectation retains a clock-qualified
-snapshot with an isolated health error after a deliberately lost health
-response, then requires bounded recovery. This makes headless-browser evidence
-inspectable without reading pixels from the canvas.
+after at least five authenticated observations yield a qualified exact interval,
+a schema-v3 health snapshot reports the exact expected queues, executor domains,
+samples, and fresh RT witness, and exactly one complete capability-document
+event matches the snapshot identity. The extra post-completion heartbeat makes
+a duplicate document event an observable failure. Separate expectations retain
+a clock-qualified snapshot with an isolated health error after a deliberately
+lost health response, or a clean clock/health snapshot with an isolated
+capability error after a deliberately lost first range, then require bounded
+recovery. This makes headless-browser evidence inspectable without reading
+pixels from the canvas.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -149,9 +170,29 @@ firmware `Unsupported` as an explicit observation rather than fabricated zero
 measurements.
 
 `ControlWorkerRuntime` now schedules this seam beside successful heartbeats,
-serializes it into strict schema-v2 `DeviceSessionSnapshot` values, and renders
+serializes it into strict schema-v3 `DeviceSessionSnapshot` values, and renders
 integer facts in the live-device explorer. The window-free client remains
 independently testable for native and `wasm32-unknown-unknown` without building
 the CAD/CAM application or moving Hyper dependencies. Localhost browser evidence
 covers the available-snapshot and lost-health-response recovery paths; no
 physical MCU, ESP radio, WLAN, motor, output, or safety claim is made here.
+
+## Authenticated capability seam
+
+`CapabilityDownloadMachine` is a transport-independent, retry-safe assembler
+for firmware's immutable `CapabilitiesGet` operation. It checks caller limits
+before allocation, enforces exact status/body rules, binds every response to the
+pending range and first accepted identity, retains only a contiguous prefix, and
+does not expose completion until the full `ALMCAP02` document independently
+decodes and hashes to that identity. Tests cover exact TinyBee reassembly,
+identical ambiguous retry, identity substitution, preallocation limits, and
+response-body/status rejection.
+
+The browser adapter uses the same zero-configuration authenticated session as
+clock and health. The worker publishes complete bytes once per generation only
+after validation. JSON transfer is deliberately treated as untrusted: schema v3
+validates the document again, and the UI validates and decodes it once more into
+`BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
+the admitted explorer. The localhost capability-loss run and complete evidence
+are recorded in sibling
+`aluminafw/docs/evidence/M10-AUTHENTICATED-CAPABILITY-WORKER-UI.md`.

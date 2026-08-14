@@ -161,7 +161,9 @@ prototype.
   HMAC secret, HTTP session, causal clock model, automatic retry cadence, and a
   bounded 64-observation history. It also owns passive runtime-health polling,
   retains independently validated queue/stack evidence and health-specific
-  failures, and publishes only strict schema-v2 redacted snapshots. The UI can
+  failures, and owns retry-safe bounded board-capability acquisition. Strict
+  schema-v3 snapshots expose only progress and immutable identity; one complete
+  canonical document crosses to the UI after independent validation. The UI can
   add, probe, and disconnect diagnostic sessions and never receives credentials.
 - That worker exchanges production-format authenticated heartbeat traffic with
   the deterministic host MCU fixture and recovers from response loss, a finite
@@ -317,8 +319,9 @@ lifecycle. Subscription state exposes monotonic event/loss progress; capture
 state reconciles ambiguous configure/arm/stop responses and reconstructs a
 retained record from exact digest-bound ranges before exposing it. In-memory,
 signed HTTP-fixture, and real localhost TCP/HTTP tests pass without contacting
-the board or WLAN. This client is not yet connected to the visible worker or
-live WebSocket stream. See the [authenticated diagnostic client
+the board or WLAN. Immutable capability acquisition now supplies the visible
+worker/UI with target context, but these telemetry/capture machines are not yet
+connected to that worker or a live WebSocket stream. See the [authenticated diagnostic client
 checkpoint](docs/AUTHENTICATED-DIAGNOSTIC-CLIENT.md).
 
 The headless client now also owns the firmware's passive runtime-health
@@ -331,6 +334,16 @@ second policy after successful heartbeats, resets boot/session-scoped evidence,
 keeps health failures separate from clock qualification, and renders the last
 valid queue and executor-stack facts in the live-device panel. Its strict JSON
 projection is validated again in the rendering realm before insertion.
+
+The worker now also requests the selected MCU's canonical `ALMCAP02` document
+through authenticated `CapabilitiesGet` ranges. It repeats the exact range
+after ambiguous loss, freezes the digest after discovery, bounds allocation,
+and independently decodes and hashes the complete document. Strict schema v3
+transfers those bytes once per worker generation; the rendering realm validates
+them again before constructing the board-name-independent explorer. The live
+panel shows exact board, revision, chip, core, memory, resource, hazard, visual,
+hotspot, HIL, and armability facts while granting no resource lease, output,
+arm transition, or safety authority.
 
 ## Value domains
 
@@ -377,7 +390,7 @@ assets suitable for later embedding in `aluminafw`.
 
 The next interface milestones add native/tighter broader-curve metric carriers,
 certified nonzero-radius blends, direction-aware and broader-axis kinematics,
-live device identity/capability discovery,
+complete public device/security/machine-membership discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
 annotated board photography, capability-negotiated live telemetry, oscilloscope/logic-analyzer
 views, groups, nested component dependency/cycle handling, editable instance
