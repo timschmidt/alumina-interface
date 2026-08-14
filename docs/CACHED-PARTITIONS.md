@@ -4,6 +4,13 @@ The browser compiler packages canonical integer motion using the real sibling
 `aluminafw` schemas. It does not own a second block, storage, manifest, or
 `JobPrepare` representation.
 
+The sibling machine boundary is now `ALMBLK02`/schema V2 with separately bound
+coordinated-motion and direct Q31.32 finite-difference kinds. This document's
+current compiler path deliberately emits kind `1` coordinated records and sets
+the real `ALMJOBD3` descriptor to that same kind with a zero direct-update
+limit. Browser lowering to kind `2` is a new authoritative-CAM stage, not a
+compatibility interpretation of the records described here.
+
 ## One-way artifact pipeline
 
 ```text

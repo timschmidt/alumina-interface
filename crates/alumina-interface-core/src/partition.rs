@@ -273,6 +273,8 @@ impl CanonicalMachinePartition2 {
             capability_digest: self.policy.capability_digest,
             config_digest: self.policy.config_digest,
             axis_count: 2,
+            execution_kind: alumina_machine_ir::ExecutionKind::Motion,
+            maximum_finite_difference_updates: 0,
             block_count: self.block_count,
             first_tick: StreamTick(0),
             initial_position,
