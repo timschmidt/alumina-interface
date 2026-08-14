@@ -99,19 +99,20 @@ prototype.
 - The machine-bound program packages only into a partition with identical
   capability/configuration digests. The resulting cached bytes run through an
   event-level `RealtimeJob`/`CachedStepperExecutor` simulator, and canonical
-  `ALMEVD02` evidence independently binds exact-rational source, metric path,
-  source-to-motion certificate, physical/error policy, executor results, and
-  content-addressed partition identities. The same
+  `ALMEVD03` evidence independently binds exact-rational source, metric path,
+  source-to-motion certificate, physical/error policy, every retained exact
+  affine/lookahead/jerk certification decision, complete timer-search and
+  lowering evidence, executor results, and content-addressed partition
+  identities. Planner and lowering subtranscripts are domain-separated,
+  incrementally hashed, and committed by both SHA-256 and byte length. The same
   representative test binary compiles for WASM. This remains software evidence,
-  not TinyBee timing or motion qualification. V2 binds the resulting canonical
-  stream but not every affine/lookahead/jerk/timer-search decision row; a new V3
-  transcript is the next evidence boundary rather than a compatibility layer.
+  not TinyBee timing or motion qualification.
 - The shell now opens an offline Machine/CAM inspector by default. One
   canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
   travel proof, resolution-budget decomposition, retained-path diagnostic
   projection, exact acceleration/jerk-feasible schedule tables, canonical
   points and segments, production executor preflight, SD-cache identities, event-level
-  replay, and `ALMEVD02` evidence. Native and browser file exchange can replace
+  replay, and `ALMEVD03` evidence. Native and browser file exchange can replace
   configuration state only after the entire chain reconstructs successfully;
   evidence imports must equal a fresh reconstruction byte for byte. This view
   initiates no device connection and has no arming or output authority. See

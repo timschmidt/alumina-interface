@@ -116,7 +116,7 @@ semicircle, and a cubic arch, stops exactly at every unblended/certified metric
 join, lowers the result under a `1/1000 mm` controller-interpolation bound, and
 finishes at `[19200, 0]` steps. The source-to-motion allocation is `1/100 mm`.
 The same fixture passes production electrical preflight, real cache packaging,
-event-level simulator replay, deterministic `ALMEVD02` reconstruction,
+event-level simulator replay, deterministic `ALMEVD03` reconstruction,
 identity substitution rejection, and evidence-tamper rejection.
 
 ## Required next boundaries

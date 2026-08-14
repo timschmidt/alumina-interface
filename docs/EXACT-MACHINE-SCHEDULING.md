@@ -28,7 +28,7 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> allocation-free production StepperExecutor preflight
     -> independently replayed chained execution blocks
     -> content-addressed SD partition
-       ├-> canonical ALMEVD02 evidence transcript
+       ├-> canonical ALMEVD03 evidence transcript
        └-> event-level cached-partition simulator replay (verification)
 ```
 
@@ -273,13 +273,11 @@ preflight terminal facts, constructs real chained 512-byte execution blocks,
 replays them with `MotionStreamValidator`, and lets `alumina-storage` produce
 the immutable object, chunk, and manifest identities.
 
-`ALMEVD02` binds those resulting canonical bytes, terminal timing, source,
-metric path, source approximation, machine identities, and selected error
-allocations. It does not yet serialize the affine-projection, lookahead,
-component-refinement, jerk, or timer-factor search transcripts themselves. The
-in-memory program retains and displays them, but a greenfield evidence V3 must
-bind their policies and rows explicitly; final output identity is not a
-substitute for planner-decision identity.
+`ALMEVD03` binds those resulting canonical bytes and terminal timing, but does
+not use final output identity as a substitute for planner-decision identity. It
+reconstructs separate domain-separated planner and lowering subtranscripts,
+hashes each incrementally, and commits both SHA-256 and canonical byte length in
+the outer evidence record.
 
 `alumina-sim::replay_cached_stepper_partition` consumes the resulting bytes and
 real `JobDescriptor`. It first checks the complete byte length, object kind, and
@@ -289,29 +287,50 @@ deadline event loop, acknowledges ownership in production order, and requires
 the terminal block digest, tick, position, step counts, and finish cycle to
 agree. It uses no target backend and produces no output.
 
-Canonical `ALMEVD02` binds:
+Canonical `ALMEVD03` binds:
 
 - exact-rational line/arc/cubic source identity;
 - the exact line/arc metric-path identity;
 - source-to-motion spans, family tags, motion ranges, exact error bounds, and
   subdivision depths;
 - configuration and capability digests;
+- the strict predicate policy/refinement floor, caller-owned source-reduction
+  and jerk-refinement bounds, exact tangent spans and travel envelope;
+- scalar and affine dense-axis limits, selected bottlenecks, and every retained
+  Hypersolve row, signed residual, proof status, and proof source;
+- caller lookahead ceilings/radii, forward and reverse acceleration nodes,
+  component-local jerk halvings, final nodes, monotonic transitions, selected
+  phases, complete jerk replays, and exact aggregate length/time;
+- the complete resolution budget and certified interpolation/quantization error
+  decomposition;
+- caller-owned point and timer-search bounds, selected rational dilation factor,
+  replay count, factor-one and predecessor failures, and every exact timing
+  bound;
+- every scheduled point's source/motion/phase/subdivision provenance, exact
+  coordinate and ideal time, canonical steps and tick, followed by every
+  canonical segment and the complete executor preflight;
 - partition object and manifest identities and object length;
 - timer and output-quantum facts;
 - block, point, segment, position, tick, finish, and step-count facts; and
 - exact requested total, source, controller, certified source-to-motion, and
   interpolation budgets.
 
-Replay reconstructs the transcript from the retained program and partition and
-requires byte-for-byte equality; externally stored bytes are SHA-256 checked
-before reconstruction. Source, metric, and approximation transcripts are
-domain-separated and independently hashed. Evidence serialization requires
-exact-rational primitive parameters. The schedule can carry other exact
-expressions such as the symbolic semicircle length, but a non-rational source
-parameter currently fails the evidence boundary.
+Replay reconstructs the outer record and all five retained subdomains from the
+live schedule, program, and partition, then requires byte-for-byte equality;
+externally stored bytes are SHA-256 checked before reconstruction. Source,
+metric, approximation, planner, and lowering transcripts are independently
+domain-separated. Source primitives require exact-rational parameters. Planner
+and lowering `Real` values use Hyperreal's exact structural serde representation
+with transient caches/signals omitted, a 1 MiB bound per encoded value, and a
+64 MiB bound per incrementally hashed subtranscript; any structural-schema
+change requires a transcript-version change. A regression
+forces representative approximation caches and proves the evidence remains
+byte-identical. Other regressions prove that changing source-reduction or timer
+search policy changes the appropriate subtranscript even when the final
+canonical stream is identical.
 
 The event-level simulator report is separate verification evidence; it is not
-silently encoded as an `ALMEVD02` certification flag. The transcript's partition
+silently encoded as an `ALMEVD03` certification flag. The transcript's partition
 replay flag refers to the independent canonical `MotionStreamValidator` replay
 performed during packaging.
 

@@ -94,7 +94,7 @@ pub use partition::{
 };
 pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
 pub use schedule_evidence::{
-    CanonicalScheduleEvidence2, ScheduleEvidenceError, ScheduleEvidenceResult,
+    CanonicalScheduleEvidence3, ScheduleEvidenceError, ScheduleEvidenceResult,
     build_canonical_schedule_evidence, replay_canonical_schedule_evidence,
     verify_canonical_schedule_evidence_bytes,
 };

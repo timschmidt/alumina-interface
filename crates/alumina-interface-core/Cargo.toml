@@ -26,6 +26,7 @@ hyperlimit.workspace = true
 hyperpath.workspace = true
 hyperreal.workspace = true
 hypersolve.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 alumina-sim.workspace = true

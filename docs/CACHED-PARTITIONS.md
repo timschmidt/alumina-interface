@@ -97,8 +97,9 @@ real `JobDescriptor`, first rehashes the complete immutable object, then uses
 `RealtimeJob` and `CachedStepperExecutor`, advances to each exact deadline,
 acknowledges owned blocks in order, and requires terminal tick, position, step
 counts, finish cycle, and block digest to agree. Canonical
-`ALMEVD02` evidence then binds the exact-rational source, certified metric path,
-source-to-motion spans, configuration, capability, budgets, executor facts,
+`ALMEVD03` evidence then binds the exact-rational source, certified metric path,
+source-to-motion spans, exact planner policy and certification rows, complete
+timer/lowering decisions, configuration, capability, budgets, executor facts,
 and content-addressed partition. See
 `EXACT-MACHINE-SCHEDULING.md`.
 

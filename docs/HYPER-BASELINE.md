@@ -20,10 +20,10 @@ That package label is not permission to substitute the old published release.
 | `hypertri` | `86189ff6e87f056a3686d81b57952d799945663a` | clean |
 | `hyperlattice` | `a475bb752c1e0fb0cfdb80f4db74a56caa6962c0` | clean |
 | `hypermesh` | `088c4a4bd32bf8bfea37032432d84e19104f1ab0` | clean |
-| `hypercurve` | `72bc0c7f0514b41144d941f2382dc458ffb828d8` | concurrent tracked edits in `src/bezier_offset.rs`, `src/bezier_region.rs`, and `src/curve.rs`; tested diff SHA-256 `a729d67db6f1767d588e822fa23a87127cb7f27a18d3fb0d039b2fbf093b322e` |
+| `hypercurve` | `de9628dd962a8dcbbe20a527f743a1d2abcff225` | concurrent tracked edits in `src/bezier_offset.rs`, `src/bezier_region.rs`, and `src/curve_region_boolean.rs`; final V3-qualified diff SHA-256 `14da56a6db9295aba186b9cb585d662241571971f7be08fde90811e5067ba71c` |
 | `hyperpath` | `d792aa8dc843218b26fc0d1730033e5cd06bdf2f` | clean; adds exact N-axis affine velocity/acceleration/jerk projection and bottleneck replay to diagonal length, acceleration lookahead, monotonic transitions, and component-local jerk refinement |
 | `hyperphysics` | `a8002f286914356d3ebc5f491695f39f6f1c029e` | tracked source and tests modified by concurrent local development; tracked diff SHA-256 `99766a9ad8ccb54b8eac523fcc904db4d2df3aa5eeb4c10f5bcb781d57ad9667` |
-| `hypersolve` | `cec630b0fb121fa6ec7fe99e9780c8f020f92d61` | clean |
+| `hypersolve` | `6ce08b714cdba1e3668e1af6c83f0a249bda9bb5` | clean |
 | `hypergraphics` | `31811aeb17bd2dc827db5669558f6251e0c2f2aa` | clean; includes checked native Hypermesh plus certified Hypercurve curve/path/region adapters |
 
 ## Qualification rule
@@ -56,9 +56,30 @@ HEAD `d85eec9aa6bcde54ebbfd5ac08a3ac72d2f244e9` and tracked diff SHA-256
 The exact timer-lattice checkpoint's final native/WASM tests, strict Clippy and
 rustdoc, complete WASM test-target link, source/license audit, optimized bundle,
 compression checks, long-budget software-WebGL loopback render, and final core
-check completed against the current table state. Pre/post snapshots around the
-gate batch and the subsequent production rebuild retained the same HEAD,
-tracked file set, and diff digest.
+check completed against its previously recorded `72bc0c7...` Hypercurve state.
+Pre/post snapshots around that gate batch and production rebuild retained the
+same HEAD, tracked file set, and diff digest.
+
+The canonical planner-evidence V3 work deliberately straddled later concurrent
+sibling edits without treating them as Alumina changes. Its first complete gate
+batch and optimized artifact were produced while Hypercurve was stable at
+`f6508292039a0249ee63fbd0d6855ddb9ff9a0d1` with tracked edits in
+`src/bezier_offset.rs`, `src/bezier_parameter.rs`, `src/bezier_region.rs`, and
+`src/curve.rs`, whose binary diff SHA-256 was
+`549005666bbf29a48445b583ebc97c5dfbdc8000be0e8d16fa9518d6619abcdd`.
+Hypersolve was then still the clean `cec630b...` state. While loopback approval
+was pending, both repositories advanced independently; intermediate core checks
+continued to pass but were not used to relabel that first artifact.
+
+After the final 64 MiB subtranscript bound was added, the complete native test
+suite, native and WASM strict Clippy, strict rustdoc, complete WASM test-target
+link, source/license audit, optimized build, compression integrity checks, and
+long-budget software-WebGL loopback render were repeated. Pre/post observations
+remained stable at the current table's Hypercurve `de9628d...` with diff
+`14da56...` and clean Hypersolve `6ce08b7...`. The final V3 artifact and current
+source qualification therefore share that explicit coherent dependency
+snapshot. Later Hypercurve edits are expected and do not retroactively rename
+or invalidate this recorded development artifact.
 
 Hypercurve advanced through multiple coherent and temporarily non-compiling
 states while this work was underway and is expected to continue changing. This

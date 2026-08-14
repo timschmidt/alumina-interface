@@ -40,7 +40,7 @@ hypercurve = { path = "../hypercurve", default-features = false }
 hypergraphics = { path = "../hypergraphics" }
 hyperlimit = { path = "../hyperlimit", default-features = false }
 hyperpath = { path = "../hyperpath", default-features = false }
-hyperreal = { path = "../hyperreal", default-features = false }
+hyperreal = { path = "../hyperreal", default-features = false, features = ["serde"] }
 hypersolve = { path = "../hypersolve", default-features = false }
 
 [package]

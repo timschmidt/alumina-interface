@@ -360,7 +360,10 @@ pub struct CertifiedJerkSchedule2 {
     travel_envelope: CertifiedTravelEnvelope2,
     route: Vec<FeedPathElement>,
     tangent_spans: Vec<TangentSpan>,
+    approximation_limits: MetricPathApproximationLimits2,
     limits: ScalarMotionLimits2,
+    lookahead_limits: LookaheadFeedPlanningLimits,
+    maximum_jerk_component_halvings: u32,
     lookahead_plan: PlannedJerkFeasibleLookaheadSchedule,
     phases: Vec<Vec<JerkRampPhaseProposal>>,
     jerk_report: MultiPhaseJerkRampFeedScheduleReport,
@@ -435,6 +438,7 @@ pub struct ScheduledLoweringEvidence2 {
     maximum_position_quantization_error_mm: Real,
     maximum_step_event_tracking_error_mm: Real,
     maximum_curve_to_canonical_error_mm: Real,
+    lowering_limits: ScheduledLoweringLimits,
     timer_lattice_schedule: TimerLatticeScheduleReport2,
 }
 
@@ -675,6 +679,11 @@ impl ScheduledLoweringEvidence2 {
     pub const fn timer_lattice_schedule(&self) -> &TimerLatticeScheduleReport2 {
         &self.timer_lattice_schedule
     }
+
+    /// Caller-owned point and timer-search bounds used for this lowering.
+    pub const fn lowering_limits(&self) -> ScheduledLoweringLimits {
+        self.lowering_limits
+    }
 }
 
 /// Canonical V1 constant-velocity IR approximation of a certified jerk schedule.
@@ -787,9 +796,24 @@ impl CertifiedJerkSchedule2 {
         &self.tangent_spans
     }
 
+    /// Caller-owned source-reduction element and depth bounds.
+    pub const fn approximation_limits(&self) -> MetricPathApproximationLimits2 {
+        self.approximation_limits
+    }
+
     /// Conservative path-wide machine limits.
     pub const fn limits(&self) -> &ScalarMotionLimits2 {
         &self.limits
+    }
+
+    /// Exact caller-owned node ceilings and retained blend radii.
+    pub const fn lookahead_limits(&self) -> &LookaheadFeedPlanningLimits {
+        &self.lookahead_limits
+    }
+
+    /// Caller-owned bound on exact component-local divisions by two.
+    pub const fn maximum_jerk_component_halvings(&self) -> u32 {
+        self.maximum_jerk_component_halvings
     }
 
     /// Exact zero-radius schedule selected by lookahead and jerk refinement.
@@ -931,7 +955,10 @@ pub fn certify_jerk_schedule(
         travel_envelope,
         route,
         tangent_spans,
+        approximation_limits,
         limits,
+        lookahead_limits,
+        maximum_jerk_component_halvings: MAXIMUM_JERK_COMPONENT_HALVINGS,
         lookahead_plan,
         phases,
         jerk_report,
@@ -1196,6 +1223,7 @@ pub fn lower_certified_schedule_to_v1(
             maximum_position_quantization_error_mm,
             maximum_step_event_tracking_error_mm,
             maximum_curve_to_canonical_error_mm,
+            lowering_limits: limits,
             timer_lattice_schedule: selected_timer.report,
         },
     })

@@ -27,7 +27,7 @@ retained exact Hypercurve path
                     -> four-phase jerk schedule per metric element
                     -> bounded controller interpolation
                     -> step/tick lattices and executor preflight
-                    -> cached partition + ALMEVD02
+                    -> cached partition + ALMEVD03
 ```
 
 `CurvePath2` remains in both `CertifiedJerkSchedule2` and
@@ -131,20 +131,26 @@ controller interpolation request remains `1/1000 mm`.
 
 ## Canonical evidence
 
-`ALMEVD02` domain-separates and hashes three reconstructed transcripts:
+`ALMEVD03` domain-separates and hashes five reconstructed transcripts:
 
 - the retained exact source path, including all four exact-rational cubic
   control points;
 - the exact line/arc metric path actually presented to Hyperpath; and
 - the source-to-motion spans, family tags, motion ranges, exact error bounds,
-  and subdivision depths.
+  and subdivision depths;
+- exact planner policy, tangent/travel/limit facts, affine projection,
+  lookahead and component refinement, selected phases, and every retained
+  Hypersolve certification row; and
+- complete resolution/interpolation/lattice evidence, timer-search policy and
+  rejections, exact scheduled points, canonical segments, and executor
+  preflight.
 
-The outer transcript binds those three digests alongside machine identities,
-partition identities, terminal executor facts, machine allocations, the
-certified source-to-motion bound, and the controller interpolation request.
-Replay rebuilds all transcripts from the in-memory program and requires
-byte-for-byte identity. Raw CNC text remains separate provenance and does not
-enter evidence.
+The outer transcript binds all five digests, and the planner/lowering byte
+lengths, alongside machine identities, partition identities, terminal executor
+facts, machine allocations, the certified source-to-motion bound, and the
+controller interpolation request. Replay rebuilds all transcripts from the
+live schedule/program/partition and requires byte-for-byte identity. Raw CNC
+text remains separate provenance and does not enter evidence.
 
 ## Present limits
 

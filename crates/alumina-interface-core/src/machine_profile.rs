@@ -1444,21 +1444,103 @@ mod tests {
             ),
             Err(CachedStepperReplayError::PartitionIdentity)
         );
-        let evidence = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
-        let rebuilt = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
+        let evidence = build_canonical_schedule_evidence(&schedule, &lowered, &partition).unwrap();
+        let rebuilt = build_canonical_schedule_evidence(&schedule, &lowered, &partition).unwrap();
         assert_eq!(evidence, rebuilt);
         assert!(!evidence.digest().is_zero());
         assert!(!evidence.source_digest().is_zero());
         assert!(!evidence.metric_path_digest().is_zero());
         assert!(!evidence.source_approximation_digest().is_zero());
-        assert_eq!(&evidence.encoded()[..8], b"ALMEVD02");
-        replay_canonical_schedule_evidence(&evidence, &lowered, &partition).unwrap();
+        assert!(!evidence.planner_transcript_digest().is_zero());
+        assert!(evidence.planner_transcript_byte_len() > 0);
+        assert!(!evidence.lowering_transcript_digest().is_zero());
+        assert!(evidence.lowering_transcript_byte_len() > 0);
+        assert_eq!(&evidence.encoded()[..8], b"ALMEVD03");
+        replay_canonical_schedule_evidence(&evidence, &schedule, &lowered, &partition).unwrap();
+
+        // Exact-real approximation caches are accelerators, not transcript
+        // state. Refining representative symbolic planner and lowering values
+        // must leave the canonical evidence byte-for-byte unchanged.
+        assert!(
+            schedule
+                .total_path_length_mm()
+                .certified_dyadic_interval(-128)
+                .is_some()
+        );
+        assert!(
+            schedule
+                .total_traversal_time_seconds()
+                .certified_dyadic_interval(-128)
+                .is_some()
+        );
+        assert!(
+            lowered
+                .evidence()
+                .maximum_curve_to_canonical_error_mm()
+                .certified_dyadic_interval(-128)
+                .is_some()
+        );
+        let cache_refined_evidence =
+            build_canonical_schedule_evidence(&schedule, &lowered, &partition).unwrap();
+        assert_eq!(cache_refined_evidence, evidence);
+
+        let alternate_schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::try_new(16_385, 21).unwrap(),
+        )
+        .unwrap();
+        let alternate_planner_evidence =
+            build_canonical_schedule_evidence(&alternate_schedule, &lowered, &partition).unwrap();
+        assert_eq!(
+            alternate_planner_evidence.lowering_transcript_digest(),
+            evidence.lowering_transcript_digest()
+        );
+        assert_ne!(
+            alternate_planner_evidence.planner_transcript_digest(),
+            evidence.planner_transcript_digest()
+        );
+        assert_ne!(alternate_planner_evidence.digest(), evidence.digest());
+
+        let alternate_timer_limits = ScheduledLoweringLimits::try_new_with_timer_dilation(
+            ScheduledLoweringLimits::INTERACTIVE.maximum_points(),
+            TimerDilationPolicy::try_new(1_024, 16_384).unwrap(),
+        )
+        .unwrap();
+        let alternate_lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            alternate_timer_limits,
+        )
+        .unwrap();
+        assert_eq!(alternate_lowered.points(), lowered.points());
+        assert_eq!(alternate_lowered.segments(), lowered.segments());
+        let alternate_partition =
+            package_canonical_scheduled_program(&alternate_lowered, partition_policy).unwrap();
+        assert_eq!(alternate_partition.bytes(), partition.bytes());
+        let alternate_lowering_evidence =
+            build_canonical_schedule_evidence(&schedule, &alternate_lowered, &alternate_partition)
+                .unwrap();
+        assert_eq!(
+            alternate_lowering_evidence.planner_transcript_digest(),
+            evidence.planner_transcript_digest()
+        );
+        assert_ne!(
+            alternate_lowering_evidence.lowering_transcript_digest(),
+            evidence.lowering_transcript_digest()
+        );
+        assert_ne!(alternate_lowering_evidence.digest(), evidence.digest());
+
         let mut corrupt_evidence = evidence.encoded().to_vec();
         corrupt_evidence[12] ^= 1;
         assert_eq!(
             verify_canonical_schedule_evidence_bytes(
                 &corrupt_evidence,
                 evidence.digest(),
+                &schedule,
                 &lowered,
                 &partition,
             ),
@@ -2005,14 +2087,14 @@ mod tests {
         )
         .unwrap();
         let partition = package_canonical_scheduled_program(&lowered, partition_policy).unwrap();
-        let evidence = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
-        let rebuilt = build_canonical_schedule_evidence(&lowered, &partition).unwrap();
+        let evidence = build_canonical_schedule_evidence(&schedule, &lowered, &partition).unwrap();
+        let rebuilt = build_canonical_schedule_evidence(&schedule, &lowered, &partition).unwrap();
 
         assert_eq!(evidence, rebuilt);
-        assert_eq!(&evidence.encoded()[..8], b"ALMEVD02");
+        assert_eq!(&evidence.encoded()[..8], b"ALMEVD03");
         assert_ne!(evidence.source_digest(), evidence.metric_path_digest());
         assert!(!evidence.source_approximation_digest().is_zero());
-        replay_canonical_schedule_evidence(&evidence, &lowered, &partition).unwrap();
+        replay_canonical_schedule_evidence(&evidence, &schedule, &lowered, &partition).unwrap();
     }
 
     #[test]

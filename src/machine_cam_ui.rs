@@ -12,7 +12,7 @@ use alumina_config::{
     Rational as ConfigurationRational, ResourceBinding, ScalarFact, SignalPolarity,
 };
 use alumina_interface_core::{
-    CanonicalMachinePartition2, CanonicalScheduleEvidence2, CanonicalScheduledProgram2,
+    CanonicalMachinePartition2, CanonicalScheduleEvidence3, CanonicalScheduledProgram2,
     CertifiedJerkSchedule2, CncGeometryImportLimits, CncGeometryImportReport2, ExactValue,
     MachineDynamicsProfile2, MachinePartitionPolicy2, MachineResolutionBudget2,
     MetricPathApproximationLimits2, Millimetres, ScheduledLoweringLimits,
@@ -34,7 +34,7 @@ const MAXIMUM_CONFIGURATION_BYTES: usize =
 const MAXIMUM_EVIDENCE_BYTES: usize = 64 * 1024;
 const MAXIMUM_CNC_SOURCE_BYTES: usize = CncGeometryImportLimits::INTERACTIVE.maximum_source_bytes();
 const CONFIGURATION_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMCFG05 file", "almcfg");
-const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD02 file", "almevd");
+const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD03 file", "almevd");
 const CNC_SOURCE_FILE: BoundedFileSpec = BoundedFileSpec::new("UI-only CNC geometry draft", "nc");
 const STREAM_ID: [u8; 16] = *b"tinybee-cam-v1!!";
 const UPLOAD_ID: UploadId = UploadId(0x1122_3344_5566_7788);
@@ -110,7 +110,7 @@ struct MachineCamArtifacts {
     program: CanonicalScheduledProgram2,
     partition: CanonicalMachinePartition2,
     replay: CachedStepperReplayReport<2>,
-    evidence: CanonicalScheduleEvidence2,
+    evidence: CanonicalScheduleEvidence3,
 }
 
 impl MachineCamArtifacts {
@@ -178,9 +178,9 @@ impl MachineCamArtifacts {
             profile.stepper_timing(0),
         )
         .map_err(|error| format!("deterministic cached replay rejected: {error:?}"))?;
-        let evidence = build_canonical_schedule_evidence(&program, &partition)
+        let evidence = build_canonical_schedule_evidence(&schedule, &program, &partition)
             .map_err(|error| format!("canonical evidence construction rejected: {error}"))?;
-        replay_canonical_schedule_evidence(&evidence, &program, &partition)
+        replay_canonical_schedule_evidence(&evidence, &schedule, &program, &partition)
             .map_err(|error| format!("canonical evidence replay rejected: {error}"))?;
 
         Ok(Self {
@@ -310,6 +310,7 @@ impl MachineCamWorkspace {
         verify_canonical_schedule_evidence_bytes(
             bytes,
             self.artifacts.evidence.digest(),
+            &self.artifacts.schedule,
             &self.artifacts.program,
             &self.artifacts.partition,
         )
@@ -411,26 +412,26 @@ impl MachineCamWorkspace {
                         match self.verify_evidence_bytes(&bytes) {
                             Ok(()) => {
                                 self.file_status = format!(
-                                    "verified {} imported ALMEVD02 bytes against the current exact reconstruction",
+                                    "verified {} imported ALMEVD03 bytes against the current exact reconstruction",
                                     bytes.len()
                                 );
                             }
                             Err(error) => {
                                 self.file_status = format!(
-                                    "ALMEVD02 import rejected without changing the workspace: {error}"
+                                    "ALMEVD03 import rejected without changing the workspace: {error}"
                                 );
                             }
                         }
                     }
                     BoundedFileEvent::Import(Err(error)) => {
-                        self.file_status = format!("ALMEVD02 read rejected: {error}");
+                        self.file_status = format!("ALMEVD03 read rejected: {error}");
                     }
                     BoundedFileEvent::Export(Ok(bytes)) => {
                         self.file_status =
-                            format!("exported {bytes} canonical ALMEVD02 evidence bytes");
+                            format!("exported {bytes} canonical ALMEVD03 evidence bytes");
                     }
                     BoundedFileEvent::Export(Err(error)) => {
-                        self.file_status = format!("ALMEVD02 export failed: {error}");
+                        self.file_status = format!("ALMEVD03 export failed: {error}");
                     }
                 }
             }
@@ -1205,7 +1206,14 @@ impl MachineCamWorkspace {
             digest_prefix(self.artifacts.evidence.source_approximation_digest().0),
         ));
         ui.monospace(format!(
-            "{} canonical ALMEVD02 bytes",
+            "planner {}… / {} canonical bytes · lowering {}… / {} canonical bytes",
+            digest_prefix(self.artifacts.evidence.planner_transcript_digest().0),
+            self.artifacts.evidence.planner_transcript_byte_len(),
+            digest_prefix(self.artifacts.evidence.lowering_transcript_digest().0),
+            self.artifacts.evidence.lowering_transcript_byte_len(),
+        ));
+        ui.monospace(format!(
+            "{} canonical ALMEVD03 bytes",
             self.artifacts.evidence.encoded().len()
         ));
         ui.colored_label(
@@ -1514,7 +1522,7 @@ mod tests {
             artifacts.replay.terminal_position,
             artifacts.partition.final_position()
         );
-        assert_eq!(&artifacts.evidence.encoded()[..8], b"ALMEVD02");
+        assert_eq!(&artifacts.evidence.encoded()[..8], b"ALMEVD03");
         assert_ne!(
             artifacts.evidence.source_digest(),
             artifacts.evidence.metric_path_digest()

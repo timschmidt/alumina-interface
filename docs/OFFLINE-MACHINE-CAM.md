@@ -34,8 +34,9 @@ bytes it reconstructs:
 10. chained canonical blocks, independently hashed upload chunks, and the
    immutable SD-cache publication;
 11. deterministic `RealtimeJob` plus `CachedStepperExecutor` event replay; and
-12. a reconstructed canonical `ALMEVD02` transcript binding source, metric
-    path, and approximation identities.
+12. a reconstructed canonical `ALMEVD03` transcript binding source, metric
+    path, approximation, exact planner policy/certification, complete lowering,
+    timer-search, and canonical execution identities.
 
 The default fixture declares its facts as declared—not measured—and includes
 the cached-autonomous policy bit. The board package remains non-armable because
@@ -75,8 +76,9 @@ The inspector exposes:
 - partition object/manifest/chunk identities and cache horizons;
 - event replay step counts, output transaction count, terminal state, and
   finish cycle; and
-- evidence, exact-source, exact-metric, and source-approximation SHA-256
-  identities.
+- evidence, exact-source, exact-metric, source-approximation, planner, and
+  lowering SHA-256 identities, with canonical planner/lowering transcript byte
+  lengths.
 
 ## Transactional file and source exchange
 
@@ -124,10 +126,10 @@ At checkpoint implementation time:
 - native and `wasm32-unknown-unknown` strict Clippy passed for the complete
   workspace, and every workspace test target linked for WASM;
 - strict rustdoc and the local-source/license policy audit passed;
-- the optimized 5,403,381-byte WASM validated with `wasm-tools`; its
-  2,431,866-byte gzip and 1,949,157-byte Brotli forms passed integrity checks,
+- the optimized 5,447,452-byte WASM validated with `wasm-tools`; its
+  2,443,730-byte gzip and 1,955,126-byte Brotli forms passed integrity checks,
   and the uncompressed artifact has SHA-256
-  `144aaa48985cfc3f0c870b7592197b6d3012b26c22717481ee29e74137ec07db`;
+  `58729ee1661c226fc8b15239a72e5a6b128631bbbce5e4f6f3688a1b429034ff`;
 - headless Chromium loaded the bundle and dedicated worker over loopback with
   software WebGL, then visibly rendered the complete default Machine/CAM
   inspector, line/arc/cubic motion plot, source-to-motion certificate, and the
@@ -135,7 +137,9 @@ At checkpoint implementation time:
   zero eligible positive components in the default line/arc/cubic fixture, and
   the active lossless-line G1-only policy. The same view reported selected
   timer factor `1`, the complete `1/4096` through `65536/4096` policy lattice,
-  one complete preflight replay, and no factor-one or predecessor rejection;
+  one complete preflight replay, no factor-one or predecessor rejection, and
+  the independent `ALMPLN01`/`ALMLOW01` identities and lengths committed by
+  `ALMEVD03`;
   and
 - no WLAN or physical board operation occurred.
 
