@@ -106,3 +106,29 @@ case passed only by retaining zero accepted samples and no estimate after three
 round-trip rejections. The complete commands, observations, artifact hashes,
 and deliberately closed claims are recorded in the sibling
 `aluminafw/docs/evidence/M7-BROWSER-AUTH-HTTP-SIM.md` evidence file.
+
+## Runtime-health client seam
+
+The window-free client now has a separate session-scoped
+`RuntimeHealthModel` for firmware's authenticated, bodyless
+`HealthSnapshot` operation. It independently decodes the fixed 124-byte body,
+exposes exact command/work/telemetry occupancy and the two stack observations,
+and distinguishes absent, present-stale, and present-fresh real-time reports.
+It rejects response-cycle regression and any service or real-time epoch,
+layout, counter, sample-cycle, or observed-headroom regression. A temporarily
+absent real-time report does not erase the last monotonic witness used to check
+the next present report.
+
+The browser adapter supplies both window and worker fetch functions. They
+require the same zero-configuration HTTP session already opened by the clock
+worker, spend no request when a differently bound session is supplied, retain
+the last valid health evidence after transport or semantic failure, and treat
+firmware `Unsupported` as an explicit observation rather than fabricated zero
+measurements.
+
+This seam is compiled for native and `wasm32-unknown-unknown` without building
+the CAD/CAM application or its moving Hyper dependencies. It is not yet
+scheduled by `ControlWorkerRuntime`, serialized into
+`DeviceSessionSnapshot`, or rendered in the board explorer. Those changes need
+a versioned worker-schema update plus bounded poll/error history and remain a
+separate checkpoint; no live device or network claim is made here.

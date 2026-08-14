@@ -263,6 +263,7 @@ dependencies = [
  "alumina-diagnostics",
  "alumina-net",
  "alumina-protocol",
+ "alumina-runtime",
  "alumina-safety",
  "alumina-storage",
  "heapless",

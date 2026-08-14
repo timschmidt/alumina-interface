@@ -288,6 +288,11 @@ impl AuthenticatedHttpSession {
         self.origin
     }
 
+    /// Configuration identity encoded into every native frame in this session.
+    pub const fn config_digest(&self) -> Digest {
+        self.config_digest
+    }
+
     /// Constructs and signs one request before browser/native I/O begins.
     ///
     /// The counter, sequence, and correlation are spent at construction. If I/O

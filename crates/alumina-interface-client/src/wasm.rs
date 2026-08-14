@@ -18,6 +18,7 @@ use crate::graph::{
     GraphInstallError, GraphInstallMachine, GraphInstallPhase, GraphRunError, GraphRunMachine,
     GraphRunPhase,
 };
+use crate::health::{RuntimeHealthClientError, RuntimeHealthModel, RuntimeHealthUpdate};
 use crate::http::{
     AUTHENTICATION_PATH, AuthenticatedHttpSession, AuthenticatedProtocolRequest,
     AuthenticatedProtocolResponse, AuthenticationChallenge, AuthenticationChallengeError,
@@ -353,6 +354,60 @@ async fn drive_clock_probe_inner(
     model
         .accept_response(&response, receive.latest_ns())
         .map_err(BrowserClockError::Clock)
+}
+
+/// Acquires one authenticated passive runtime-health snapshot.
+///
+/// The session must be bound to the zero configuration identity declared by
+/// [`crate::health::RuntimeHealthRequest`]. Transport and semantic failures
+/// retain the model's last valid evidence; an explicit device `Unsupported`
+/// response is an accepted update that clears boot-scoped measurements.
+pub async fn drive_runtime_health(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut RuntimeHealthModel,
+    secret: &[u8],
+) -> Result<RuntimeHealthUpdate, BrowserHealthError> {
+    drive_runtime_health_inner(window, origin, session, model, secret).await
+}
+
+/// Worker-scope runtime-health acquisition isolated from rendering stalls.
+pub async fn drive_runtime_health_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut RuntimeHealthModel,
+    secret: &[u8],
+) -> Result<RuntimeHealthUpdate, BrowserHealthError> {
+    drive_runtime_health_inner(worker, origin, session, model, secret).await
+}
+
+async fn drive_runtime_health_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut RuntimeHealthModel,
+    secret: &[u8],
+) -> Result<RuntimeHealthUpdate, BrowserHealthError> {
+    let operation = model.request();
+    if session.config_digest() != operation.config_digest() {
+        return Err(BrowserHealthError::ConfigurationIdentity);
+    }
+    let request = session
+        .begin_request(operation.operation(), operation.body(), secret)
+        .map_err(BrowserHealthError::Session)?;
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            return Err(BrowserHealthError::Fetch(error));
+        }
+    };
+    model
+        .accept_response(&response)
+        .map_err(BrowserHealthError::Health)
 }
 
 /// Returns the browser-generated calling origin used by the CORS `Origin` header.
@@ -741,6 +796,36 @@ impl fmt::Display for BrowserClockError {
 }
 
 impl std::error::Error for BrowserClockError {}
+
+/// One authenticated browser runtime-health acquisition failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserHealthError {
+    /// The session would substitute an active configuration into the zero-config request.
+    ConfigurationIdentity,
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+    /// Authenticated health bytes or monotonic device evidence were invalid.
+    Health(RuntimeHealthClientError),
+}
+
+impl fmt::Display for BrowserHealthError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigurationIdentity => {
+                formatter.write_str("runtime health requires a zero-configuration session")
+            }
+            Self::Session(error) => {
+                write!(formatter, "health request construction failed: {error}")
+            }
+            Self::Fetch(error) => write!(formatter, "health fetch failed: {error}"),
+            Self::Health(error) => write!(formatter, "runtime health rejected: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserHealthError {}
 
 /// One-step browser delivery failure with transport versus upload semantics preserved.
 #[derive(Clone, Debug, Eq, PartialEq)]

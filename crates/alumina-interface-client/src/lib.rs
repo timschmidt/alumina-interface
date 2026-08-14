@@ -13,6 +13,7 @@ use alumina_protocol::{
 pub mod clock;
 pub mod diagnostics;
 pub mod graph;
+pub mod health;
 pub mod http;
 pub mod schedule;
 pub mod upload;

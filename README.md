@@ -320,6 +320,14 @@ the board or WLAN. This client is not yet connected to the visible worker or
 live WebSocket stream. See the [authenticated diagnostic client
 checkpoint](docs/AUTHENTICATED-DIAGNOSTIC-CLIENT.md).
 
+The headless client now also owns the firmware's passive runtime-health
+boundary. It requests the exact zero-configuration `HealthSnapshot`, validates
+the fixed queue and dual-executor stack reports again, retains monotonic
+boot-scoped evidence across temporary real-time-report absence, and exposes
+integer queue/headroom facts without converting them to percentages or safety
+authority. Native tests and both window/worker WASM fetch adapters are present;
+automatic worker polling and the visible board-debug panel remain open.
+
 ## Value domains
 
 The core intentionally keeps four domains structurally separate:
