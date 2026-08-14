@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+use alumina_capability::{
+    BoardCapabilityLimits, CAPABILITY_DOCUMENT_HEADER_BYTES, CapabilityIdentity,
+    decode_board_capability,
+};
 use alumina_clock::ClockEstimationPolicy;
 use alumina_protocol::DeviceCycle;
 use alumina_runtime::health::{
@@ -10,10 +14,11 @@ use alumina_runtime::health::{
 use alumina_runtime::stack::{StackDomain, StackWatermarkFlags, StackWatermarkSnapshot};
 use serde::{Deserialize, Serialize};
 
+use crate::capability::CapabilityDownloadPhase;
 use crate::health::{RuntimeHealthAvailability, RuntimeHealthView};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 2;
+pub const WORKER_SCHEMA_VERSION: u16 = 3;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -537,6 +542,138 @@ impl RuntimeHealthWorkerSnapshot {
     }
 }
 
+/// Strict JSON lifecycle for authenticated canonical capability acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDownloadPhaseSnapshot {
+    /// No signed range has established an immutable identity yet.
+    Discovering,
+    /// A stable identity and contiguous prefix have been retained.
+    Downloading,
+    /// Every byte passed canonical decoding and SHA-256 identity validation.
+    Complete,
+}
+
+impl From<CapabilityDownloadPhase> for CapabilityDownloadPhaseSnapshot {
+    fn from(value: CapabilityDownloadPhase) -> Self {
+        match value {
+            CapabilityDownloadPhase::Discovering => Self::Discovering,
+            CapabilityDownloadPhase::Downloading => Self::Downloading,
+            CapabilityDownloadPhase::Complete => Self::Complete,
+        }
+    }
+}
+
+/// JSON-safe exact identity of one canonical board document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityIdentitySnapshot {
+    /// Complete canonical document length.
+    pub document_bytes: u32,
+    /// SHA-256 over every canonical document byte.
+    pub digest: [u8; 32],
+}
+
+impl CapabilityIdentitySnapshot {
+    /// Projects one native capability identity without changing any bits.
+    #[must_use]
+    pub const fn from_identity(identity: CapabilityIdentity) -> Self {
+        Self {
+            document_bytes: identity.byte_len,
+            digest: identity.digest.0,
+        }
+    }
+
+    /// Reconstructs and validates the native identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero digest or a document length outside the browser policy.
+    pub fn identity(self) -> Result<CapabilityIdentity, WorkerContractError> {
+        let limits = BoardCapabilityLimits::interactive();
+        let minimum = u32::try_from(CAPABILITY_DOCUMENT_HEADER_BYTES)
+            .expect("fixed capability header length fits u32");
+        if self.document_bytes < minimum
+            || self.document_bytes > limits.maximum_document_bytes
+            || self.digest.iter().all(|byte| *byte == 0)
+        {
+            return Err(WorkerContractError::CapabilityProgress);
+        }
+        Ok(CapabilityIdentity {
+            byte_len: self.document_bytes,
+            digest: alumina_protocol::Digest(self.digest),
+        })
+    }
+}
+
+/// One-time, credential-free canonical document transferred from worker to UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCapabilityDocument {
+    /// UI-local connection identity owning this document.
+    pub connection_id: u64,
+    /// Exact worker session generation that acquired the bytes.
+    pub generation: u64,
+    /// Stable identity repeated separately for bounded preflight.
+    pub identity: CapabilityIdentitySnapshot,
+    /// Complete canonical `ALMCAP02` bytes.
+    document: Vec<u8>,
+}
+
+impl WorkerCapabilityDocument {
+    /// Constructs and independently validates a one-time worker transfer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero session identity, mismatched lengths/digests, or any invalid
+    /// canonical capability document.
+    pub fn try_new(
+        connection_id: u64,
+        generation: u64,
+        identity: CapabilityIdentity,
+        document: Vec<u8>,
+    ) -> Result<Self, WorkerContractError> {
+        let transfer = Self {
+            connection_id,
+            generation,
+            identity: CapabilityIdentitySnapshot::from_identity(identity),
+            document,
+        };
+        transfer.validate()?;
+        Ok(transfer)
+    }
+
+    /// Complete immutable capability bytes.
+    pub fn document(&self) -> &[u8] {
+        &self.document
+    }
+
+    /// Revalidates session identity and complete canonical document content.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed or substituted worker JSON before it reaches UI state.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0 || self.generation == 0 {
+            return Err(WorkerContractError::CapabilityDocument);
+        }
+        let identity = self
+            .identity
+            .identity()
+            .map_err(|_| WorkerContractError::CapabilityDocument)?;
+        if usize::try_from(identity.byte_len).ok() != Some(self.document.len()) {
+            return Err(WorkerContractError::CapabilityDocument);
+        }
+        let capability =
+            decode_board_capability(&self.document, BoardCapabilityLimits::interactive())
+                .map_err(|_| WorkerContractError::CapabilityDocument)?;
+        if capability.identity() != identity {
+            return Err(WorkerContractError::CapabilityDocument);
+        }
+        Ok(())
+    }
+}
+
 /// Redacted complete UI view of one worker-owned connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -573,6 +710,16 @@ pub struct DeviceSessionSnapshot {
     pub runtime_health_consecutive_failures: u32,
     /// Latest passive-health failure text, independent from clock lifecycle.
     pub runtime_health_last_error: Option<String>,
+    /// Current authenticated canonical capability acquisition phase.
+    pub capability_phase: CapabilityDownloadPhaseSnapshot,
+    /// Contiguous capability bytes retained by the worker.
+    pub capability_received_bytes: u32,
+    /// Stable complete document identity after the first accepted range.
+    pub capability_identity: Option<CapabilityIdentitySnapshot>,
+    /// Consecutive capability-range failures since the latest accepted range.
+    pub capability_consecutive_failures: u32,
+    /// Latest capability acquisition failure, independent from clock/health state.
+    pub capability_last_error: Option<String>,
 }
 
 impl DeviceSessionSnapshot {
@@ -592,9 +739,11 @@ impl DeviceSessionSnapshot {
             || self.history.len() > MAXIMUM_CLOCK_HISTORY
             || !diagnostic_is_valid(self.last_error.as_deref())
             || !diagnostic_is_valid(self.runtime_health_last_error.as_deref())
+            || !diagnostic_is_valid(self.capability_last_error.as_deref())
             || (self.consecutive_failures == 0) != self.last_error.is_none()
             || (self.runtime_health_consecutive_failures == 0)
                 != self.runtime_health_last_error.is_none()
+            || (self.capability_consecutive_failures == 0) != self.capability_last_error.is_none()
         {
             return Err(WorkerContractError::DeviceSnapshot);
         }
@@ -608,6 +757,25 @@ impl DeviceSessionSnapshot {
                 None,
             ) => {}
             _ => return Err(WorkerContractError::RuntimeHealthSnapshot),
+        }
+        match (self.capability_phase, self.capability_identity) {
+            (CapabilityDownloadPhaseSnapshot::Discovering, None)
+                if self.capability_received_bytes == 0 => {}
+            (CapabilityDownloadPhaseSnapshot::Downloading, Some(identity)) => {
+                let identity = identity.identity()?;
+                if self.capability_received_bytes >= identity.byte_len {
+                    return Err(WorkerContractError::CapabilityProgress);
+                }
+            }
+            (CapabilityDownloadPhaseSnapshot::Complete, Some(identity)) => {
+                let identity = identity.identity()?;
+                if self.capability_received_bytes != identity.byte_len
+                    || self.capability_consecutive_failures != 0
+                {
+                    return Err(WorkerContractError::CapabilityProgress);
+                }
+            }
+            _ => return Err(WorkerContractError::CapabilityProgress),
         }
         Ok(())
     }
@@ -634,6 +802,11 @@ pub enum WorkerEvent {
     Snapshot {
         /// Redacted worker-owned state.
         snapshot: Box<DeviceSessionSnapshot>,
+    },
+    /// One complete canonical capability document, emitted once per generation.
+    CapabilityDocument {
+        /// Independently validated immutable bytes and owning session identity.
+        capability: Box<WorkerCapabilityDocument>,
     },
     /// A disconnect erased a connection.
     Removed {
@@ -697,6 +870,9 @@ impl WorkerEventEnvelope {
         if let WorkerEvent::Snapshot { snapshot } = &self.event {
             snapshot.validate()?;
         }
+        if let WorkerEvent::CapabilityDocument { capability } = &self.event {
+            capability.validate()?;
+        }
         Ok(())
     }
 }
@@ -724,6 +900,10 @@ pub enum WorkerContractError {
     DeviceSnapshot,
     /// Runtime-health JSON violated native queue, stack, domain, or freshness rules.
     RuntimeHealthSnapshot,
+    /// Capability acquisition progress or identity relationships were invalid.
+    CapabilityProgress,
+    /// A one-time capability document transfer failed canonical validation.
+    CapabilityDocument,
 }
 
 impl fmt::Display for WorkerContractError {
@@ -745,6 +925,12 @@ impl fmt::Display for WorkerContractError {
             Self::RuntimeHealthSnapshot => {
                 formatter.write_str("runtime health snapshot is invalid")
             }
+            Self::CapabilityProgress => {
+                formatter.write_str("capability download progress is invalid")
+            }
+            Self::CapabilityDocument => {
+                formatter.write_str("capability document transfer is invalid")
+            }
         }
     }
 }
@@ -753,7 +939,25 @@ impl std::error::Error for WorkerContractError {}
 
 #[cfg(test)]
 mod tests {
+    use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
+
     use super::*;
+
+    fn tinybee_document() -> (CapabilityIdentity, Vec<u8>) {
+        let identity = calculate_identity(&board_mks_tinybee::PACKAGE).unwrap();
+        let mut document = vec![0_u8; usize::try_from(identity.byte_len).unwrap()];
+        let mut offset = 0_u32;
+        while offset < identity.byte_len {
+            let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
+            let read =
+                read_verified_range(&board_mks_tinybee::PACKAGE, offset, &mut chunk).unwrap();
+            let start = usize::try_from(offset).unwrap();
+            let count = usize::from(read.byte_len);
+            document[start..start + count].copy_from_slice(&chunk[..count]);
+            offset += u32::from(read.byte_len);
+        }
+        (identity, document)
+    }
 
     fn executor_stack(domain: ExecutorStackDomainSnapshot) -> ExecutorStackSnapshot {
         ExecutorStackSnapshot {
@@ -884,6 +1088,11 @@ mod tests {
                 runtime_health: Some(runtime_health()),
                 runtime_health_consecutive_failures: 0,
                 runtime_health_last_error: None,
+                capability_phase: CapabilityDownloadPhaseSnapshot::Discovering,
+                capability_received_bytes: 0,
+                capability_identity: None,
+                capability_consecutive_failures: 0,
+                capability_last_error: None,
             }),
         });
         let json = serde_json::to_string(&event).unwrap();
@@ -891,7 +1100,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 2);
+        assert_eq!(WORKER_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -980,6 +1189,11 @@ mod tests {
             runtime_health: None,
             runtime_health_consecutive_failures: 0,
             runtime_health_last_error: None,
+            capability_phase: CapabilityDownloadPhaseSnapshot::Discovering,
+            capability_received_bytes: 0,
+            capability_identity: None,
+            capability_consecutive_failures: 0,
+            capability_last_error: None,
         };
         assert_eq!(snapshot.validate(), Ok(()));
         snapshot.runtime_health = Some(runtime_health());
@@ -996,6 +1210,45 @@ mod tests {
         );
         snapshot.runtime_health_last_error = Some("health fetch failed".to_owned());
         assert_eq!(snapshot.validate(), Ok(()));
+
+        let (identity, _) = tinybee_document();
+        snapshot.capability_phase = CapabilityDownloadPhaseSnapshot::Downloading;
+        snapshot.capability_identity = Some(CapabilityIdentitySnapshot::from_identity(identity));
+        snapshot.capability_received_bytes = identity.byte_len;
+        assert_eq!(
+            snapshot.validate(),
+            Err(WorkerContractError::CapabilityProgress)
+        );
+        snapshot.capability_phase = CapabilityDownloadPhaseSnapshot::Complete;
+        assert_eq!(snapshot.validate(), Ok(()));
+        snapshot.capability_consecutive_failures = 1;
+        snapshot.capability_last_error = Some("late failure".to_owned());
+        assert_eq!(
+            snapshot.validate(),
+            Err(WorkerContractError::CapabilityProgress)
+        );
+    }
+
+    #[test]
+    fn capability_document_event_is_revalidated_after_json_transfer() {
+        let (identity, document) = tinybee_document();
+        let transfer = WorkerCapabilityDocument::try_new(7, 3, identity, document).unwrap();
+        let event = WorkerEventEnvelope::current(WorkerEvent::CapabilityDocument {
+            capability: Box::new(transfer),
+        });
+        let json = serde_json::to_vec(&event).unwrap();
+        let mut decoded: WorkerEventEnvelope = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.validate(), Ok(()));
+
+        if let WorkerEvent::CapabilityDocument { capability } = &mut decoded.event {
+            capability.document[32] ^= 1;
+        } else {
+            panic!("round trip changed capability event kind");
+        }
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::CapabilityDocument)
+        );
     }
 
     #[test]

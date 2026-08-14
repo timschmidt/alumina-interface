@@ -16,6 +16,8 @@
       let timeout;
       let latestSnapshot;
       let isolatedHealthFailureSnapshot;
+      let isolatedCapabilityFailureSnapshot;
+      let capabilityDocument;
       const eventKinds = [];
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
@@ -43,7 +45,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 2) {
+        if (envelope.schema_version !== 3) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -61,11 +63,14 @@
               event_kinds: eventKinds,
               latest_snapshot: latestSnapshot,
               isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
+              isolated_capability_failure_snapshot:
+                isolatedCapabilityFailureSnapshot,
+              capability_document: capabilityDocument,
             });
-          }, 15000);
+          }, 20000);
           worker.postMessage(
             JSON.stringify({
-              schema_version: 2,
+              schema_version: 3,
               command: {
                 kind: "configure",
                 request: {
@@ -94,6 +99,37 @@
           );
           return;
         }
+        if (event.kind === "capability_document") {
+          if (capabilityDocument !== undefined) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "capability document was emitted more than once",
+              event_kinds: eventKinds,
+            });
+            return;
+          }
+          const capability = event.capability;
+          const magic = capability.document.slice(0, 8);
+          const validMagic =
+            JSON.stringify(magic) ===
+            JSON.stringify(Array.from(new TextEncoder().encode("ALMCAP02")));
+          if (
+            capability.connection_id !== 1 ||
+            capability.generation < 1 ||
+            capability.identity.document_bytes !== capability.document.length ||
+            capability.identity.digest.length !== 32 ||
+            !validMagic
+          ) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "capability document event was malformed",
+              capability,
+            });
+            return;
+          }
+          capabilityDocument = capability;
+          return;
+        }
         if (event.kind === "snapshot") {
           const snapshot = event.snapshot;
           latestSnapshot = snapshot;
@@ -105,6 +141,14 @@
             snapshot.runtime_health_last_error !== null;
           if (isolatedHealthFailure) {
             isolatedHealthFailureSnapshot = snapshot;
+          }
+          const isolatedCapabilityFailure =
+            snapshot.consecutive_failures === 0 &&
+            snapshot.last_error === null &&
+            snapshot.capability_consecutive_failures >= 1 &&
+            snapshot.capability_last_error !== null;
+          if (isolatedCapabilityFailure) {
+            isolatedCapabilityFailureSnapshot = snapshot;
           }
           const health = snapshot.runtime_health;
           const runtimeHealthAvailable =
@@ -126,17 +170,33 @@
             snapshot.runtime_health_last_error === null;
           const qualified =
             snapshot.phase === "clock_qualified" &&
-            snapshot.accepted_samples >= 4 &&
+            snapshot.accepted_samples >= 5 &&
             snapshot.estimate !== null &&
             snapshot.history.length >= 4 &&
-            runtimeHealthAvailable;
+            runtimeHealthAvailable &&
+            snapshot.capability_phase === "complete" &&
+            snapshot.capability_identity !== null &&
+            snapshot.capability_received_bytes ===
+              snapshot.capability_identity.document_bytes &&
+            snapshot.capability_consecutive_failures === 0 &&
+            snapshot.capability_last_error === null &&
+            capabilityDocument !== undefined &&
+            capabilityDocument.generation === snapshot.generation &&
+            capabilityDocument.identity.document_bytes ===
+              snapshot.capability_identity.document_bytes &&
+            JSON.stringify(capabilityDocument.identity.digest) ===
+              JSON.stringify(snapshot.capability_identity.digest);
           const conservativelyRejected =
             snapshot.rejected_samples >= 3 &&
             snapshot.accepted_samples === 0 &&
             snapshot.estimate === null;
           if (expectation === "qualified" && qualified) {
             clearTimeout(timeout);
-            finish("passed", { expectation, snapshot });
+            finish("passed", {
+              expectation,
+              capability_document: capabilityDocument,
+              snapshot,
+            });
           } else if (
             expectation === "health-retry" &&
             qualified &&
@@ -146,6 +206,20 @@
             finish("passed", {
               expectation,
               isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
+              capability_document: capabilityDocument,
+              recovered_snapshot: snapshot,
+            });
+          } else if (
+            expectation === "capability-retry" &&
+            qualified &&
+            isolatedCapabilityFailureSnapshot !== undefined
+          ) {
+            clearTimeout(timeout);
+            finish("passed", {
+              expectation,
+              isolated_capability_failure_snapshot:
+                isolatedCapabilityFailureSnapshot,
+              capability_document: capabilityDocument,
               recovered_snapshot: snapshot,
             });
           } else if (

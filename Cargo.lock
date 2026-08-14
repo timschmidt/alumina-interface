@@ -145,6 +145,7 @@ name = "alumina-interface-client"
 version = "0.1.0"
 dependencies = [
  "alumina-board",
+ "alumina-capability",
  "alumina-clock",
  "alumina-diagnostics",
  "alumina-graph-ir",
@@ -156,6 +157,7 @@ dependencies = [
  "alumina-service",
  "alumina-sim",
  "alumina-storage",
+ "board-mks-tinybee",
  "js-sys",
  "serde",
  "serde_json",
@@ -260,6 +262,8 @@ dependencies = [
 name = "alumina-service"
 version = "0.1.0"
 dependencies = [
+ "alumina-board",
+ "alumina-capability",
  "alumina-diagnostics",
  "alumina-net",
  "alumina-protocol",

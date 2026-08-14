@@ -24,7 +24,9 @@ use hypergraphics::backend::{GpuColoredMesh, UnlitProgram};
 use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 
 #[cfg(target_arch = "wasm32")]
-use crate::browser_worker::{BrowserWorkerSupervisor, SupervisorLifecycle};
+use crate::browser_worker::{
+    BrowserWorkerSupervisor, ConnectedCapabilityView, SupervisorLifecycle,
+};
 use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
 use crate::control_graph_ui::WORKSPACE_STORAGE_KEY;
@@ -32,8 +34,9 @@ use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_
 use crate::machine_cam_ui::MachineCamWorkspace;
 #[cfg(target_arch = "wasm32")]
 use alumina_interface_client::worker::{
-    ClockSamplingPolicy, DeviceConnectionRequest, DeviceSessionPhase, DeviceSessionSnapshot,
-    ExecutorStackSnapshot, RuntimeHealthAvailabilitySnapshot, WorkerCommand,
+    CapabilityDownloadPhaseSnapshot, ClockSamplingPolicy, DeviceConnectionRequest,
+    DeviceSessionPhase, DeviceSessionSnapshot, ExecutorStackSnapshot,
+    RuntimeHealthAvailabilitySnapshot, WorkerCommand,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -631,8 +634,8 @@ impl AluminaApp {
 
     #[cfg(target_arch = "wasm32")]
     fn show_live_control(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Live MCU clocks");
-        ui.label("Dedicated worker; authenticated Wi-Fi heartbeat only");
+        ui.heading("Live MCUs");
+        ui.label("Dedicated worker; authenticated Wi-Fi clock, health, and board authority");
         ui.colored_label(
             egui::Color32::YELLOW,
             "Diagnostic connection does not arm outputs or prove physical safety.",
@@ -670,7 +673,11 @@ impl AluminaApp {
         };
         let mut actions = Vec::new();
         for snapshot in &view.devices {
-            show_live_device_snapshot(ui, snapshot, &mut actions);
+            let capability = view.capabilities.iter().find(|capability| {
+                capability.connection_id() == snapshot.connection_id
+                    && capability.generation() == snapshot.generation
+            });
+            show_live_device_snapshot(ui, snapshot, capability, &mut actions);
         }
         self.apply_live_actions(actions);
         if !view.diagnostics.is_empty() {
@@ -780,6 +787,7 @@ impl AluminaApp {
 fn show_live_device_snapshot(
     ui: &mut egui::Ui,
     snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
     actions: &mut Vec<(u64, bool)>,
 ) {
     ui.separator();
@@ -822,6 +830,7 @@ fn show_live_device_snapshot(
                     latest.missed_deadlines, latest.flags
                 ));
             }
+            show_live_capability_snapshot(ui, snapshot, capability);
             show_runtime_health_snapshot(ui, snapshot);
             if snapshot.phase == DeviceSessionPhase::DeviceUnhealthy {
                 ui.colored_label(
@@ -855,6 +864,97 @@ fn show_live_device_snapshot(
             }
         },
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_capability_snapshot(
+    ui: &mut egui::Ui,
+    snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
+) {
+    ui.separator();
+    ui.strong("Authenticated board capability");
+    match snapshot.capability_phase {
+        CapabilityDownloadPhaseSnapshot::Discovering => {
+            ui.label("Waiting for the first signed canonical capability range.");
+        }
+        CapabilityDownloadPhaseSnapshot::Downloading => {
+            if let Some(identity) = snapshot.capability_identity {
+                ui.label(format!(
+                    "contiguous bytes: {} / {}; identity {}…",
+                    snapshot.capability_received_bytes,
+                    identity.document_bytes,
+                    encode_hex(&identity.digest[..8])
+                ));
+            } else {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    "Capability download lacks its required stable identity.",
+                );
+            }
+        }
+        CapabilityDownloadPhaseSnapshot::Complete => {
+            if let Some(identity) = snapshot.capability_identity {
+                ui.label(format!(
+                    "complete canonical document: {} bytes · {}…",
+                    identity.document_bytes,
+                    encode_hex(&identity.digest[..8])
+                ));
+            }
+        }
+    }
+    if let Some(capability) = capability {
+        let board = capability.board();
+        let summary = board.resource_summary();
+        let (flash, internal_sram, psram) = board.memory_bytes();
+        let (service_core, realtime_core) = board.core_assignment();
+        let hotspot_count = board
+            .visuals()
+            .iter()
+            .map(|visual| visual.hotspots().len())
+            .sum::<usize>();
+        ui.label(format!(
+            "{} · {} · {:?} / {:?} · {} cores",
+            board.board_id(),
+            board.revision(),
+            board.chip(),
+            board.qualification(),
+            board.application_cores()
+        ));
+        ui.label(format!(
+            "service core {service_core}; real-time core {realtime_core}; flash {flash}; internal SRAM {internal_sram}; PSRAM {psram} bytes"
+        ));
+        ui.label(format!(
+            "{} resources ({} service, {} real-time, {} hazardous, {} graph-addressable); {} aliases",
+            board.resources().len(),
+            summary.service,
+            summary.realtime,
+            summary.hazardous,
+            summary.graph_addressable,
+            board.alias_count()
+        ));
+        ui.label(format!(
+            "{} licensed visuals / {} reviewed hotspots; {} HIL requirements; armable claim: {}",
+            board.visuals().len(),
+            hotspot_count,
+            board.hil_requirement_count(),
+            board.armable()
+        ));
+        ui.small(
+            "These immutable facts label later diagnostic selection; they grant no resource lease, output command, arm transition, or physical-safety claim.",
+        );
+    } else if snapshot.capability_phase == CapabilityDownloadPhaseSnapshot::Complete {
+        ui.label("Validated one-time board transfer is awaiting UI admission.");
+    }
+    if snapshot.capability_consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive capability failures: {}",
+            snapshot.capability_consecutive_failures
+        ));
+    }
+    if let Some(error) = &snapshot.capability_last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

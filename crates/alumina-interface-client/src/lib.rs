@@ -10,6 +10,7 @@ use alumina_protocol::{
     Operation, StatusCode,
 };
 
+pub mod capability;
 pub mod clock;
 pub mod diagnostics;
 pub mod graph;

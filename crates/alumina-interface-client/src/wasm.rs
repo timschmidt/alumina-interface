@@ -13,6 +13,9 @@ use web_sys::{
 };
 
 use crate::Response;
+use crate::capability::{
+    CapabilityDownloadError, CapabilityDownloadMachine, CapabilityDownloadPhase,
+};
 use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
 use crate::graph::{
     GraphInstallError, GraphInstallMachine, GraphInstallPhase, GraphRunError, GraphRunMachine,
@@ -408,6 +411,66 @@ async fn drive_runtime_health_inner(
     model
         .accept_response(&response)
         .map_err(BrowserHealthError::Health)
+}
+
+/// Acquires one authenticated, side-effect-free canonical capability range.
+///
+/// Repeated calls assemble a contiguous complete document. A transport failure
+/// abandons only the pending range so the next call emits the identical offset,
+/// digest, and byte bound. The session must remain on the zero configuration
+/// identity required by the capability service.
+pub async fn drive_capability_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    download: &mut CapabilityDownloadMachine,
+    secret: &[u8],
+) -> Result<CapabilityDownloadPhase, BrowserCapabilityError> {
+    drive_capability_step_inner(window, origin, session, download, secret).await
+}
+
+/// Worker-scope variant of [`drive_capability_step`].
+pub async fn drive_capability_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    download: &mut CapabilityDownloadMachine,
+    secret: &[u8],
+) -> Result<CapabilityDownloadPhase, BrowserCapabilityError> {
+    drive_capability_step_inner(worker, origin, session, download, secret).await
+}
+
+async fn drive_capability_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    download: &mut CapabilityDownloadMachine,
+    secret: &[u8],
+) -> Result<CapabilityDownloadPhase, BrowserCapabilityError> {
+    if !session.config_digest().is_zero() {
+        return Err(BrowserCapabilityError::ConfigurationIdentity);
+    }
+    let Some(operation) = download.next_request()? else {
+        return Ok(CapabilityDownloadPhase::Complete);
+    };
+    let request = match session.begin_request(operation.operation, &operation.body, secret) {
+        Ok(request) => request,
+        Err(error) => {
+            download.abandon_pending();
+            return Err(BrowserCapabilityError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            download.abandon_pending();
+            return Err(BrowserCapabilityError::Fetch(error));
+        }
+    };
+    download.accept_response(&response)?;
+    Ok(download.phase())
 }
 
 /// Returns the browser-generated calling origin used by the CORS `Origin` header.
@@ -826,6 +889,42 @@ impl fmt::Display for BrowserHealthError {
 }
 
 impl std::error::Error for BrowserHealthError {}
+
+/// One authenticated browser capability-range acquisition failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserCapabilityError {
+    /// The session would substitute an active configuration into this immutable read.
+    ConfigurationIdentity,
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+    /// Range, identity, allocation, or complete-document validation failed.
+    Capability(CapabilityDownloadError),
+}
+
+impl From<CapabilityDownloadError> for BrowserCapabilityError {
+    fn from(value: CapabilityDownloadError) -> Self {
+        Self::Capability(value)
+    }
+}
+
+impl fmt::Display for BrowserCapabilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigurationIdentity => {
+                formatter.write_str("capability reads require a zero-configuration session")
+            }
+            Self::Session(error) => {
+                write!(formatter, "capability request construction failed: {error}")
+            }
+            Self::Fetch(error) => write!(formatter, "capability fetch failed: {error}"),
+            Self::Capability(error) => write!(formatter, "capability response rejected: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserCapabilityError {}
 
 /// One-step browser delivery failure with transport versus upload semantics preserved.
 #[derive(Clone, Debug, Eq, PartialEq)]

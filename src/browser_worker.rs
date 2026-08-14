@@ -4,20 +4,26 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
+use alumina_capability::BoardCapabilityLimits;
 use alumina_clock::{ClockFlags, ClockObservation};
+use alumina_interface_client::capability::{CapabilityDownloadMachine, CapabilityDownloadPhase};
 use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
 use alumina_interface_client::health::RuntimeHealthModel;
 use alumina_interface_client::http::AuthenticatedHttpSession;
 use alumina_interface_client::wasm::{
-    BrowserClockError, BrowserFetchError, BrowserHealthError, DeviceOrigin,
-    drive_clock_probe_in_worker, drive_runtime_health_in_worker,
+    BrowserCapabilityError, BrowserClockError, BrowserFetchError, BrowserHealthError, DeviceOrigin,
+    drive_capability_step_in_worker, drive_clock_probe_in_worker, drive_runtime_health_in_worker,
     open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
-    ClockEstimateSnapshot, ClockHistoryRecord, DeviceConnectionRequest, DeviceSessionPhase,
-    DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY, MAXIMUM_WORKER_DIAGNOSTIC_BYTES,
-    RuntimeHealthWorkerSnapshot, WORKER_SCHEMA_VERSION, WorkerCommand, WorkerCommandEnvelope,
-    WorkerEvent, WorkerEventEnvelope,
+    CapabilityIdentitySnapshot, ClockEstimateSnapshot, ClockHistoryRecord, DeviceConnectionRequest,
+    DeviceSessionPhase, DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY,
+    MAXIMUM_WORKER_DIAGNOSTIC_BYTES, RuntimeHealthWorkerSnapshot, WORKER_SCHEMA_VERSION,
+    WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope, WorkerEvent,
+    WorkerEventEnvelope,
+};
+use alumina_interface_core::board_explorer::{
+    BoardExplorerSnapshot, build_board_explorer_snapshot,
 };
 use alumina_protocol::Digest;
 use wasm_bindgen::closure::Closure;
@@ -33,6 +39,7 @@ const WORKER_TICK_MS: i32 = 100;
 const MAXIMUM_COMMAND_JSON_BYTES: usize = 8 * 1024;
 const MAXIMUM_UI_DIAGNOSTICS: usize = 16;
 const MAXIMUM_RETRY_MS: u32 = 30_000;
+const CAPABILITY_RANGES_PER_HEARTBEAT: usize = 4;
 
 struct DeviceState {
     connection_id: u64,
@@ -45,6 +52,8 @@ struct DeviceState {
     session: Option<AuthenticatedHttpSession>,
     clock: DeviceClockModel,
     runtime_health: RuntimeHealthModel,
+    capability: CapabilityDownloadMachine,
+    capability_event_published: bool,
     history: VecDeque<ClockHistoryRecord>,
     phase: DeviceSessionPhase,
     consecutive_failures: u32,
@@ -54,6 +63,8 @@ struct DeviceState {
     runtime_health_consecutive_failures: u32,
     runtime_health_last_error: Option<String>,
     next_runtime_health_attempt_ms: f64,
+    capability_consecutive_failures: u32,
+    capability_last_error: Option<String>,
 }
 
 impl DeviceState {
@@ -67,6 +78,8 @@ impl DeviceState {
             .estimator()
             .map_err(|error| error.to_string())?;
         let clock = DeviceClockModel::new(estimator).map_err(|error| error.to_string())?;
+        let capability = CapabilityDownloadMachine::new(BoardCapabilityLimits::interactive())
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             connection_id: request.connection_id,
             label: std::mem::take(&mut request.label),
@@ -78,6 +91,8 @@ impl DeviceState {
             session: None,
             clock,
             runtime_health: RuntimeHealthModel::new(),
+            capability,
+            capability_event_published: false,
             history: VecDeque::with_capacity(MAXIMUM_CLOCK_HISTORY),
             phase: DeviceSessionPhase::Connecting,
             consecutive_failures: 0,
@@ -87,6 +102,8 @@ impl DeviceState {
             runtime_health_consecutive_failures: 0,
             runtime_health_last_error: None,
             next_runtime_health_attempt_ms: 0.0,
+            capability_consecutive_failures: 0,
+            capability_last_error: None,
         })
     }
 
@@ -111,6 +128,14 @@ impl DeviceState {
                 .map(RuntimeHealthWorkerSnapshot::from_view),
             runtime_health_consecutive_failures: self.runtime_health_consecutive_failures,
             runtime_health_last_error: self.runtime_health_last_error.clone(),
+            capability_phase: self.capability.phase().into(),
+            capability_received_bytes: self.capability.progress().received_bytes,
+            capability_identity: self
+                .capability
+                .identity()
+                .map(CapabilityIdentitySnapshot::from_identity),
+            capability_consecutive_failures: self.capability_consecutive_failures,
+            capability_last_error: self.capability_last_error.clone(),
         }
     }
 
@@ -163,6 +188,24 @@ impl DeviceState {
         self.reset_runtime_health_evidence();
         self.runtime_health_consecutive_failures = 0;
         self.runtime_health_last_error = None;
+    }
+
+    fn record_capability_success(&mut self) {
+        self.capability_consecutive_failures = 0;
+        self.capability_last_error = None;
+    }
+
+    fn record_capability_failure(&mut self, error: &str) {
+        self.capability_consecutive_failures =
+            self.capability_consecutive_failures.saturating_add(1);
+        self.capability_last_error = Some(bounded_diagnostic(error));
+    }
+
+    fn reset_capability_for_new_boot(&mut self) {
+        self.capability.reset();
+        self.capability_event_published = false;
+        self.capability_consecutive_failures = 0;
+        self.capability_last_error = None;
     }
 
     fn record_observation(&mut self, observation: ClockObservation) {
@@ -559,12 +602,45 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
                     }
                 }
             }
+            if state.session.is_some()
+                && state.capability.phase() != CapabilityDownloadPhase::Complete
+            {
+                for _ in 0..CAPABILITY_RANGES_PER_HEARTBEAT {
+                    let capability_result = drive_capability_step_in_worker(
+                        worker_scope,
+                        &state.origin,
+                        state
+                            .session
+                            .as_mut()
+                            .expect("capability burst retains its authenticated session"),
+                        &mut state.capability,
+                        &state.secret,
+                    )
+                    .await;
+                    match capability_result {
+                        Ok(phase) => {
+                            state.record_capability_success();
+                            if phase == CapabilityDownloadPhase::Complete {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            if capability_session_must_reopen(&error) {
+                                state.session = None;
+                            }
+                            state.record_capability_failure(&error.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
         }
         Err(error) => {
             if clock_model_must_reset(&error) {
                 let _ = state.clock.reset();
                 state.history.clear();
                 state.reset_runtime_health_for_new_boot();
+                state.reset_capability_for_new_boot();
             }
             if session_must_reopen(&error) {
                 state.session = None;
@@ -611,6 +687,21 @@ const fn health_session_must_reopen(error: &BrowserHealthError) -> bool {
     )
 }
 
+const fn capability_session_must_reopen(error: &BrowserCapabilityError) -> bool {
+    matches!(
+        error,
+        BrowserCapabilityError::ConfigurationIdentity
+            | BrowserCapabilityError::Session(_)
+            | BrowserCapabilityError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
 fn finish_device_step(
     runtime: &SharedWorkerRuntime,
     connection_id: u64,
@@ -639,9 +730,54 @@ fn finish_device_step(
     if !restored {
         return;
     }
+    publish_capability_document(runtime, connection_id);
     publish_snapshot(runtime, connection_id);
     if probe_immediately {
         launch_device_step(runtime, connection_id, false);
+    }
+}
+
+fn publish_capability_document(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    let transfer = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let Some(DeviceEntry::Idle(state)) = runtime_ref.devices.get_mut(&connection_id) else {
+            return;
+        };
+        if state.capability_event_published
+            || state.capability.phase() != CapabilityDownloadPhase::Complete
+        {
+            return;
+        }
+        let Some(identity) = state.capability.identity() else {
+            return;
+        };
+        let Some(document) = state.capability.document() else {
+            return;
+        };
+        let transfer = WorkerCapabilityDocument::try_new(
+            state.connection_id,
+            state.generation,
+            identity,
+            document.to_vec(),
+        );
+        if transfer.is_ok() {
+            state.capability_event_published = true;
+        }
+        transfer
+    };
+    match transfer {
+        Ok(capability) => emit_worker_event(
+            runtime,
+            WorkerEvent::CapabilityDocument {
+                capability: Box::new(capability),
+            },
+        ),
+        Err(error) => emit_worker_event(
+            runtime,
+            WorkerEvent::Fatal {
+                message: format!("validated capability transfer failed: {error}"),
+            },
+        ),
     }
 }
 
@@ -708,13 +844,44 @@ pub struct SupervisorView {
     pub lifecycle: SupervisorLifecycle,
     /// Stable connection snapshots sorted by UI-local identity.
     pub devices: Vec<DeviceSessionSnapshot>,
+    /// Canonical connected-board documents decoded once per matching generation.
+    pub capabilities: Vec<ConnectedCapabilityView>,
     /// Oldest-to-newest bounded supervision diagnostics.
     pub diagnostics: Vec<String>,
+}
+
+/// Rendering-realm board authority derived from one validated worker transfer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedCapabilityView {
+    connection_id: u64,
+    generation: u64,
+    board: BoardExplorerSnapshot,
+}
+
+impl ConnectedCapabilityView {
+    /// UI-local connection identity owning this board authority.
+    #[must_use]
+    pub const fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
+
+    /// Worker generation that acquired and authenticated the document.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Complete board-name-independent explorer snapshot.
+    #[must_use]
+    pub const fn board(&self) -> &BoardExplorerSnapshot {
+        &self.board
+    }
 }
 
 struct MutableSupervisorView {
     lifecycle: SupervisorLifecycle,
     devices: BTreeMap<u64, DeviceSessionSnapshot>,
+    capabilities: BTreeMap<u64, ConnectedCapabilityView>,
     diagnostics: VecDeque<String>,
 }
 
@@ -723,6 +890,7 @@ impl Default for MutableSupervisorView {
         Self {
             lifecycle: SupervisorLifecycle::Starting,
             devices: BTreeMap::new(),
+            capabilities: BTreeMap::new(),
             diagnostics: VecDeque::new(),
         }
     }
@@ -752,10 +920,57 @@ impl MutableSupervisorView {
                 self.lifecycle = SupervisorLifecycle::Ready { scope_origin };
             }
             WorkerEvent::Snapshot { snapshot } => {
+                if self
+                    .capabilities
+                    .get(&snapshot.connection_id)
+                    .is_some_and(|capability| capability.generation != snapshot.generation)
+                {
+                    self.capabilities.remove(&snapshot.connection_id);
+                }
                 self.devices.insert(snapshot.connection_id, *snapshot);
+            }
+            WorkerEvent::CapabilityDocument { capability } => {
+                let connection_id = capability.connection_id;
+                let generation = capability.generation;
+                let matching_session = self
+                    .devices
+                    .get(&connection_id)
+                    .is_some_and(|snapshot| snapshot.generation == generation);
+                if !matching_session {
+                    self.push_diagnostic(format!(
+                        "connection {connection_id}: stale capability generation {generation} ignored"
+                    ));
+                    return;
+                }
+                let Ok(identity) = capability.identity.identity() else {
+                    self.push_diagnostic(format!(
+                        "connection {connection_id}: capability identity projection failed"
+                    ));
+                    return;
+                };
+                match build_board_explorer_snapshot(
+                    capability.document(),
+                    identity,
+                    BoardCapabilityLimits::interactive(),
+                ) {
+                    Ok(board) => {
+                        self.capabilities.insert(
+                            connection_id,
+                            ConnectedCapabilityView {
+                                connection_id,
+                                generation,
+                                board,
+                            },
+                        );
+                    }
+                    Err(error) => self.push_diagnostic(format!(
+                        "connection {connection_id}: capability explorer rejected: {error}"
+                    )),
+                }
             }
             WorkerEvent::Removed { connection_id } => {
                 self.devices.remove(&connection_id);
+                self.capabilities.remove(&connection_id);
             }
             WorkerEvent::CommandRejected {
                 connection_id,
@@ -777,6 +992,7 @@ impl MutableSupervisorView {
         SupervisorView {
             lifecycle: self.lifecycle.clone(),
             devices: self.devices.values().cloned().collect(),
+            capabilities: self.capabilities.values().cloned().collect(),
             diagnostics: self.diagnostics.iter().cloned().collect(),
         }
     }
