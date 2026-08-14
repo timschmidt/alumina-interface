@@ -52,7 +52,7 @@ Hypergraphics output.
 
 The machine-bound V1 path accepts lossless lines/arcs and certified polynomial
 cubics. It derives dynamics, electrical timing, physical uncertainty, step
-density, timer frequency, and output quantum from canonical Configuration V5
+density, timer frequency, and output quantum from canonical Configuration V6
 rather than a second UI schema. Hyperpath/Hypersolve certify zero-radius
 acceleration lookahead, stop-separated component-local jerk refinement, and
 two- or four-phase schedules from the selected boundary nodes. Only lossless

@@ -1,6 +1,6 @@
 //! Offline, machine-bound exact CAM inspection for the canonical `TinyBee` fixture.
 //!
-//! The state below owns firmware-schema `ALMCFG05` bytes and artifacts derived
+//! The state below owns firmware-schema `ALMCFG06` bytes and artifacts derived
 //! from them. The egui layer only projects retained exact values for display;
 //! neither painter coordinates nor formatted text can flow back into CAM.
 
@@ -42,7 +42,7 @@ const MAXIMUM_CONFIGURATION_BYTES: usize =
     CONFIGURATION_HEADER_BYTES + MAX_CONFIGURATION_RECORDS * CONFIGURATION_RECORD_BYTES;
 const MAXIMUM_EVIDENCE_BYTES: usize = 64 * 1024;
 const MAXIMUM_CNC_SOURCE_BYTES: usize = CncGeometryImportLimits::INTERACTIVE.maximum_source_bytes();
-const CONFIGURATION_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMCFG05 file", "almcfg");
+const CONFIGURATION_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMCFG06 file", "almcfg");
 const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD03 file", "almevd");
 const DIRECT_EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMDFE01 file", "almdfe");
 const CNC_SOURCE_FILE: BoundedFileSpec = BoundedFileSpec::new("UI-only CNC geometry draft", "nc");
@@ -151,7 +151,7 @@ impl MachineCamArtifacts {
             &configuration_bytes,
             configuration_digest,
         )
-        .map_err(|error| format!("ALMCFG05 validation rejected: {error:?}"))?;
+        .map_err(|error| format!("ALMCFG06 validation rejected: {error:?}"))?;
         let configuration_identity = view.identity();
         let profile = MachineDynamicsProfile2::from_configuration(view)
             .map_err(|error| format!("machine profile derivation rejected: {error}"))?;
@@ -495,7 +495,7 @@ impl MachineCamWorkspace {
             ui.heading("Exact machine / CAM inspector");
             ui.colored_label(
                 egui::Color32::LIGHT_BLUE,
-                "ALMCFG05 → exact path → cached IR",
+                "ALMCFG06 → exact path → cached IR",
             );
         });
         ui.label(
@@ -540,25 +540,25 @@ impl MachineCamWorkspace {
                         match self.import_configuration_bytes(bytes) {
                             Ok(byte_len) => {
                                 self.file_status = format!(
-                                    "imported and transactionally replayed {byte_len} canonical ALMCFG05 bytes"
+                                    "imported and transactionally replayed {byte_len} canonical ALMCFG06 bytes"
                                 );
                             }
                             Err(error) => {
                                 self.file_status = format!(
-                                    "ALMCFG05 import rejected without changing the workspace: {error}"
+                                    "ALMCFG06 import rejected without changing the workspace: {error}"
                                 );
                             }
                         }
                     }
                     BoundedFileEvent::Import(Err(error)) => {
-                        self.file_status = format!("ALMCFG05 read rejected: {error}");
+                        self.file_status = format!("ALMCFG06 read rejected: {error}");
                     }
                     BoundedFileEvent::Export(Ok(bytes)) => {
                         self.file_status =
-                            format!("exported {bytes} exact canonical ALMCFG05 bytes");
+                            format!("exported {bytes} exact canonical ALMCFG06 bytes");
                     }
                     BoundedFileEvent::Export(Err(error)) => {
-                        self.file_status = format!("ALMCFG05 export failed: {error}");
+                        self.file_status = format!("ALMCFG06 export failed: {error}");
                     }
                 }
             }
@@ -1810,7 +1810,7 @@ mod tests {
     fn canonical_fixture_replays_from_configuration_through_cached_events() {
         let workspace = MachineCamWorkspace::try_new().unwrap();
         let artifacts = &workspace.artifacts;
-        assert_eq!(&artifacts.configuration_bytes[..8], b"ALMCFG05");
+        assert_eq!(&artifacts.configuration_bytes[..8], b"ALMCFG06");
         assert!(!board_mks_tinybee::PACKAGE.armable);
         assert_eq!(artifacts.configuration_identity.summary.stepper_axes, 2);
         assert!(artifacts.configuration_identity.summary.safety_binding);
@@ -1872,6 +1872,19 @@ mod tests {
             &artifacts.direct,
             DirectMachineCamState::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn retired_configuration_v5_is_rejected_without_a_compatibility_path() {
+        let workspace = MachineCamWorkspace::try_new().unwrap();
+        let mut legacy = workspace.artifacts.configuration_bytes.clone();
+        legacy[..8].copy_from_slice(b"ALMCFG05");
+        legacy[8..10].copy_from_slice(&5_u16.to_le_bytes());
+        let result = MachineCamArtifacts::compile(legacy, workspace.artifacts.source.clone());
+        let Err(error) = result else {
+            panic!("retired configuration unexpectedly compiled");
+        };
+        assert!(error.starts_with("ALMCFG06 validation rejected:"));
     }
 
     #[test]

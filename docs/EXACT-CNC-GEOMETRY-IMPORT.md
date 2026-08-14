@@ -73,7 +73,7 @@ only. An imported candidate becomes visible only after this complete chain:
 bounded raw source
     -> exact selected-semantics parser
     -> native Hypercurve connected path
-    -> current ALMCFG05-derived machine profile and error budget
+    -> current ALMCFG06-derived machine profile and error budget
     -> exact native-extrema travel proof
     -> Hyperpath/Hypersolve lookahead and jerk replay
     -> bounded step/tick lowering and post-rounding travel proof

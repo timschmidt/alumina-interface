@@ -41,7 +41,7 @@ prototype.
   `alumina-machine-ir::ExecutionSegment` type. The deterministic fixture uses
   80 steps/mm, 1 MHz ticks, 10 mm/s, and a `1/1024 mm` source-chord budget.
 - The production-oriented line/arc/cubic path derives a two-axis dynamics profile
-  directly from validated canonical Configuration V5: exact resource and
+  directly from validated canonical Configuration V6: exact resource and
   transmission facts, uncertainty intervals, travel, pulse-rate ceiling,
   velocity/acceleration/jerk/following limits, device clock, and backend output
   quantum. A machine-wide resolution certificate composes source and controller
@@ -118,7 +118,7 @@ prototype.
   synchronization evidence before emitting `ALMJMF01`; mixed-clock grids fail
   closed.
 - The shell now opens an offline Machine/CAM inspector by default. One
-  canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
+  canonical `ALMCFG06` TinyBee fixture drives exact axis/transmission facts,
   travel proof, resolution-budget decomposition, retained-path diagnostic
   projection, exact acceleration/jerk-feasible schedule tables, canonical
   points and segments, production executor preflight, SD-cache identities, event-level

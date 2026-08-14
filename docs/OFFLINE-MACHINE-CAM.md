@@ -7,7 +7,7 @@ V1.0 was not contacted, reset, flashed, or driven.
 ## Visible authority chain
 
 The application opens the Machine/CAM workspace by default. It owns no second
-machine model: its input is a canonical firmware-schema `ALMCFG05` document
+machine model: its input is a canonical firmware-schema `ALMCFG06` document
 validated against the primary 8 MiB `mks-tinybee-v1` package. From those exact
 bytes it reconstructs:
 

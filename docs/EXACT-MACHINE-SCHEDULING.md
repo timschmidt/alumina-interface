@@ -12,7 +12,7 @@ driver, machine, output waveform, or physical following-error claim.
 ## Authority flow
 
 ```text
-authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
+authenticated ALMCAP02 capability + canonical ALMCFG06 configuration
     -> allocation-free ConfigurationDocumentView
     -> exact two-axis MachineDynamicsProfile2
     -> certified MachineResolutionBudget2
@@ -63,7 +63,7 @@ and `TimerTickHertz / (pulse_high_cycles + pulse_low_cycles)`. This prevents a
 nominal velocity fact from exceeding the electrical pulse-period ceiling.
 
 The configuration also supplies the exact integer device-cycle frequency and
-the backend's smallest addressable output interval. Firmware retains these V5
+the backend's smallest addressable output interval. Firmware retains these V6
 facts and refuses to construct a stepper executor if they differ from the
 compiled Embassy clock or selected board backend.
 
