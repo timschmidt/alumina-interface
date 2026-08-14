@@ -18,6 +18,8 @@
       let isolatedHealthFailureSnapshot;
       let isolatedCapabilityFailureSnapshot;
       let capabilityDocument;
+      let waveformDocument;
+      let waveformRequested = false;
       const eventKinds = [];
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
@@ -45,7 +47,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 3) {
+        if (envelope.schema_version !== 4) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -66,11 +68,12 @@
               isolated_capability_failure_snapshot:
                 isolatedCapabilityFailureSnapshot,
               capability_document: capabilityDocument,
+              waveform_document: waveformDocument,
             });
-          }, 20000);
+          }, 30000);
           worker.postMessage(
             JSON.stringify({
-              schema_version: 3,
+              schema_version: 4,
               command: {
                 kind: "configure",
                 request: {
@@ -130,6 +133,36 @@
           capabilityDocument = capability;
           return;
         }
+        if (event.kind === "waveform_document") {
+          if (waveformDocument !== undefined) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "waveform document was emitted more than once",
+              event_kinds: eventKinds,
+            });
+            return;
+          }
+          const waveform = event.waveform;
+          const magic = waveform.record.slice(0, 8);
+          const validMagic =
+            JSON.stringify(magic) ===
+            JSON.stringify(Array.from(new TextEncoder().encode("ALMDIG01")));
+          if (
+            waveform.connection_id !== 1 ||
+            waveform.generation < 1 ||
+            waveform.record.length < 224 ||
+            !validMagic
+          ) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "waveform document event was malformed",
+              waveform,
+            });
+            return;
+          }
+          waveformDocument = waveform;
+          return;
+        }
         if (event.kind === "snapshot") {
           const snapshot = event.snapshot;
           latestSnapshot = snapshot;
@@ -180,12 +213,26 @@
               snapshot.capability_identity.document_bytes &&
             snapshot.capability_consecutive_failures === 0 &&
             snapshot.capability_last_error === null &&
+            snapshot.device_identity !== null &&
+            snapshot.device_identity.board_id === "mks-tinybee-v1" &&
+            snapshot.device_identity.device_id.length === 16 &&
             capabilityDocument !== undefined &&
             capabilityDocument.generation === snapshot.generation &&
             capabilityDocument.identity.document_bytes ===
               snapshot.capability_identity.document_bytes &&
             JSON.stringify(capabilityDocument.identity.digest) ===
               JSON.stringify(snapshot.capability_identity.digest);
+          const waveformComplete =
+            snapshot.waveform_phase === "complete" &&
+            snapshot.waveform_capture_id !== null &&
+            snapshot.waveform_received_bytes ===
+              snapshot.waveform_total_bytes &&
+            snapshot.waveform_total_bytes > 0 &&
+            snapshot.waveform_consecutive_failures === 0 &&
+            snapshot.waveform_last_error === null &&
+            waveformDocument !== undefined &&
+            waveformDocument.generation === snapshot.generation &&
+            waveformDocument.record.length === snapshot.waveform_total_bytes;
           const conservativelyRejected =
             snapshot.rejected_samples >= 3 &&
             snapshot.accepted_samples === 0 &&
@@ -195,6 +242,43 @@
             finish("passed", {
               expectation,
               capability_document: capabilityDocument,
+              snapshot,
+            });
+          } else if (
+            expectation === "waveform" &&
+            qualified &&
+            !waveformRequested
+          ) {
+            waveformRequested = true;
+            worker.postMessage(
+              JSON.stringify({
+                schema_version: 4,
+                command: {
+                  kind: "capture_waveform",
+                  request: {
+                    connection_id: 1,
+                    channels: [
+                      [1, 0, 22, 0],
+                      [1, 0, 32, 0],
+                      [1, 0, 33, 0],
+                      [1, 0, 35, 0],
+                    ],
+                    duration_cycles: 2000,
+                  },
+                },
+              }),
+            );
+            finish("sampling", snapshot);
+          } else if (
+            expectation === "waveform" &&
+            qualified &&
+            waveformComplete
+          ) {
+            clearTimeout(timeout);
+            finish("passed", {
+              expectation,
+              capability_document: capabilityDocument,
+              waveform_document: waveformDocument,
               snapshot,
             });
           } else if (

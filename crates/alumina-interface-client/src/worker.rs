@@ -4,10 +4,11 @@ use std::fmt;
 
 use alumina_capability::{
     BoardCapabilityLimits, CAPABILITY_DOCUMENT_HEADER_BYTES, CapabilityIdentity,
-    decode_board_capability,
+    decode_board_capability, decode_resource_id,
 };
 use alumina_clock::ClockEstimationPolicy;
-use alumina_protocol::DeviceCycle;
+use alumina_diagnostics::{DiagnosticLimits, decode_digital_capture};
+use alumina_protocol::{DeviceCycle, DeviceId, Digest};
 use alumina_runtime::health::{
     RuntimeHealthFlags, RuntimeHealthSnapshot as WireRuntimeHealthSnapshot,
 };
@@ -15,10 +16,12 @@ use alumina_runtime::stack::{StackDomain, StackWatermarkFlags, StackWatermarkSna
 use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilityDownloadPhase;
+use crate::diagnostics::WaveformClientPhase;
 use crate::health::{RuntimeHealthAvailability, RuntimeHealthView};
+use crate::http::{DeviceCredentialSource, DeviceIdentity};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 3;
+pub const WORKER_SCHEMA_VERSION: u16 = 4;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -27,6 +30,47 @@ pub const MAXIMUM_WORKER_DIAGNOSTIC_BYTES: usize = 512;
 const MAXIMUM_LABEL_BYTES: usize = 64;
 const MAXIMUM_ORIGIN_BYTES: usize = 256;
 const MAXIMUM_SECRET_BYTES: usize = 256;
+const MAXIMUM_CAPTURE_CHANNELS: usize = 4;
+const MAXIMUM_CAPTURE_DURATION_CYCLES: u64 = 60_000_000_000;
+
+/// Bounded capability-selected one-shot digital-capture request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerWaveformRequest {
+    /// UI-local connection owning the already authenticated device session.
+    pub connection_id: u64,
+    /// Strictly increasing canonical four-byte resource selectors.
+    pub channels: Vec<[u8; 4]>,
+    /// Exact immediate-capture duration in device cycles.
+    pub duration_cycles: u64,
+}
+
+impl WorkerWaveformRequest {
+    /// Validates transport bounds and canonical resource ordering before I/O.
+    ///
+    /// Capability membership is checked separately inside the worker against
+    /// the complete document acquired for this exact session generation.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0
+            || self.channels.is_empty()
+            || self.channels.len() > MAXIMUM_CAPTURE_CHANNELS
+            || self.duration_cycles == 0
+            || self.duration_cycles > MAXIMUM_CAPTURE_DURATION_CYCLES
+        {
+            return Err(WorkerContractError::WaveformRequest);
+        }
+        let mut previous = None;
+        for encoded in &self.channels {
+            let resource =
+                decode_resource_id(encoded).map_err(|_| WorkerContractError::WaveformRequest)?;
+            if previous.is_some_and(|prior| prior >= resource) {
+                return Err(WorkerContractError::WaveformRequest);
+            }
+            previous = Some(resource);
+        }
+        Ok(())
+    }
+}
 
 /// Policy for causal heartbeat acquisition and exact affine-clock admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -189,6 +233,11 @@ pub enum WorkerCommand {
     ProbeNow {
         /// UI-local stable connection identity.
         connection_id: u64,
+    },
+    /// Start one immediate, input-only digital capture on capability-selected resources.
+    CaptureWaveform {
+        /// Complete bounded capture request; the worker supplies trusted context.
+        request: WorkerWaveformRequest,
     },
     /// Remove one session and erase its worker-owned secret/model.
     Disconnect {
@@ -606,6 +655,165 @@ impl CapabilityIdentitySnapshot {
     }
 }
 
+/// JSON-safe non-secret credential provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSourceSnapshot {
+    /// Repository development fallback; never production-armable.
+    DevelopmentFallback,
+    /// Secret supplied outside source control when the image was built.
+    BuildProvisioned,
+    /// Unique credential loaded from transactional device storage.
+    DeviceStored,
+}
+
+impl From<DeviceCredentialSource> for CredentialSourceSnapshot {
+    fn from(value: DeviceCredentialSource) -> Self {
+        match value {
+            DeviceCredentialSource::DevelopmentFallback => Self::DevelopmentFallback,
+            DeviceCredentialSource::BuildProvisioned => Self::BuildProvisioned,
+            DeviceCredentialSource::DeviceStored => Self::DeviceStored,
+        }
+    }
+}
+
+impl CredentialSourceSnapshot {
+    /// Whether this provenance is eligible for production arming.
+    pub const fn production_armable(self) -> bool {
+        matches!(self, Self::DeviceStored)
+    }
+}
+
+/// Strict rendering-safe projection of public device identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceIdentitySnapshot {
+    /// Stable board package ID claimed by the running image.
+    pub board_id: String,
+    /// Stable physical or explicitly simulated device identity.
+    pub device_id: [u8; 16],
+    /// Non-secret credential provenance.
+    pub credential_source: CredentialSourceSnapshot,
+    /// Exact capability identity claimed by the running image.
+    pub capability: CapabilityIdentitySnapshot,
+}
+
+impl DeviceIdentitySnapshot {
+    /// Projects a validated public response into the worker schema.
+    #[must_use]
+    pub fn from_identity(identity: &DeviceIdentity) -> Self {
+        Self {
+            board_id: identity.board_id().to_owned(),
+            device_id: identity.device_id().0,
+            credential_source: identity.credential_source().into(),
+            capability: CapabilityIdentitySnapshot::from_identity(identity.capability()),
+        }
+    }
+
+    /// Reconstructs the stable device selector after validating every field.
+    pub fn validate(&self) -> Result<DeviceId, WorkerContractError> {
+        if self.board_id.is_empty()
+            || self.board_id.len() > MAXIMUM_LABEL_BYTES
+            || !self.board_id.as_bytes().iter().copied().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+            || self.device_id.iter().all(|byte| *byte == 0)
+        {
+            return Err(WorkerContractError::DeviceIdentity);
+        }
+        self.capability
+            .identity()
+            .map_err(|_| WorkerContractError::DeviceIdentity)?;
+        Ok(DeviceId(self.device_id))
+    }
+}
+
+/// Rendering-safe waveform lifecycle retained with one device snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveformCapturePhaseSnapshot {
+    /// Canonical configure mutation is pending or being reconciled.
+    Configuring,
+    /// Configuration is known and an explicit diagnostic arm is next.
+    Configured,
+    /// Diagnostic acquisition arm is pending or being reconciled.
+    Arming,
+    /// Input-only acquisition is armed and awaiting completion.
+    Armed,
+    /// Exact retained ranges are being assembled.
+    Downloading,
+    /// Complete canonical capture bytes were independently validated.
+    Complete,
+    /// Capture release is pending or being reconciled.
+    Stopping,
+    /// Device confirmed capture release.
+    Stopped,
+}
+
+impl From<WaveformClientPhase> for WaveformCapturePhaseSnapshot {
+    fn from(value: WaveformClientPhase) -> Self {
+        match value {
+            WaveformClientPhase::Configuring | WaveformClientPhase::ReconcilingConfigure => {
+                Self::Configuring
+            }
+            WaveformClientPhase::Configured => Self::Configured,
+            WaveformClientPhase::Arming | WaveformClientPhase::ReconcilingArm => Self::Arming,
+            WaveformClientPhase::Armed => Self::Armed,
+            WaveformClientPhase::Downloading { .. } => Self::Downloading,
+            WaveformClientPhase::Complete => Self::Complete,
+            WaveformClientPhase::Stopping | WaveformClientPhase::ReconcilingStop => Self::Stopping,
+            WaveformClientPhase::Stopped => Self::Stopped,
+        }
+    }
+}
+
+/// One-time credential-free canonical capture transferred from worker to UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerWaveformDocument {
+    /// UI-local connection identity owning the capture.
+    pub connection_id: u64,
+    /// Exact worker session generation that acquired the bytes.
+    pub generation: u64,
+    /// Complete canonical `ALMDIG01` record.
+    record: Vec<u8>,
+}
+
+impl WorkerWaveformDocument {
+    /// Constructs and independently validates one worker-to-UI transfer.
+    pub fn try_new(
+        connection_id: u64,
+        generation: u64,
+        record: Vec<u8>,
+    ) -> Result<Self, WorkerContractError> {
+        let transfer = Self {
+            connection_id,
+            generation,
+            record,
+        };
+        transfer.validate()?;
+        Ok(transfer)
+    }
+
+    /// Complete immutable canonical capture bytes.
+    pub fn record(&self) -> &[u8] {
+        &self.record
+    }
+
+    /// Revalidates session identity and canonical capture content.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0 || self.generation == 0 {
+            return Err(WorkerContractError::WaveformDocument);
+        }
+        let capture = decode_digital_capture(&self.record, DiagnosticLimits::interactive())
+            .map_err(|_| WorkerContractError::WaveformDocument)?;
+        if capture.context().config_digest != Digest::ZERO {
+            return Err(WorkerContractError::WaveformDocument);
+        }
+        Ok(())
+    }
+}
+
 /// One-time, credential-free canonical document transferred from worker to UI.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -690,6 +898,8 @@ pub struct DeviceSessionSnapshot {
     pub phase: DeviceSessionPhase,
     /// Public boot identity learned from an authenticated heartbeat.
     pub boot_id: Option<[u8; 16]>,
+    /// Strict stable public identity reconciled with signed capability data.
+    pub device_identity: Option<DeviceIdentitySnapshot>,
     /// Number of intersecting observations admitted by the estimator.
     pub accepted_samples: u32,
     /// Number of authenticated observations rejected by exact clock policy.
@@ -720,6 +930,18 @@ pub struct DeviceSessionSnapshot {
     pub capability_consecutive_failures: u32,
     /// Latest capability acquisition failure, independent from clock/health state.
     pub capability_last_error: Option<String>,
+    /// Current input-only diagnostic acquisition lifecycle, when requested.
+    pub waveform_phase: Option<WaveformCapturePhaseSnapshot>,
+    /// Capture attempt identity retained while a waveform lifecycle exists.
+    pub waveform_capture_id: Option<[u8; 16]>,
+    /// Contiguous canonical capture bytes retained during range download.
+    pub waveform_received_bytes: u32,
+    /// Complete canonical capture length once reported by device status.
+    pub waveform_total_bytes: u32,
+    /// Consecutive waveform-operation failures since the latest accepted response.
+    pub waveform_consecutive_failures: u32,
+    /// Latest waveform failure, isolated from clock/health/capability state.
+    pub waveform_last_error: Option<String>,
 }
 
 impl DeviceSessionSnapshot {
@@ -740,12 +962,17 @@ impl DeviceSessionSnapshot {
             || !diagnostic_is_valid(self.last_error.as_deref())
             || !diagnostic_is_valid(self.runtime_health_last_error.as_deref())
             || !diagnostic_is_valid(self.capability_last_error.as_deref())
+            || !diagnostic_is_valid(self.waveform_last_error.as_deref())
             || (self.consecutive_failures == 0) != self.last_error.is_none()
             || (self.runtime_health_consecutive_failures == 0)
                 != self.runtime_health_last_error.is_none()
             || (self.capability_consecutive_failures == 0) != self.capability_last_error.is_none()
+            || (self.waveform_consecutive_failures == 0) != self.waveform_last_error.is_none()
         {
             return Err(WorkerContractError::DeviceSnapshot);
+        }
+        if let Some(identity) = &self.device_identity {
+            identity.validate()?;
         }
         match (self.runtime_health_availability, self.runtime_health) {
             (RuntimeHealthAvailabilitySnapshot::Available, Some(snapshot)) => {
@@ -777,6 +1004,50 @@ impl DeviceSessionSnapshot {
             }
             _ => return Err(WorkerContractError::CapabilityProgress),
         }
+        if let Some(capability) = self.capability_identity {
+            let identity = self
+                .device_identity
+                .as_ref()
+                .ok_or(WorkerContractError::DeviceIdentity)?;
+            if identity.capability != capability {
+                return Err(WorkerContractError::DeviceIdentity);
+            }
+        }
+        match (self.waveform_phase, self.waveform_capture_id) {
+            (None, None) if self.waveform_received_bytes == 0 && self.waveform_total_bytes == 0 => {
+            }
+            (Some(phase), Some(capture_id)) if capture_id.iter().any(|byte| *byte != 0) => {
+                if self.boot_id.is_none()
+                    || self.device_identity.is_none()
+                    || self.capability_phase != CapabilityDownloadPhaseSnapshot::Complete
+                {
+                    return Err(WorkerContractError::WaveformProgress);
+                }
+                match phase {
+                    WaveformCapturePhaseSnapshot::Downloading => {
+                        if self.waveform_total_bytes == 0
+                            || self.waveform_received_bytes >= self.waveform_total_bytes
+                        {
+                            return Err(WorkerContractError::WaveformProgress);
+                        }
+                    }
+                    WaveformCapturePhaseSnapshot::Complete => {
+                        if self.waveform_total_bytes == 0
+                            || self.waveform_received_bytes != self.waveform_total_bytes
+                            || self.waveform_consecutive_failures != 0
+                        {
+                            return Err(WorkerContractError::WaveformProgress);
+                        }
+                    }
+                    _ => {
+                        if self.waveform_received_bytes != 0 || self.waveform_total_bytes != 0 {
+                            return Err(WorkerContractError::WaveformProgress);
+                        }
+                    }
+                }
+            }
+            _ => return Err(WorkerContractError::WaveformProgress),
+        }
         Ok(())
     }
 }
@@ -807,6 +1078,11 @@ pub enum WorkerEvent {
     CapabilityDocument {
         /// Independently validated immutable bytes and owning session identity.
         capability: Box<WorkerCapabilityDocument>,
+    },
+    /// One complete canonical digital capture, emitted once per capture attempt.
+    WaveformDocument {
+        /// Independently validated retained record and owning session identity.
+        waveform: Box<WorkerWaveformDocument>,
     },
     /// A disconnect erased a connection.
     Removed {
@@ -873,6 +1149,9 @@ impl WorkerEventEnvelope {
         if let WorkerEvent::CapabilityDocument { capability } = &self.event {
             capability.validate()?;
         }
+        if let WorkerEvent::WaveformDocument { waveform } = &self.event {
+            waveform.validate()?;
+        }
         Ok(())
     }
 }
@@ -904,6 +1183,14 @@ pub enum WorkerContractError {
     CapabilityProgress,
     /// A one-time capability document transfer failed canonical validation.
     CapabilityDocument,
+    /// A bounded capture command was malformed or noncanonical.
+    WaveformRequest,
+    /// Waveform progress fields contradicted the retained lifecycle.
+    WaveformProgress,
+    /// A one-time capture transfer failed canonical validation.
+    WaveformDocument,
+    /// Public device identity projection was malformed or inconsistent.
+    DeviceIdentity,
 }
 
 impl fmt::Display for WorkerContractError {
@@ -931,6 +1218,10 @@ impl fmt::Display for WorkerContractError {
             Self::CapabilityDocument => {
                 formatter.write_str("capability document transfer is invalid")
             }
+            Self::WaveformRequest => formatter.write_str("waveform request is invalid"),
+            Self::WaveformProgress => formatter.write_str("waveform progress is invalid"),
+            Self::WaveformDocument => formatter.write_str("waveform document transfer is invalid"),
+            Self::DeviceIdentity => formatter.write_str("device identity snapshot is invalid"),
         }
     }
 }
@@ -939,7 +1230,11 @@ impl std::error::Error for WorkerContractError {}
 
 #[cfg(test)]
 mod tests {
-    use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
+    use alumina_board::ResourceId;
+    use alumina_capability::{
+        MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, encode_resource_id, read_verified_range,
+    };
+    use alumina_sim::diagnostics::tinybee_diagnostic_fixture_for_context;
 
     use super::*;
 
@@ -997,6 +1292,15 @@ mod tests {
         }
     }
 
+    fn device_identity(capability: CapabilityIdentity) -> DeviceIdentitySnapshot {
+        DeviceIdentitySnapshot {
+            board_id: "mks-tinybee-v1".to_owned(),
+            device_id: *b"ALUM-SIM:TINYBEE",
+            credential_source: CredentialSourceSnapshot::DevelopmentFallback,
+            capability: CapabilityIdentitySnapshot::from_identity(capability),
+        }
+    }
+
     fn request() -> DeviceConnectionRequest {
         DeviceConnectionRequest {
             connection_id: 7,
@@ -1050,6 +1354,35 @@ mod tests {
     }
 
     #[test]
+    fn waveform_command_requires_sorted_bounded_canonical_resources() {
+        let mut request = WorkerWaveformRequest {
+            connection_id: 7,
+            channels: [22_u8, 32, 33, 35]
+                .map(|gpio| encode_resource_id(ResourceId::Gpio(gpio)))
+                .to_vec(),
+            duration_cycles: 2_000,
+        };
+        assert_eq!(request.validate(), Ok(()));
+        request.channels.swap(0, 1);
+        assert_eq!(
+            request.validate(),
+            Err(WorkerContractError::WaveformRequest)
+        );
+        request.channels.sort_unstable();
+        request.channels.push(request.channels[3]);
+        assert_eq!(
+            request.validate(),
+            Err(WorkerContractError::WaveformRequest)
+        );
+        request.channels.truncate(4);
+        request.duration_cycles = 0;
+        assert_eq!(
+            request.validate(),
+            Err(WorkerContractError::WaveformRequest)
+        );
+    }
+
+    #[test]
     fn snapshots_round_trip_without_a_credential_field() {
         let event = WorkerEventEnvelope::current(WorkerEvent::Snapshot {
             snapshot: Box::new(DeviceSessionSnapshot {
@@ -1059,6 +1392,7 @@ mod tests {
                 generation: 2,
                 phase: DeviceSessionPhase::ClockQualified,
                 boot_id: Some([3; 16]),
+                device_identity: None,
                 accepted_samples: 4,
                 rejected_samples: 1,
                 consecutive_failures: 0,
@@ -1093,6 +1427,12 @@ mod tests {
                 capability_identity: None,
                 capability_consecutive_failures: 0,
                 capability_last_error: None,
+                waveform_phase: None,
+                waveform_capture_id: None,
+                waveform_received_bytes: 0,
+                waveform_total_bytes: 0,
+                waveform_consecutive_failures: 0,
+                waveform_last_error: None,
             }),
         });
         let json = serde_json::to_string(&event).unwrap();
@@ -1100,7 +1440,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 3);
+        assert_eq!(WORKER_SCHEMA_VERSION, 4);
     }
 
     #[test]
@@ -1179,6 +1519,7 @@ mod tests {
             generation: 2,
             phase: DeviceSessionPhase::Sampling,
             boot_id: None,
+            device_identity: None,
             accepted_samples: 0,
             rejected_samples: 0,
             consecutive_failures: 0,
@@ -1194,6 +1535,12 @@ mod tests {
             capability_identity: None,
             capability_consecutive_failures: 0,
             capability_last_error: None,
+            waveform_phase: None,
+            waveform_capture_id: None,
+            waveform_received_bytes: 0,
+            waveform_total_bytes: 0,
+            waveform_consecutive_failures: 0,
+            waveform_last_error: None,
         };
         assert_eq!(snapshot.validate(), Ok(()));
         snapshot.runtime_health = Some(runtime_health());
@@ -1214,6 +1561,7 @@ mod tests {
         let (identity, _) = tinybee_document();
         snapshot.capability_phase = CapabilityDownloadPhaseSnapshot::Downloading;
         snapshot.capability_identity = Some(CapabilityIdentitySnapshot::from_identity(identity));
+        snapshot.device_identity = Some(device_identity(identity));
         snapshot.capability_received_bytes = identity.byte_len;
         assert_eq!(
             snapshot.validate(),
@@ -1226,6 +1574,31 @@ mod tests {
         assert_eq!(
             snapshot.validate(),
             Err(WorkerContractError::CapabilityProgress)
+        );
+        snapshot.capability_consecutive_failures = 0;
+        snapshot.capability_last_error = None;
+        snapshot.boot_id = Some([3; 16]);
+        snapshot.waveform_phase = Some(WaveformCapturePhaseSnapshot::Configured);
+        snapshot.waveform_capture_id = Some(*b"WORKER-CAPTURE01");
+        assert_eq!(snapshot.validate(), Ok(()));
+
+        snapshot.waveform_phase = Some(WaveformCapturePhaseSnapshot::Downloading);
+        snapshot.waveform_received_bytes = 544;
+        snapshot.waveform_total_bytes = 544;
+        assert_eq!(
+            snapshot.validate(),
+            Err(WorkerContractError::WaveformProgress)
+        );
+        snapshot.waveform_received_bytes = 168;
+        assert_eq!(snapshot.validate(), Ok(()));
+        snapshot.waveform_phase = Some(WaveformCapturePhaseSnapshot::Complete);
+        snapshot.waveform_received_bytes = 544;
+        assert_eq!(snapshot.validate(), Ok(()));
+
+        snapshot.device_identity.as_mut().unwrap().capability.digest[0] ^= 1;
+        assert_eq!(
+            snapshot.validate(),
+            Err(WorkerContractError::DeviceIdentity)
         );
     }
 
@@ -1248,6 +1621,37 @@ mod tests {
         assert_eq!(
             decoded.validate(),
             Err(WorkerContractError::CapabilityDocument)
+        );
+    }
+
+    #[test]
+    fn waveform_document_event_is_revalidated_after_json_transfer() {
+        let (identity, _) = tinybee_document();
+        let context = alumina_diagnostics::DiagnosticContext {
+            device_id: DeviceId(*b"ALUM-SIM:TINYBEE"),
+            boot_id: alumina_clock::BootId::new([0x31; 16]).unwrap(),
+            capability: identity,
+            config_digest: Digest::ZERO,
+            clock_frequency_hz: 1_000_000,
+        };
+        let evidence = tinybee_diagnostic_fixture_for_context(context).unwrap();
+        let transfer =
+            WorkerWaveformDocument::try_new(7, 3, evidence.digital_capture_bytes().to_vec())
+                .unwrap();
+        let event = WorkerEventEnvelope::current(WorkerEvent::WaveformDocument {
+            waveform: Box::new(transfer),
+        });
+        let json = serde_json::to_vec(&event).unwrap();
+        let mut decoded: WorkerEventEnvelope = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.validate(), Ok(()));
+        if let WorkerEvent::WaveformDocument { waveform } = &mut decoded.event {
+            waveform.record[0] ^= 1;
+        } else {
+            panic!("round trip changed waveform event kind");
+        }
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::WaveformDocument)
         );
     }
 

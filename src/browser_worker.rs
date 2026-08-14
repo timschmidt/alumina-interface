@@ -4,28 +4,40 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use alumina_capability::BoardCapabilityLimits;
+use alumina_board::GraphResourceAccess;
+use alumina_capability::{BoardCapabilityLimits, decode_board_capability, decode_resource_id};
 use alumina_clock::{ClockFlags, ClockObservation};
+use alumina_diagnostics::transport::{
+    DiagnosticTransportLimits, WaveformConfigureFlags, WaveformConfigureRequest,
+    encode_waveform_configure, waveform_configure_encoded_len,
+};
+use alumina_diagnostics::{
+    CaptureId, DiagnosticContext, DiagnosticLimits, DigitalCaptureView, DigitalTriggerCondition,
+    decode_digital_capture,
+};
 use alumina_interface_client::capability::{CapabilityDownloadMachine, CapabilityDownloadPhase};
 use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
+use alumina_interface_client::diagnostics::{WaveformCaptureMachine, WaveformClientPhase};
 use alumina_interface_client::health::RuntimeHealthModel;
-use alumina_interface_client::http::AuthenticatedHttpSession;
+use alumina_interface_client::http::{AuthenticatedHttpSession, DeviceIdentity};
 use alumina_interface_client::wasm::{
-    BrowserCapabilityError, BrowserClockError, BrowserFetchError, BrowserHealthError, DeviceOrigin,
-    drive_capability_step_in_worker, drive_clock_probe_in_worker, drive_runtime_health_in_worker,
-    open_authenticated_session_in_worker, worker_origin,
+    BrowserCapabilityError, BrowserClockError, BrowserFetchError, BrowserHealthError,
+    BrowserWaveformError, DeviceOrigin, drive_capability_step_in_worker,
+    drive_clock_probe_in_worker, drive_runtime_health_in_worker, drive_waveform_step_in_worker,
+    fetch_device_identity_in_worker, open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
-    CapabilityIdentitySnapshot, ClockEstimateSnapshot, ClockHistoryRecord, DeviceConnectionRequest,
-    DeviceSessionPhase, DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY,
-    MAXIMUM_WORKER_DIAGNOSTIC_BYTES, RuntimeHealthWorkerSnapshot, WORKER_SCHEMA_VERSION,
-    WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope, WorkerEvent,
-    WorkerEventEnvelope,
+    CapabilityDownloadPhaseSnapshot, CapabilityIdentitySnapshot, ClockEstimateSnapshot,
+    ClockHistoryRecord, DeviceConnectionRequest, DeviceIdentitySnapshot, DeviceSessionPhase,
+    DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY, MAXIMUM_WORKER_DIAGNOSTIC_BYTES,
+    RuntimeHealthWorkerSnapshot, WORKER_SCHEMA_VERSION, WorkerCapabilityDocument, WorkerCommand,
+    WorkerCommandEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerWaveformDocument,
+    WorkerWaveformRequest,
 };
 use alumina_interface_core::board_explorer::{
     BoardExplorerSnapshot, build_board_explorer_snapshot,
 };
-use alumina_protocol::Digest;
+use alumina_protocol::{DeviceCycle, Digest};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::spawn_local;
@@ -40,6 +52,10 @@ const MAXIMUM_COMMAND_JSON_BYTES: usize = 8 * 1024;
 const MAXIMUM_UI_DIAGNOSTICS: usize = 16;
 const MAXIMUM_RETRY_MS: u32 = 30_000;
 const CAPABILITY_RANGES_PER_HEARTBEAT: usize = 4;
+const WAVEFORM_OPERATIONS_PER_HEARTBEAT: usize = 8;
+const WAVEFORM_TRANSITION_CAPACITY: u32 = 64;
+const WAVEFORM_CHUNK_BYTES: u32 = 168;
+const WAVEFORM_ARM_HORIZON_SECONDS: u64 = 30;
 
 struct DeviceState {
     connection_id: u64,
@@ -50,6 +66,7 @@ struct DeviceState {
     sampling: alumina_interface_client::worker::ClockSamplingPolicy,
     generation: u64,
     session: Option<AuthenticatedHttpSession>,
+    identity: Option<DeviceIdentity>,
     clock: DeviceClockModel,
     runtime_health: RuntimeHealthModel,
     capability: CapabilityDownloadMachine,
@@ -65,6 +82,11 @@ struct DeviceState {
     next_runtime_health_attempt_ms: f64,
     capability_consecutive_failures: u32,
     capability_last_error: Option<String>,
+    waveform: Option<WaveformCaptureMachine>,
+    waveform_event_published: bool,
+    waveform_consecutive_failures: u32,
+    waveform_last_error: Option<String>,
+    next_capture_sequence: u64,
 }
 
 impl DeviceState {
@@ -89,6 +111,7 @@ impl DeviceState {
             sampling: request.sampling,
             generation,
             session: None,
+            identity: None,
             clock,
             runtime_health: RuntimeHealthModel::new(),
             capability,
@@ -104,10 +127,40 @@ impl DeviceState {
             next_runtime_health_attempt_ms: 0.0,
             capability_consecutive_failures: 0,
             capability_last_error: None,
+            waveform: None,
+            waveform_event_published: false,
+            waveform_consecutive_failures: 0,
+            waveform_last_error: None,
+            next_capture_sequence: 1,
         })
     }
 
     fn snapshot(&self) -> DeviceSessionSnapshot {
+        let (waveform_phase, waveform_capture_id, waveform_received_bytes, waveform_total_bytes) =
+            self.waveform
+                .as_ref()
+                .map_or((None, None, 0, 0), |waveform| {
+                    let (received, total) = match waveform.phase() {
+                        WaveformClientPhase::Downloading {
+                            received_bytes,
+                            total_bytes,
+                        } => (received_bytes, total_bytes),
+                        WaveformClientPhase::Complete => {
+                            let bytes = waveform
+                                .record()
+                                .and_then(|record| u32::try_from(record.len()).ok())
+                                .unwrap_or(0);
+                            (bytes, bytes)
+                        }
+                        _ => (0, 0),
+                    };
+                    (
+                        Some(waveform.phase().into()),
+                        Some(waveform.reference().capture_id.as_bytes()),
+                        received,
+                        total,
+                    )
+                });
         DeviceSessionSnapshot {
             connection_id: self.connection_id,
             label: self.label.clone(),
@@ -115,6 +168,10 @@ impl DeviceState {
             generation: self.generation,
             phase: self.phase,
             boot_id: self.clock.boot_id().map(alumina_clock::BootId::as_bytes),
+            device_identity: self
+                .identity
+                .as_ref()
+                .map(DeviceIdentitySnapshot::from_identity),
             accepted_samples: self.clock.accepted_samples(),
             rejected_samples: self.clock.rejected_samples(),
             consecutive_failures: self.consecutive_failures,
@@ -136,6 +193,12 @@ impl DeviceState {
                 .map(CapabilityIdentitySnapshot::from_identity),
             capability_consecutive_failures: self.capability_consecutive_failures,
             capability_last_error: self.capability_last_error.clone(),
+            waveform_phase,
+            waveform_capture_id,
+            waveform_received_bytes,
+            waveform_total_bytes,
+            waveform_consecutive_failures: self.waveform_consecutive_failures,
+            waveform_last_error: self.waveform_last_error.clone(),
         }
     }
 
@@ -206,6 +269,159 @@ impl DeviceState {
         self.capability_event_published = false;
         self.capability_consecutive_failures = 0;
         self.capability_last_error = None;
+    }
+
+    fn record_waveform_success(&mut self) {
+        self.waveform_consecutive_failures = 0;
+        self.waveform_last_error = None;
+    }
+
+    fn record_waveform_failure(&mut self, error: &str) {
+        self.waveform_consecutive_failures = self.waveform_consecutive_failures.saturating_add(1);
+        self.waveform_last_error = Some(bounded_diagnostic(error));
+    }
+
+    fn reset_waveform_for_new_boot(&mut self) {
+        self.waveform = None;
+        self.waveform_event_published = false;
+        self.waveform_consecutive_failures = 0;
+        self.waveform_last_error = None;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one linear audit surface binds every capture field to live identity and capability authority"
+    )]
+    fn start_waveform(&mut self, request: &WorkerWaveformRequest) -> Result<(), String> {
+        request.validate().map_err(|error| error.to_string())?;
+        if self.waveform.as_ref().is_some_and(|waveform| {
+            !matches!(
+                waveform.phase(),
+                WaveformClientPhase::Complete | WaveformClientPhase::Stopped
+            )
+        }) {
+            return Err("a waveform acquisition is already active".to_owned());
+        }
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| "device identity has not been acquired".to_owned())?;
+        let capability_identity = self
+            .capability
+            .identity()
+            .ok_or_else(|| "board capability identity is unavailable".to_owned())?;
+        if self.capability.phase() != CapabilityDownloadPhase::Complete
+            || capability_identity != identity.capability()
+        {
+            return Err("device identity and complete capability are not reconciled".to_owned());
+        }
+        let document = self
+            .capability
+            .document()
+            .ok_or_else(|| "complete capability bytes are unavailable".to_owned())?;
+        let capability = decode_board_capability(document, BoardCapabilityLimits::interactive())
+            .map_err(|error| format!("board capability rejected: {error:?}"))?;
+        if capability.board_id() != identity.board_id() {
+            return Err("public board identity does not match capability bytes".to_owned());
+        }
+
+        let mut channels = Vec::new();
+        channels
+            .try_reserve_exact(request.channels.len())
+            .map_err(|_| "waveform channel allocation failed".to_owned())?;
+        for encoded in &request.channels {
+            let resource = decode_resource_id(encoded)
+                .map_err(|_| "waveform resource selector is invalid".to_owned())?;
+            let readable = capability.graph().resources().any(|candidate| {
+                candidate.resource == resource
+                    && candidate.access == GraphResourceAccess::StableBooleanInput
+            });
+            if !readable {
+                return Err(format!(
+                    "resource {resource:?} is not an admitted stable Boolean input"
+                ));
+            }
+            channels.push(resource);
+        }
+
+        let boot_id = self
+            .clock
+            .boot_id()
+            .ok_or_else(|| "authenticated boot identity is unavailable".to_owned())?;
+        let latest = self
+            .history
+            .back()
+            .ok_or_else(|| "authenticated clock evidence is unavailable".to_owned())?;
+        let maximum_duration = latest
+            .frequency_hz
+            .checked_mul(2)
+            .ok_or_else(|| "clock frequency cannot bound capture duration".to_owned())?;
+        if request.duration_cycles > maximum_duration {
+            return Err("waveform duration exceeds the two-second interactive bound".to_owned());
+        }
+        let latest_trigger_cycle = latest
+            .transmit_cycle
+            .checked_add(
+                latest
+                    .frequency_hz
+                    .checked_mul(WAVEFORM_ARM_HORIZON_SECONDS)
+                    .ok_or_else(|| "waveform arm horizon overflowed".to_owned())?,
+            )
+            .ok_or_else(|| "waveform arm deadline overflowed".to_owned())?;
+        let capture_sequence = self.next_capture_sequence;
+        self.next_capture_sequence = capture_sequence
+            .checked_add(1)
+            .ok_or_else(|| "waveform attempt identity is exhausted".to_owned())?;
+        let mut capture_bytes = [0_u8; 16];
+        capture_bytes[..8].copy_from_slice(&self.generation.to_le_bytes());
+        capture_bytes[8..].copy_from_slice(&capture_sequence.to_le_bytes());
+        let capture_id = CaptureId::new(capture_bytes)
+            .map_err(|_| "waveform attempt identity is invalid".to_owned())?;
+        let context = DiagnosticContext {
+            device_id: identity.device_id(),
+            boot_id,
+            capability: capability_identity,
+            config_digest: Digest::ZERO,
+            clock_frequency_hz: latest.frequency_hz,
+        };
+        let encoded_len = waveform_configure_encoded_len(channels.len())
+            .map_err(|error| format!("waveform configure length rejected: {error}"))?;
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(encoded_len)
+            .map_err(|_| "waveform configure allocation failed".to_owned())?;
+        encoded.resize(encoded_len, 0);
+        let used = encode_waveform_configure(
+            &WaveformConfigureRequest {
+                capture_id,
+                context,
+                flags: WaveformConfigureFlags(WaveformConfigureFlags::EDGE_TIMESTAMPS),
+                requested_pretrigger_cycles: 0,
+                requested_posttrigger_cycles: request.duration_cycles,
+                earliest_trigger_cycle: DeviceCycle(latest.transmit_cycle),
+                latest_trigger_cycle: DeviceCycle(latest_trigger_cycle),
+                transition_capacity: WAVEFORM_TRANSITION_CAPACITY,
+                maximum_chunk_bytes: WAVEFORM_CHUNK_BYTES,
+                trigger_channel_index: u16::MAX,
+                trigger_condition: DigitalTriggerCondition::Immediate,
+                channels: &channels,
+            },
+            &mut encoded,
+            DiagnosticTransportLimits::native_control(),
+        )
+        .map_err(|error| format!("waveform configure rejected: {error}"))?;
+        encoded.truncate(used);
+        self.waveform = Some(
+            WaveformCaptureMachine::new(
+                encoded,
+                DiagnosticTransportLimits::native_control(),
+                DiagnosticLimits::interactive(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        self.waveform_event_published = false;
+        self.record_waveform_success();
+        Ok(())
     }
 
     fn record_observation(&mut self, observation: ClockObservation) {
@@ -391,6 +607,9 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
                 launch_device_step(runtime, connection_id, true);
             }
         }
+        WorkerCommand::CaptureWaveform { request } => {
+            start_waveform_capture(runtime, &request);
+        }
         WorkerCommand::Disconnect { connection_id } => disconnect_device(runtime, connection_id),
     }
 }
@@ -398,10 +617,35 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
 const fn command_connection_id(command: &WorkerCommand) -> u64 {
     match command {
         WorkerCommand::Configure { request } => request.connection_id,
+        WorkerCommand::CaptureWaveform { request } => request.connection_id,
         WorkerCommand::ProbeNow { connection_id } | WorkerCommand::Disconnect { connection_id } => {
             *connection_id
         }
     }
+}
+
+fn start_waveform_capture(runtime: &SharedWorkerRuntime, request: &WorkerWaveformRequest) {
+    let connection_id = request.connection_id;
+    if let Err(error) = request.validate() {
+        reject_command(runtime, Some(connection_id), &error.to_string());
+        return;
+    }
+    let result = {
+        let mut runtime_ref = runtime.borrow_mut();
+        match runtime_ref.devices.get_mut(&connection_id) {
+            Some(DeviceEntry::Idle(state)) => state.start_waveform(request),
+            Some(DeviceEntry::Busy { .. }) => {
+                Err("connection is busy; retry the capture request".to_owned())
+            }
+            None => Err("connection does not exist".to_owned()),
+        }
+    };
+    if let Err(error) = result {
+        reject_command(runtime, Some(connection_id), &error);
+        return;
+    }
+    publish_snapshot(runtime, connection_id);
+    launch_device_step(runtime, connection_id, false);
 }
 
 fn configure_device(runtime: &SharedWorkerRuntime, request: DeviceConnectionRequest) {
@@ -538,11 +782,37 @@ async fn connect_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -
     let scope = runtime.borrow().scope.clone();
     let worker_scope: &WorkerGlobalScope = scope.as_ref();
     let result =
-        open_authenticated_session_in_worker(worker_scope, &state.origin, Digest::ZERO).await;
+        match open_authenticated_session_in_worker(worker_scope, &state.origin, Digest::ZERO).await
+        {
+            Ok(session) => fetch_device_identity_in_worker(worker_scope, &state.origin)
+                .await
+                .map(|identity| (session, identity)),
+            Err(error) => Err(error),
+        };
     let now_ms = worker_now_ms(&scope);
     match result {
-        Ok(session) => {
+        Ok((session, identity)) => {
+            let identity_changed = state
+                .identity
+                .as_ref()
+                .is_some_and(|previous| previous != &identity);
+            if identity_changed {
+                let _ = state.clock.reset();
+                state.history.clear();
+                state.estimate = None;
+                state.reset_runtime_health_for_new_boot();
+                state.reset_capability_for_new_boot();
+                state.reset_waveform_for_new_boot();
+            } else if state
+                .capability
+                .identity()
+                .is_some_and(|capability| capability != identity.capability())
+            {
+                state.reset_capability_for_new_boot();
+                state.reset_waveform_for_new_boot();
+            }
             state.session = Some(session);
+            state.identity = Some(identity);
             state.reset_runtime_health_evidence();
             state.phase = DeviceSessionPhase::Sampling;
             state.schedule_success(now_ms);
@@ -573,66 +843,17 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
         Ok(observation) => {
             state.record_observation(observation);
             state.schedule_success(now_ms);
-            if state.runtime_health_due(now_ms) {
-                let health_result = drive_runtime_health_in_worker(
-                    worker_scope,
-                    &state.origin,
-                    state
-                        .session
-                        .as_mut()
-                        .expect("clock probe retained its authenticated session"),
-                    &mut state.runtime_health,
-                    &state.secret,
-                )
-                .await;
-                let sampled_health_now_ms = worker_now_ms(&scope);
-                let health_now_ms = if sampled_health_now_ms.is_finite() {
-                    sampled_health_now_ms
-                } else {
-                    now_ms
-                };
-                state.schedule_runtime_health_attempt(health_now_ms);
-                match health_result {
-                    Ok(_) => state.record_runtime_health_success(),
-                    Err(error) => {
-                        if health_session_must_reopen(&error) {
-                            state.session = None;
-                        }
-                        state.record_runtime_health_failure(&error.to_string());
-                    }
-                }
-            }
+            probe_runtime_health(&scope, worker_scope, &mut state, now_ms).await;
+            download_capability(worker_scope, &mut state).await;
             if state.session.is_some()
-                && state.capability.phase() != CapabilityDownloadPhase::Complete
+                && state.capability.phase() == CapabilityDownloadPhase::Complete
+                && let Err(error) = capability_reconciles_identity(&state)
             {
-                for _ in 0..CAPABILITY_RANGES_PER_HEARTBEAT {
-                    let capability_result = drive_capability_step_in_worker(
-                        worker_scope,
-                        &state.origin,
-                        state
-                            .session
-                            .as_mut()
-                            .expect("capability burst retains its authenticated session"),
-                        &mut state.capability,
-                        &state.secret,
-                    )
-                    .await;
-                    match capability_result {
-                        Ok(phase) => {
-                            state.record_capability_success();
-                            if phase == CapabilityDownloadPhase::Complete {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            if capability_session_must_reopen(&error) {
-                                state.session = None;
-                            }
-                            state.record_capability_failure(&error.to_string());
-                            break;
-                        }
-                    }
-                }
+                state.record_capability_failure(error);
+                state.session = None;
+            }
+            if state.session.is_some() && state.waveform.is_some() {
+                drive_waveform_burst(worker_scope, &mut state).await;
             }
         }
         Err(error) => {
@@ -641,6 +862,8 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
                 state.history.clear();
                 state.reset_runtime_health_for_new_boot();
                 state.reset_capability_for_new_boot();
+                state.reset_waveform_for_new_boot();
+                state.identity = None;
             }
             if session_must_reopen(&error) {
                 state.session = None;
@@ -649,6 +872,169 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
         }
     }
     state
+}
+
+async fn probe_runtime_health(
+    scope: &DedicatedWorkerGlobalScope,
+    worker_scope: &WorkerGlobalScope,
+    state: &mut DeviceState,
+    fallback_now_ms: f64,
+) {
+    if !state.runtime_health_due(fallback_now_ms) {
+        return;
+    }
+    let health_result = drive_runtime_health_in_worker(
+        worker_scope,
+        &state.origin,
+        state
+            .session
+            .as_mut()
+            .expect("clock probe retained its authenticated session"),
+        &mut state.runtime_health,
+        &state.secret,
+    )
+    .await;
+    let sampled_now_ms = worker_now_ms(scope);
+    state.schedule_runtime_health_attempt(if sampled_now_ms.is_finite() {
+        sampled_now_ms
+    } else {
+        fallback_now_ms
+    });
+    match health_result {
+        Ok(_) => state.record_runtime_health_success(),
+        Err(error) => {
+            if health_session_must_reopen(&error) {
+                state.session = None;
+            }
+            state.record_runtime_health_failure(&error.to_string());
+        }
+    }
+}
+
+async fn download_capability(worker_scope: &WorkerGlobalScope, state: &mut DeviceState) {
+    if state.session.is_none() || state.capability.phase() == CapabilityDownloadPhase::Complete {
+        return;
+    }
+    for _ in 0..CAPABILITY_RANGES_PER_HEARTBEAT {
+        let result = drive_capability_step_in_worker(
+            worker_scope,
+            &state.origin,
+            state
+                .session
+                .as_mut()
+                .expect("capability burst retains its authenticated session"),
+            &mut state.capability,
+            &state.secret,
+        )
+        .await;
+        match result {
+            Ok(phase) => {
+                state.record_capability_success();
+                if phase == CapabilityDownloadPhase::Complete {
+                    break;
+                }
+            }
+            Err(error) => {
+                if capability_session_must_reopen(&error) {
+                    state.session = None;
+                }
+                state.record_capability_failure(&error.to_string());
+                break;
+            }
+        }
+    }
+}
+
+fn capability_reconciles_identity(state: &DeviceState) -> Result<(), &'static str> {
+    let identity = state
+        .identity
+        .as_ref()
+        .ok_or("public device identity is unavailable")?;
+    let capability_identity = state
+        .capability
+        .identity()
+        .ok_or("complete capability lacks an identity")?;
+    if capability_identity != identity.capability() {
+        return Err("public identity does not match signed capability identity");
+    }
+    let document = state
+        .capability
+        .document()
+        .ok_or("complete capability lacks canonical bytes")?;
+    let capability = decode_board_capability(document, BoardCapabilityLimits::interactive())
+        .map_err(|_| "complete capability cannot be decoded")?;
+    if capability.board_id() != identity.board_id() {
+        return Err("public board ID does not match signed capability bytes");
+    }
+    Ok(())
+}
+
+async fn drive_state_waveform(
+    worker_scope: &WorkerGlobalScope,
+    state: &mut DeviceState,
+) -> Result<WaveformClientPhase, BrowserWaveformError> {
+    let session = state
+        .session
+        .as_mut()
+        .expect("caller checked authenticated session");
+    let waveform = state
+        .waveform
+        .as_mut()
+        .expect("caller checked waveform lifecycle");
+    drive_waveform_step_in_worker(
+        worker_scope,
+        &state.origin,
+        session,
+        waveform,
+        &state.secret,
+    )
+    .await
+}
+
+async fn drive_waveform_burst(worker_scope: &WorkerGlobalScope, state: &mut DeviceState) {
+    for _ in 0..WAVEFORM_OPERATIONS_PER_HEARTBEAT {
+        let phase = state
+            .waveform
+            .as_ref()
+            .expect("caller checked waveform existence")
+            .phase();
+        if phase == WaveformClientPhase::Configured
+            && let Err(error) = state
+                .waveform
+                .as_mut()
+                .expect("caller checked waveform existence")
+                .request_arm()
+        {
+            state.record_waveform_failure(&error.to_string());
+            break;
+        }
+        let before = state
+            .waveform
+            .as_ref()
+            .expect("caller checked waveform existence")
+            .phase();
+        if matches!(
+            before,
+            WaveformClientPhase::Complete | WaveformClientPhase::Stopped
+        ) {
+            break;
+        }
+        match drive_state_waveform(worker_scope, state).await {
+            Ok(after) => {
+                state.record_waveform_success();
+                if after == WaveformClientPhase::Armed && before == WaveformClientPhase::Armed {
+                    break;
+                }
+            }
+            Err(error) => {
+                if waveform_session_must_reopen(&error) {
+                    state.session = None;
+                }
+                state.record_waveform_failure(&error.to_string());
+                break;
+            }
+        }
+    }
 }
 
 const fn clock_model_must_reset(error: &BrowserClockError) -> bool {
@@ -702,6 +1088,21 @@ const fn capability_session_must_reopen(error: &BrowserCapabilityError) -> bool 
     )
 }
 
+const fn waveform_session_must_reopen(error: &BrowserWaveformError) -> bool {
+    matches!(
+        error,
+        BrowserWaveformError::ConfigurationIdentity
+            | BrowserWaveformError::Session(_)
+            | BrowserWaveformError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
 fn finish_device_step(
     runtime: &SharedWorkerRuntime,
     connection_id: u64,
@@ -731,9 +1132,48 @@ fn finish_device_step(
         return;
     }
     publish_capability_document(runtime, connection_id);
+    publish_waveform_document(runtime, connection_id);
     publish_snapshot(runtime, connection_id);
     if probe_immediately {
         launch_device_step(runtime, connection_id, false);
+    }
+}
+
+fn publish_waveform_document(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    let transfer = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let Some(DeviceEntry::Idle(state)) = runtime_ref.devices.get_mut(&connection_id) else {
+            return;
+        };
+        if state.waveform_event_published {
+            return;
+        }
+        let Some(waveform) = state.waveform.as_ref() else {
+            return;
+        };
+        let Some(record) = waveform.record() else {
+            return;
+        };
+        let transfer =
+            WorkerWaveformDocument::try_new(state.connection_id, state.generation, record.to_vec());
+        if transfer.is_ok() {
+            state.waveform_event_published = true;
+        }
+        transfer
+    };
+    match transfer {
+        Ok(waveform) => emit_worker_event(
+            runtime,
+            WorkerEvent::WaveformDocument {
+                waveform: Box::new(waveform),
+            },
+        ),
+        Err(error) => emit_worker_event(
+            runtime,
+            WorkerEvent::Fatal {
+                message: format!("validated waveform transfer failed: {error}"),
+            },
+        ),
     }
 }
 
@@ -846,8 +1286,57 @@ pub struct SupervisorView {
     pub devices: Vec<DeviceSessionSnapshot>,
     /// Canonical connected-board documents decoded once per matching generation.
     pub capabilities: Vec<ConnectedCapabilityView>,
+    /// Latest complete capability- and boot-bound digital capture per connection.
+    pub waveforms: Vec<ConnectedWaveformView>,
     /// Oldest-to-newest bounded supervision diagnostics.
     pub diagnostics: Vec<String>,
+}
+
+/// Rendering-realm waveform evidence independently rebound to live session facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedWaveformView {
+    connection_id: u64,
+    generation: u64,
+    capture_id: [u8; 16],
+    record: Vec<u8>,
+}
+
+impl ConnectedWaveformView {
+    /// UI-local connection identity owning this capture.
+    #[must_use]
+    pub const fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
+
+    /// Worker generation in which the capture was acquired.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Exact capture attempt retained by this evidence record.
+    #[must_use]
+    pub const fn capture_id(&self) -> [u8; 16] {
+        self.capture_id
+    }
+
+    /// Reborrows the already validated canonical digital-capture record.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if immutable bytes retained after successful supervisor
+    /// admission are corrupted by an internal programming error.
+    #[must_use]
+    pub fn capture(&self) -> DigitalCaptureView<'_> {
+        decode_digital_capture(&self.record, DiagnosticLimits::interactive())
+            .expect("supervisor retained an independently validated capture")
+    }
+
+    /// Exact canonical record length.
+    #[must_use]
+    pub fn record_bytes(&self) -> usize {
+        self.record.len()
+    }
 }
 
 /// Rendering-realm board authority derived from one validated worker transfer.
@@ -882,6 +1371,7 @@ struct MutableSupervisorView {
     lifecycle: SupervisorLifecycle,
     devices: BTreeMap<u64, DeviceSessionSnapshot>,
     capabilities: BTreeMap<u64, ConnectedCapabilityView>,
+    waveforms: BTreeMap<u64, ConnectedWaveformView>,
     diagnostics: VecDeque<String>,
 }
 
@@ -891,6 +1381,7 @@ impl Default for MutableSupervisorView {
             lifecycle: SupervisorLifecycle::Starting,
             devices: BTreeMap::new(),
             capabilities: BTreeMap::new(),
+            waveforms: BTreeMap::new(),
             diagnostics: VecDeque::new(),
         }
     }
@@ -902,6 +1393,116 @@ impl MutableSupervisorView {
             self.diagnostics.pop_front();
         }
         self.diagnostics.push_back(message);
+    }
+
+    fn validate_waveform_transfer(
+        &self,
+        waveform: &WorkerWaveformDocument,
+    ) -> Result<(), &'static str> {
+        let snapshot = self
+            .devices
+            .get(&waveform.connection_id)
+            .filter(|snapshot| snapshot.generation == waveform.generation)
+            .ok_or("session generation is stale or absent")?;
+        let capability = self
+            .capabilities
+            .get(&waveform.connection_id)
+            .filter(|capability| capability.generation == waveform.generation)
+            .ok_or("matching complete board capability is absent")?;
+        let identity = snapshot
+            .device_identity
+            .as_ref()
+            .ok_or("public device identity is absent")?;
+        let device_id = identity
+            .validate()
+            .map_err(|_| "public device identity is invalid")?;
+        let capture = decode_digital_capture(waveform.record(), DiagnosticLimits::interactive())
+            .map_err(|_| "canonical capture decoding failed")?;
+        let context = capture.context();
+        if context.device_id != device_id
+            || context.capability != capability.board.identity()
+            || context.config_digest != Digest::ZERO
+            || snapshot.boot_id != Some(context.boot_id.as_bytes())
+            || identity.capability.identity().ok() != Some(context.capability)
+            || snapshot.waveform_capture_id != Some(capture.capture_id().as_bytes())
+        {
+            return Err("capture context does not match live device authority");
+        }
+        if snapshot
+            .history
+            .last()
+            .is_none_or(|latest| latest.frequency_hz != context.clock_frequency_hz)
+        {
+            return Err("capture clock frequency does not match signed heartbeat evidence");
+        }
+        for channel in capture.channels() {
+            let resource = capability
+                .board
+                .resource(channel.resource)
+                .ok_or("capture names a resource absent from the board capability")?;
+            if !resource
+                .graph_accesses()
+                .iter()
+                .any(|access| access.access == GraphResourceAccess::StableBooleanInput)
+            {
+                return Err("capture resource lacks stable Boolean input authority");
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_waveform_transfer(&mut self, waveform: &WorkerWaveformDocument) {
+        let connection_id = waveform.connection_id;
+        let generation = waveform.generation;
+        match self.validate_waveform_transfer(waveform) {
+            Ok(()) => {
+                let capture_id =
+                    decode_digital_capture(waveform.record(), DiagnosticLimits::interactive())
+                        .expect("validated waveform transfer remains canonical")
+                        .capture_id()
+                        .as_bytes();
+                self.waveforms.insert(
+                    connection_id,
+                    ConnectedWaveformView {
+                        connection_id,
+                        generation,
+                        capture_id,
+                        record: waveform.record().to_vec(),
+                    },
+                );
+            }
+            Err(error) => self.push_diagnostic(format!(
+                "connection {connection_id}: waveform transfer rejected: {error}"
+            )),
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: DeviceSessionSnapshot) {
+        if self
+            .capabilities
+            .get(&snapshot.connection_id)
+            .is_some_and(|capability| {
+                capability.generation != snapshot.generation
+                    || snapshot.capability_phase != CapabilityDownloadPhaseSnapshot::Complete
+                    || snapshot
+                        .capability_identity
+                        .and_then(|identity| identity.identity().ok())
+                        != Some(capability.board.identity())
+            })
+        {
+            self.capabilities.remove(&snapshot.connection_id);
+        }
+        if self
+            .waveforms
+            .get(&snapshot.connection_id)
+            .is_some_and(|waveform| {
+                waveform.generation != snapshot.generation
+                    || snapshot.waveform_capture_id != Some(waveform.capture_id)
+            })
+        {
+            self.waveforms.remove(&snapshot.connection_id);
+        }
+        self.devices.insert(snapshot.connection_id, snapshot);
     }
 
     fn apply(&mut self, envelope: WorkerEventEnvelope) {
@@ -919,16 +1520,7 @@ impl MutableSupervisorView {
             WorkerEvent::Ready { scope_origin } => {
                 self.lifecycle = SupervisorLifecycle::Ready { scope_origin };
             }
-            WorkerEvent::Snapshot { snapshot } => {
-                if self
-                    .capabilities
-                    .get(&snapshot.connection_id)
-                    .is_some_and(|capability| capability.generation != snapshot.generation)
-                {
-                    self.capabilities.remove(&snapshot.connection_id);
-                }
-                self.devices.insert(snapshot.connection_id, *snapshot);
-            }
+            WorkerEvent::Snapshot { snapshot } => self.apply_snapshot(*snapshot),
             WorkerEvent::CapabilityDocument { capability } => {
                 let connection_id = capability.connection_id;
                 let generation = capability.generation;
@@ -968,9 +1560,13 @@ impl MutableSupervisorView {
                     )),
                 }
             }
+            WorkerEvent::WaveformDocument { waveform } => {
+                self.apply_waveform_transfer(waveform.as_ref());
+            }
             WorkerEvent::Removed { connection_id } => {
                 self.devices.remove(&connection_id);
                 self.capabilities.remove(&connection_id);
+                self.waveforms.remove(&connection_id);
             }
             WorkerEvent::CommandRejected {
                 connection_id,
@@ -993,6 +1589,7 @@ impl MutableSupervisorView {
             lifecycle: self.lifecycle.clone(),
             devices: self.devices.values().cloned().collect(),
             capabilities: self.capabilities.values().cloned().collect(),
+            waveforms: self.waveforms.values().cloned().collect(),
             diagnostics: self.diagnostics.iter().cloned().collect(),
         }
     }

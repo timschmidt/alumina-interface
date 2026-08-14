@@ -17,6 +17,7 @@ use crate::capability::{
     CapabilityDownloadError, CapabilityDownloadMachine, CapabilityDownloadPhase,
 };
 use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
+use crate::diagnostics::{DiagnosticClientError, WaveformCaptureMachine, WaveformClientPhase};
 use crate::graph::{
     GraphInstallError, GraphInstallMachine, GraphInstallPhase, GraphRunError, GraphRunMachine,
     GraphRunPhase,
@@ -25,7 +26,9 @@ use crate::health::{RuntimeHealthClientError, RuntimeHealthModel, RuntimeHealthU
 use crate::http::{
     AUTHENTICATION_PATH, AuthenticatedHttpSession, AuthenticatedProtocolRequest,
     AuthenticatedProtocolResponse, AuthenticationChallenge, AuthenticationChallengeError,
-    CONTROL_PATH, HttpSessionError, NATIVE_FRAME_MEDIA_TYPE, decode_authentication_challenge,
+    CONTROL_PATH, DeviceIdentity, DeviceIdentityError, HttpSessionError, IDENTITY_PATH,
+    MAXIMUM_IDENTITY_BODY_BYTES, NATIVE_FRAME_MEDIA_TYPE, decode_authentication_challenge,
+    decode_device_identity,
 };
 use crate::upload::{CacheUploadError, CacheUploadMachine, CacheUploadPhase, UploadSource};
 
@@ -118,6 +121,10 @@ impl DeviceOrigin {
     fn authentication_url(&self) -> String {
         format!("{}{AUTHENTICATION_PATH}", self.origin)
     }
+
+    fn identity_url(&self) -> String {
+        format!("{}{IDENTITY_PATH}", self.origin)
+    }
 }
 
 /// Fetches and validates the device's public boot-scoped authentication policy.
@@ -180,6 +187,75 @@ async fn fetch_authentication_challenge_inner(
         .map_err(javascript_error)?;
     decode_authentication_challenge(&Uint8Array::new(&body).to_vec())
         .map_err(BrowserFetchError::Challenge)
+}
+
+/// Fetches and validates stable public device and board-package identity.
+pub async fn fetch_device_identity(
+    window: &Window,
+    origin: &DeviceOrigin,
+) -> Result<DeviceIdentity, BrowserFetchError> {
+    fetch_device_identity_inner(window, origin).await
+}
+
+/// Worker-scope variant of [`fetch_device_identity`].
+pub async fn fetch_device_identity_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+) -> Result<DeviceIdentity, BrowserFetchError> {
+    fetch_device_identity_inner(worker, origin).await
+}
+
+async fn fetch_device_identity_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+) -> Result<DeviceIdentity, BrowserFetchError> {
+    let init = RequestInit::new();
+    init.set_method("GET");
+    init.set_cache(RequestCache::NoStore);
+    init.set_credentials(RequestCredentials::Omit);
+    init.set_mode(RequestMode::Cors);
+    init.set_redirect(RequestRedirect::Error);
+    annotate_local_address_space(scope, &init)?;
+    let request =
+        Request::new_with_str_and_init(&origin.identity_url(), &init).map_err(javascript_error)?;
+    let response = JsFuture::from(scope.fetch_request(&request))
+        .await
+        .map_err(javascript_error)?
+        .dyn_into::<web_sys::Response>()
+        .map_err(javascript_error)?;
+    if response.status() != 200 {
+        return Err(BrowserFetchError::HttpStatus(response.status()));
+    }
+    let content_type = response
+        .headers()
+        .get("Content-Type")
+        .map_err(javascript_error)?
+        .ok_or(BrowserFetchError::MissingHeader("Content-Type"))?;
+    if content_type != JSON_MEDIA_TYPE {
+        return Err(BrowserFetchError::Media(content_type));
+    }
+    if let Some(content_length) = response
+        .headers()
+        .get("Content-Length")
+        .map_err(javascript_error)?
+    {
+        let parsed = content_length
+            .parse::<usize>()
+            .map_err(|_| BrowserFetchError::ContentLength(content_length.clone()))?;
+        if parsed == 0 || parsed > MAXIMUM_IDENTITY_BODY_BYTES {
+            return Err(BrowserFetchError::ContentLength(content_length));
+        }
+    }
+    let body = JsFuture::from(response.array_buffer().map_err(javascript_error)?)
+        .await
+        .map_err(javascript_error)?
+        .dyn_into::<ArrayBuffer>()
+        .map_err(javascript_error)?;
+    let body = Uint8Array::new(&body).to_vec();
+    if body.is_empty() || body.len() > MAXIMUM_IDENTITY_BODY_BYTES {
+        return Err(BrowserFetchError::BodyLength(body.len()));
+    }
+    decode_device_identity(&body).map_err(BrowserFetchError::Identity)
 }
 
 /// Opens a fresh HMAC session bound to the actual browser document origin.
@@ -471,6 +547,61 @@ async fn drive_capability_step_inner(
     };
     download.accept_response(&response)?;
     Ok(download.phase())
+}
+
+/// Drives one retry-safe authenticated waveform operation in the browser realm.
+pub async fn drive_waveform_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    capture: &mut WaveformCaptureMachine,
+    secret: &[u8],
+) -> Result<WaveformClientPhase, BrowserWaveformError> {
+    drive_waveform_step_inner(window, origin, session, capture, secret).await
+}
+
+/// Worker-scope variant of [`drive_waveform_step`].
+pub async fn drive_waveform_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    capture: &mut WaveformCaptureMachine,
+    secret: &[u8],
+) -> Result<WaveformClientPhase, BrowserWaveformError> {
+    drive_waveform_step_inner(worker, origin, session, capture, secret).await
+}
+
+async fn drive_waveform_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    capture: &mut WaveformCaptureMachine,
+    secret: &[u8],
+) -> Result<WaveformClientPhase, BrowserWaveformError> {
+    if !session.config_digest().is_zero() {
+        return Err(BrowserWaveformError::ConfigurationIdentity);
+    }
+    let Some(operation) = capture.next_request()? else {
+        return Ok(capture.phase());
+    };
+    let request = match session.begin_request(operation.operation, &operation.body, secret) {
+        Ok(request) => request,
+        Err(error) => {
+            capture.abandon_pending();
+            return Err(BrowserWaveformError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            capture.abandon_pending();
+            return Err(BrowserWaveformError::Fetch(error));
+        }
+    };
+    capture.accept_response(&response)?;
+    Ok(capture.phase())
 }
 
 /// Returns the browser-generated calling origin used by the CORS `Origin` header.
@@ -783,8 +914,12 @@ pub enum BrowserFetchError {
     Media(String),
     /// Public authentication discovery was malformed or incompatible.
     Challenge(AuthenticationChallengeError),
+    /// Public device identity was malformed or internally inconsistent.
+    Identity(DeviceIdentityError),
     /// Public discovery body declared a length outside the exact fixed schema.
     ContentLength(String),
+    /// A public response body exceeded its endpoint-specific bound.
+    BodyLength(usize),
     /// Response failed exact HMAC/native-protocol validation.
     Session(HttpSessionError),
 }
@@ -804,11 +939,15 @@ impl fmt::Display for BrowserFetchError {
             }
             Self::Media(media) => write!(formatter, "unsupported response media {media}"),
             Self::Challenge(error) => write!(formatter, "device challenge rejected: {error}"),
+            Self::Identity(error) => write!(formatter, "device identity rejected: {error}"),
             Self::ContentLength(length) => {
                 write!(
                     formatter,
-                    "device challenge declared content length {length}"
+                    "device public response declared content length {length}"
                 )
+            }
+            Self::BodyLength(length) => {
+                write!(formatter, "device public response contained {length} bytes")
             }
             Self::Session(error) => write!(formatter, "authenticated session failed: {error}"),
         }
@@ -925,6 +1064,42 @@ impl fmt::Display for BrowserCapabilityError {
 }
 
 impl std::error::Error for BrowserCapabilityError {}
+
+/// One authenticated browser waveform-lifecycle failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserWaveformError {
+    /// Diagnostic reads in this worker require the unconfigured device context.
+    ConfigurationIdentity,
+    /// Local configure, lifecycle, range, or retained-record validation failed.
+    Diagnostic(DiagnosticClientError),
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+}
+
+impl From<DiagnosticClientError> for BrowserWaveformError {
+    fn from(value: DiagnosticClientError) -> Self {
+        Self::Diagnostic(value)
+    }
+}
+
+impl fmt::Display for BrowserWaveformError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigurationIdentity => {
+                formatter.write_str("waveform reads require a zero-configuration session")
+            }
+            Self::Diagnostic(error) => write!(formatter, "waveform state rejected: {error}"),
+            Self::Session(error) => {
+                write!(formatter, "waveform request construction failed: {error}")
+            }
+            Self::Fetch(error) => write!(formatter, "waveform fetch failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserWaveformError {}
 
 /// One-step browser delivery failure with transport versus upload semantics preserved.
 #[derive(Clone, Debug, Eq, PartialEq)]

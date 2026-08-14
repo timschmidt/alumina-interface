@@ -2,12 +2,13 @@
 
 use std::fmt;
 
+use alumina_capability::{BoardCapabilityLimits, CapabilityIdentity};
 use alumina_net::{
     AUTH_COUNTER_HEADER, AUTH_DISCOVERY_BODY_BYTES, AUTH_PROOF_HEADER, AUTH_RESPONSE_HEADER,
     AUTH_TAG_HEX_BYTES, AuthError, AuthenticatedMedia, BootNonce, CorsOrigin, HttpMethod,
     ResponseProof, parse_request_proof, sign_request, verify_response_proof, write_lower_hex,
 };
-use alumina_protocol::{Digest, Operation};
+use alumina_protocol::{DeviceId, Digest, Operation};
 use serde::Deserialize;
 
 use crate::{RequestEncodeError, Response, ResponseDecodeError, decode_response, encode_request};
@@ -16,10 +17,175 @@ use crate::{RequestEncodeError, Response, ResponseDecodeError, decode_response, 
 pub const CONTROL_PATH: &str = "/api/v1/control";
 /// Public firmware route returning the boot-scoped authentication challenge.
 pub const AUTHENTICATION_PATH: &str = "/api/v1/auth";
+/// Public firmware route returning stable device and board-package identity.
+pub const IDENTITY_PATH: &str = "/api/v1/identity";
 /// Exact media type required by the firmware control route.
 pub const NATIVE_FRAME_MEDIA_TYPE: &str = "application/vnd.alumina.frame";
 
+/// Maximum public identity JSON admitted by browser and native clients.
+pub const MAXIMUM_IDENTITY_BODY_BYTES: usize = 512;
+
 const AUTHENTICATION_SCHEME: &str = "hmac-sha256-v2";
+const MAXIMUM_BOARD_ID_BYTES: usize = 64;
+
+/// Credential provenance reported without disclosing any credential bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceCredentialSource {
+    /// Repository development fallback; never production-armable.
+    DevelopmentFallback,
+    /// Secret supplied outside source control when the image was built.
+    BuildProvisioned,
+    /// Unique credential loaded from transactional device storage.
+    DeviceStored,
+}
+
+impl DeviceCredentialSource {
+    const fn parse(value: &str) -> Option<Self> {
+        match value.as_bytes() {
+            b"development-fallback" => Some(Self::DevelopmentFallback),
+            b"build-provisioned" => Some(Self::BuildProvisioned),
+            b"device-stored" => Some(Self::DeviceStored),
+            _ => None,
+        }
+    }
+
+    /// Whether this provenance is eligible for production arming.
+    pub const fn production_armable(self) -> bool {
+        matches!(self, Self::DeviceStored)
+    }
+}
+
+/// Strict public identity facts subsequently reconciled with signed native data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceIdentity {
+    board_id: String,
+    credential_source: DeviceCredentialSource,
+    device_id: DeviceId,
+    capability: CapabilityIdentity,
+}
+
+impl DeviceIdentity {
+    /// Stable board-package identifier reported by the running image.
+    pub fn board_id(&self) -> &str {
+        &self.board_id
+    }
+
+    /// Non-secret access-point credential provenance.
+    pub const fn credential_source(&self) -> DeviceCredentialSource {
+        self.credential_source
+    }
+
+    /// Stable physical or explicitly simulated device identity.
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+
+    /// Exact canonical board-capability identity advertised by the image.
+    pub const fn capability(&self) -> CapabilityIdentity {
+        self.capability
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceIdentityWire<'a> {
+    protocol_version: u16,
+    board_id: &'a str,
+    credential_source: &'a str,
+    production_armable: bool,
+    device_id: &'a str,
+    capability_digest: &'a str,
+    capability_document_bytes: u32,
+}
+
+/// Decodes and bounds the current public firmware identity schema.
+pub fn decode_device_identity(bytes: &[u8]) -> Result<DeviceIdentity, DeviceIdentityError> {
+    if bytes.is_empty() || bytes.len() > MAXIMUM_IDENTITY_BODY_BYTES {
+        return Err(DeviceIdentityError::Json);
+    }
+    let wire: DeviceIdentityWire<'_> =
+        serde_json::from_slice(bytes).map_err(|_| DeviceIdentityError::Json)?;
+    if wire.protocol_version != 1 {
+        return Err(DeviceIdentityError::Version);
+    }
+    if wire.board_id.is_empty()
+        || wire.board_id.len() > MAXIMUM_BOARD_ID_BYTES
+        || !wire.board_id.as_bytes().iter().copied().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(DeviceIdentityError::Board);
+    }
+    let credential_source = DeviceCredentialSource::parse(wire.credential_source)
+        .ok_or(DeviceIdentityError::CredentialSource)?;
+    if wire.production_armable != credential_source.production_armable() {
+        return Err(DeviceIdentityError::CredentialSource);
+    }
+    let device_id = DeviceId(decode_exact_lower_hex::<16>(wire.device_id)?);
+    if device_id.0.iter().all(|byte| *byte == 0) {
+        return Err(DeviceIdentityError::Device);
+    }
+    let digest = Digest(decode_exact_lower_hex::<32>(wire.capability_digest)?);
+    let limits = BoardCapabilityLimits::interactive();
+    let minimum = u32::try_from(alumina_capability::CAPABILITY_DOCUMENT_HEADER_BYTES)
+        .expect("fixed capability header length fits u32");
+    if digest.is_zero()
+        || wire.capability_document_bytes < minimum
+        || wire.capability_document_bytes > limits.maximum_document_bytes
+    {
+        return Err(DeviceIdentityError::Capability);
+    }
+    Ok(DeviceIdentity {
+        board_id: wire.board_id.to_owned(),
+        credential_source,
+        device_id,
+        capability: CapabilityIdentity {
+            byte_len: wire.capability_document_bytes,
+            digest,
+        },
+    })
+}
+
+fn decode_exact_lower_hex<const N: usize>(value: &str) -> Result<[u8; N], DeviceIdentityError> {
+    if value.len() != N * 2 {
+        return Err(DeviceIdentityError::Hex);
+    }
+    let mut decoded = [0_u8; N];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        let high = decode_lower_hex(value.as_bytes()[index * 2]).ok_or(DeviceIdentityError::Hex)?;
+        let low =
+            decode_lower_hex(value.as_bytes()[index * 2 + 1]).ok_or(DeviceIdentityError::Hex)?;
+        *byte = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+/// Invalid or incompatible public device-identity response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceIdentityError {
+    /// Body was not the single bounded current JSON schema.
+    Json,
+    /// Protocol version is unsupported.
+    Version,
+    /// Board identifier was empty, oversized, or noncanonical.
+    Board,
+    /// Credential provenance contradicted production eligibility.
+    CredentialSource,
+    /// Stable device identity was absent or zero.
+    Device,
+    /// Capability digest or length was outside the interactive policy.
+    Capability,
+    /// A fixed identity field was not exact lowercase hexadecimal.
+    Hex,
+}
+
+impl fmt::Display for DeviceIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "device identity rejected: {self:?}")
+    }
+}
+
+impl std::error::Error for DeviceIdentityError {}
 
 /// Validated boot-scoped firmware authentication discovery response.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -566,6 +732,47 @@ mod tests {
         assert_eq!(
             decode_authentication_challenge(&changed_policy_bytes),
             Err(AuthenticationChallengeError::Policy)
+        );
+    }
+
+    #[test]
+    fn public_device_identity_is_bounded_and_semantically_strict() {
+        let bytes = br#"{"protocol_version":1,"board_id":"mks-tinybee-v1","credential_source":"development-fallback","production_armable":false,"device_id":"414c554d2d53494d3a54494e59424545","capability_digest":"1111111111111111111111111111111111111111111111111111111111111111","capability_document_bytes":3435}"#;
+        let identity = decode_device_identity(bytes).unwrap();
+        assert_eq!(identity.board_id(), "mks-tinybee-v1");
+        assert_eq!(identity.device_id(), DeviceId(*b"ALUM-SIM:TINYBEE"));
+        assert_eq!(identity.capability().byte_len, 3435);
+        assert_eq!(identity.capability().digest, Digest([0x11; 32]));
+        assert_eq!(
+            identity.credential_source(),
+            DeviceCredentialSource::DevelopmentFallback
+        );
+
+        let contradictory = bytes
+            .windows(b"\"production_armable\":false".len())
+            .position(|window| window == b"\"production_armable\":false")
+            .unwrap();
+        let mut contradictory_bytes = bytes.to_vec();
+        contradictory_bytes.splice(
+            contradictory + b"\"production_armable\":".len()
+                ..contradictory + b"\"production_armable\":false".len(),
+            b"true".iter().copied(),
+        );
+        assert_eq!(
+            decode_device_identity(&contradictory_bytes),
+            Err(DeviceIdentityError::CredentialSource)
+        );
+
+        let mut uppercase = bytes.to_vec();
+        let device_start = uppercase
+            .windows(b"\"device_id\":\"".len())
+            .position(|window| window == b"\"device_id\":\"")
+            .unwrap()
+            + b"\"device_id\":\"".len();
+        uppercase[device_start] = b'A';
+        assert_eq!(
+            decode_device_identity(&uppercase),
+            Err(DeviceIdentityError::Hex)
         );
     }
 

@@ -13,6 +13,15 @@ mod workspace_file;
 
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_arch = "wasm32")]
+use std::collections::BTreeMap;
+
+#[cfg(target_arch = "wasm32")]
+use alumina_board::GraphResourceAccess;
+#[cfg(target_arch = "wasm32")]
+use alumina_capability::encode_resource_id;
+#[cfg(target_arch = "wasm32")]
+use alumina_diagnostics::{DigitalCaptureFlags, DigitalLevel};
 use alumina_interface_core::{
     CanonicalGlobalJob2, CanonicalMachinePartition2, CanonicalPathProgram2, ExactScene, ExactValue,
     Millimetres, compile_representative_global_job, compile_representative_program,
@@ -25,7 +34,7 @@ use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 
 #[cfg(target_arch = "wasm32")]
 use crate::browser_worker::{
-    BrowserWorkerSupervisor, ConnectedCapabilityView, SupervisorLifecycle,
+    BrowserWorkerSupervisor, ConnectedCapabilityView, ConnectedWaveformView, SupervisorLifecycle,
 };
 use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
@@ -36,7 +45,8 @@ use crate::machine_cam_ui::MachineCamWorkspace;
 use alumina_interface_client::worker::{
     CapabilityDownloadPhaseSnapshot, ClockSamplingPolicy, DeviceConnectionRequest,
     DeviceSessionPhase, DeviceSessionSnapshot, ExecutorStackSnapshot,
-    RuntimeHealthAvailabilitySnapshot, WorkerCommand,
+    RuntimeHealthAvailabilitySnapshot, WaveformCapturePhaseSnapshot, WorkerCommand,
+    WorkerWaveformRequest,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -45,6 +55,13 @@ struct LiveDeviceForm {
     origin: String,
     secret: String,
     error: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+enum LiveDeviceAction {
+    Probe(u64),
+    Capture(WorkerWaveformRequest),
+    Disconnect(u64),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -187,6 +204,8 @@ pub struct AluminaApp {
     live_device_form: LiveDeviceForm,
     #[cfg(target_arch = "wasm32")]
     next_connection_id: u64,
+    #[cfg(target_arch = "wasm32")]
+    live_capture_cursors: BTreeMap<u64, u64>,
 }
 
 impl AluminaApp {
@@ -297,6 +316,8 @@ impl AluminaApp {
             live_device_form: LiveDeviceForm::default(),
             #[cfg(target_arch = "wasm32")]
             next_connection_id: 1,
+            #[cfg(target_arch = "wasm32")]
+            live_capture_cursors: BTreeMap::new(),
         }
     }
 
@@ -677,8 +698,22 @@ impl AluminaApp {
                 capability.connection_id() == snapshot.connection_id
                     && capability.generation() == snapshot.generation
             });
-            show_live_device_snapshot(ui, snapshot, capability, &mut actions);
+            let waveform = view.waveforms.iter().find(|waveform| {
+                waveform.connection_id() == snapshot.connection_id
+                    && waveform.generation() == snapshot.generation
+                    && snapshot.waveform_capture_id == Some(waveform.capture_id())
+            });
+            let cursor = self
+                .live_capture_cursors
+                .entry(snapshot.connection_id)
+                .or_insert(0);
+            show_live_device_snapshot(ui, snapshot, capability, waveform, cursor, &mut actions);
         }
+        self.live_capture_cursors.retain(|connection_id, _| {
+            view.devices
+                .iter()
+                .any(|snapshot| snapshot.connection_id == *connection_id)
+        });
         self.apply_live_actions(actions);
         if !view.diagnostics.is_empty() {
             ui.separator();
@@ -739,12 +774,14 @@ impl AluminaApp {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn apply_live_actions(&mut self, actions: Vec<(u64, bool)>) {
-        for (connection_id, disconnect) in actions {
-            let command = if disconnect {
-                WorkerCommand::Disconnect { connection_id }
-            } else {
-                WorkerCommand::ProbeNow { connection_id }
+    fn apply_live_actions(&mut self, actions: Vec<LiveDeviceAction>) {
+        for action in actions {
+            let command = match action {
+                LiveDeviceAction::Probe(connection_id) => WorkerCommand::ProbeNow { connection_id },
+                LiveDeviceAction::Capture(request) => WorkerCommand::CaptureWaveform { request },
+                LiveDeviceAction::Disconnect(connection_id) => {
+                    WorkerCommand::Disconnect { connection_id }
+                }
             };
             if let Some(worker) = &self.worker
                 && let Err(error) = worker.send(command)
@@ -788,7 +825,9 @@ fn show_live_device_snapshot(
     ui: &mut egui::Ui,
     snapshot: &DeviceSessionSnapshot,
     capability: Option<&ConnectedCapabilityView>,
-    actions: &mut Vec<(u64, bool)>,
+    waveform: Option<&ConnectedWaveformView>,
+    capture_cursor: &mut u64,
+    actions: &mut Vec<LiveDeviceAction>,
 ) {
     ui.separator();
     ui.collapsing(
@@ -798,6 +837,15 @@ fn show_live_device_snapshot(
             ui.label(format!("session generation: {}", snapshot.generation));
             if let Some(boot_id) = snapshot.boot_id {
                 ui.label(format!("boot: {}", encode_hex(&boot_id)));
+            }
+            if let Some(identity) = &snapshot.device_identity {
+                ui.label(format!(
+                    "device: {} · board claim: {} · credential: {:?} · production-armable credential: {}",
+                    encode_hex(&identity.device_id),
+                    identity.board_id,
+                    identity.credential_source,
+                    identity.credential_source.production_armable()
+                ));
             }
             ui.label(format!(
                 "clock samples: {} accepted / {} rejected",
@@ -832,6 +880,7 @@ fn show_live_device_snapshot(
             }
             show_live_capability_snapshot(ui, snapshot, capability);
             show_runtime_health_snapshot(ui, snapshot);
+            show_live_waveform_status(ui, snapshot, capability, waveform, capture_cursor);
             if snapshot.phase == DeviceSessionPhase::DeviceUnhealthy {
                 ui.colored_label(
                     egui::Color32::RED,
@@ -841,14 +890,7 @@ fn show_live_device_snapshot(
             if let Some(error) = &snapshot.last_error {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
-            ui.horizontal(|ui| {
-                if ui.button("Probe now").clicked() {
-                    actions.push((snapshot.connection_id, false));
-                }
-                if ui.button("Disconnect").clicked() {
-                    actions.push((snapshot.connection_id, true));
-                }
-            });
+            show_live_device_actions(ui, snapshot, capability, actions);
             if snapshot.history.len() > 1 {
                 ui.collapsing("Recent causal spans", |ui| {
                     for record in snapshot.history.iter().rev().take(8) {
@@ -864,6 +906,41 @@ fn show_live_device_snapshot(
             }
         },
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_device_actions(
+    ui: &mut egui::Ui,
+    snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
+    actions: &mut Vec<LiveDeviceAction>,
+) {
+    ui.horizontal(|ui| {
+        if ui.button("Probe now").clicked() {
+            actions.push(LiveDeviceAction::Probe(snapshot.connection_id));
+        }
+        if let Some(request) = default_live_waveform_request(snapshot, capability) {
+            let available = matches!(
+                snapshot.waveform_phase,
+                None | Some(
+                    WaveformCapturePhaseSnapshot::Complete
+                        | WaveformCapturePhaseSnapshot::Stopped
+                )
+            );
+            if ui
+                .add_enabled(available, egui::Button::new("Capture inputs (2 ms)"))
+                .on_hover_text(
+                    "Starts only the diagnostic input acquisition; it grants no machine arm, output, or resource-write authority.",
+                )
+                .clicked()
+            {
+                actions.push(LiveDeviceAction::Capture(request));
+            }
+        }
+        if ui.button("Disconnect").clicked() {
+            actions.push(LiveDeviceAction::Disconnect(snapshot.connection_id));
+        }
+    });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -955,6 +1032,333 @@ fn show_live_capability_snapshot(
     if let Some(error) = &snapshot.capability_last_error {
         ui.colored_label(egui::Color32::LIGHT_RED, error);
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_live_waveform_request(
+    snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
+) -> Option<WorkerWaveformRequest> {
+    let capability = capability?;
+    let identity = snapshot.device_identity.as_ref()?;
+    let latest = snapshot.history.last()?;
+    if snapshot.boot_id.is_none()
+        || identity.board_id != capability.board().board_id()
+        || identity.capability.identity().ok()? != capability.board().identity()
+    {
+        return None;
+    }
+    let mut resources = capability
+        .board()
+        .resources()
+        .iter()
+        .filter(|resource| {
+            resource
+                .graph_accesses()
+                .iter()
+                .any(|access| access.access == GraphResourceAccess::StableBooleanInput)
+        })
+        .map(|resource| resource.descriptor().id)
+        .collect::<Vec<_>>();
+    resources.sort_unstable();
+    resources.truncate(4);
+    if resources.is_empty() {
+        return None;
+    }
+    let duration_cycles = latest.frequency_hz.saturating_add(499) / 500;
+    Some(WorkerWaveformRequest {
+        connection_id: snapshot.connection_id,
+        channels: resources.into_iter().map(encode_resource_id).collect(),
+        duration_cycles: duration_cycles.max(1),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_waveform_status(
+    ui: &mut egui::Ui,
+    snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
+    waveform: Option<&ConnectedWaveformView>,
+    capture_cursor: &mut u64,
+) {
+    ui.separator();
+    ui.strong("Capability-bound digital logic capture");
+    match snapshot.waveform_phase {
+        None => {
+            ui.label("No input capture has been requested in this worker generation.");
+        }
+        Some(phase) => {
+            ui.label(format!("diagnostic acquisition: {phase:?}"));
+            if phase == WaveformCapturePhaseSnapshot::Downloading {
+                ui.label(format!(
+                    "canonical range assembly: {} / {} bytes",
+                    snapshot.waveform_received_bytes, snapshot.waveform_total_bytes
+                ));
+            }
+            if phase == WaveformCapturePhaseSnapshot::Complete && waveform.is_none() {
+                ui.label("Complete worker evidence is awaiting rendering-realm admission.");
+            }
+        }
+    }
+    if snapshot.waveform_consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive waveform failures: {}",
+            snapshot.waveform_consecutive_failures
+        ));
+    }
+    if let Some(error) = &snapshot.waveform_last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+    if let (Some(capability), Some(waveform)) = (capability, waveform) {
+        show_live_waveform_plot(ui, capability.board(), waveform, capture_cursor);
+    }
+    ui.small(
+        "This path configures and arms only an input diagnostic acquisition. It cannot lease resources, write pins, schedule motion, energize outputs, or arm the machine.",
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines,
+    reason = "screen projection is lossy while retained device cycles remain exact integers"
+)]
+fn show_live_waveform_plot(
+    ui: &mut egui::Ui,
+    board: &alumina_interface_core::BoardExplorerSnapshot,
+    waveform: &ConnectedWaveformView,
+    capture_cursor: &mut u64,
+) {
+    let capture = waveform.capture();
+    let context = capture.context();
+    let simulated = capture.flags().contains(DigitalCaptureFlags::SIMULATED);
+    ui.colored_label(
+        if simulated {
+            egui::Color32::YELLOW
+        } else {
+            egui::Color32::LIGHT_GREEN
+        },
+        if simulated {
+            "SIMULATED canonical input evidence — no physical measurement claim"
+        } else {
+            "Canonical device input evidence"
+        },
+    );
+    let (start, end) = capture.cycle_window();
+    let duration = end.0.saturating_sub(start.0).max(1);
+    let (trigger_cycle, _, trigger, _) = capture.trigger();
+    ui.horizontal_wrapped(|ui| {
+        ui.monospace(format!(
+            "ALMDIG01 {} B · {} Hz · [{}..{})",
+            waveform.record_bytes(),
+            context.clock_frequency_hz,
+            start.0,
+            end.0
+        ));
+        ui.label(format!(
+            "{:?}; {} channels; {} transitions; trigger {:?} at {}",
+            capture.state(),
+            capture.channel_count(),
+            capture.transition_count(),
+            trigger,
+            trigger_cycle.0
+        ));
+    });
+
+    let channel_count = capture.channel_count();
+    if channel_count == 0 {
+        return;
+    }
+    let width = ui.available_width().max(360.0);
+    let height = 45.0 + 40.0 * channel_count as f32;
+    let (response, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
+    let plot = egui::Rect::from_min_max(
+        response.rect.min + egui::vec2(170.0, 10.0),
+        response.rect.max - egui::vec2(12.0, 28.0),
+    );
+    painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+    if let Some(pointer) = response.hover_pos().filter(|point| plot.contains(*point)) {
+        let ratio = ((pointer.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
+        *capture_cursor = (f64::from(ratio) * duration as f64).floor() as u64;
+    }
+    *capture_cursor = (*capture_cursor).min(duration.saturating_sub(1));
+
+    for grid in 0..=4_u64 {
+        let offset = duration.saturating_mul(grid) / 4;
+        let x = live_capture_x(plot, offset, duration);
+        painter.line_segment(
+            [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
+            egui::Stroke::new(0.7_f32, egui::Color32::from_gray(49)),
+        );
+        painter.text(
+            egui::pos2(x, plot.bottom() + 4.0),
+            egui::Align2::CENTER_TOP,
+            offset.to_string(),
+            egui::FontId::monospace(9.0),
+            egui::Color32::GRAY,
+        );
+    }
+    let cursor_x = live_capture_x(plot, *capture_cursor, duration);
+    painter.line_segment(
+        [
+            egui::pos2(cursor_x, plot.top()),
+            egui::pos2(cursor_x, plot.bottom()),
+        ],
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(150)),
+    );
+
+    let lane_height = plot.height() / channel_count as f32;
+    for (index, channel) in capture.channels().enumerate() {
+        let lane_top = plot.top() + lane_height * index as f32;
+        let center = lane_top + lane_height * 0.5;
+        let color = live_capture_color(index);
+        painter.text(
+            egui::pos2(plot.left() - 8.0, center),
+            egui::Align2::RIGHT_CENTER,
+            live_resource_label(board, channel.resource),
+            egui::FontId::monospace(10.0),
+            color,
+        );
+        let channel_index = u16::try_from(index).expect("canonical channel index fits u16");
+        let mut level = channel.initial_level;
+        let mut prior_offset = 0_u64;
+        for transition in capture
+            .transitions()
+            .filter(|transition| transition.channel_index == channel_index)
+        {
+            let from_x = live_capture_x(plot, prior_offset, duration);
+            let to_x = live_capture_x(plot, transition.offset_cycles, duration);
+            let from_y = live_level_y(center, level);
+            let to_y = live_level_y(center, transition.level);
+            painter.line_segment(
+                [egui::pos2(from_x, from_y), egui::pos2(to_x, from_y)],
+                egui::Stroke::new(1.8_f32, color),
+            );
+            painter.line_segment(
+                [egui::pos2(to_x, from_y), egui::pos2(to_x, to_y)],
+                egui::Stroke::new(1.8_f32, color),
+            );
+            prior_offset = transition.offset_cycles;
+            level = transition.level;
+        }
+        painter.line_segment(
+            [
+                egui::pos2(
+                    live_capture_x(plot, prior_offset, duration),
+                    live_level_y(center, level),
+                ),
+                egui::pos2(plot.right(), live_level_y(center, level)),
+            ],
+            egui::Stroke::new(1.8_f32, color),
+        );
+        let cursor_level = live_capture_level_at(capture, channel_index, *capture_cursor);
+        painter.circle_filled(
+            egui::pos2(cursor_x, live_level_y(center, cursor_level)),
+            3.0,
+            color,
+        );
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.strong(format!(
+            "cursor +{} cycles · absolute {}",
+            *capture_cursor,
+            start.0.saturating_add(*capture_cursor)
+        ));
+        for (index, channel) in capture.channels().enumerate() {
+            let level = live_capture_level_at(
+                capture,
+                u16::try_from(index).expect("canonical channel index fits u16"),
+                *capture_cursor,
+            );
+            ui.colored_label(
+                live_capture_color(index),
+                format!(
+                    "{} {}",
+                    live_resource_label(board, channel.resource),
+                    match level {
+                        DigitalLevel::Low => "LOW",
+                        DigitalLevel::High => "HIGH",
+                        DigitalLevel::Unknown => "UNKNOWN",
+                    }
+                ),
+            );
+        }
+    });
+    ui.small(
+        "Hover the trace for an exact device-cycle cursor. Channel labels are resolved from the same capability resources and annotated-image hotspots shown by the board package.",
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn live_capture_level_at(
+    capture: alumina_diagnostics::DigitalCaptureView<'_>,
+    channel_index: u16,
+    offset: u64,
+) -> DigitalLevel {
+    let mut level = capture
+        .channel(channel_index)
+        .expect("canonical channel index is present")
+        .initial_level;
+    for transition in capture.transitions() {
+        if transition.offset_cycles > offset {
+            break;
+        }
+        if transition.channel_index == channel_index {
+            level = transition.level;
+        }
+    }
+    level
+}
+
+#[cfg(target_arch = "wasm32")]
+fn live_resource_label(
+    board: &alumina_interface_core::BoardExplorerSnapshot,
+    resource: alumina_board::ResourceId,
+) -> String {
+    board.resource(resource).map_or_else(
+        || format!("{resource:?}"),
+        |entry| {
+            entry
+                .aliases()
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("{resource:?}"))
+        },
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "bounded screen projection"
+)]
+fn live_capture_x(rect: egui::Rect, offset: u64, duration: u64) -> f32 {
+    rect.left() + rect.width() * (offset.min(duration) as f64 / duration.max(1) as f64) as f32
+}
+
+#[cfg(target_arch = "wasm32")]
+const fn live_level_y(center: f32, level: DigitalLevel) -> f32 {
+    match level {
+        DigitalLevel::High => center - 8.0,
+        DigitalLevel::Low => center + 8.0,
+        DigitalLevel::Unknown => center,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn live_capture_color(index: usize) -> egui::Color32 {
+    const COLORS: [egui::Color32; 6] = [
+        egui::Color32::from_rgb(103, 193, 232),
+        egui::Color32::from_rgb(248, 183, 82),
+        egui::Color32::from_rgb(126, 211, 133),
+        egui::Color32::from_rgb(211, 132, 226),
+        egui::Color32::from_rgb(239, 111, 108),
+        egui::Color32::from_rgb(123, 216, 204),
+    ];
+    COLORS[index % COLORS.len()]
 }
 
 #[cfg(target_arch = "wasm32")]
