@@ -4,12 +4,12 @@ The browser compiler packages canonical integer motion using the real sibling
 `aluminafw` schemas. It does not own a second block, storage, manifest, or
 `JobPrepare` representation.
 
-The sibling machine boundary is now `ALMBLK02`/schema V2 with separately bound
-coordinated-motion and direct Q31.32 finite-difference kinds. This document's
-current compiler path deliberately emits kind `1` coordinated records and sets
-the real `ALMJOBD3` descriptor to that same kind with a zero direct-update
-limit. Browser lowering to kind `2` is a new authoritative-CAM stage, not a
-compatibility interpretation of the records described here.
+The sibling machine boundary is `ALMBLK03`/schema V3 with separately bound
+coordinated-motion, direct Q31.32 step-crossing, and Q31.32/Q2.30 servo
+finite-difference kinds. The real `ALMJOBD4` descriptor repeats the selected
+kind. Ordinary motion binds both dense-update fields to zero; either recurrence
+kind binds an exact device cadence and maximum updates per record. There is no
+V2/V3 compatibility interpretation.
 
 ## One-way artifact pipeline
 
@@ -86,13 +86,13 @@ The current line/arc/cubic fixture uses the exact-CAM policy documented in
 segment, and 700-byte storage chunks. It produces:
 
 ```text
-partition_blocks=20
-partition_bytes=10240
-storage_chunks=15
+partition_blocks=18
+partition_bytes=9216
+storage_chunks=14
 maximum_observed_block_ticks=449740
-partition_sha256=49e4292876fbf4d0d2c83b1adbf5f6d8069faf3603fd6243bed06786a4f7401e
-chunk_manifest_sha256=6aeb0b3fcf14b087d02683d956fd215488a89bf57b191526f189cd379c00376c
-terminal_block_sha256=ec0b6b3c82d61f23180c32f709676e93f7402e03e37c4bf177348d95f91b5285
+partition_sha256=ccd0a47153dae2c1f7dff1697f7b2d8d1a229535c02881476251911ab8ab3f98
+chunk_manifest_sha256=8f2b4611c37aa7bd738ccef3de0d0bfb8829d5a418fe28bd77776a90c4035821
+terminal_block_sha256=7e2e39f25d3b6c60f6be1517407d5fc28c8b91a15e9c2c7c3c2aee166786d64d
 ```
 
 Tests compile the fixture twice and require identical partition/chunk bytes and
@@ -105,6 +105,13 @@ Two owned partition fixtures now feed the shared canonical global manifest.
 That later boundary preserves these local object/manifest/terminal identities;
 it does not reopen, reinterpret, or concatenate execution records. See
 `GLOBAL-JOB-MANIFEST.md`.
+
+Kind-3 servo programs use the generic one-to-four-axis
+`CanonicalServoMachinePartition`. Its policy must reproduce the exact active
+FOC-derived cadence and position authority, and complete replay retains the
+terminal Q31.32/Q2.30 state and dense-update total. The projection, extrema
+splitting, half-open boundary, and terminal-hold rules are documented in
+`EXACT-SERVO-MOTION.md`.
 
 The schedule-derived browser path now performs shared factor selection before
 either participant partition exists. After selected-stream replay, it packages

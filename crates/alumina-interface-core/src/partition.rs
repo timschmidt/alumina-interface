@@ -16,8 +16,9 @@ use alumina_machine_ir::{
     BlockError, BlockExpectation, BlockValidationLimits, EXECUTION_BLOCK_BYTES, ExecutionBlock,
     ExecutionKind, FINITE_DIFFERENCE_ONE_STEP, FiniteDifferenceBlockValidationLimits,
     FiniteDifferenceStreamValidator, FiniteDifferenceValidationLimits, MAX_EXECUTION_AXES,
-    MotionStreamValidator, StreamId, StreamTick, ValidationLimits,
-    maximum_finite_difference_segments_per_block, maximum_motion_segments_per_block,
+    MotionStreamValidator, ServoFiniteDifferenceState, ServoFiniteDifferenceStreamValidator,
+    StreamId, StreamTick, ValidationLimits, maximum_finite_difference_segments_per_block,
+    maximum_motion_segments_per_block, maximum_servo_finite_difference_segments_per_block,
 };
 use alumina_protocol::{DeviceId, Digest};
 use alumina_storage::{
@@ -28,6 +29,7 @@ use alumina_storage::{
 use crate::compiler::CanonicalPathProgram2;
 use crate::direct_motion::CanonicalDirectFiniteDifferenceProgram2;
 use crate::motion_schedule::{CanonicalScheduledProgram2, SharedRetimedParticipant2};
+use crate::servo_motion::CanonicalServoFiniteDifferenceProgram;
 
 /// Result type for canonical per-MCU packaging.
 pub type MachinePartitionResult<T> = Result<T, MachinePartitionError>;
@@ -184,7 +186,8 @@ pub struct CanonicalMachinePartition2 {
     initial_position: [i64; 2],
     final_position: [i64; 2],
     execution_kind: ExecutionKind,
-    maximum_finite_difference_updates: u32,
+    maximum_dense_updates: u32,
+    dense_update_period_ticks: u32,
     terminal_progress: MachineStreamProgress<2>,
     terminal_finite_position: Option<[i64; 2]>,
     finite_difference_update_count: Option<u64>,
@@ -275,8 +278,14 @@ impl CanonicalMachinePartition2 {
     }
 
     /// Return the exact descriptor bound for dense updates in one direct record.
-    pub const fn maximum_finite_difference_updates(&self) -> u32 {
-        self.maximum_finite_difference_updates
+    pub const fn maximum_dense_updates(&self) -> u32 {
+        self.maximum_dense_updates
+    }
+
+    /// Return the exact descriptor-bound device cadence for dense updates.
+    /// Ordinary coordinated motion returns zero.
+    pub const fn dense_update_period_ticks(&self) -> u32 {
+        self.dense_update_period_ticks
     }
 
     /// Return exact terminal Q31.32 continuity for a direct partition.
@@ -302,7 +311,8 @@ impl CanonicalMachinePartition2 {
             config_digest: self.policy.config_digest,
             axis_count: 2,
             execution_kind: self.execution_kind,
-            maximum_finite_difference_updates: self.maximum_finite_difference_updates,
+            maximum_dense_updates: self.maximum_dense_updates,
+            dense_update_period_ticks: self.dense_update_period_ticks,
             block_count: self.block_count,
             first_tick: StreamTick(0),
             initial_position,
@@ -323,6 +333,302 @@ impl CanonicalMachinePartition2 {
             .encode::<2>()
             .map_err(MachinePartitionError::DescriptorWire)
     }
+}
+
+/// Complete immutable cached partition for one homogeneous servo-axis vector.
+#[derive(Debug)]
+pub struct CanonicalServoMachinePartition<const AXES: usize> {
+    policy: MachinePartitionPolicy2,
+    bytes: Vec<u8>,
+    chunks: Vec<CanonicalPartitionChunk>,
+    upload_plan: UploadPlan,
+    publication: PublishedObject,
+    block_count: u32,
+    maximum_segments_per_block: usize,
+    maximum_observed_block_ticks: u64,
+    local_timer_hz: u64,
+    initial_position: [i64; AXES],
+    terminal_state: ServoFiniteDifferenceState<AXES>,
+    maximum_dense_updates: u32,
+    dense_update_period_ticks: u32,
+    total_update_count: u64,
+    terminal_progress: MachineStreamProgress<AXES>,
+}
+
+impl<const AXES: usize> CanonicalServoMachinePartition<AXES> {
+    /// Borrow the exact identities and storage/admission policy.
+    pub const fn policy(&self) -> &MachinePartitionPolicy2 {
+        &self.policy
+    }
+
+    /// Borrow the byte-identical concatenation of canonical 512-byte blocks.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Borrow independently hashed storage chunks in upload order.
+    pub fn chunks(&self) -> &[CanonicalPartitionChunk] {
+        &self.chunks
+    }
+
+    /// Borrow exactly one independently hashed storage chunk without copying.
+    pub fn chunk_bytes(&self, index: usize) -> Option<&[u8]> {
+        let chunk = self.chunks.get(index)?;
+        let len = usize::try_from(chunk.byte_len).ok()?;
+        self.bytes.get(chunk.offset..chunk.offset.checked_add(len)?)
+    }
+
+    /// Return one validated resumable upload declaration.
+    pub const fn upload_plan(&self) -> UploadPlan {
+        self.upload_plan
+    }
+
+    /// Return one canonical storage chunk prefix for the retained transaction.
+    pub fn chunk_upload_header(&self, index: usize) -> Option<ChunkUploadHeader> {
+        let chunk = *self.chunks.get(index)?;
+        Some(ChunkUploadHeader {
+            upload_id: self.policy.upload_id,
+            index: u32::try_from(index).ok()?,
+            byte_len: chunk.byte_len,
+            content: chunk.content,
+        })
+    }
+
+    /// Return the object and manifest identities expected after publication.
+    pub const fn publication(&self) -> PublishedObject {
+        self.publication
+    }
+
+    /// Number of independently owned execution blocks.
+    pub const fn block_count(&self) -> u32 {
+        self.block_count
+    }
+
+    /// Canonical servo-record capacity queried from the firmware schema.
+    pub const fn maximum_segments_per_block(&self) -> usize {
+        self.maximum_segments_per_block
+    }
+
+    /// Longest encoded block ownership horizon in device ticks.
+    pub const fn maximum_observed_block_ticks(&self) -> u64 {
+        self.maximum_observed_block_ticks
+    }
+
+    /// Exact local stream timer frequency.
+    pub const fn local_timer_hz(&self) -> u64 {
+        self.local_timer_hz
+    }
+
+    /// Absolute configured-axis initial position in Q31.32 bits.
+    pub const fn initial_position(&self) -> [i64; AXES] {
+        self.initial_position
+    }
+
+    /// Exact terminal Q31.32/Q2.30 state; both feed-forward vectors are zero.
+    pub const fn terminal_state(&self) -> ServoFiniteDifferenceState<AXES> {
+        self.terminal_state
+    }
+
+    /// Exact configuration-derived maximum updates in one recurrence record.
+    pub const fn maximum_dense_updates(&self) -> u32 {
+        self.maximum_dense_updates
+    }
+
+    /// Exact local device ticks between simultaneous servo setpoints.
+    pub const fn dense_update_period_ticks(&self) -> u32 {
+        self.dense_update_period_ticks
+    }
+
+    /// Half-open setpoint count before the executor's terminal at-rest hold.
+    pub const fn total_update_count(&self) -> u64 {
+        self.total_update_count
+    }
+
+    /// Independently replayed terminal chain, time, position, and completion facts.
+    pub const fn terminal_progress(&self) -> MachineStreamProgress<AXES> {
+        self.terminal_progress
+    }
+
+    /// Construct the exact V4 descriptor for a boot-local prepare identity.
+    pub fn job_descriptor(&self, prepare_id: u64) -> MachinePartitionResult<JobDescriptor> {
+        let mut initial_position = [0_i64; MAX_EXECUTION_AXES];
+        initial_position[..AXES].copy_from_slice(&self.initial_position);
+        let descriptor = JobDescriptor {
+            prepare_id,
+            partition: self.publication,
+            stream_id: self.policy.stream_id,
+            capability_digest: self.policy.capability_digest,
+            config_digest: self.policy.config_digest,
+            axis_count: u8::try_from(AXES).map_err(|_| MachinePartitionError::CounterOverflow)?,
+            execution_kind: ExecutionKind::ServoFiniteDifference,
+            maximum_dense_updates: self.maximum_dense_updates,
+            dense_update_period_ticks: self.dense_update_period_ticks,
+            block_count: self.block_count,
+            first_tick: StreamTick(0),
+            initial_position,
+            limits: self.policy.block_limits,
+        };
+        descriptor
+            .validate::<AXES>()
+            .map_err(MachinePartitionError::Descriptor)?;
+        Ok(descriptor)
+    }
+
+    /// Encode the exact body sent by a later authenticated `JobPrepare` call.
+    pub fn job_prepare_body(
+        &self,
+        prepare_id: u64,
+    ) -> MachinePartitionResult<[u8; JOB_DESCRIPTOR_WIRE_BYTES]> {
+        self.job_descriptor(prepare_id)?
+            .encode::<AXES>()
+            .map_err(MachinePartitionError::DescriptorWire)
+    }
+}
+
+/// Package one exact browser-compiled servo stream into canonical cache blocks.
+pub fn package_canonical_servo_program<const AXES: usize>(
+    program: &CanonicalServoFiniteDifferenceProgram<AXES>,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<CanonicalServoMachinePartition<AXES>> {
+    if program.configuration_digest() != policy.config_digest
+        || program.capability_digest() != policy.capability_digest
+    {
+        return Err(MachinePartitionError::ProgramIdentityMismatch);
+    }
+    let admission = program.admission();
+    let maximum_position_delta = admission
+        .limits
+        .segment
+        .maximum_position_delta_bits
+        .iter()
+        .copied()
+        .max()
+        .ok_or(MachinePartitionError::InvalidPolicy(
+            "servo axis vector must be nonempty",
+        ))?;
+    if admission.limits.maximum_block_ticks != policy.block_limits.maximum_block_ticks
+        || admission.limits.segment.maximum_segment_ticks
+            != policy.block_limits.segment.maximum_segment_ticks
+        || maximum_position_delta != policy.block_limits.segment.maximum_steps_per_segment
+        || admission.setpoints.configuration_digest != policy.config_digest
+        || admission.setpoints.update_period_ticks
+            != admission.limits.segment.required_update_period_ticks
+    {
+        return Err(MachinePartitionError::InvalidPolicy(
+            "servo partition limits must exactly match the FOC admission profile",
+        ));
+    }
+    let segments = program.records();
+    let first = segments
+        .first()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    if first.start_tick != StreamTick(0) {
+        return Err(MachinePartitionError::ProgramMustStartAtZero);
+    }
+    let maximum_segments_per_block = maximum_servo_finite_difference_segments_per_block::<AXES>()?;
+    if maximum_segments_per_block == 0 {
+        return Err(MachinePartitionError::Machine(BlockError::PayloadLength));
+    }
+
+    let mut bytes = Vec::new();
+    let mut cursor = 0_usize;
+    let mut sequence = 0_u32;
+    let mut previous_digest = Digest::ZERO;
+    let mut maximum_observed_block_ticks = 0_u64;
+    while cursor < segments.len() {
+        let block_start_tick = segments[cursor].start_tick;
+        let mut end = cursor;
+        while end < segments.len() && end - cursor < maximum_segments_per_block {
+            let candidate_ticks = segments[end]
+                .end_tick
+                .0
+                .checked_sub(block_start_tick.0)
+                .ok_or(MachinePartitionError::ProgramTiming { segment: end })?;
+            if end > cursor && candidate_ticks > admission.limits.maximum_block_ticks {
+                break;
+            }
+            if candidate_ticks > admission.limits.maximum_block_ticks {
+                return Err(MachinePartitionError::Machine(BlockError::BlockTooLong {
+                    duration: candidate_ticks,
+                    maximum: admission.limits.maximum_block_ticks,
+                }));
+            }
+            end += 1;
+        }
+        let block = ExecutionBlock::encode_servo_finite_difference(
+            policy.stream_id,
+            policy.capability_digest,
+            policy.config_digest,
+            sequence,
+            previous_digest,
+            &segments[cursor..end],
+        )?;
+        let header = block.header();
+        let block_ticks = header
+            .end_tick
+            .0
+            .checked_sub(header.start_tick.0)
+            .ok_or(MachinePartitionError::ProgramTiming { segment: cursor })?;
+        maximum_observed_block_ticks = maximum_observed_block_ticks.max(block_ticks);
+        bytes
+            .try_reserve_exact(EXECUTION_BLOCK_BYTES)
+            .map_err(|_| MachinePartitionError::AllocationOverflow)?;
+        bytes.extend_from_slice(block.as_bytes());
+        previous_digest = header.block_digest;
+        sequence = sequence
+            .checked_add(1)
+            .ok_or(MachinePartitionError::Machine(BlockError::SequenceOverflow))?;
+        cursor = end;
+    }
+    let block_count = sequence;
+    let mut validator = ServoFiniteDifferenceStreamValidator::<AXES>::new(
+        block_count,
+        BlockExpectation {
+            stream_id: policy.stream_id,
+            capability_digest: policy.capability_digest,
+            config_digest: policy.config_digest,
+            sequence: 0,
+            start_tick: StreamTick(0),
+            previous_digest: Digest::ZERO,
+        },
+        program.initial_position(),
+        admission.limits,
+    )?;
+    for encoded in bytes.chunks_exact(EXECUTION_BLOCK_BYTES) {
+        let mut owned = [0_u8; EXECUTION_BLOCK_BYTES];
+        owned.copy_from_slice(encoded);
+        validator.accept(&ExecutionBlock::decode(owned)?)?;
+    }
+    let servo_progress = validator.finish()?;
+    let expected_end_tick = segments
+        .last()
+        .ok_or(MachinePartitionError::EmptyProgram)?
+        .end_tick;
+    if servo_progress.end_tick != expected_end_tick
+        || servo_progress.terminal_state != program.final_state()
+        || servo_progress.update_count != program.total_update_count()
+        || servo_progress.block_digest != previous_digest
+    {
+        return Err(MachinePartitionError::TerminalMismatch);
+    }
+    let storage = build_partition_storage(bytes, policy)?;
+    Ok(CanonicalServoMachinePartition {
+        policy,
+        bytes: storage.bytes,
+        chunks: storage.chunks,
+        upload_plan: storage.upload_plan,
+        publication: storage.publication,
+        block_count,
+        maximum_segments_per_block,
+        maximum_observed_block_ticks,
+        local_timer_hz: program.timer_ticks_per_second(),
+        initial_position: program.initial_position(),
+        terminal_state: servo_progress.terminal_state,
+        maximum_dense_updates: admission.limits.segment.maximum_update_count,
+        dense_update_period_ticks: admission.limits.segment.required_update_period_ticks,
+        total_update_count: servo_progress.update_count,
+        terminal_progress: servo_progress.into(),
+    })
 }
 
 /// Partition one certified canonical program into independently admitted
@@ -454,7 +760,7 @@ fn package_canonical_finite_difference_segments(
     if maximum_segments_per_block == 0 {
         return Err(MachinePartitionError::Machine(BlockError::PayloadLength));
     }
-    let maximum_finite_difference_updates = segments
+    let maximum_dense_updates = segments
         .iter()
         .map(|segment| segment.update_count)
         .max()
@@ -512,7 +818,8 @@ fn package_canonical_finite_difference_segments(
         maximum_block_ticks: policy.block_limits.maximum_block_ticks,
         segment: FiniteDifferenceValidationLimits {
             maximum_segment_ticks: policy.block_limits.segment.maximum_segment_ticks,
-            maximum_update_count: maximum_finite_difference_updates,
+            maximum_update_count: maximum_dense_updates,
+            required_update_period_ticks: segments[0].update_period_ticks,
             maximum_steps_per_segment: policy.block_limits.segment.maximum_steps_per_segment,
             maximum_absolute_first_difference: [FINITE_DIFFERENCE_ONE_STEP.unsigned_abs() - 1; 2],
         },
@@ -569,7 +876,8 @@ fn package_canonical_finite_difference_segments(
         initial_position,
         final_position,
         execution_kind: ExecutionKind::FiniteDifference,
-        maximum_finite_difference_updates,
+        maximum_dense_updates,
+        dense_update_period_ticks: segments[0].update_period_ticks,
         terminal_progress: direct_progress.into(),
         terminal_finite_position: Some(direct_progress.finite_position),
         finite_difference_update_count: Some(direct_progress.update_count),
@@ -787,7 +1095,8 @@ fn package_canonical_segments(
         initial_position,
         final_position,
         execution_kind: ExecutionKind::Motion,
-        maximum_finite_difference_updates: 0,
+        maximum_dense_updates: 0,
+        dense_update_period_ticks: 0,
         terminal_progress: terminal_progress.into(),
         terminal_finite_position: None,
         finite_difference_update_count: None,

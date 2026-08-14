@@ -1128,6 +1128,7 @@ fn direct_validation_limits(
                 domain: "maximum direct record ticks",
             })?,
         maximum_update_count: policy.maximum_updates_per_record,
+        required_update_period_ticks: profile.output_quantum_cycles(),
         maximum_steps_per_segment: policy.maximum_steps_per_record,
         maximum_absolute_first_difference: [FINITE_DIFFERENCE_ONE_STEP.unsigned_abs() - 1; 2],
     })

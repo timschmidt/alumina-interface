@@ -206,7 +206,8 @@ pub fn build_direct_motion_evidence(
     transcript.u32(partition.block_count())?;
     transcript.usize(partition.maximum_segments_per_block())?;
     transcript.u64(partition.maximum_observed_block_ticks())?;
-    transcript.u32(partition.maximum_finite_difference_updates())?;
+    transcript.u32(partition.maximum_dense_updates())?;
+    transcript.u32(partition.dense_update_period_ticks())?;
     transcript.raw(&terminal.block_digest.0)?;
     transcript.u64(terminal.end_tick.0)?;
     for coordinate in terminal.position {

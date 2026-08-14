@@ -1491,11 +1491,11 @@ impl MachineCamWorkspace {
             DirectMachineCamState::Ready(direct) => {
                 let replay = direct.replay;
                 ui.monospace(format!(
-                    "{} records / {} dense updates → {} ALMBLK02 blocks · maximum {} updates/record",
+                    "{} records / {} dense updates → {} ALMBLK03 blocks · maximum {} updates/record",
                     direct.program.records().len(),
                     replay.update_count,
                     direct.partition.block_count(),
-                    direct.partition.maximum_finite_difference_updates()
+                    direct.partition.maximum_dense_updates()
                 ));
                 ui.monospace(format!(
                     "terminal tick {} · integer {:?} · Q31.32 {:?} · rising edges {:?}",

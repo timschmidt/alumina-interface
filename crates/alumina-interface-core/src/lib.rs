@@ -21,6 +21,7 @@ pub mod motion_schedule;
 pub mod partition;
 pub mod scene;
 pub mod schedule_evidence;
+pub mod servo_motion;
 pub mod shared_timing_evidence;
 pub mod toolpath;
 
@@ -103,9 +104,10 @@ pub use motion_schedule::{
     certify_jerk_schedule, lower_certified_schedule_to_v1, select_shared_timer_lattice_schedule,
 };
 pub use partition::{
-    CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
-    MachinePartitionPolicy2, MachinePartitionResult, package_canonical_direct_program,
-    package_canonical_program, package_canonical_scheduled_program,
+    CanonicalMachinePartition2, CanonicalPartitionChunk, CanonicalServoMachinePartition,
+    MachinePartitionError, MachinePartitionPolicy2, MachinePartitionResult,
+    package_canonical_direct_program, package_canonical_program,
+    package_canonical_scheduled_program, package_canonical_servo_program,
     package_shared_retimed_scheduled_program, representative_partition_policy,
     representative_partition_policy_for,
 };
@@ -114,6 +116,12 @@ pub use schedule_evidence::{
     CanonicalScheduleEvidence3, ScheduleEvidenceError, ScheduleEvidenceResult,
     build_canonical_schedule_evidence, replay_canonical_schedule_evidence,
     verify_canonical_schedule_evidence_bytes,
+};
+pub use servo_motion::{
+    CanonicalServoFiniteDifferenceProgram, ExactServoAxisRecurrence, ExactServoCubicSpan,
+    ServoAxisProjectionEvidence, ServoCoefficientProjection, ServoFiniteDifferenceCompilePolicy,
+    ServoMotionError, ServoMotionResult, ServoSpanProjectionEvidence,
+    lower_exact_servo_recurrences,
 };
 pub use shared_timing_evidence::{
     CanonicalSharedTimingEvidence1, SharedTimingEvidenceError, SharedTimingEvidenceParticipant2,

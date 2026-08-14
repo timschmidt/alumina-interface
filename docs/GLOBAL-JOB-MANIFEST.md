@@ -9,7 +9,7 @@ It does not define a browser-only participant map or JSON execution manifest.
 
 - every owned `CanonicalMachinePartition2`, including its exact execution
   blocks, storage chunks, identities, limits, and terminal replay facts; and
-- the shared `ALMJMF01` manifest object whose participant records name those
+- the shared `ALMJMF02` manifest object whose participant records name those
   exact facts.
 
 Inputs may arrive in any discovery order. The compiler sorts them by stable
@@ -45,7 +45,7 @@ boundary for schedule-derived participants. Its ordering is fixed:
 5. build canonical `ALMSYN01` evidence over the exact derivations, complete
    factor-search trace, selected streams, and partition identities; then
 6. derive global timer frequency, duration, and `synchronization_digest` from
-   those results before constructing `ALMJMF01`.
+   those results before constructing `ALMJMF02`.
 
 The caller supplies a `SharedGlobalJobCompilePolicy2` template with those three
 derived fields set to zero. Nonzero placeholders reject, so stale timing facts
@@ -85,9 +85,9 @@ The current two-participant fixture emits:
 global_participants=2
 global_manifest_bytes=1312
 global_manifest_chunks=2
-global_job_sha256=acd6bb77c405c770ef4cc75a7d5423f84bcbab440a39c71707d5701d38714eae
-participant_set_sha256=bf496a0af361742e00968605947c1fbde338eaf9db0862206cade1fa49739e4e
-global_chunk_manifest_sha256=2d84df13947cfb73f0ded35a559c98107ffd9284ab6a49f00cdb1785bf355311
+global_job_sha256=2626778741a7046fd1957371132ed44c54790ce5b7f7b4c145930af4f93ddd9c
+participant_set_sha256=d26ddc63881977582a1a3138c676be9e60a95db24fd923480a0706021977217a
+global_chunk_manifest_sha256=546d614a553733fb44cdc3af4900b348c7713f030888832d749e6433ae296cf2
 ```
 
 The fixture deliberately supplies participants in reverse discovery order and

@@ -115,7 +115,7 @@ prototype.
   committed by a 104-byte `ALMSYN01` record over a streamed `ALMSRT01`
   transcript containing the full search trace, derivation identities, final
   IR, and partition identities. The compiler derives global duration and
-  synchronization evidence before emitting `ALMJMF01`; mixed-clock grids fail
+  synchronization evidence before emitting `ALMJMF02`; mixed-clock grids fail
   closed.
 - The shell now opens an offline Machine/CAM inspector by default. One
   canonical `ALMCFG06` TinyBee fixture drives exact axis/transmission facts,
@@ -131,6 +131,11 @@ prototype.
 - The cubic motion contract, bounded failure modes, exact-stop rationale, error
   composition, and evidence domains are documented in
   [`docs/CERTIFIED-BEZIER-MOTION.md`](docs/CERTIFIED-BEZIER-MOTION.md).
+- Exact Hyperreal servo recurrences now project once to Q31.32/Q2.30 with
+  retained certified error bounds, split at discrete extrema and
+  configuration-derived horizons, replay through the firmware validator, and
+  package as generic one-to-four-axis `ALMBLK03` kind-3 cached jobs. See
+  [`docs/EXACT-SERVO-MOTION.md`](docs/EXACT-SERVO-MOTION.md).
 - The same workspace has a bounded UI-only CNC geometry adapter for one
   connected XY line/explicit-IJ-arc path. It parses every decimal into an exact
   rational, requires explicit unit/plane/endpoint/arc-centre modal state,

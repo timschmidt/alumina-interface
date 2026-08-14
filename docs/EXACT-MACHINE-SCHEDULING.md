@@ -33,7 +33,7 @@ authenticated ALMCAP02 capability + canonical ALMCFG06 configuration
     -> content-addressed SD partitions
        ├-> canonical ALMEVD03 local derivation evidence
        ├-> canonical ALMSYN01 / streamed ALMSRT01 shared evidence
-       ├-> evidence-bound ALMJMF01 global manifest
+       ├-> evidence-bound ALMJMF02 global manifest
        └-> event-level cached-partition simulator replay (verification)
 ```
 
@@ -339,7 +339,7 @@ the outer evidence record.
 For a shared job, `compile_shared_scheduled_global_job` enforces the stronger
 ordering: select the common factor, replay each selected stream against its
 exact point carrier, construct and independently replay every partition, build
-`ALMSYN01`, then construct `ALMJMF01`. The compiler—not the caller—derives the
+`ALMSYN01`, then construct `ALMJMF02`. The compiler—not the caller—derives the
 global timer, duration, and synchronization digest. That evidence digest is
 also each participant record's timing/error evidence identity, preventing a
 manifest from naming stale caller-supplied retiming facts.

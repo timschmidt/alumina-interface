@@ -1842,8 +1842,12 @@ mod tests {
             alumina_machine_ir::ExecutionKind::FiniteDifference
         );
         assert_eq!(
-            descriptor.maximum_finite_difference_updates,
-            partition.maximum_finite_difference_updates()
+            descriptor.maximum_dense_updates,
+            partition.maximum_dense_updates()
+        );
+        assert_eq!(
+            descriptor.dense_update_period_ticks,
+            partition.dense_update_period_ticks()
         );
         let replay = replay_cached_finite_difference_partition::<2>(
             partition.bytes(),
