@@ -83,6 +83,7 @@ struct DeviceState {
     capability_consecutive_failures: u32,
     capability_last_error: Option<String>,
     waveform: Option<WaveformCaptureMachine>,
+    pending_waveform_request: Option<WorkerWaveformRequest>,
     waveform_event_published: bool,
     waveform_consecutive_failures: u32,
     waveform_last_error: Option<String>,
@@ -128,6 +129,7 @@ impl DeviceState {
             capability_consecutive_failures: 0,
             capability_last_error: None,
             waveform: None,
+            pending_waveform_request: None,
             waveform_event_published: false,
             waveform_consecutive_failures: 0,
             waveform_last_error: None,
@@ -283,9 +285,28 @@ impl DeviceState {
 
     fn reset_waveform_for_new_boot(&mut self) {
         self.waveform = None;
+        self.pending_waveform_request = None;
         self.waveform_event_published = false;
         self.waveform_consecutive_failures = 0;
         self.waveform_last_error = None;
+    }
+
+    fn request_waveform(&mut self, request: &WorkerWaveformRequest) -> Result<(), String> {
+        request.validate().map_err(|error| error.to_string())?;
+        match self.waveform.as_ref().map(WaveformCaptureMachine::phase) {
+            None | Some(WaveformClientPhase::Stopped) => self.start_waveform(request),
+            Some(WaveformClientPhase::Complete) => {
+                self.waveform
+                    .as_mut()
+                    .expect("complete waveform exists")
+                    .request_stop()
+                    .map_err(|error| error.to_string())?;
+                self.pending_waveform_request = Some(request.clone());
+                self.record_waveform_success();
+                Ok(())
+            }
+            Some(_) => Err("a waveform acquisition is already active".to_owned()),
+        }
     }
 
     #[allow(
@@ -294,13 +315,12 @@ impl DeviceState {
     )]
     fn start_waveform(&mut self, request: &WorkerWaveformRequest) -> Result<(), String> {
         request.validate().map_err(|error| error.to_string())?;
-        if self.waveform.as_ref().is_some_and(|waveform| {
-            !matches!(
-                waveform.phase(),
-                WaveformClientPhase::Complete | WaveformClientPhase::Stopped
-            )
-        }) {
-            return Err("a waveform acquisition is already active".to_owned());
+        if self
+            .waveform
+            .as_ref()
+            .is_some_and(|waveform| waveform.phase() != WaveformClientPhase::Stopped)
+        {
+            return Err("prior waveform evidence has not been released".to_owned());
         }
         let identity = self
             .identity
@@ -419,6 +439,7 @@ impl DeviceState {
             )
             .map_err(|error| error.to_string())?,
         );
+        self.pending_waveform_request = None;
         self.waveform_event_published = false;
         self.record_waveform_success();
         Ok(())
@@ -633,7 +654,7 @@ fn start_waveform_capture(runtime: &SharedWorkerRuntime, request: &WorkerWavefor
     let result = {
         let mut runtime_ref = runtime.borrow_mut();
         match runtime_ref.devices.get_mut(&connection_id) {
-            Some(DeviceEntry::Idle(state)) => state.start_waveform(request),
+            Some(DeviceEntry::Idle(state)) => state.request_waveform(request),
             Some(DeviceEntry::Busy { .. }) => {
                 Err("connection is busy; retry the capture request".to_owned())
             }
@@ -993,6 +1014,10 @@ async fn drive_state_waveform(
 
 async fn drive_waveform_burst(worker_scope: &WorkerGlobalScope, state: &mut DeviceState) {
     for _ in 0..WAVEFORM_OPERATIONS_PER_HEARTBEAT {
+        if let Err(error) = install_pending_waveform(state) {
+            state.record_waveform_failure(&error);
+            break;
+        }
         let phase = state
             .waveform
             .as_ref()
@@ -1022,6 +1047,10 @@ async fn drive_waveform_burst(worker_scope: &WorkerGlobalScope, state: &mut Devi
         match drive_state_waveform(worker_scope, state).await {
             Ok(after) => {
                 state.record_waveform_success();
+                if let Err(error) = install_pending_waveform(state) {
+                    state.record_waveform_failure(&error);
+                    break;
+                }
                 if after == WaveformClientPhase::Armed && before == WaveformClientPhase::Armed {
                     break;
                 }
@@ -1035,6 +1064,20 @@ async fn drive_waveform_burst(worker_scope: &WorkerGlobalScope, state: &mut Devi
             }
         }
     }
+}
+
+fn install_pending_waveform(state: &mut DeviceState) -> Result<(), String> {
+    if state
+        .waveform
+        .as_ref()
+        .is_none_or(|waveform| waveform.phase() != WaveformClientPhase::Stopped)
+    {
+        return Ok(());
+    }
+    let Some(request) = state.pending_waveform_request.take() else {
+        return Ok(());
+    };
+    state.start_waveform(&request)
 }
 
 const fn clock_model_must_reset(error: &BrowserClockError) -> bool {

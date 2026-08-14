@@ -19,7 +19,10 @@
       let isolatedCapabilityFailureSnapshot;
       let capabilityDocument;
       let waveformDocument;
+      const waveformDocuments = [];
       let waveformRequested = false;
+      let repeatedWaveformRequested = false;
+      let firstWaveformCaptureId;
       const eventKinds = [];
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
@@ -31,6 +34,27 @@
         if (status !== "sampling") {
           worker.terminate();
         }
+      };
+
+      const requestWaveform = (durationCycles) => {
+        worker.postMessage(
+          JSON.stringify({
+            schema_version: 4,
+            command: {
+              kind: "capture_waveform",
+              request: {
+                connection_id: 1,
+                channels: [
+                  [1, 0, 22, 0],
+                  [1, 0, 32, 0],
+                  [1, 0, 33, 0],
+                  [1, 0, 35, 0],
+                ],
+                duration_cycles: durationCycles,
+              },
+            },
+          }),
+        );
       };
 
       worker.onerror = (event) => {
@@ -69,6 +93,7 @@
                 isolatedCapabilityFailureSnapshot,
               capability_document: capabilityDocument,
               waveform_document: waveformDocument,
+              waveform_documents: waveformDocuments,
             });
           }, 30000);
           worker.postMessage(
@@ -134,16 +159,27 @@
           return;
         }
         if (event.kind === "waveform_document") {
-          if (waveformDocument !== undefined) {
+          const maximumDocuments = expectation === "waveform-repeat" ? 2 : 1;
+          if (waveformDocuments.length >= maximumDocuments) {
             clearTimeout(timeout);
             finish("failed", {
-              error: "waveform document was emitted more than once",
+              error: "waveform document count exceeded the expectation",
               event_kinds: eventKinds,
+              waveform_documents: waveformDocuments,
             });
             return;
           }
           const waveform = event.waveform;
           const magic = waveform.record.slice(0, 8);
+          const captureId = waveform.record.slice(128, 144);
+          const recordBytes = Uint8Array.from(waveform.record);
+          const requestedDuration = Number(
+            new DataView(recordBytes.buffer).getBigUint64(168, true),
+          );
+          const expectedDuration =
+            expectation === "waveform-repeat" && waveformDocuments.length === 1
+              ? 3000
+              : 2000;
           const validMagic =
             JSON.stringify(magic) ===
             JSON.stringify(Array.from(new TextEncoder().encode("ALMDIG01")));
@@ -151,6 +187,8 @@
             waveform.connection_id !== 1 ||
             waveform.generation < 1 ||
             waveform.record.length < 224 ||
+            captureId.every((byte) => byte === 0) ||
+            requestedDuration !== expectedDuration ||
             !validMagic
           ) {
             clearTimeout(timeout);
@@ -161,6 +199,7 @@
             return;
           }
           waveformDocument = waveform;
+          waveformDocuments.push(waveform);
           return;
         }
         if (event.kind === "snapshot") {
@@ -232,7 +271,9 @@
             snapshot.waveform_last_error === null &&
             waveformDocument !== undefined &&
             waveformDocument.generation === snapshot.generation &&
-            waveformDocument.record.length === snapshot.waveform_total_bytes;
+            waveformDocument.record.length === snapshot.waveform_total_bytes &&
+            JSON.stringify(waveformDocument.record.slice(128, 144)) ===
+              JSON.stringify(snapshot.waveform_capture_id);
           const conservativelyRejected =
             snapshot.rejected_samples >= 3 &&
             snapshot.accepted_samples === 0 &&
@@ -250,24 +291,7 @@
             !waveformRequested
           ) {
             waveformRequested = true;
-            worker.postMessage(
-              JSON.stringify({
-                schema_version: 4,
-                command: {
-                  kind: "capture_waveform",
-                  request: {
-                    connection_id: 1,
-                    channels: [
-                      [1, 0, 22, 0],
-                      [1, 0, 32, 0],
-                      [1, 0, 33, 0],
-                      [1, 0, 35, 0],
-                    ],
-                    duration_cycles: 2000,
-                  },
-                },
-              }),
-            );
+            requestWaveform(2000);
             finish("sampling", snapshot);
           } else if (
             expectation === "waveform" &&
@@ -279,6 +303,42 @@
               expectation,
               capability_document: capabilityDocument,
               waveform_document: waveformDocument,
+              snapshot,
+            });
+          } else if (
+            expectation === "waveform-repeat" &&
+            qualified &&
+            !waveformRequested
+          ) {
+            waveformRequested = true;
+            requestWaveform(2000);
+            finish("sampling", snapshot);
+          } else if (
+            expectation === "waveform-repeat" &&
+            qualified &&
+            waveformComplete &&
+            !repeatedWaveformRequested
+          ) {
+            repeatedWaveformRequested = true;
+            firstWaveformCaptureId = JSON.stringify(
+              snapshot.waveform_capture_id,
+            );
+            requestWaveform(3000);
+            finish("sampling", snapshot);
+          } else if (
+            expectation === "waveform-repeat" &&
+            qualified &&
+            waveformComplete &&
+            repeatedWaveformRequested &&
+            waveformDocuments.length === 2 &&
+            JSON.stringify(snapshot.waveform_capture_id) !==
+              firstWaveformCaptureId
+          ) {
+            clearTimeout(timeout);
+            finish("passed", {
+              expectation,
+              capability_document: capabilityDocument,
+              waveform_documents: waveformDocuments,
               snapshot,
             });
           } else if (
