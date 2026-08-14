@@ -897,16 +897,27 @@ mod tests {
     use crate::compiler::{
         MachineCompileError, MotionCompilePolicy2, compile_certified_chord_program,
     };
+    use crate::global_job::{
+        SharedGlobalJobCompilePolicy2, SharedScheduledJobParticipant2,
+        compile_shared_scheduled_global_job,
+    };
     use crate::motion_schedule::{
-        MotionScheduleError, ScheduledLoweringLimits, TimerDilationPolicy, TravelBoundary,
-        certify_jerk_schedule, lower_certified_schedule_to_v1,
+        CanonicalScheduledProgram2, CertifiedJerkSchedule2, MotionScheduleError,
+        ScheduledLoweringLimits, SharedTimerCandidateOutcome2, SharedTimerParticipant2,
+        TimerDilationPolicy, TravelBoundary, certify_jerk_schedule, lower_certified_schedule_to_v1,
+        select_shared_timer_lattice_schedule,
     };
     use crate::partition::{
         MachinePartitionError, MachinePartitionPolicy2, package_canonical_scheduled_program,
+        package_shared_retimed_scheduled_program,
     };
     use crate::schedule_evidence::{
         ScheduleEvidenceError, build_canonical_schedule_evidence,
         replay_canonical_schedule_evidence, verify_canonical_schedule_evidence_bytes,
+    };
+    use crate::shared_timing_evidence::{
+        SharedTimingEvidenceError, SharedTimingEvidenceParticipant2, build_shared_timing_evidence,
+        replay_shared_timing_evidence, verify_shared_timing_evidence_bytes,
     };
     use crate::toolpath::{
         MetricPathApproximationLimits2, representative_curve_path, representative_metric_path,
@@ -916,8 +927,10 @@ mod tests {
         BindingFlags, ConfigurationFlags, ConfigurationHeader, ConfigurationRecord, ExactScalar,
         FactEvidence, Rational as ConfigurationRational, SignalPolarity,
     };
+    use alumina_job::{JobNetworkPolicy, MachineJobGlobalFacts};
     use alumina_machine_ir::{BlockValidationLimits, EXECUTION_BLOCK_BYTES, ValidationLimits};
     use alumina_motion::MotionError;
+    use alumina_protocol::DeviceId;
     use alumina_sim::motion::{CachedStepperReplayError, replay_cached_stepper_partition};
     use alumina_storage::{CacheLimits, UploadId, sha256};
     use hypercurve::{
@@ -1122,6 +1135,56 @@ mod tests {
             ConfigurationDocumentView::decode::<32>(&board_mks_tinybee::PACKAGE, &bytes, digest)
                 .unwrap();
         MachineDynamicsProfile2::from_configuration(view)
+    }
+
+    fn lower_diagonal_g1(
+        records: &[ConfigurationRecord],
+    ) -> (
+        MachineDynamicsProfile2,
+        CertifiedJerkSchedule2,
+        CanonicalScheduledProgram2,
+    ) {
+        let profile = profile_from(records).unwrap();
+        let source = CurvePath2::try_new(vec![
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(0, 0),
+                    CurvePoint2::from_values(3, 4),
+                )
+                .unwrap(),
+            )),
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(3, 4),
+                    CurvePoint2::from_values(6, 8),
+                )
+                .unwrap(),
+            )),
+        ])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+        (profile, schedule, lowered)
     }
 
     #[test]
@@ -1792,6 +1855,584 @@ mod tests {
                 < &(Real::one() / Real::from(profile.timer_ticks_per_second())).unwrap()
         );
         assert!(lowered.executor_preflight().segment_count > 0);
+    }
+
+    #[test]
+    fn shared_timer_search_is_canonical_complete_and_jointly_minimal() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = CurvePath2::try_new(vec![
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(0, 0),
+                    CurvePoint2::from_values(3, 4),
+                )
+                .unwrap(),
+            )),
+            Curve2::new(CurveGeometry2::Line(
+                LineSeg2::try_new(
+                    CurvePoint2::from_values(3, 4),
+                    CurvePoint2::from_values(6, 8),
+                )
+                .unwrap(),
+            )),
+        ])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+        let lowered = lower_certified_schedule_to_v1(
+            &schedule,
+            &profile,
+            &budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+        let device_1 = DeviceId([1; 16]);
+        let device_2 = DeviceId([2; 16]);
+
+        let shared = select_shared_timer_lattice_schedule(
+            vec![
+                SharedTimerParticipant2::new(device_2, &lowered, &profile),
+                SharedTimerParticipant2::new(device_1, &lowered, &profile),
+            ],
+            TimerDilationPolicy::INTERACTIVE,
+        )
+        .unwrap();
+        let rebuilt = select_shared_timer_lattice_schedule(
+            vec![
+                SharedTimerParticipant2::new(device_1, &lowered, &profile),
+                SharedTimerParticipant2::new(device_2, &lowered, &profile),
+            ],
+            TimerDilationPolicy::INTERACTIVE,
+        )
+        .unwrap();
+
+        assert_eq!(shared, rebuilt);
+        assert_eq!(shared.selected_factor_numerator(), 4_158);
+        assert_eq!(shared.selected_factor_denominator(), 4_096);
+        assert_eq!(
+            shared.selected_factor(),
+            Rational::fraction(2_079, 2_048).unwrap()
+        );
+        assert_eq!(shared.candidate_rounds(), 20);
+        assert_eq!(shared.participant_replays(), 40);
+        assert_eq!(shared.candidate_reports().len(), 20);
+        assert_eq!(shared.candidate_reports()[0].factor_numerator(), 4_096);
+        assert_eq!(
+            shared
+                .candidate_reports()
+                .last()
+                .unwrap()
+                .factor_numerator(),
+            4_157
+        );
+        assert!(
+            shared
+                .candidate_reports()
+                .iter()
+                .all(|round| round.outcomes().len() == 2)
+        );
+        assert_eq!(
+            shared.terminal_tick(),
+            lowered.points().last().unwrap().tick()
+        );
+        assert_eq!(shared.participants()[0].device_id(), device_1);
+        assert_eq!(shared.participants()[1].device_id(), device_2);
+        for participant in shared.participants() {
+            assert_eq!(participant.segments(), lowered.segments());
+            assert_eq!(
+                participant.unit_factor_outcome(),
+                SharedTimerCandidateOutcome2::Rejected(MotionError::PulseBoundary { axis: 1 })
+            );
+            assert_eq!(
+                participant.predecessor_outcome(),
+                Some(SharedTimerCandidateOutcome2::Rejected(MotionError::Rate {
+                    axis: 1
+                }))
+            );
+            assert_eq!(
+                participant.executor_preflight().end_tick.0,
+                shared.terminal_tick().get()
+            );
+        }
+
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(
+                vec![
+                    SharedTimerParticipant2::new(device_1, &lowered, &profile),
+                    SharedTimerParticipant2::new(device_1, &lowered, &profile),
+                ],
+                TimerDilationPolicy::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::DuplicateSharedTimerParticipant { device_id })
+                if device_id == device_1
+        ));
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(Vec::new(), TimerDilationPolicy::INTERACTIVE),
+            Err(MotionScheduleError::SharedTimerParticipantsEmpty)
+        ));
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(
+                vec![SharedTimerParticipant2::new(device_1, &lowered, &profile)],
+                TimerDilationPolicy::try_new(1, 1).unwrap(),
+            ),
+            Err(MotionScheduleError::SharedTimerDilationBudgetExceeded {
+                maximum_factor_numerator: 1,
+                factor_denominator: 1,
+                device_id,
+                rejection: MotionError::PulseBoundary { axis: 1 },
+            }) if device_id == device_1
+        ));
+    }
+
+    #[test]
+    fn shared_timer_minimum_is_driven_by_the_strict_participant_only() {
+        let mut strict_records = machine_records();
+        for record in &mut strict_records {
+            if let ConfigurationRecord::Scalar(scalar) = record
+                && scalar.fact == ScalarFact::AxisVelocityLimitMetresPerSecond
+            {
+                // This exact configured ceiling is just below the original
+                // 48+48-cycle pulse-rate limit, so both profiles retain the
+                // same planner dynamics while only the strict pulse boundary
+                // experiences timer-lattice pressure.
+                scalar.value = wire_rational(13, 2_000);
+                scalar.uncertainty = wire_rational(0, 1);
+            }
+        }
+        let mut relaxed_records = strict_records.clone();
+        for record in &mut relaxed_records {
+            if let ConfigurationRecord::Binding(binding) = record
+                && binding.role == BindingRole::AxisStep
+            {
+                binding.minimum_active_cycles = 1;
+                binding.minimum_inactive_cycles = 1;
+            }
+        }
+
+        let (strict_profile, strict_schedule, strict_program) = lower_diagonal_g1(&strict_records);
+        let (relaxed_profile, relaxed_schedule, relaxed_program) =
+            lower_diagonal_g1(&relaxed_records);
+        assert_eq!(
+            strict_program.points().len(),
+            relaxed_program.points().len()
+        );
+        assert!(
+            strict_program
+                .points()
+                .iter()
+                .zip(relaxed_program.points())
+                .all(
+                    |(strict, relaxed)| strict.ideal_time_seconds() == relaxed.ideal_time_seconds()
+                )
+        );
+        assert!(
+            strict_program
+                .evidence()
+                .timer_lattice_schedule()
+                .selected_factor_numerator()
+                > TimerDilationPolicy::INTERACTIVE.factor_denominator()
+        );
+        assert_eq!(
+            relaxed_program
+                .evidence()
+                .timer_lattice_schedule()
+                .selected_factor_numerator(),
+            TimerDilationPolicy::INTERACTIVE.factor_denominator()
+        );
+
+        let relaxed_device = DeviceId([0x11; 16]);
+        let strict_device = DeviceId([0x22; 16]);
+        let shared = select_shared_timer_lattice_schedule(
+            vec![
+                SharedTimerParticipant2::new(strict_device, &strict_program, &strict_profile),
+                SharedTimerParticipant2::new(relaxed_device, &relaxed_program, &relaxed_profile),
+            ],
+            TimerDilationPolicy::INTERACTIVE,
+        )
+        .unwrap();
+        assert_eq!(
+            shared.selected_factor_numerator(),
+            strict_program
+                .evidence()
+                .timer_lattice_schedule()
+                .selected_factor_numerator()
+        );
+        let strict = shared.participant(strict_device).unwrap();
+        let relaxed = shared.participant(relaxed_device).unwrap();
+        assert!(matches!(
+            strict.unit_factor_outcome(),
+            SharedTimerCandidateOutcome2::Rejected(_)
+        ));
+        assert!(matches!(
+            strict.predecessor_outcome(),
+            Some(SharedTimerCandidateOutcome2::Rejected(_))
+        ));
+        assert!(matches!(
+            relaxed.unit_factor_outcome(),
+            SharedTimerCandidateOutcome2::Accepted(_)
+        ));
+        assert!(matches!(
+            relaxed.predecessor_outcome(),
+            Some(SharedTimerCandidateOutcome2::Accepted(_))
+        ));
+        assert_eq!(strict.ticks(), relaxed.ticks());
+        assert_eq!(
+            strict.executor_preflight().end_tick,
+            relaxed.executor_preflight().end_tick
+        );
+
+        let partition_limits = BlockValidationLimits {
+            maximum_block_ticks: 10_000_000,
+            segment: ValidationLimits {
+                maximum_segment_ticks: 10_000_000,
+                maximum_steps_per_segment: 100_000,
+            },
+        };
+        let cache_limits = CacheLimits {
+            maximum_object_bytes: 64 * 1024 * 1024,
+            maximum_chunk_bytes: 4_096,
+            maximum_chunks: 100_000,
+        };
+        let relaxed_policy = MachinePartitionPolicy2::try_new(
+            [0x31; 16],
+            relaxed_program.capability_digest(),
+            relaxed_program.configuration_digest(),
+            partition_limits,
+            UploadId(0x1111),
+            4_096,
+            cache_limits,
+        )
+        .unwrap();
+        let strict_policy = MachinePartitionPolicy2::try_new(
+            [0x32; 16],
+            strict_program.capability_digest(),
+            strict_program.configuration_digest(),
+            partition_limits,
+            UploadId(0x2222),
+            4_096,
+            cache_limits,
+        )
+        .unwrap();
+        let relaxed_partition =
+            package_shared_retimed_scheduled_program(&relaxed_program, relaxed, relaxed_policy)
+                .unwrap();
+        let strict_partition =
+            package_shared_retimed_scheduled_program(&strict_program, strict, strict_policy)
+                .unwrap();
+        assert_eq!(
+            relaxed_partition.terminal_progress().end_tick,
+            strict_partition.terminal_progress().end_tick
+        );
+        assert_eq!(
+            relaxed_partition.terminal_progress().end_tick.0,
+            shared.terminal_tick().get()
+        );
+
+        let evidence = build_shared_timing_evidence(
+            &shared,
+            vec![
+                SharedTimingEvidenceParticipant2::new(
+                    strict_device,
+                    &strict_schedule,
+                    &strict_program,
+                    &strict_partition,
+                ),
+                SharedTimingEvidenceParticipant2::new(
+                    relaxed_device,
+                    &relaxed_schedule,
+                    &relaxed_program,
+                    &relaxed_partition,
+                ),
+            ],
+        )
+        .unwrap();
+        let rebuilt = build_shared_timing_evidence(
+            &shared,
+            vec![
+                SharedTimingEvidenceParticipant2::new(
+                    relaxed_device,
+                    &relaxed_schedule,
+                    &relaxed_program,
+                    &relaxed_partition,
+                ),
+                SharedTimingEvidenceParticipant2::new(
+                    strict_device,
+                    &strict_schedule,
+                    &strict_program,
+                    &strict_partition,
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(evidence, rebuilt);
+        assert_eq!(&evidence.encoded()[..8], b"ALMSYN01");
+        assert_eq!(evidence.encoded().len(), 104);
+        assert_eq!(evidence.participant_count(), 2);
+        assert_eq!(evidence.candidate_rounds(), shared.candidate_rounds());
+        assert_eq!(evidence.participant_replays(), shared.participant_replays());
+        assert!(evidence.transcript_byte_len() > evidence.encoded().len() as u64);
+        replay_shared_timing_evidence(
+            &evidence,
+            &shared,
+            vec![
+                SharedTimingEvidenceParticipant2::new(
+                    relaxed_device,
+                    &relaxed_schedule,
+                    &relaxed_program,
+                    &relaxed_partition,
+                ),
+                SharedTimingEvidenceParticipant2::new(
+                    strict_device,
+                    &strict_schedule,
+                    &strict_program,
+                    &strict_partition,
+                ),
+            ],
+        )
+        .unwrap();
+        verify_shared_timing_evidence_bytes(evidence.encoded(), evidence.digest()).unwrap();
+        let mut corrupted = evidence.encoded().to_vec();
+        corrupted[40] ^= 1;
+        assert!(matches!(
+            verify_shared_timing_evidence_bytes(&corrupted, evidence.digest()),
+            Err(SharedTimingEvidenceError::DigestMismatch)
+        ));
+
+        let global_template = MachineJobGlobalFacts {
+            network_policy: JobNetworkPolicy::NetworkAttended,
+            global_timebase_hz: 0,
+            duration_ticks: 0,
+            source_digest: Digest([0x41; 32]),
+            compiler_digest: Digest([0x42; 32]),
+            interface_digest: Digest([0x43; 32]),
+            policy_digest: Digest([0x44; 32]),
+            machine_digest: Digest([0x45; 32]),
+            coordinate_epoch_digest: Digest([0x46; 32]),
+            safety_policy_digest: Digest([0x47; 32]),
+            synchronization_digest: Digest::ZERO,
+        };
+        let global_policy = SharedGlobalJobCompilePolicy2::try_new(
+            global_template,
+            UploadId(0x3333),
+            1_024,
+            CacheLimits {
+                maximum_object_bytes: 4 * 1024 * 1024,
+                maximum_chunk_bytes: 1_024,
+                maximum_chunks: 10_000,
+            },
+        )
+        .unwrap();
+        let strict_job_input = SharedScheduledJobParticipant2::new(
+            strict_device,
+            Digest([0x61; 32]),
+            Digest([0x71; 32]),
+            Digest([0x91; 32]),
+            &strict_schedule,
+            &strict_program,
+            &strict_profile,
+            strict_policy,
+        );
+        let relaxed_job_input = SharedScheduledJobParticipant2::new(
+            relaxed_device,
+            Digest([0x62; 32]),
+            Digest([0x72; 32]),
+            Digest([0x92; 32]),
+            &relaxed_schedule,
+            &relaxed_program,
+            &relaxed_profile,
+            relaxed_policy,
+        );
+        let compiled = compile_shared_scheduled_global_job(
+            global_policy,
+            TimerDilationPolicy::INTERACTIVE,
+            vec![strict_job_input, relaxed_job_input],
+        )
+        .unwrap();
+        let compiled_reversed = compile_shared_scheduled_global_job(
+            global_policy,
+            TimerDilationPolicy::INTERACTIVE,
+            vec![relaxed_job_input, strict_job_input],
+        )
+        .unwrap();
+        assert_eq!(compiled.timing_evidence(), &evidence);
+        assert_eq!(
+            compiled.global_job().manifest_bytes(),
+            compiled_reversed.global_job().manifest_bytes()
+        );
+        assert_eq!(
+            compiled.global_job().global_job_digest(),
+            compiled_reversed.global_job().global_job_digest()
+        );
+        let global = compiled.global_job().policy().global();
+        assert_eq!(
+            global.global_timebase_hz,
+            compiled.retiming().timer_ticks_per_second()
+        );
+        assert_eq!(
+            global.duration_ticks,
+            compiled.retiming().terminal_tick().get()
+        );
+        assert_eq!(
+            global.synchronization_digest,
+            compiled.timing_evidence().digest()
+        );
+        assert!(
+            compiled
+                .global_job()
+                .participant_records()
+                .iter()
+                .all(|participant| participant.error_evidence_digest
+                    == compiled.timing_evidence().digest())
+        );
+    }
+
+    #[test]
+    fn shared_timer_v1_rejects_identity_clock_output_and_event_grid_mismatches() {
+        let base_records = machine_records();
+        let (base_profile, _, base_program) = lower_diagonal_g1(&base_records);
+        let base_device = DeviceId([1; 16]);
+        let other_device = DeviceId([2; 16]);
+
+        let mut quantum_records = base_records.clone();
+        for record in &mut quantum_records {
+            if let ConfigurationRecord::Scalar(scalar) = record
+                && scalar.fact == ScalarFact::StepperOutputQuantumCycles
+            {
+                scalar.value = wire_rational(4, 1);
+            }
+        }
+        let (quantum_profile, _, quantum_program) = lower_diagonal_g1(&quantum_records);
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(
+                vec![
+                    SharedTimerParticipant2::new(
+                        base_device,
+                        &base_program,
+                        &base_profile,
+                    ),
+                    SharedTimerParticipant2::new(
+                        other_device,
+                        &quantum_program,
+                        &quantum_profile,
+                    ),
+                ],
+                TimerDilationPolicy::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::SharedTimerOutputQuantumMismatch {
+                device_id,
+                expected: 1,
+                actual: 4,
+            }) if device_id == other_device
+        ));
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(
+                vec![SharedTimerParticipant2::new(
+                    base_device,
+                    &base_program,
+                    &quantum_profile,
+                )],
+                TimerDilationPolicy::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::SharedTimerParticipantIdentityMismatch { device_id })
+                if device_id == base_device
+        ));
+
+        let mut clock_records = base_records.clone();
+        for record in &mut clock_records {
+            if let ConfigurationRecord::Scalar(scalar) = record
+                && scalar.fact == ScalarFact::TimerTickHertz
+            {
+                scalar.value = wire_rational(2_000_000, 1);
+            }
+        }
+        let (clock_profile, _, clock_program) = lower_diagonal_g1(&clock_records);
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(
+                vec![
+                    SharedTimerParticipant2::new(
+                        base_device,
+                        &base_program,
+                        &base_profile,
+                    ),
+                    SharedTimerParticipant2::new(
+                        other_device,
+                        &clock_program,
+                        &clock_profile,
+                    ),
+                ],
+                TimerDilationPolicy::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::SharedTimerFrequencyMismatch {
+                device_id,
+                expected: 1_000_000,
+                actual: 2_000_000,
+            }) if device_id == other_device
+        ));
+
+        let alternate_source = representative_metric_path().unwrap();
+        let alternate_budget = MachineResolutionBudget2::certify(
+            &base_profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let alternate_schedule = certify_jerk_schedule(
+            &alternate_source,
+            &base_profile,
+            &alternate_budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+        let alternate_program = lower_certified_schedule_to_v1(
+            &alternate_schedule,
+            &base_profile,
+            &alternate_budget,
+            Rational::fraction(1, 1_000).unwrap(),
+            ScheduledLoweringLimits::INTERACTIVE,
+        )
+        .unwrap();
+        assert_ne!(
+            base_program.points().len(),
+            alternate_program.points().len()
+        );
+        assert!(matches!(
+            select_shared_timer_lattice_schedule(
+                vec![
+                    SharedTimerParticipant2::new(
+                        base_device,
+                        &base_program,
+                        &base_profile,
+                    ),
+                    SharedTimerParticipant2::new(
+                        other_device,
+                        &alternate_program,
+                        &base_profile,
+                    ),
+                ],
+                TimerDilationPolicy::INTERACTIVE,
+            ),
+            Err(MotionScheduleError::SharedTimerPointCountMismatch {
+                device_id,
+                expected,
+                actual,
+            }) if device_id == other_device
+                && expected == base_program.points().len()
+                && actual == alternate_program.points().len()
+        ));
     }
 
     #[test]

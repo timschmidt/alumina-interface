@@ -13,15 +13,18 @@ use alumina_config::{
 };
 use alumina_interface_core::{
     CanonicalMachinePartition2, CanonicalScheduleEvidence3, CanonicalScheduledProgram2,
-    CertifiedJerkSchedule2, CncGeometryImportLimits, CncGeometryImportReport2, ExactValue,
-    MachineDynamicsProfile2, MachinePartitionPolicy2, MachineResolutionBudget2,
-    MetricPathApproximationLimits2, Millimetres, ScheduledLoweringLimits,
-    build_canonical_schedule_evidence, certify_jerk_schedule, import_exact_cnc_geometry,
-    lower_certified_schedule_to_v1, package_canonical_scheduled_program, project_for_display,
-    replay_canonical_schedule_evidence, representative_curve_path,
+    CanonicalSharedScheduledGlobalJob2, CertifiedJerkSchedule2, CncGeometryImportLimits,
+    CncGeometryImportReport2, ExactValue, MachineDynamicsProfile2, MachinePartitionPolicy2,
+    MachineResolutionBudget2, MetricPathApproximationLimits2, Millimetres, ScheduledLoweringLimits,
+    SharedGlobalJobCompilePolicy2, SharedScheduledJobParticipant2, TimerDilationPolicy,
+    build_canonical_schedule_evidence, certify_jerk_schedule, compile_shared_scheduled_global_job,
+    import_exact_cnc_geometry, lower_certified_schedule_to_v1, package_canonical_scheduled_program,
+    project_for_display, replay_canonical_schedule_evidence, representative_curve_path,
     verify_canonical_schedule_evidence_bytes,
 };
+use alumina_job::{JobNetworkPolicy, MachineJobGlobalFacts};
 use alumina_machine_ir::{BlockValidationLimits, ValidationLimits};
+use alumina_protocol::{DeviceId, Digest};
 use alumina_sim::motion::{CachedStepperReplayReport, replay_cached_stepper_partition};
 use alumina_storage::{CacheLimits, UploadId, sha256};
 use eframe::egui;
@@ -38,6 +41,10 @@ const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD03 file", "al
 const CNC_SOURCE_FILE: BoundedFileSpec = BoundedFileSpec::new("UI-only CNC geometry draft", "nc");
 const STREAM_ID: [u8; 16] = *b"tinybee-cam-v1!!";
 const UPLOAD_ID: UploadId = UploadId(0x1122_3344_5566_7788);
+const SHARED_STREAM_1: [u8; 16] = *b"shared-mcu-0001!";
+const SHARED_STREAM_2: [u8; 16] = *b"shared-mcu-0002!";
+const SHARED_DEVICE_1: DeviceId = DeviceId([0x11; 16]);
+const SHARED_DEVICE_2: DeviceId = DeviceId([0x22; 16]);
 const PREPARE_ID: u64 = 0x8877_6655_4433_2211;
 const MAXIMUM_VISIBLE_CNC_SPANS: usize = 128;
 const CNC_EXAMPLE: &str = "%\n\
@@ -111,6 +118,7 @@ struct MachineCamArtifacts {
     partition: CanonicalMachinePartition2,
     replay: CachedStepperReplayReport<2>,
     evidence: CanonicalScheduleEvidence3,
+    shared_job: CanonicalSharedScheduledGlobalJob2,
 }
 
 impl MachineCamArtifacts {
@@ -147,26 +155,7 @@ impl MachineCamArtifacts {
             ScheduledLoweringLimits::INTERACTIVE,
         )
         .map_err(|error| format!("canonical V1 lowering rejected: {error}"))?;
-        let policy = MachinePartitionPolicy2::try_new(
-            STREAM_ID,
-            profile.capability_digest(),
-            profile.configuration_digest(),
-            BlockValidationLimits {
-                maximum_block_ticks: 10_000_000,
-                segment: ValidationLimits {
-                    maximum_segment_ticks: 10_000_000,
-                    maximum_steps_per_segment: 100_000,
-                },
-            },
-            UPLOAD_ID,
-            700,
-            CacheLimits {
-                maximum_object_bytes: 4 * 1024 * 1024,
-                maximum_chunk_bytes: 1_024,
-                maximum_chunks: 10_000,
-            },
-        )
-        .map_err(|error| format!("partition policy rejected: {error}"))?;
+        let policy = machine_cam_partition_policy(STREAM_ID, UPLOAD_ID, &profile)?;
         let partition = package_canonical_scheduled_program(&program, policy)
             .map_err(|error| format!("cached partition packaging rejected: {error}"))?;
         let descriptor = partition
@@ -183,6 +172,8 @@ impl MachineCamArtifacts {
         replay_canonical_schedule_evidence(&evidence, &schedule, &program, &partition)
             .map_err(|error| format!("canonical evidence replay rejected: {error}"))?;
 
+        let shared_job = compile_shared_machine_cam_job(&profile, &schedule, &program, &evidence)?;
+
         Ok(Self {
             configuration_bytes,
             configuration_identity,
@@ -194,8 +185,97 @@ impl MachineCamArtifacts {
             partition,
             replay,
             evidence,
+            shared_job,
         })
     }
+}
+
+fn compile_shared_machine_cam_job(
+    profile: &MachineDynamicsProfile2,
+    schedule: &CertifiedJerkSchedule2,
+    program: &CanonicalScheduledProgram2,
+    evidence: &CanonicalScheduleEvidence3,
+) -> Result<CanonicalSharedScheduledGlobalJob2, String> {
+    let global_template = MachineJobGlobalFacts {
+        network_policy: JobNetworkPolicy::NetworkAttended,
+        global_timebase_hz: 0,
+        duration_ticks: 0,
+        source_digest: evidence.source_digest(),
+        compiler_digest: evidence.lowering_transcript_digest(),
+        interface_digest: sha256(b"alumina-interface browser authority V1").digest,
+        policy_digest: evidence.planner_transcript_digest(),
+        machine_digest: profile.configuration_digest(),
+        coordinate_epoch_digest: sha256(b"machine CAM fixture zero coordinate epoch V1").digest,
+        safety_policy_digest: sha256(b"offline non-armable fixture safety policy V1").digest,
+        synchronization_digest: Digest::ZERO,
+    };
+    let shared_policy = SharedGlobalJobCompilePolicy2::try_new(
+        global_template,
+        UploadId(0x3344_5566_7788_9900),
+        700,
+        CacheLimits {
+            maximum_object_bytes: 4 * 1024 * 1024,
+            maximum_chunk_bytes: 1_024,
+            maximum_chunks: 10_000,
+        },
+    )
+    .map_err(|error| format!("shared global policy rejected: {error}"))?;
+    let board_package_digest = sha256(b"MKS TinyBee v1.0 board package").digest;
+    let resource_set_digest = profile.configuration_digest();
+    let safety_envelope_digest = global_template.safety_policy_digest;
+    let first = SharedScheduledJobParticipant2::new(
+        SHARED_DEVICE_1,
+        board_package_digest,
+        resource_set_digest,
+        safety_envelope_digest,
+        schedule,
+        program,
+        profile,
+        machine_cam_partition_policy(SHARED_STREAM_1, UploadId(0x1122_3344_5566_0001), profile)?,
+    );
+    let second = SharedScheduledJobParticipant2::new(
+        SHARED_DEVICE_2,
+        board_package_digest,
+        resource_set_digest,
+        safety_envelope_digest,
+        schedule,
+        program,
+        profile,
+        machine_cam_partition_policy(SHARED_STREAM_2, UploadId(0x1122_3344_5566_0002), profile)?,
+    );
+    compile_shared_scheduled_global_job(
+        shared_policy,
+        TimerDilationPolicy::INTERACTIVE,
+        vec![second, first],
+    )
+    .map_err(|error| format!("shared cached-job compilation rejected: {error}"))
+}
+
+fn machine_cam_partition_policy(
+    stream_id: [u8; 16],
+    upload_id: UploadId,
+    profile: &MachineDynamicsProfile2,
+) -> Result<MachinePartitionPolicy2, String> {
+    MachinePartitionPolicy2::try_new(
+        stream_id,
+        profile.capability_digest(),
+        profile.configuration_digest(),
+        BlockValidationLimits {
+            maximum_block_ticks: 10_000_000,
+            segment: ValidationLimits {
+                maximum_segment_ticks: 10_000_000,
+                maximum_steps_per_segment: 100_000,
+            },
+        },
+        upload_id,
+        700,
+        CacheLimits {
+            maximum_object_bytes: 4 * 1024 * 1024,
+            maximum_chunk_bytes: 1_024,
+            maximum_chunks: 10_000,
+        },
+    )
+    .map_err(|error| format!("partition policy rejected: {error}"))
 }
 
 /// Visible offline CAM state. It has no device-connection, arming, or output authority.
@@ -253,6 +333,12 @@ impl MachineCamWorkspace {
             "{} canonical segments · {} cache blocks",
             artifacts.program.segments().len(),
             artifacts.partition.block_count()
+        ));
+        ui.label(format!(
+            "{} synchronized MCU partitions · shared factor {} · ALMSYN01 {}…",
+            artifacts.shared_job.global_job().participants().len(),
+            artifacts.shared_job.retiming().selected_factor(),
+            digest_prefix(artifacts.shared_job.timing_evidence().digest().0)
         ));
         ui.label(format!(
             "{} replayed rising edges",
@@ -1216,6 +1302,48 @@ impl MachineCamWorkspace {
             "{} canonical ALMEVD03 bytes",
             self.artifacts.evidence.encoded().len()
         ));
+        let shared = &self.artifacts.shared_job;
+        let timing = shared.retiming();
+        let shared_evidence = shared.timing_evidence();
+        let global = shared.global_job();
+        ui.separator();
+        ui.strong("Joint multi-MCU retiming before immutable publication");
+        ui.monospace(format!(
+            "factor {} on 1/{} grid · {} complete rounds / {} participant replays · common terminal tick {}",
+            timing.selected_factor(),
+            timing.selected_factor_denominator(),
+            timing.candidate_rounds(),
+            timing.participant_replays(),
+            timing.terminal_tick().get()
+        ));
+        ui.monospace(format!(
+            "ALMSYN01 {}… / {} bytes · ALMSRT01 {}… / {} streamed canonical bytes",
+            digest_prefix(shared_evidence.digest().0),
+            shared_evidence.encoded().len(),
+            digest_prefix(shared_evidence.transcript_digest().0),
+            shared_evidence.transcript_byte_len()
+        ));
+        ui.monospace(format!(
+            "global manifest {}… · {} participants · {} bytes / {} chunks",
+            digest_prefix(global.global_job_digest().0),
+            global.participants().len(),
+            global.manifest_bytes().len(),
+            global.manifest_chunks().len()
+        ));
+        for (participant, report) in global.participants().iter().zip(timing.participants()) {
+            let id = report.device_id().0;
+            ui.monospace(format!(
+                "MCU {:02x}{:02x}{:02x}{:02x}… · {} blocks / {} bytes · unit {:?} · predecessor {:?}",
+                id[0],
+                id[1],
+                id[2],
+                id[3],
+                participant.partition().block_count(),
+                participant.partition().bytes().len(),
+                report.unit_factor_outcome(),
+                report.predecessor_outcome()
+            ));
+        }
         ui.colored_label(
             egui::Color32::LIGHT_BLUE,
             "Immutable bytes were decoded, admitted, event-replayed, acknowledged, and cross-checked through the production core-1 owners.",
@@ -1526,6 +1654,36 @@ mod tests {
         assert_ne!(
             artifacts.evidence.source_digest(),
             artifacts.evidence.metric_path_digest()
+        );
+        assert_eq!(
+            artifacts.shared_job.retiming().selected_factor_numerator(),
+            4_096
+        );
+        assert_eq!(artifacts.shared_job.retiming().candidate_rounds(), 1);
+        assert_eq!(artifacts.shared_job.retiming().participant_replays(), 2);
+        assert_eq!(artifacts.shared_job.global_job().participants().len(), 2);
+        assert_eq!(
+            &artifacts.shared_job.timing_evidence().encoded()[..8],
+            b"ALMSYN01"
+        );
+        assert_eq!(artifacts.shared_job.timing_evidence().encoded().len(), 104);
+        assert_eq!(
+            artifacts
+                .shared_job
+                .global_job()
+                .policy()
+                .global()
+                .synchronization_digest,
+            artifacts.shared_job.timing_evidence().digest()
+        );
+        assert!(
+            artifacts
+                .shared_job
+                .global_job()
+                .participant_records()
+                .iter()
+                .all(|participant| participant.error_evidence_digest
+                    == artifacts.shared_job.timing_evidence().digest())
         );
     }
 

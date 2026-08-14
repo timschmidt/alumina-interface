@@ -19,6 +19,7 @@ pub mod motion_schedule;
 pub mod partition;
 pub mod scene;
 pub mod schedule_evidence;
+pub mod shared_timing_evidence;
 pub mod toolpath;
 
 pub use board_explorer::{
@@ -43,9 +44,10 @@ pub use diagnostics::{
     DiagnosticExplorerError, DiagnosticExplorerSnapshot, build_diagnostic_explorer_snapshot,
 };
 pub use global_job::{
-    CanonicalGlobalJob2, CanonicalGlobalManifestChunk, GlobalJobCompileError,
-    GlobalJobCompilePolicy, GlobalJobCompileResult, MachineJobParticipantPackage2,
-    compile_global_job, compile_representative_global_job,
+    CanonicalGlobalJob2, CanonicalGlobalManifestChunk, CanonicalSharedScheduledGlobalJob2,
+    GlobalJobCompileError, GlobalJobCompilePolicy, GlobalJobCompileResult,
+    MachineJobParticipantPackage2, SharedGlobalJobCompilePolicy2, SharedScheduledJobParticipant2,
+    compile_global_job, compile_representative_global_job, compile_shared_scheduled_global_job,
 };
 pub use graph::{
     BaseDimensions, CanonicalGraphEncoding, CanonicalGraphProbeEncoding, CanonicalGraphTrace,
@@ -82,21 +84,27 @@ pub use machine_profile::{
 pub use motion_schedule::{
     CanonicalScheduledProgram2, CertifiedJerkSchedule2, CertifiedTravelEnvelope2,
     MotionScheduleError, MotionScheduleResult, ScalarMotionLimits2, ScheduledLoweringEvidence2,
-    ScheduledLoweringLimits, ScheduledMachinePoint2, TimerDilationPolicy,
-    TimerLatticeScheduleReport2, TravelBoundary, certify_jerk_schedule,
-    lower_certified_schedule_to_v1,
+    ScheduledLoweringLimits, ScheduledMachinePoint2, SharedRetimedParticipant2,
+    SharedTimerCandidateOutcome2, SharedTimerCandidateRoundReport2, SharedTimerLatticeSchedule2,
+    SharedTimerParticipant2, TimerDilationPolicy, TimerLatticeScheduleReport2, TravelBoundary,
+    certify_jerk_schedule, lower_certified_schedule_to_v1, select_shared_timer_lattice_schedule,
 };
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
     MachinePartitionPolicy2, MachinePartitionResult, package_canonical_program,
-    package_canonical_scheduled_program, representative_partition_policy,
-    representative_partition_policy_for,
+    package_canonical_scheduled_program, package_shared_retimed_scheduled_program,
+    representative_partition_policy, representative_partition_policy_for,
 };
 pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
 pub use schedule_evidence::{
     CanonicalScheduleEvidence3, ScheduleEvidenceError, ScheduleEvidenceResult,
     build_canonical_schedule_evidence, replay_canonical_schedule_evidence,
     verify_canonical_schedule_evidence_bytes,
+};
+pub use shared_timing_evidence::{
+    CanonicalSharedTimingEvidence1, SharedTimingEvidenceError, SharedTimingEvidenceParticipant2,
+    SharedTimingEvidenceResult, build_shared_timing_evidence, replay_shared_timing_evidence,
+    verify_shared_timing_evidence_bytes,
 };
 pub use toolpath::{
     CertifiedMetricPath2, CertifiedMetricSourceSpan2, MetricPathApproximationLimits2,

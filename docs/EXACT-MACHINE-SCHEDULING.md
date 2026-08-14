@@ -26,9 +26,14 @@ authenticated ALMCAP02 capability + canonical ALMCFG05 configuration
     -> certified interpolation onto the firmware V1 segment model
     -> configured step/tick/output lattices
     -> allocation-free production StepperExecutor preflight
-    -> independently replayed chained execution blocks
-    -> content-addressed SD partition
-       ├-> canonical ALMEVD03 evidence transcript
+    -> optional exact shared-factor selection across every MCU
+       -> complete production replay of every participant at every candidate
+       -> selected per-MCU streams replayed against retained exact point carriers
+    -> independently replayed chained execution blocks per MCU
+    -> content-addressed SD partitions
+       ├-> canonical ALMEVD03 local derivation evidence
+       ├-> canonical ALMSYN01 / streamed ALMSRT01 shared evidence
+       ├-> evidence-bound ALMJMF01 global manifest
        └-> event-level cached-partition simulator replay (verification)
 ```
 
@@ -265,6 +270,58 @@ sub-quantum grid padding. The exact 3-4-5 ceiling regression retains
 and selects `4158/4096` before ending at `[9600, 12800]`. A policy capped at one
 fails closed. No floating safety factor or weakened firmware check exists.
 
+## Shared multi-MCU retiming
+
+`select_shared_timer_lattice_schedule` begins from already certified local
+programs, while their exact ideal times and integer step coordinates are still
+reconstructible. It canonicalizes participants by stable `DeviceId`, rejects
+duplicates and zero identities, and proves each program/profile configuration,
+capability, timer, and output-quantum binding before searching.
+
+Shared V1 intentionally admits only participants with the same exact cumulative
+ideal event grid, timer frequency, and output quantum. Under those conditions,
+each interval reconstructs the identical cumulative tick grid as
+`q*ceil(factor*ideal/q)`, even when coordinates and electrical constraints
+differ. Mixed clocks, output quanta, event counts, or exact event times fail
+closed; they require a later explicit common-event-grid and idle semantics, not
+rounded-seconds inference.
+
+Every factor is a complete round over every MCU. The retained report includes
+factor one, the caller ceiling, every deterministic binary-search midpoint, the
+selected factor, and its immediate predecessor, with either the complete
+accepted production preflight or exact timing rejection for every participant.
+Only the same explicit timing-pressure failures accepted by local retiming can
+move the shared search. The selected factor must pass all participants; the
+predecessor must fail at least one. It need not fail all of them.
+
+The adversarial regression uses two profiles with identical planner dynamics
+and ideal event grids. Only the strict pulse profile drives the common minimum
+`4151/4096`; the relaxed profile accepts both factor one and `4150/4096`.
+Twenty complete candidate rounds therefore perform 40 production replays and
+produce byte-identical cumulative ticks ending at 2,495,232 on both MCUs.
+Reversing discovery order does not change one selected result byte.
+
+`package_shared_retimed_scheduled_program` then checks every selected tick and
+step delta against the retained local point carrier before constructing any
+immutable block. `ALMSYN01` is a compact 104-byte outer record committing a
+bounded, incrementally hashed `ALMSRT01` transcript. The transcript contains:
+
+- the exact shared lattice policy, selected factor, common ideal/scheduled
+  totals, timer/output facts, and complete ordered search trace;
+- each participant's exact source, metric, approximation, planner, and lowering
+  transcript identities and lengths;
+- unit/predecessor outcomes and all final timing-error bounds;
+- every selected tick, segment, and production preflight; and
+- each independently replayed partition's stream/object/manifest/block/terminal
+  identities.
+
+The browser's default offline Machine/CAM fixture now drives the complete
+two-participant pipeline before display. Its identical TinyBee participants
+pass factor one in one round (two production replays), end at tick 9,639,280,
+produce two 125,952-byte partitions, and bind a 218,287-byte streamed shared
+transcript into a 1,312-byte global manifest. These are deterministic software
+fixture facts, not physical synchronization or armability evidence.
+
 ## Cache, simulation, and evidence
 
 `package_canonical_scheduled_program` requires the program's configuration and
@@ -278,6 +335,14 @@ not use final output identity as a substitute for planner-decision identity. It
 reconstructs separate domain-separated planner and lowering subtranscripts,
 hashes each incrementally, and commits both SHA-256 and canonical byte length in
 the outer evidence record.
+
+For a shared job, `compile_shared_scheduled_global_job` enforces the stronger
+ordering: select the common factor, replay each selected stream against its
+exact point carrier, construct and independently replay every partition, build
+`ALMSYN01`, then construct `ALMJMF01`. The compiler—not the caller—derives the
+global timer, duration, and synchronization digest. That evidence digest is
+also each participant record's timing/error evidence identity, preventing a
+manifest from naming stale caller-supplied retiming facts.
 
 `alumina-sim::replay_cached_stepper_partition` consumes the resulting bytes and
 real `JobDescriptor`. It first checks the complete byte length, object kind, and
@@ -350,9 +415,10 @@ performed during packaging.
   projection, span-local limits, and non-Cartesian kinematics remain future
   work.
 - Exact output-quantum headroom is selected on a caller-owned rational factor
-  lattice and complete production replay remains authoritative. Global
-  multi-MCU selection of one shared retiming factor and direct native jerk IR
-  remain open.
+  lattice and complete production replay remains authoritative. Shared V1
+  retiming is implemented for one exact ideal event grid, timer frequency, and
+  output quantum. Mixed timer/output grids and direct native jerk IR remain
+  open.
 - Firmware V1 follows the certified smooth schedule through bounded
   constant-velocity segments; it does not run an onboard jerk planner.
 - Configured source/command travel containment does not by itself prove tool,

@@ -15,9 +15,19 @@ use alumina_storage::{
 };
 
 use crate::compiler::CanonicalPathProgram2;
+use crate::machine_profile::MachineDynamicsProfile2;
+use crate::motion_schedule::{
+    CanonicalScheduledProgram2, CertifiedJerkSchedule2, MotionScheduleError,
+    SharedTimerLatticeSchedule2, SharedTimerParticipant2, TimerDilationPolicy,
+    select_shared_timer_lattice_schedule,
+};
 use crate::partition::{
     CanonicalMachinePartition2, MachinePartitionError, package_canonical_program,
-    representative_partition_policy_for,
+    package_shared_retimed_scheduled_program, representative_partition_policy_for,
+};
+use crate::shared_timing_evidence::{
+    CanonicalSharedTimingEvidence1, SharedTimingEvidenceError, SharedTimingEvidenceParticipant2,
+    build_shared_timing_evidence,
 };
 
 /// Result type for global multi-MCU job compilation.
@@ -81,6 +91,156 @@ impl GlobalJobCompilePolicy {
     /// Return the cache admission budget for the manifest object.
     pub const fn cache_limits(&self) -> CacheLimits {
         self.cache_limits
+    }
+}
+
+/// Job-wide facts and manifest storage policy whose synchronization fields are
+/// derived only after exact shared retiming and partition evidence exist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SharedGlobalJobCompilePolicy2 {
+    global_template: MachineJobGlobalFacts,
+    upload_id: UploadId,
+    storage_chunk_bytes: u32,
+    cache_limits: CacheLimits,
+}
+
+impl SharedGlobalJobCompilePolicy2 {
+    /// Validate storage policy and require empty derived timing/evidence fields.
+    ///
+    /// The compiler fills `global_timebase_hz`, `duration_ticks`, and
+    /// `synchronization_digest` from the selected schedule and `ALMSYN01`
+    /// evidence. Requiring zero placeholders prevents stale caller facts from
+    /// appearing authoritative.
+    pub fn try_new(
+        global_template: MachineJobGlobalFacts,
+        upload_id: UploadId,
+        storage_chunk_bytes: u32,
+        cache_limits: CacheLimits,
+    ) -> GlobalJobCompileResult<Self> {
+        if global_template.global_timebase_hz != 0
+            || global_template.duration_ticks != 0
+            || !global_template.synchronization_digest.is_zero()
+        {
+            return Err(GlobalJobCompileError::InvalidPolicy(
+                "shared job timing and synchronization evidence must be derived",
+            ));
+        }
+        if global_template.source_digest.is_zero()
+            || global_template.compiler_digest.is_zero()
+            || global_template.interface_digest.is_zero()
+            || global_template.policy_digest.is_zero()
+            || global_template.machine_digest.is_zero()
+            || global_template.coordinate_epoch_digest.is_zero()
+            || global_template.safety_policy_digest.is_zero()
+        {
+            return Err(GlobalJobCompileError::InvalidPolicy(
+                "shared job upstream source/compiler/machine/safety identities must be bound",
+            ));
+        }
+        GlobalJobCompilePolicy::try_new(
+            global_template,
+            upload_id,
+            storage_chunk_bytes,
+            cache_limits,
+        )?;
+        Ok(Self {
+            global_template,
+            upload_id,
+            storage_chunk_bytes,
+            cache_limits,
+        })
+    }
+
+    /// Borrow caller-owned job-wide facts with derived fields still empty.
+    pub const fn global_template(&self) -> MachineJobGlobalFacts {
+        self.global_template
+    }
+
+    /// Manifest upload transaction identity.
+    pub const fn upload_id(&self) -> UploadId {
+        self.upload_id
+    }
+
+    /// Independently hashed manifest chunk size.
+    pub const fn storage_chunk_bytes(&self) -> u32 {
+        self.storage_chunk_bytes
+    }
+
+    /// Manifest cache-admission policy.
+    pub const fn cache_limits(&self) -> CacheLimits {
+        self.cache_limits
+    }
+}
+
+/// One exact local derivation and immutable-partition policy in a shared job.
+#[derive(Clone, Copy, Debug)]
+pub struct SharedScheduledJobParticipant2<'a> {
+    device_id: DeviceId,
+    board_package_digest: Digest,
+    resource_set_digest: Digest,
+    safety_envelope_digest: Digest,
+    schedule: &'a CertifiedJerkSchedule2,
+    program: &'a CanonicalScheduledProgram2,
+    profile: &'a MachineDynamicsProfile2,
+    partition_policy: crate::partition::MachinePartitionPolicy2,
+}
+
+impl<'a> SharedScheduledJobParticipant2<'a> {
+    /// Bind one discovered MCU and all exact inputs required before publication.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is an independent canonical participant fact"
+    )]
+    pub const fn new(
+        device_id: DeviceId,
+        board_package_digest: Digest,
+        resource_set_digest: Digest,
+        safety_envelope_digest: Digest,
+        schedule: &'a CertifiedJerkSchedule2,
+        program: &'a CanonicalScheduledProgram2,
+        profile: &'a MachineDynamicsProfile2,
+        partition_policy: crate::partition::MachinePartitionPolicy2,
+    ) -> Self {
+        Self {
+            device_id,
+            board_package_digest,
+            resource_set_digest,
+            safety_envelope_digest,
+            schedule,
+            program,
+            profile,
+            partition_policy,
+        }
+    }
+
+    /// Stable physical MCU identity.
+    pub const fn device_id(self) -> DeviceId {
+        self.device_id
+    }
+}
+
+/// Exact shared retiming, its evidence, and every immutable global cache object.
+#[derive(Debug)]
+pub struct CanonicalSharedScheduledGlobalJob2 {
+    retiming: SharedTimerLatticeSchedule2,
+    timing_evidence: CanonicalSharedTimingEvidence1,
+    global_job: CanonicalGlobalJob2,
+}
+
+impl CanonicalSharedScheduledGlobalJob2 {
+    /// Jointly minimal exact timer-lattice selection and final MCU streams.
+    pub const fn retiming(&self) -> &SharedTimerLatticeSchedule2 {
+        &self.retiming
+    }
+
+    /// Canonical shared search/derivation/partition evidence.
+    pub const fn timing_evidence(&self) -> &CanonicalSharedTimingEvidence1 {
+        &self.timing_evidence
+    }
+
+    /// Final global manifest and every owned participant partition.
+    pub const fn global_job(&self) -> &CanonicalGlobalJob2 {
+        &self.global_job
     }
 }
 
@@ -252,6 +412,110 @@ impl CanonicalGlobalJob2 {
     pub const fn global_job_digest(&self) -> Digest {
         self.global_job_digest
     }
+}
+
+/// Jointly retime, replay, partition, evidence-bind, and globally package a
+/// multi-MCU scheduled job.
+///
+/// No immutable participant object is constructed until the common factor is
+/// selected. No global manifest is constructed until every selected partition
+/// has independently replayed and the resulting `ALMSYN01` digest is available
+/// for both the global synchronization fact and each participant's exact error
+/// evidence identity.
+pub fn compile_shared_scheduled_global_job(
+    policy: SharedGlobalJobCompilePolicy2,
+    timer_policy: TimerDilationPolicy,
+    mut participants: Vec<SharedScheduledJobParticipant2<'_>>,
+) -> GlobalJobCompileResult<CanonicalSharedScheduledGlobalJob2> {
+    if participants.iter().any(|participant| {
+        participant.device_id.is_zero()
+            || participant.board_package_digest.is_zero()
+            || participant.resource_set_digest.is_zero()
+            || participant.safety_envelope_digest.is_zero()
+    }) {
+        return Err(GlobalJobCompileError::InvalidPolicy(
+            "shared participants require stable device, board, resource, and safety identities",
+        ));
+    }
+    let mut retiming_inputs = Vec::new();
+    retiming_inputs
+        .try_reserve_exact(participants.len())
+        .map_err(|_| GlobalJobCompileError::AllocationOverflow)?;
+    for participant in &participants {
+        retiming_inputs.push(SharedTimerParticipant2::new(
+            participant.device_id,
+            participant.program,
+            participant.profile,
+        ));
+    }
+    let retiming = select_shared_timer_lattice_schedule(retiming_inputs, timer_policy)?;
+    participants.sort_unstable_by_key(|participant| participant.device_id);
+    if participants.len() != retiming.participants().len()
+        || participants
+            .iter()
+            .zip(retiming.participants())
+            .any(|(input, selected)| input.device_id != selected.device_id())
+    {
+        return Err(GlobalJobCompileError::SharedParticipantSetMismatch);
+    }
+
+    let mut partitions = Vec::new();
+    partitions
+        .try_reserve_exact(participants.len())
+        .map_err(|_| GlobalJobCompileError::AllocationOverflow)?;
+    for (participant, selected) in participants.iter().zip(retiming.participants()) {
+        partitions.push(package_shared_retimed_scheduled_program(
+            participant.program,
+            selected,
+            participant.partition_policy,
+        )?);
+    }
+
+    let mut evidence_inputs = Vec::new();
+    evidence_inputs
+        .try_reserve_exact(participants.len())
+        .map_err(|_| GlobalJobCompileError::AllocationOverflow)?;
+    for (participant, partition) in participants.iter().zip(&partitions) {
+        evidence_inputs.push(SharedTimingEvidenceParticipant2::new(
+            participant.device_id,
+            participant.schedule,
+            participant.program,
+            partition,
+        ));
+    }
+    let timing_evidence = build_shared_timing_evidence(&retiming, evidence_inputs)?;
+
+    let mut packages = Vec::new();
+    packages
+        .try_reserve_exact(participants.len())
+        .map_err(|_| GlobalJobCompileError::AllocationOverflow)?;
+    for (participant, partition) in participants.into_iter().zip(partitions) {
+        packages.push(MachineJobParticipantPackage2::new(
+            participant.device_id,
+            participant.board_package_digest,
+            participant.resource_set_digest,
+            timing_evidence.digest(),
+            participant.safety_envelope_digest,
+            partition,
+        ));
+    }
+
+    let mut global = policy.global_template;
+    global.global_timebase_hz = retiming.timer_ticks_per_second();
+    global.duration_ticks = retiming.terminal_tick().get();
+    global.synchronization_digest = timing_evidence.digest();
+    let manifest_policy = GlobalJobCompilePolicy::try_new(
+        global,
+        policy.upload_id,
+        policy.storage_chunk_bytes,
+        policy.cache_limits,
+    )?;
+    let global_job = compile_global_job(manifest_policy, packages)?;
+    Ok(CanonicalSharedScheduledGlobalJob2 {
+        retiming,
+        timing_evidence,
+        global_job,
+    })
 }
 
 /// Construct a canonical global manifest and retain every local partition it
@@ -465,6 +729,12 @@ pub enum GlobalJobCompileError {
     DigestMismatch,
     /// Independent manifest decode did not reproduce compiler facts.
     ReplayMismatch,
+    /// Canonical participant identities diverged across shared compilation stages.
+    SharedParticipantSetMismatch,
+    /// Exact shared timer selection failed before any partition was emitted.
+    MotionSchedule(MotionScheduleError),
+    /// Canonical shared-retiming evidence construction or replay failed.
+    SharedTimingEvidence(SharedTimingEvidenceError),
     /// One local partition failed before global binding.
     Partition(MachinePartitionError),
     /// The shared firmware manifest schema rejected global or participant facts.
@@ -489,6 +759,14 @@ impl fmt::Display for GlobalJobCompileError {
             Self::ReplayMismatch => {
                 formatter.write_str("decoded global manifest diverged from compiler facts")
             }
+            Self::SharedParticipantSetMismatch => formatter
+                .write_str("shared job participant identities diverged across compilation stages"),
+            Self::MotionSchedule(source) => {
+                write!(formatter, "shared timer selection failed: {source}")
+            }
+            Self::SharedTimingEvidence(source) => {
+                write!(formatter, "shared timer evidence failed: {source}")
+            }
             Self::Partition(source) => write!(formatter, "participant partition failed: {source}"),
             Self::Manifest(source) => write!(formatter, "global manifest rejected: {source:?}"),
             Self::Storage(source) => {
@@ -503,6 +781,18 @@ impl StdError for GlobalJobCompileError {}
 impl From<MachinePartitionError> for GlobalJobCompileError {
     fn from(value: MachinePartitionError) -> Self {
         Self::Partition(value)
+    }
+}
+
+impl From<MotionScheduleError> for GlobalJobCompileError {
+    fn from(value: MotionScheduleError) -> Self {
+        Self::MotionSchedule(value)
+    }
+}
+
+impl From<SharedTimingEvidenceError> for GlobalJobCompileError {
+    fn from(value: SharedTimingEvidenceError) -> Self {
+        Self::SharedTimingEvidence(value)
     }
 }
 

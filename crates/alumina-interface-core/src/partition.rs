@@ -16,14 +16,14 @@ use alumina_machine_ir::{
     MAX_EXECUTION_AXES, MotionStreamProgress, MotionStreamValidator, StreamId, StreamTick,
     ValidationLimits, maximum_motion_segments_per_block,
 };
-use alumina_protocol::Digest;
+use alumina_protocol::{DeviceId, Digest};
 use alumina_storage::{
     CacheLimits, ChunkUploadHeader, ContentId, Error as StorageError, ManifestHasher, ObjectKind,
     PublishedObject, StoredObject, UploadId, UploadPlan, sha256,
 };
 
 use crate::compiler::CanonicalPathProgram2;
-use crate::motion_schedule::CanonicalScheduledProgram2;
+use crate::motion_schedule::{CanonicalScheduledProgram2, SharedRetimedParticipant2};
 
 /// Result type for canonical per-MCU packaging.
 pub type MachinePartitionResult<T> = Result<T, MachinePartitionError>;
@@ -370,6 +370,94 @@ pub fn package_canonical_scheduled_program(
     )
 }
 
+/// Package one selected participant only after replaying its relationship to
+/// the exact locally lowered point carrier.
+///
+/// Shared retiming owns the final ticks and segments, while the local program
+/// remains the authority for configuration/capability identity and absolute
+/// step coordinates. This boundary checks every tick and step delta before any
+/// immutable block, hash, upload declaration, or manifest fact is emitted.
+pub fn package_shared_retimed_scheduled_program(
+    program: &CanonicalScheduledProgram2,
+    retimed: &SharedRetimedParticipant2,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<CanonicalMachinePartition2> {
+    if program.configuration_digest() != policy.config_digest
+        || program.capability_digest() != policy.capability_digest
+        || retimed.configuration_digest() != policy.config_digest
+        || retimed.capability_digest() != policy.capability_digest
+        || retimed.configuration_digest() != program.configuration_digest()
+        || retimed.capability_digest() != program.capability_digest()
+        || retimed.timer_ticks_per_second() != program.timer_ticks_per_second()
+        || retimed.output_quantum_cycles() != program.output_quantum_cycles()
+    {
+        return Err(MachinePartitionError::SharedRetimingMismatch {
+            device_id: retimed.device_id(),
+        });
+    }
+
+    let points = program.points();
+    let ticks = retimed.ticks();
+    let segments = retimed.segments();
+    if points.len() < 2
+        || ticks.len() != points.len()
+        || segments.len().checked_add(1) != Some(points.len())
+        || ticks.first().is_none_or(|tick| tick.get() != 0)
+    {
+        return Err(MachinePartitionError::SharedRetimingMismatch {
+            device_id: retimed.device_id(),
+        });
+    }
+
+    for (segment_index, segment) in segments.iter().enumerate() {
+        let point_pair = &points[segment_index..=segment_index + 1];
+        let expected_delta = [
+            point_pair[1].steps()[0]
+                .get()
+                .checked_sub(point_pair[0].steps()[0].get()),
+            point_pair[1].steps()[1]
+                .get()
+                .checked_sub(point_pair[0].steps()[1].get()),
+        ];
+        let Some(expected_delta) = expected_delta[0].zip(expected_delta[1]) else {
+            return Err(MachinePartitionError::SharedRetimingMismatch {
+                device_id: retimed.device_id(),
+            });
+        };
+        if segment.start_tick.0 != ticks[segment_index].get()
+            || segment.end_tick.0 != ticks[segment_index + 1].get()
+            || segment.delta_steps != [expected_delta.0, expected_delta.1]
+            || segment.flags != 0
+        {
+            return Err(MachinePartitionError::SharedRetimingMismatch {
+                device_id: retimed.device_id(),
+            });
+        }
+    }
+
+    let first_point = &points[0];
+    let last_point = &points[points.len() - 1];
+    let initial_position = [first_point.steps()[0].get(), first_point.steps()[1].get()];
+    let final_position = [last_point.steps()[0].get(), last_point.steps()[1].get()];
+    let preflight = retimed.executor_preflight();
+    if preflight.position != final_position
+        || preflight.end_tick != segments[segments.len() - 1].end_tick
+        || usize::try_from(preflight.segment_count).ok() != Some(segments.len())
+    {
+        return Err(MachinePartitionError::SharedRetimingMismatch {
+            device_id: retimed.device_id(),
+        });
+    }
+
+    package_canonical_segments(
+        segments,
+        initial_position,
+        final_position,
+        retimed.timer_ticks_per_second(),
+        policy,
+    )
+}
+
 fn package_canonical_segments(
     segments: &[alumina_machine_ir::ExecutionSegment<2>],
     initial_position: [i64; 2],
@@ -602,6 +690,11 @@ pub enum MachinePartitionError {
     InvalidPolicy(&'static str),
     /// Program configuration/capability identity did not match the partition target.
     ProgramIdentityMismatch,
+    /// Shared retiming did not replay against the retained exact point carrier.
+    SharedRetimingMismatch {
+        /// Stable physical identity of the rejected retimed stream.
+        device_id: DeviceId,
+    },
     /// No canonical segment was available to package.
     EmptyProgram,
     /// Full cached partitions begin at stream-relative tick zero.
@@ -633,6 +726,10 @@ impl fmt::Display for MachinePartitionError {
             Self::InvalidPolicy(reason) => write!(formatter, "invalid partition policy: {reason}"),
             Self::ProgramIdentityMismatch => formatter
                 .write_str("canonical program identity does not match the partition target"),
+            Self::SharedRetimingMismatch { device_id } => write!(
+                formatter,
+                "shared retimed stream for participant {device_id:?} does not match its exact local point carrier"
+            ),
             Self::EmptyProgram => formatter.write_str("canonical program contains no segments"),
             Self::ProgramMustStartAtZero => {
                 formatter.write_str("cached partition must begin at stream tick zero")

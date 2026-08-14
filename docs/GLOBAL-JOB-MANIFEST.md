@@ -31,6 +31,45 @@ domain-separated SHA-256 over the complete ordered participant records becomes
 firmware `JobCommit`; the selected participant record supplies its local
 partition digest.
 
+## Exact shared scheduled-job compiler
+
+`compile_shared_scheduled_global_job` is the production-shaped browser
+boundary for schedule-derived participants. Its ordering is fixed:
+
+1. validate stable device/board/resource/safety identities;
+2. select the smallest common exact timer-lattice factor by complete
+   all-participant production preflight;
+3. replay each selected stream against its retained exact ideal-time/step-point
+   carrier;
+4. construct and independently replay every immutable participant partition;
+5. build canonical `ALMSYN01` evidence over the exact derivations, complete
+   factor-search trace, selected streams, and partition identities; then
+6. derive global timer frequency, duration, and `synchronization_digest` from
+   those results before constructing `ALMJMF01`.
+
+The caller supplies a `SharedGlobalJobCompilePolicy2` template with those three
+derived fields set to zero. Nonzero placeholders reject, so stale timing facts
+cannot masquerade as authority. The compiler writes the `ALMSYN01` digest into
+the global synchronization field and every participant's timing/error evidence
+field. Board, resource, safety, source, build, configuration, and coordinate
+identities remain explicit nonzero caller facts and are committed by the final
+manifest.
+
+Shared timer-lattice V1 requires one exact cumulative ideal event grid, local
+timer frequency, and output quantum across participants. This makes every
+selected local terminal tick identical and satisfies the existing manifest's
+exact duration proof without adding a float, tolerance, or second wire schema.
+Mixed clocks and event grids are rejected pending an explicit synchronization-
+marker/idle model.
+
+`ALMSYN01` is a 104-byte compact record containing the streamed
+`ALMSRT01` digest and length plus the selected factor/search/timer/terminal
+summary. Replay reconstructs all upstream source/metric/approximation/planner/
+lowering digests, candidate outcomes, selected ticks/segments/preflights, and
+partition identities. Corruption, participant substitution, reordered input,
+an inconsistent binary-search trace, a non-timing rejection, or terminal
+divergence fails before the global manifest is returned.
+
 ## Storage
 
 The same global manifest must be published on every participant. Object bytes
@@ -57,12 +96,34 @@ Both local partitions contain the same harmless line/arc/cubic motion fixture,
 which makes this a synchronization/identity example rather than a useful
 machine split.
 
+The Machine/CAM workspace additionally constructs a two-participant
+schedule-derived fixture through the new shared compiler. Both identical
+TinyBee profiles accept factor `4096/4096`, so one complete round performs two
+production replays and both partitions end at tick 9,639,280. The fixture
+retains:
+
+```text
+shared_evidence_magic=ALMSYN01
+shared_outer_bytes=104
+shared_transcript_bytes=218287
+participant_partition_bytes=125952,125952
+global_manifest_bytes=1312
+```
+
+The UI displays the selected factor, replay counts, common terminal tick,
+shared evidence/transcript identities, manifest identity, and each canonical
+participant package. All are offline artifacts; no network or device operation
+is initiated.
+
 ## Open authority boundaries
 
-- Fixture source/compiler/interface/policy/machine/coordinate/safety/resource/
-  error digests are explicit nonzero sentinels. Production compilation must
-  derive them from canonical source, authenticated capabilities and active
-  configuration, compiler/build identity, and retained evidence objects.
+- The older general-motion fixture still uses explicit nonzero sentinel
+  identities. The schedule-derived Machine/CAM fixture derives source,
+  planner/lowering, configuration, duration, and shared timing identities from
+  retained artifacts, while its offline board/resource/safety/build fixture
+  identities remain deterministic development values. Live compilation must
+  replace them with authenticated board, active-configuration, build, resource,
+  coordinate, and safety evidence.
 - The compiler does not yet partition axes/resources from one global machine
   graph; the caller currently supplies complete participant packages.
 - Browser Wi-Fi transport now strictly authenticates and reconciles each local

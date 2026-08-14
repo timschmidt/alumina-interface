@@ -18,7 +18,7 @@ use std::fmt;
 
 use alumina_machine_ir::ExecutionSegment;
 use alumina_motion::{MotionError, StepperPreflightSummary, preflight_stepper_segments};
-use alumina_protocol::Digest;
+use alumina_protocol::{DeviceId, Digest};
 use hypercurve::{
     Classification, CurveContext, CurveError, CurveGeometry2, CurvePath2, ExactCurveError,
     Point2 as CurvePoint2,
@@ -530,6 +530,296 @@ impl TimerLatticeScheduleReport2 {
     /// output quantum after applying the selected factor.
     pub const fn maximum_output_grid_padding_seconds(&self) -> &Real {
         &self.maximum_output_grid_padding_seconds
+    }
+}
+
+/// One machine-bound program participating in a common timer-lattice search.
+///
+/// The program retains the exact ideal event grid and canonical coordinates;
+/// the profile supplies the production electrical timing validator. The
+/// selector checks their immutable configuration and capability identities
+/// before considering any candidate.
+#[derive(Clone, Copy, Debug)]
+pub struct SharedTimerParticipant2<'a> {
+    device_id: DeviceId,
+    program: &'a CanonicalScheduledProgram2,
+    profile: &'a MachineDynamicsProfile2,
+}
+
+impl<'a> SharedTimerParticipant2<'a> {
+    /// Bind one stable MCU identity to its exact program and machine profile.
+    pub const fn new(
+        device_id: DeviceId,
+        program: &'a CanonicalScheduledProgram2,
+        profile: &'a MachineDynamicsProfile2,
+    ) -> Self {
+        Self {
+            device_id,
+            program,
+            profile,
+        }
+    }
+
+    /// Stable physical MCU identity used for canonical participant ordering.
+    pub const fn device_id(self) -> DeviceId {
+        self.device_id
+    }
+
+    /// Locally lowered program retaining this participant's exact ideal grid.
+    pub const fn program(self) -> &'a CanonicalScheduledProgram2 {
+        self.program
+    }
+
+    /// Machine profile used by the unchanged production preflight.
+    pub const fn profile(self) -> &'a MachineDynamicsProfile2 {
+        self.profile
+    }
+}
+
+/// Complete production-preflight result for one participant at one candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SharedTimerCandidateOutcome2 {
+    /// The complete candidate stream passed production preflight.
+    Accepted(StepperPreflightSummary<2>),
+    /// The complete candidate stream was rejected by timing pressure.
+    Rejected(MotionError),
+}
+
+impl SharedTimerCandidateOutcome2 {
+    /// Whether this participant accepted the candidate stream.
+    pub const fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted(_))
+    }
+
+    /// Exact timing rejection, or `None` for an accepted candidate.
+    pub const fn rejection(self) -> Option<MotionError> {
+        match self {
+            Self::Accepted(_) => None,
+            Self::Rejected(error) => Some(error),
+        }
+    }
+}
+
+/// Canonical all-participant production outcomes for one searched numerator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SharedTimerCandidateRoundReport2 {
+    factor_numerator: u32,
+    outcomes: Vec<SharedTimerCandidateOutcome2>,
+}
+
+impl SharedTimerCandidateRoundReport2 {
+    /// Candidate numerator on the schedule's shared denominator.
+    pub const fn factor_numerator(&self) -> u32 {
+        self.factor_numerator
+    }
+
+    /// Outcomes in the schedule's canonical `DeviceId` order.
+    pub fn outcomes(&self) -> &[SharedTimerCandidateOutcome2] {
+        &self.outcomes
+    }
+}
+
+/// One participant's final stream and boundary replays under shared retiming.
+///
+/// This does not rewrite the participant's local lowering evidence. Shared
+/// minimality is a property of the complete participant set: an individual
+/// participant may accept the shared predecessor while another rejects it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedRetimedParticipant2 {
+    device_id: DeviceId,
+    configuration_digest: Digest,
+    capability_digest: Digest,
+    timer_ticks_per_second: u64,
+    output_quantum_cycles: u32,
+    ticks: Vec<CanonicalCycle>,
+    segments: Vec<ExecutionSegment<2>>,
+    executor_preflight: StepperPreflightSummary<2>,
+    unit_factor_outcome: SharedTimerCandidateOutcome2,
+    predecessor_outcome: Option<SharedTimerCandidateOutcome2>,
+    ideal_total_time_seconds: Real,
+    scheduled_total_time_seconds: Real,
+    maximum_cumulative_delay_seconds: Real,
+    maximum_segment_extension_seconds: Real,
+    maximum_output_grid_padding_seconds: Real,
+}
+
+impl SharedRetimedParticipant2 {
+    /// Stable physical MCU identity.
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+
+    /// Exact active machine-configuration identity.
+    pub const fn configuration_digest(&self) -> Digest {
+        self.configuration_digest
+    }
+
+    /// Immutable board-capability identity.
+    pub const fn capability_digest(&self) -> Digest {
+        self.capability_digest
+    }
+
+    /// Shared exact local timer frequency.
+    pub const fn timer_ticks_per_second(&self) -> u64 {
+        self.timer_ticks_per_second
+    }
+
+    /// Shared exact backend output quantum.
+    pub const fn output_quantum_cycles(&self) -> u32 {
+        self.output_quantum_cycles
+    }
+
+    /// Canonical cumulative ticks on the selected common factor.
+    pub fn ticks(&self) -> &[CanonicalCycle] {
+        &self.ticks
+    }
+
+    /// Final canonical segments replayed through production preflight.
+    pub fn segments(&self) -> &[ExecutionSegment<2>] {
+        &self.segments
+    }
+
+    /// Complete selected-candidate production preflight.
+    pub const fn executor_preflight(&self) -> StepperPreflightSummary<2> {
+        self.executor_preflight
+    }
+
+    /// This participant's factor-one production-preflight result.
+    pub const fn unit_factor_outcome(&self) -> SharedTimerCandidateOutcome2 {
+        self.unit_factor_outcome
+    }
+
+    /// This participant's immediate-predecessor result when dilation occurred.
+    pub const fn predecessor_outcome(&self) -> Option<SharedTimerCandidateOutcome2> {
+        self.predecessor_outcome
+    }
+
+    /// Retained exact traversal time before output-grid lowering.
+    pub const fn ideal_total_time_seconds(&self) -> &Real {
+        &self.ideal_total_time_seconds
+    }
+
+    /// Exact common terminal tick converted back to seconds.
+    pub const fn scheduled_total_time_seconds(&self) -> &Real {
+        &self.scheduled_total_time_seconds
+    }
+
+    /// Largest nonnegative scheduled-minus-ideal cumulative delay.
+    pub const fn maximum_cumulative_delay_seconds(&self) -> &Real {
+        &self.maximum_cumulative_delay_seconds
+    }
+
+    /// Largest nonnegative extension of one retained ideal interval.
+    pub const fn maximum_segment_extension_seconds(&self) -> &Real {
+        &self.maximum_segment_extension_seconds
+    }
+
+    /// Largest exact per-segment output-grid padding after shared dilation.
+    pub const fn maximum_output_grid_padding_seconds(&self) -> &Real {
+        &self.maximum_output_grid_padding_seconds
+    }
+}
+
+/// Canonical jointly feasible timer-lattice schedule for an MCU set.
+///
+/// V1 deliberately requires the same exact ideal event grid, timer frequency,
+/// and output quantum for every participant. Those constraints make cumulative
+/// ticks identical after one-sided interval rounding, which in turn gives the
+/// existing global manifest an exact common-duration proof. Wider mixed-clock
+/// synchronization requires a later explicit common-event-grid model and is
+/// rejected rather than approximated here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedTimerLatticeSchedule2 {
+    selected_factor_numerator: u32,
+    selected_factor_denominator: u32,
+    maximum_factor_numerator: u32,
+    candidate_rounds: u32,
+    participant_replays: u64,
+    timer_ticks_per_second: u64,
+    output_quantum_cycles: u32,
+    terminal_tick: CanonicalCycle,
+    ideal_total_time_seconds: Real,
+    scheduled_total_time_seconds: Real,
+    candidate_reports: Vec<SharedTimerCandidateRoundReport2>,
+    participants: Vec<SharedRetimedParticipant2>,
+}
+
+impl SharedTimerLatticeSchedule2 {
+    /// Exact selected common time-dilation factor.
+    pub fn selected_factor(&self) -> Rational {
+        Rational::fraction(
+            i64::from(self.selected_factor_numerator),
+            u64::from(self.selected_factor_denominator),
+        )
+        .expect("validated shared timer-dilation factor remains positive")
+    }
+
+    /// Selected numerator on the caller-owned common factor lattice.
+    pub const fn selected_factor_numerator(&self) -> u32 {
+        self.selected_factor_numerator
+    }
+
+    /// Denominator of the caller-owned common factor lattice.
+    pub const fn selected_factor_denominator(&self) -> u32 {
+        self.selected_factor_denominator
+    }
+
+    /// Inclusive common search ceiling numerator.
+    pub const fn maximum_factor_numerator(&self) -> u32 {
+        self.maximum_factor_numerator
+    }
+
+    /// Number of complete all-participant candidate rounds.
+    pub const fn candidate_rounds(&self) -> u32 {
+        self.candidate_rounds
+    }
+
+    /// Number of participant production-preflight replays across all rounds.
+    pub const fn participant_replays(&self) -> u64 {
+        self.participant_replays
+    }
+
+    /// Shared exact timer frequency.
+    pub const fn timer_ticks_per_second(&self) -> u64 {
+        self.timer_ticks_per_second
+    }
+
+    /// Shared exact output quantum.
+    pub const fn output_quantum_cycles(&self) -> u32 {
+        self.output_quantum_cycles
+    }
+
+    /// Byte-exact common terminal local tick.
+    pub const fn terminal_tick(&self) -> CanonicalCycle {
+        self.terminal_tick
+    }
+
+    /// Common retained ideal traversal time.
+    pub const fn ideal_total_time_seconds(&self) -> &Real {
+        &self.ideal_total_time_seconds
+    }
+
+    /// Common selected terminal time after one-sided output-grid rounding.
+    pub const fn scheduled_total_time_seconds(&self) -> &Real {
+        &self.scheduled_total_time_seconds
+    }
+
+    /// Every complete candidate replay in deterministic search order.
+    pub fn candidate_reports(&self) -> &[SharedTimerCandidateRoundReport2] {
+        &self.candidate_reports
+    }
+
+    /// Canonically `DeviceId`-sorted participant streams and boundary replays.
+    pub fn participants(&self) -> &[SharedRetimedParticipant2] {
+        &self.participants
+    }
+
+    /// Find one retimed participant by stable physical identity.
+    pub fn participant(&self, device_id: DeviceId) -> Option<&SharedRetimedParticipant2> {
+        self.participants
+            .binary_search_by_key(&device_id, SharedRetimedParticipant2::device_id)
+            .ok()
+            .map(|index| &self.participants[index])
     }
 }
 
@@ -1416,6 +1706,438 @@ fn select_timer_lattice_schedule(
     }
 }
 
+struct SharedTimerCandidateRound2 {
+    candidates: Vec<TimerCandidate2>,
+    outcomes: Vec<SharedTimerCandidateOutcome2>,
+    first_rejection: Option<(DeviceId, MotionError)>,
+}
+
+struct SharedTimerSelectionEvidence2 {
+    selected_factor_numerator: u32,
+    selected_factor_denominator: u32,
+    maximum_factor_numerator: u32,
+    candidate_rounds: u32,
+    candidate_reports: Vec<SharedTimerCandidateRoundReport2>,
+    unit_outcomes: Vec<SharedTimerCandidateOutcome2>,
+    predecessor_outcomes: Option<Vec<SharedTimerCandidateOutcome2>>,
+}
+
+/// Select the smallest caller-lattice factor accepted by every MCU.
+///
+/// Participants are sorted by `DeviceId`, duplicates are rejected, and every
+/// candidate round replays every complete stream through the unchanged
+/// production stepper preflight. Factor one, the search ceiling, every binary
+/// search candidate, the selected factor, and its immediate predecessor are
+/// complete all-participant rounds. Structural failures abort immediately;
+/// only explicitly classified electrical timing pressure may drive dilation.
+pub fn select_shared_timer_lattice_schedule<'a>(
+    mut participants: Vec<SharedTimerParticipant2<'a>>,
+    policy: TimerDilationPolicy,
+) -> MotionScheduleResult<SharedTimerLatticeSchedule2> {
+    validate_shared_timer_participants(&mut participants)?;
+
+    let denominator = policy.factor_denominator();
+    let maximum_numerator = policy.maximum_factor_numerator();
+    let mut candidate_rounds = 0_u32;
+    let mut candidate_reports = Vec::new();
+    let unit_round = replay_shared_timer_round(
+        &participants,
+        denominator,
+        denominator,
+        &mut candidate_rounds,
+        &mut candidate_reports,
+    )?;
+    let unit_outcomes = unit_round.outcomes.clone();
+
+    if unit_round.first_rejection.is_none() {
+        return finish_shared_timer_selection(
+            participants,
+            unit_round,
+            SharedTimerSelectionEvidence2 {
+                selected_factor_numerator: denominator,
+                selected_factor_denominator: denominator,
+                maximum_factor_numerator: maximum_numerator,
+                candidate_rounds,
+                candidate_reports,
+                unit_outcomes,
+                predecessor_outcomes: None,
+            },
+        );
+    }
+
+    if maximum_numerator == denominator {
+        let (device_id, rejection) = unit_round
+            .first_rejection
+            .expect("the rejected unit round retains its first rejection");
+        return Err(MotionScheduleError::SharedTimerDilationBudgetExceeded {
+            maximum_factor_numerator: maximum_numerator,
+            factor_denominator: denominator,
+            device_id,
+            rejection,
+        });
+    }
+
+    let maximum_round = replay_shared_timer_round(
+        &participants,
+        maximum_numerator,
+        denominator,
+        &mut candidate_rounds,
+        &mut candidate_reports,
+    )?;
+    if let Some((device_id, rejection)) = maximum_round.first_rejection {
+        return Err(MotionScheduleError::SharedTimerDilationBudgetExceeded {
+            maximum_factor_numerator: maximum_numerator,
+            factor_denominator: denominator,
+            device_id,
+            rejection,
+        });
+    }
+
+    // Every participant's interval construction is q*ceil(factor*ideal/q),
+    // and all participants have the same q and ideal event grid. Their ticks
+    // are therefore identical and monotone in the factor. The production
+    // timing inequalities are monotone in those durations, so conjunction
+    // across participants is monotone as well.
+    let mut rejected_numerator = denominator;
+    let mut admitted_numerator = maximum_numerator;
+    while admitted_numerator - rejected_numerator > 1 {
+        let candidate_numerator =
+            rejected_numerator + (admitted_numerator - rejected_numerator) / 2;
+        let candidate_round = replay_shared_timer_round(
+            &participants,
+            candidate_numerator,
+            denominator,
+            &mut candidate_rounds,
+            &mut candidate_reports,
+        )?;
+        if candidate_round.first_rejection.is_some() {
+            rejected_numerator = candidate_numerator;
+        } else {
+            admitted_numerator = candidate_numerator;
+        }
+    }
+
+    let selected_round = replay_shared_timer_round(
+        &participants,
+        admitted_numerator,
+        denominator,
+        &mut candidate_rounds,
+        &mut candidate_reports,
+    )?;
+    if let Some((device_id, rejection)) = selected_round.first_rejection {
+        return Err(MotionScheduleError::SharedTimerSelectionReplayRejected {
+            selected_factor_numerator: admitted_numerator,
+            factor_denominator: denominator,
+            device_id,
+            rejection,
+        });
+    }
+
+    let predecessor_round = replay_shared_timer_round(
+        &participants,
+        admitted_numerator - 1,
+        denominator,
+        &mut candidate_rounds,
+        &mut candidate_reports,
+    )?;
+    if predecessor_round.first_rejection.is_none() {
+        return Err(
+            MotionScheduleError::SharedTimerDilationMinimalityUncertified {
+                selected_factor_numerator: admitted_numerator,
+                factor_denominator: denominator,
+            },
+        );
+    }
+    let predecessor_outcomes = predecessor_round.outcomes;
+
+    finish_shared_timer_selection(
+        participants,
+        selected_round,
+        SharedTimerSelectionEvidence2 {
+            selected_factor_numerator: admitted_numerator,
+            selected_factor_denominator: denominator,
+            maximum_factor_numerator: maximum_numerator,
+            candidate_rounds,
+            candidate_reports,
+            unit_outcomes,
+            predecessor_outcomes: Some(predecessor_outcomes),
+        },
+    )
+}
+
+fn validate_shared_timer_participants(
+    participants: &mut [SharedTimerParticipant2<'_>],
+) -> MotionScheduleResult<()> {
+    if participants.is_empty() {
+        return Err(MotionScheduleError::SharedTimerParticipantsEmpty);
+    }
+    participants.sort_unstable_by_key(|participant| participant.device_id);
+    for pair in participants.windows(2) {
+        if pair[0].device_id == pair[1].device_id {
+            return Err(MotionScheduleError::DuplicateSharedTimerParticipant {
+                device_id: pair[0].device_id,
+            });
+        }
+    }
+
+    let first = participants[0];
+    validate_shared_timer_participant_identity(first)?;
+    let reference_points = first.program.points();
+    if reference_points.len() < 2
+        || compare_reals(
+            reference_points[0].ideal_time_seconds(),
+            &Real::zero(),
+            PredicatePolicy::STRICT,
+        )
+        .value()
+            != Some(Ordering::Equal)
+    {
+        return Err(MotionScheduleError::SharedTimerPointGridMismatch {
+            device_id: first.device_id,
+            point_index: 0,
+        });
+    }
+
+    for participant in participants.iter().copied().skip(1) {
+        validate_shared_timer_participant_identity(participant)?;
+        if participant.program.timer_ticks_per_second() != first.program.timer_ticks_per_second() {
+            return Err(MotionScheduleError::SharedTimerFrequencyMismatch {
+                device_id: participant.device_id,
+                expected: first.program.timer_ticks_per_second(),
+                actual: participant.program.timer_ticks_per_second(),
+            });
+        }
+        if participant.program.output_quantum_cycles() != first.program.output_quantum_cycles() {
+            return Err(MotionScheduleError::SharedTimerOutputQuantumMismatch {
+                device_id: participant.device_id,
+                expected: first.program.output_quantum_cycles(),
+                actual: participant.program.output_quantum_cycles(),
+            });
+        }
+        let points = participant.program.points();
+        if points.len() != reference_points.len() {
+            return Err(MotionScheduleError::SharedTimerPointCountMismatch {
+                device_id: participant.device_id,
+                expected: reference_points.len(),
+                actual: points.len(),
+            });
+        }
+        for (point_index, (reference, candidate)) in reference_points.iter().zip(points).enumerate()
+        {
+            if compare_reals(
+                reference.ideal_time_seconds(),
+                candidate.ideal_time_seconds(),
+                PredicatePolicy::STRICT,
+            )
+            .value()
+                != Some(Ordering::Equal)
+            {
+                return Err(MotionScheduleError::SharedTimerPointGridMismatch {
+                    device_id: participant.device_id,
+                    point_index,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_shared_timer_participant_identity(
+    participant: SharedTimerParticipant2<'_>,
+) -> MotionScheduleResult<()> {
+    if participant.device_id.is_zero()
+        || participant.program.configuration_digest() != participant.profile.configuration_digest()
+        || participant.program.capability_digest() != participant.profile.capability_digest()
+        || participant.program.timer_ticks_per_second()
+            != participant.profile.timer_ticks_per_second()
+        || participant.program.output_quantum_cycles()
+            != participant.profile.output_quantum_cycles()
+    {
+        return Err(
+            MotionScheduleError::SharedTimerParticipantIdentityMismatch {
+                device_id: participant.device_id,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn replay_shared_timer_round(
+    participants: &[SharedTimerParticipant2<'_>],
+    factor_numerator: u32,
+    factor_denominator: u32,
+    candidate_rounds: &mut u32,
+    candidate_reports: &mut Vec<SharedTimerCandidateRoundReport2>,
+) -> MotionScheduleResult<SharedTimerCandidateRound2> {
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(participants.len())
+        .map_err(|_| MotionScheduleError::AllocationOverflow {
+            domain: "shared timer candidate streams",
+        })?;
+    let mut outcomes = Vec::new();
+    outcomes
+        .try_reserve_exact(participants.len())
+        .map_err(|_| MotionScheduleError::AllocationOverflow {
+            domain: "shared timer candidate outcomes",
+        })?;
+    let mut first_rejection = None;
+
+    for participant in participants.iter().copied() {
+        let first_point = participant
+            .program
+            .points()
+            .first()
+            .ok_or(MotionScheduleError::MetricPathMismatch)?;
+        let initial_position = [first_point.steps()[0].get(), first_point.steps()[1].get()];
+        let candidate = build_timer_candidate(
+            participant.program.points(),
+            participant.profile,
+            initial_position,
+            factor_numerator,
+            factor_denominator,
+        )?;
+        let outcome = match candidate.executor_preflight {
+            Ok(preflight) => SharedTimerCandidateOutcome2::Accepted(preflight),
+            Err(error) if error.is_time_dilation_candidate() => {
+                first_rejection.get_or_insert((participant.device_id, error));
+                SharedTimerCandidateOutcome2::Rejected(error)
+            }
+            Err(rejection) => {
+                return Err(MotionScheduleError::SharedTimerParticipantPreflight {
+                    device_id: participant.device_id,
+                    rejection,
+                });
+            }
+        };
+        outcomes.push(outcome);
+        candidates.push(candidate);
+    }
+    *candidate_rounds =
+        candidate_rounds
+            .checked_add(1)
+            .ok_or(MotionScheduleError::IntegerOverflow {
+                domain: "shared timer candidate round count",
+            })?;
+    candidate_reports
+        .try_reserve(1)
+        .map_err(|_| MotionScheduleError::AllocationOverflow {
+            domain: "shared timer candidate reports",
+        })?;
+    candidate_reports.push(SharedTimerCandidateRoundReport2 {
+        factor_numerator,
+        outcomes: outcomes.clone(),
+    });
+    Ok(SharedTimerCandidateRound2 {
+        candidates,
+        outcomes,
+        first_rejection,
+    })
+}
+
+fn finish_shared_timer_selection(
+    participants: Vec<SharedTimerParticipant2<'_>>,
+    selected_round: SharedTimerCandidateRound2,
+    selection: SharedTimerSelectionEvidence2,
+) -> MotionScheduleResult<SharedTimerLatticeSchedule2> {
+    let first_candidate = selected_round
+        .candidates
+        .first()
+        .ok_or(MotionScheduleError::SharedTimerParticipantsEmpty)?;
+    let common_ticks = first_candidate.ticks.clone();
+    let terminal_tick = *common_ticks
+        .last()
+        .ok_or(MotionScheduleError::MetricPathMismatch)?;
+    let ideal_total_time_seconds = first_candidate.ideal_total_time_seconds.clone();
+    let scheduled_total_time_seconds = first_candidate.scheduled_total_time_seconds.clone();
+    let timer_ticks_per_second = participants[0].program.timer_ticks_per_second();
+    let output_quantum_cycles = participants[0].program.output_quantum_cycles();
+
+    let participant_replays = u64::from(selection.candidate_rounds)
+        .checked_mul(u64::try_from(participants.len()).map_err(|_| {
+            MotionScheduleError::IntegerOverflow {
+                domain: "shared timer participant count",
+            }
+        })?)
+        .ok_or(MotionScheduleError::IntegerOverflow {
+            domain: "shared timer participant replay count",
+        })?;
+    let mut retimed = Vec::new();
+    retimed.try_reserve_exact(participants.len()).map_err(|_| {
+        MotionScheduleError::AllocationOverflow {
+            domain: "shared retimed participants",
+        }
+    })?;
+
+    let predecessor_outcomes = selection.predecessor_outcomes.as_deref();
+    for (index, (participant, candidate)) in participants
+        .into_iter()
+        .zip(selected_round.candidates)
+        .enumerate()
+    {
+        if candidate.ticks != common_ticks
+            || compare_reals(
+                &candidate.ideal_total_time_seconds,
+                &ideal_total_time_seconds,
+                PredicatePolicy::STRICT,
+            )
+            .value()
+                != Some(Ordering::Equal)
+            || compare_reals(
+                &candidate.scheduled_total_time_seconds,
+                &scheduled_total_time_seconds,
+                PredicatePolicy::STRICT,
+            )
+            .value()
+                != Some(Ordering::Equal)
+        {
+            return Err(MotionScheduleError::SharedTimerGridDiverged {
+                device_id: participant.device_id,
+            });
+        }
+        let executor_preflight = candidate.executor_preflight.map_err(|rejection| {
+            MotionScheduleError::SharedTimerSelectionReplayRejected {
+                selected_factor_numerator: selection.selected_factor_numerator,
+                factor_denominator: selection.selected_factor_denominator,
+                device_id: participant.device_id,
+                rejection,
+            }
+        })?;
+        retimed.push(SharedRetimedParticipant2 {
+            device_id: participant.device_id,
+            configuration_digest: participant.program.configuration_digest(),
+            capability_digest: participant.program.capability_digest(),
+            timer_ticks_per_second,
+            output_quantum_cycles,
+            ticks: candidate.ticks,
+            segments: candidate.segments,
+            executor_preflight,
+            unit_factor_outcome: selection.unit_outcomes[index],
+            predecessor_outcome: predecessor_outcomes.map(|outcomes| outcomes[index]),
+            ideal_total_time_seconds: candidate.ideal_total_time_seconds,
+            scheduled_total_time_seconds: candidate.scheduled_total_time_seconds,
+            maximum_cumulative_delay_seconds: candidate.maximum_cumulative_delay_seconds,
+            maximum_segment_extension_seconds: candidate.maximum_segment_extension_seconds,
+            maximum_output_grid_padding_seconds: candidate.maximum_output_grid_padding_seconds,
+        });
+    }
+
+    Ok(SharedTimerLatticeSchedule2 {
+        selected_factor_numerator: selection.selected_factor_numerator,
+        selected_factor_denominator: selection.selected_factor_denominator,
+        maximum_factor_numerator: selection.maximum_factor_numerator,
+        candidate_rounds: selection.candidate_rounds,
+        participant_replays,
+        timer_ticks_per_second,
+        output_quantum_cycles,
+        terminal_tick,
+        ideal_total_time_seconds,
+        scheduled_total_time_seconds,
+        candidate_reports: selection.candidate_reports,
+        participants: retimed,
+    })
+}
+
 fn finish_timer_selection(
     candidate: TimerCandidate2,
     executor_preflight: StepperPreflightSummary<2>,
@@ -1952,6 +2674,93 @@ pub enum MotionScheduleError {
         /// Shared candidate denominator.
         factor_denominator: u32,
     },
+    /// A shared search requires at least one MCU participant.
+    SharedTimerParticipantsEmpty,
+    /// A stable physical MCU identity appeared more than once.
+    DuplicateSharedTimerParticipant {
+        /// Repeated stable physical identity.
+        device_id: DeviceId,
+    },
+    /// A participant's program and production profile identities diverged.
+    SharedTimerParticipantIdentityMismatch {
+        /// Stable physical identity of the mismatched participant.
+        device_id: DeviceId,
+    },
+    /// V1 shared retiming requires one exact timer frequency.
+    SharedTimerFrequencyMismatch {
+        /// Stable physical identity of the mismatched participant.
+        device_id: DeviceId,
+        /// Canonical reference timer frequency.
+        expected: u64,
+        /// Participant timer frequency.
+        actual: u64,
+    },
+    /// V1 shared retiming requires one exact backend output quantum.
+    SharedTimerOutputQuantumMismatch {
+        /// Stable physical identity of the mismatched participant.
+        device_id: DeviceId,
+        /// Canonical reference output quantum.
+        expected: u32,
+        /// Participant output quantum.
+        actual: u32,
+    },
+    /// V1 participants retained different numbers of ideal events.
+    SharedTimerPointCountMismatch {
+        /// Stable physical identity of the mismatched participant.
+        device_id: DeviceId,
+        /// Canonical reference point count.
+        expected: usize,
+        /// Participant point count.
+        actual: usize,
+    },
+    /// V1 participants retained different exact cumulative ideal times.
+    SharedTimerPointGridMismatch {
+        /// Stable physical identity of the mismatched participant.
+        device_id: DeviceId,
+        /// First mismatched ideal event.
+        point_index: usize,
+    },
+    /// A participant produced a non-dilatable production-preflight failure.
+    SharedTimerParticipantPreflight {
+        /// Stable physical identity of the rejected participant.
+        device_id: DeviceId,
+        /// Exact structural or state rejection.
+        rejection: MotionError,
+    },
+    /// No common candidate through the caller-owned ceiling passed every MCU.
+    SharedTimerDilationBudgetExceeded {
+        /// Inclusive largest candidate numerator.
+        maximum_factor_numerator: u32,
+        /// Shared candidate denominator.
+        factor_denominator: u32,
+        /// First canonically ordered participant still rejected at the ceiling.
+        device_id: DeviceId,
+        /// Exact production timing rejection at the ceiling.
+        rejection: MotionError,
+    },
+    /// Replaying the selected shared factor unexpectedly rejected one MCU.
+    SharedTimerSelectionReplayRejected {
+        /// Selected common factor numerator.
+        selected_factor_numerator: u32,
+        /// Shared candidate denominator.
+        factor_denominator: u32,
+        /// First canonically ordered rejected participant.
+        device_id: DeviceId,
+        /// Exact production rejection.
+        rejection: MotionError,
+    },
+    /// Every MCU unexpectedly accepted the immediate shared predecessor.
+    SharedTimerDilationMinimalityUncertified {
+        /// Selected common factor numerator.
+        selected_factor_numerator: u32,
+        /// Shared candidate denominator.
+        factor_denominator: u32,
+    },
+    /// Equal ideal grids did not reconstruct byte-identical cumulative ticks.
+    SharedTimerGridDiverged {
+        /// Stable physical identity of the divergent participant.
+        device_id: DeviceId,
+    },
     /// At least one jerk phase, sum, or continuity condition did not certify.
     JerkScheduleUncertified {
         /// First failed retained element, if any.
@@ -2080,6 +2889,84 @@ impl fmt::Display for MotionScheduleError {
             } => write!(
                 formatter,
                 "timer dilation {selected_factor_numerator}/{factor_denominator} passed but its immediate predecessor also passed"
+            ),
+            Self::SharedTimerParticipantsEmpty => {
+                formatter.write_str("shared timer retiming requires at least one participant")
+            }
+            Self::DuplicateSharedTimerParticipant { device_id } => write!(
+                formatter,
+                "shared timer participant identity {device_id:?} is duplicated"
+            ),
+            Self::SharedTimerParticipantIdentityMismatch { device_id } => write!(
+                formatter,
+                "shared timer participant {device_id:?} has mismatched program/profile identity or timing facts"
+            ),
+            Self::SharedTimerFrequencyMismatch {
+                device_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "shared timer participant {device_id:?} uses {actual} Hz instead of the V1 common {expected} Hz"
+            ),
+            Self::SharedTimerOutputQuantumMismatch {
+                device_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "shared timer participant {device_id:?} uses output quantum {actual} instead of the V1 common {expected}"
+            ),
+            Self::SharedTimerPointCountMismatch {
+                device_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "shared timer participant {device_id:?} retains {actual} ideal events instead of the V1 common {expected}"
+            ),
+            Self::SharedTimerPointGridMismatch {
+                device_id,
+                point_index,
+            } => write!(
+                formatter,
+                "shared timer participant {device_id:?} diverges from the V1 exact ideal grid at event {point_index}"
+            ),
+            Self::SharedTimerParticipantPreflight {
+                device_id,
+                rejection,
+            } => write!(
+                formatter,
+                "shared timer participant {device_id:?} produced a non-dilatable preflight rejection: {rejection:?}"
+            ),
+            Self::SharedTimerDilationBudgetExceeded {
+                maximum_factor_numerator,
+                factor_denominator,
+                device_id,
+                rejection,
+            } => write!(
+                formatter,
+                "shared timer dilation through {maximum_factor_numerator}/{factor_denominator} left participant {device_id:?} infeasible: {rejection:?}"
+            ),
+            Self::SharedTimerSelectionReplayRejected {
+                selected_factor_numerator,
+                factor_denominator,
+                device_id,
+                rejection,
+            } => write!(
+                formatter,
+                "shared timer selection {selected_factor_numerator}/{factor_denominator} rejected participant {device_id:?} on replay: {rejection:?}"
+            ),
+            Self::SharedTimerDilationMinimalityUncertified {
+                selected_factor_numerator,
+                factor_denominator,
+            } => write!(
+                formatter,
+                "shared timer dilation {selected_factor_numerator}/{factor_denominator} passed but every participant also accepted its predecessor"
+            ),
+            Self::SharedTimerGridDiverged { device_id } => write!(
+                formatter,
+                "shared timer participant {device_id:?} reconstructed a different cumulative tick grid"
             ),
             Self::JerkScheduleUncertified { element } => write!(
                 formatter,

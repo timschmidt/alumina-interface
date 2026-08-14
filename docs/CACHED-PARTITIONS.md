@@ -40,6 +40,14 @@ timer, pulse, setup/hold, maximum-frequency, and output-quantum facts. Packaging
 rechecks its terminal position and tick; it does not infer electrical validity
 from the more general machine-block validator.
 
+For a shared scheduled job, `package_shared_retimed_scheduled_program` adds a
+third gate. It requires the selected participant's configuration, capability,
+timer, and output-quantum facts to match the retained local lowering, then
+recomputes every segment's tick boundaries and step delta from the exact point
+carrier. A shared result is not allowed to overwrite the local timer report:
+shared minimality belongs to the participant set, and one MCU may accept the
+immediate predecessor while another rejects it.
+
 ## Storage and preparation identities
 
 The complete block concatenation is one
@@ -91,6 +99,13 @@ That later boundary preserves these local object/manifest/terminal identities;
 it does not reopen, reinterpret, or concatenate execution records. See
 `GLOBAL-JOB-MANIFEST.md`.
 
+The schedule-derived browser path now performs shared factor selection before
+either participant partition exists. After selected-stream replay, it packages
+both partitions, constructs `ALMSYN01` over their exact derivations and cache
+identities, and only then emits the evidence-bound global manifest. Thus a
+local partition cannot be silently published under a factor chosen before all
+participants were known.
+
 The machine-bound line/arc/cubic fixture additionally replays the packaged bytes with
 `alumina-sim::replay_cached_stepper_partition`. That event-level path uses the
 real `JobDescriptor`, first rehashes the complete immutable object, then uses
@@ -120,9 +135,9 @@ and content-addressed partition. See
   line-to-line G1 joins may remain moving; the cubic uses bounded
   source-to-motion chords with a full stop at each join. Mixed curved routes
   retain conservative axis-wide limits. Blends, curvature-bearing continuity,
-  broader exact families, kinematics, shared multi-MCU retiming-factor
-  selection, and qualified hardware timing remain open. The local program's
-  exact timer/output-lattice headroom is already selected by bounded rational
-  search and complete production preflight before packaging.
+  broader exact families, kinematics, mixed-clock/common-event-grid retiming,
+  and qualified hardware timing remain open. Local and same-grid shared
+  timer/output-lattice headroom are selected by bounded rational search and
+  complete production preflight before packaging.
 - Passing software replay does not qualify SD media, a board, or physical
   motion. No board is flashed or energized by packaging or its tests.

@@ -107,12 +107,23 @@ prototype.
   incrementally hashed, and committed by both SHA-256 and byte length. The same
   representative test binary compiles for WASM. This remains software evidence,
   not TinyBee timing or motion qualification.
+- Same-grid multi-MCU jobs now select one exact factor before immutable cache
+  publication. Participants are sorted by stable device identity and must share
+  the exact ideal event grid, timer, and output quantum; every candidate is a
+  complete production-preflight round over every MCU. The accepted streams are
+  replayed against their exact point carriers, independently partitioned, and
+  committed by a 104-byte `ALMSYN01` record over a streamed `ALMSRT01`
+  transcript containing the full search trace, derivation identities, final
+  IR, and partition identities. The compiler derives global duration and
+  synchronization evidence before emitting `ALMJMF01`; mixed-clock grids fail
+  closed.
 - The shell now opens an offline Machine/CAM inspector by default. One
   canonical `ALMCFG05` TinyBee fixture drives exact axis/transmission facts,
   travel proof, resolution-budget decomposition, retained-path diagnostic
   projection, exact acceleration/jerk-feasible schedule tables, canonical
   points and segments, production executor preflight, SD-cache identities, event-level
-  replay, and `ALMEVD03` evidence. Native and browser file exchange can replace
+  replay, `ALMEVD03` evidence, and a two-participant evidence-bound shared cache
+  and global manifest. Native and browser file exchange can replace
   configuration state only after the entire chain reconstructs successfully;
   evidence imports must equal a fresh reconstruction byte for byte. This view
   initiates no device connection and has no arming or output authority. See

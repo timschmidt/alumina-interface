@@ -129,13 +129,20 @@ impl CanonicalScheduleEvidence3 {
     }
 }
 
-/// Construct deterministic evidence only after identity and terminal replay
-/// facts agree across the scheduled program and packaged partition.
-pub fn build_canonical_schedule_evidence(
+pub(crate) struct CanonicalDerivationDigests3 {
+    pub(crate) source_digest: Digest,
+    pub(crate) metric_path_digest: Digest,
+    pub(crate) source_approximation_digest: Digest,
+    pub(crate) planner_transcript_digest: Digest,
+    pub(crate) planner_transcript_byte_len: u64,
+    pub(crate) lowering_transcript_digest: Digest,
+    pub(crate) lowering_transcript_byte_len: u64,
+}
+
+pub(crate) fn build_canonical_derivation_digests(
     schedule: &CertifiedJerkSchedule2,
     program: &CanonicalScheduledProgram2,
-    partition: &CanonicalMachinePartition2,
-) -> ScheduleEvidenceResult<CanonicalScheduleEvidence3> {
+) -> ScheduleEvidenceResult<CanonicalDerivationDigests3> {
     if schedule.configuration_digest() != program.configuration_digest()
         || schedule.capability_digest() != program.capability_digest()
         || schedule.source() != program.source()
@@ -143,6 +150,47 @@ pub fn build_canonical_schedule_evidence(
     {
         return Err(ScheduleEvidenceError::PlannerMismatch);
     }
+    let last = program
+        .points()
+        .last()
+        .ok_or(ScheduleEvidenceError::EmptyProgram)?;
+    if last.ideal_time_seconds() != schedule.total_traversal_time_seconds()
+        || program
+            .evidence()
+            .timer_lattice_schedule()
+            .ideal_total_time_seconds()
+            != last.ideal_time_seconds()
+    {
+        return Err(ScheduleEvidenceError::PlannerMismatch);
+    }
+
+    let source = encode_exact_path(program.source(), ExactPathDomain::Source)?;
+    let metric_path = encode_exact_path(program.metric_path().path(), ExactPathDomain::Metric)?;
+    let source_approximation =
+        encode_source_approximation(program.source(), program.metric_path())?;
+    let (planner_transcript_digest, planner_transcript_byte_len) =
+        encode_planner_transcript(schedule)?;
+    let (lowering_transcript_digest, lowering_transcript_byte_len) =
+        encode_lowering_transcript(program)?;
+    Ok(CanonicalDerivationDigests3 {
+        source_digest: sha256(&source).digest,
+        metric_path_digest: sha256(&metric_path).digest,
+        source_approximation_digest: sha256(&source_approximation).digest,
+        planner_transcript_digest,
+        planner_transcript_byte_len,
+        lowering_transcript_digest,
+        lowering_transcript_byte_len,
+    })
+}
+
+/// Construct deterministic evidence only after identity and terminal replay
+/// facts agree across the scheduled program and packaged partition.
+pub fn build_canonical_schedule_evidence(
+    schedule: &CertifiedJerkSchedule2,
+    program: &CanonicalScheduledProgram2,
+    partition: &CanonicalMachinePartition2,
+) -> ScheduleEvidenceResult<CanonicalScheduleEvidence3> {
+    let derivation = build_canonical_derivation_digests(schedule, program)?;
     if program.configuration_digest() != partition.policy().config_digest()
         || program.capability_digest() != partition.policy().capability_digest()
     {
@@ -159,15 +207,6 @@ pub fn build_canonical_schedule_evidence(
     let initial_position = [first.steps()[0].get(), first.steps()[1].get()];
     let final_position = [last.steps()[0].get(), last.steps()[1].get()];
     let preflight = program.executor_preflight();
-    if last.ideal_time_seconds() != schedule.total_traversal_time_seconds()
-        || program
-            .evidence()
-            .timer_lattice_schedule()
-            .ideal_total_time_seconds()
-            != last.ideal_time_seconds()
-    {
-        return Err(ScheduleEvidenceError::PlannerMismatch);
-    }
     if partition.initial_position() != initial_position
         || partition.final_position() != final_position
         || partition.local_timer_hz() != program.timer_ticks_per_second()
@@ -178,17 +217,13 @@ pub fn build_canonical_schedule_evidence(
         return Err(ScheduleEvidenceError::TerminalMismatch);
     }
 
-    let source = encode_exact_path(program.source(), ExactPathDomain::Source)?;
-    let source_digest = sha256(&source).digest;
-    let metric_path = encode_exact_path(program.metric_path().path(), ExactPathDomain::Metric)?;
-    let metric_path_digest = sha256(&metric_path).digest;
-    let source_approximation =
-        encode_source_approximation(program.source(), program.metric_path())?;
-    let source_approximation_digest = sha256(&source_approximation).digest;
-    let (planner_transcript_digest, planner_transcript_byte_len) =
-        encode_planner_transcript(schedule)?;
-    let (lowering_transcript_digest, lowering_transcript_byte_len) =
-        encode_lowering_transcript(program)?;
+    let source_digest = derivation.source_digest;
+    let metric_path_digest = derivation.metric_path_digest;
+    let source_approximation_digest = derivation.source_approximation_digest;
+    let planner_transcript_digest = derivation.planner_transcript_digest;
+    let planner_transcript_byte_len = derivation.planner_transcript_byte_len;
+    let lowering_transcript_digest = derivation.lowering_transcript_digest;
+    let lowering_transcript_byte_len = derivation.lowering_transcript_byte_len;
     let publication = partition.publication();
     let budget = program.resolution_budget();
     let requested_interpolation = program.evidence().requested_interpolation_error_mm_exact();
@@ -303,7 +338,7 @@ pub fn verify_canonical_schedule_evidence_bytes(
     Ok(())
 }
 
-struct TranscriptEncoder {
+pub(crate) struct TranscriptEncoder {
     hasher: ContentHasher,
     byte_len: u64,
 }
@@ -348,18 +383,18 @@ impl Write for BoundedExactRealEncoding {
 }
 
 impl TranscriptEncoder {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             hasher: ContentHasher::new(),
             byte_len: 0,
         }
     }
 
-    fn finish(self) -> (Digest, u64) {
+    pub(crate) fn finish(self) -> (Digest, u64) {
         (self.hasher.finalize().digest, self.byte_len)
     }
 
-    fn raw(&mut self, bytes: &[u8]) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn raw(&mut self, bytes: &[u8]) -> ScheduleEvidenceResult<()> {
         let next_byte_len = self
             .byte_len
             .checked_add(
@@ -374,7 +409,7 @@ impl TranscriptEncoder {
         Ok(())
     }
 
-    fn u8(&mut self, value: u8) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn u8(&mut self, value: u8) -> ScheduleEvidenceResult<()> {
         self.raw(&[value])
     }
 
@@ -382,11 +417,11 @@ impl TranscriptEncoder {
         self.u8(u8::from(value))
     }
 
-    fn u16(&mut self, value: u16) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn u16(&mut self, value: u16) -> ScheduleEvidenceResult<()> {
         self.raw(&value.to_le_bytes())
     }
 
-    fn u32(&mut self, value: u32) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn u32(&mut self, value: u32) -> ScheduleEvidenceResult<()> {
         self.raw(&value.to_le_bytes())
     }
 
@@ -394,15 +429,15 @@ impl TranscriptEncoder {
         self.raw(&value.to_le_bytes())
     }
 
-    fn u64(&mut self, value: u64) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn u64(&mut self, value: u64) -> ScheduleEvidenceResult<()> {
         self.raw(&value.to_le_bytes())
     }
 
-    fn i64(&mut self, value: i64) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn i64(&mut self, value: i64) -> ScheduleEvidenceResult<()> {
         self.raw(&value.to_le_bytes())
     }
 
-    fn usize(&mut self, value: usize) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn usize(&mut self, value: usize) -> ScheduleEvidenceResult<()> {
         self.u32(u32::try_from(value).map_err(|_| ScheduleEvidenceError::CounterOverflow)?)
     }
 
@@ -415,7 +450,7 @@ impl TranscriptEncoder {
         self.bytes(value.as_bytes())
     }
 
-    fn rational(&mut self, value: &Rational) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn rational(&mut self, value: &Rational) -> ScheduleEvidenceResult<()> {
         self.u8(if value.is_zero() {
             0
         } else if value.is_negative() {
@@ -427,7 +462,7 @@ impl TranscriptEncoder {
         self.bytes(&value.denominator().to_bytes_le())
     }
 
-    fn real(&mut self, value: &Real) -> ScheduleEvidenceResult<()> {
+    pub(crate) fn real(&mut self, value: &Real) -> ScheduleEvidenceResult<()> {
         let mut encoded = BoundedExactRealEncoding::new();
         if serde_json::to_writer(&mut encoded, value).is_err() {
             if encoded.limit_exceeded {
@@ -941,7 +976,7 @@ fn encode_planner_transcript(
     Ok(encoded.finish())
 }
 
-fn push_motion_error(
+pub(crate) fn push_motion_error(
     encoded: &mut TranscriptEncoder,
     error: MotionError,
 ) -> ScheduleEvidenceResult<()> {
@@ -1075,7 +1110,7 @@ fn push_lowering_evidence(
     push_timer_lattice_report(encoded, evidence.timer_lattice_schedule())
 }
 
-fn push_execution_segment(
+pub(crate) fn push_execution_segment(
     encoded: &mut TranscriptEncoder,
     segment: &ExecutionSegment<2>,
 ) -> ScheduleEvidenceResult<()> {
@@ -1087,7 +1122,7 @@ fn push_execution_segment(
     encoded.u32(segment.flags)
 }
 
-fn push_preflight(
+pub(crate) fn push_preflight(
     encoded: &mut TranscriptEncoder,
     preflight: StepperPreflightSummary<2>,
 ) -> ScheduleEvidenceResult<()> {
