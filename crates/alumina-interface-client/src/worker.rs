@@ -3,12 +3,21 @@
 use std::fmt;
 
 use alumina_clock::ClockEstimationPolicy;
+use alumina_protocol::DeviceCycle;
+use alumina_runtime::health::{
+    RuntimeHealthFlags, RuntimeHealthSnapshot as WireRuntimeHealthSnapshot,
+};
+use alumina_runtime::stack::{StackDomain, StackWatermarkFlags, StackWatermarkSnapshot};
 use serde::{Deserialize, Serialize};
 
+use crate::health::{RuntimeHealthAvailability, RuntimeHealthView};
+
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 1;
+pub const WORKER_SCHEMA_VERSION: u16 = 2;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
+/// Maximum UTF-8 bytes retained in one worker diagnostic field.
+pub const MAXIMUM_WORKER_DIAGNOSTIC_BYTES: usize = 512;
 
 const MAXIMUM_LABEL_BYTES: usize = 64;
 const MAXIMUM_ORIGIN_BYTES: usize = 256;
@@ -38,6 +47,8 @@ pub struct ClockSamplingPolicy {
     pub maximum_uncertainty_cycles: u64,
     /// Requested interval between automatic worker probes.
     pub heartbeat_interval_ms: u32,
+    /// Minimum interval between passive runtime-health polls.
+    pub runtime_health_interval_ms: u32,
 }
 
 impl ClockSamplingPolicy {
@@ -53,6 +64,7 @@ impl ClockSamplingPolicy {
         maximum_timer_error_ns: 2_000_000,
         maximum_uncertainty_cycles: 250_000,
         heartbeat_interval_ms: 1_000,
+        runtime_health_interval_ms: 1_000,
     };
 
     /// Converts the wire policy into the exact estimator policy after validation.
@@ -60,7 +72,8 @@ impl ClockSamplingPolicy {
     /// # Errors
     ///
     /// Rejects invalid estimator bounds, a zero uncertainty budget, or an
-    /// automatic probe interval outside 100 ms through 60 seconds.
+    /// automatic probe interval outside 100 ms through 60 seconds, or a
+    /// runtime-health interval outside 1 through 60 seconds.
     pub fn estimator(self) -> Result<ClockEstimationPolicy, WorkerContractError> {
         let estimator = ClockEstimationPolicy {
             maximum_round_trip_ns: self.maximum_round_trip_ns,
@@ -79,6 +92,9 @@ impl ClockSamplingPolicy {
         }
         if !(100..=60_000).contains(&self.heartbeat_interval_ms) {
             return Err(WorkerContractError::HeartbeatInterval);
+        }
+        if !(1_000..=60_000).contains(&self.runtime_health_interval_ms) {
+            return Err(WorkerContractError::RuntimeHealthInterval);
         }
         Ok(estimator)
     }
@@ -272,6 +288,255 @@ pub struct ClockHistoryRecord {
     pub work_queue_depth: u32,
 }
 
+/// Worker-visible support state for the passive runtime-health operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHealthAvailabilitySnapshot {
+    /// No authenticated health result has been accepted in this session.
+    #[default]
+    Unobserved,
+    /// Firmware explicitly returned the canonical unsupported response.
+    Unsupported,
+    /// A complete independently validated snapshot is retained.
+    Available,
+}
+
+impl From<RuntimeHealthAvailability> for RuntimeHealthAvailabilitySnapshot {
+    fn from(value: RuntimeHealthAvailability) -> Self {
+        match value {
+            RuntimeHealthAvailability::Unobserved => Self::Unobserved,
+            RuntimeHealthAvailability::Unsupported => Self::Unsupported,
+            RuntimeHealthAvailability::Available => Self::Available,
+        }
+    }
+}
+
+/// Exact occupancy of one firmware queue, without a derived percentage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueHealthSnapshot {
+    /// Entries currently owned by the queue.
+    pub depth: u16,
+    /// Fixed queue capacity reported by this firmware image.
+    pub capacity: u16,
+}
+
+impl QueueHealthSnapshot {
+    /// Remaining admission credits after independent validation.
+    pub const fn free(self) -> u16 {
+        self.capacity.saturating_sub(self.depth)
+    }
+
+    fn validate(self) -> Result<(), WorkerContractError> {
+        if self.capacity == 0 || self.depth > self.capacity {
+            Err(WorkerContractError::RuntimeHealthSnapshot)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Stable JSON name for the executor that owns a measured stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorStackDomainSnapshot {
+    /// Wi-Fi, HTTP, storage, and other service work on core 0.
+    ServiceCore,
+    /// Deterministic real-time work on core 1.
+    RealtimeCore,
+}
+
+impl ExecutorStackDomainSnapshot {
+    const fn wire(self) -> StackDomain {
+        match self {
+            Self::ServiceCore => StackDomain::ServiceCore,
+            Self::RealtimeCore => StackDomain::RealtimeCore,
+        }
+    }
+}
+
+impl From<StackDomain> for ExecutorStackDomainSnapshot {
+    fn from(value: StackDomain) -> Self {
+        match value {
+            StackDomain::ServiceCore => Self::ServiceCore,
+            StackDomain::RealtimeCore => Self::RealtimeCore,
+        }
+    }
+}
+
+/// Exact validated facts for one executor stack measurement epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutorStackSnapshot {
+    /// Executor domain that owns this allocation.
+    pub domain: ExecutorStackDomainSnapshot,
+    /// Raw validated ASWM V1 flags.
+    pub flags: u16,
+    /// Complete linker or HAL allocation including the low exclusion.
+    pub allocated_bytes: u32,
+    /// Guard and policy bytes deliberately omitted from canary access.
+    pub excluded_low_bytes: u32,
+    /// Bytes painted below the initialization-time current-SP reserve.
+    pub painted_bytes: u32,
+    /// Smallest observed free prefix within the monitored allocation.
+    pub minimum_headroom_bytes: u32,
+    /// Number of bounded scan passes attempted in this epoch.
+    pub samples: u32,
+    /// Number of scans that reached the then-current low-water mark.
+    pub completed_sweeps: u32,
+    /// Device cycle at which this partial measurement epoch began.
+    pub epoch_cycle: u64,
+    /// Device cycle of the newest bounded sample.
+    pub sampled_at: u64,
+}
+
+impl ExecutorStackSnapshot {
+    fn from_wire(snapshot: StackWatermarkSnapshot) -> Self {
+        Self {
+            domain: snapshot.domain.into(),
+            flags: snapshot.flags.0,
+            allocated_bytes: snapshot.allocated_bytes,
+            excluded_low_bytes: snapshot.excluded_low_bytes,
+            painted_bytes: snapshot.painted_bytes,
+            minimum_headroom_bytes: snapshot.minimum_headroom_bytes,
+            samples: snapshot.samples,
+            completed_sweeps: snapshot.completed_sweeps,
+            epoch_cycle: snapshot.epoch_cycle.0,
+            sampled_at: snapshot.sampled_at.0,
+        }
+    }
+
+    const fn wire(self) -> StackWatermarkSnapshot {
+        StackWatermarkSnapshot {
+            domain: self.domain.wire(),
+            flags: StackWatermarkFlags(self.flags),
+            allocated_bytes: self.allocated_bytes,
+            excluded_low_bytes: self.excluded_low_bytes,
+            painted_bytes: self.painted_bytes,
+            minimum_headroom_bytes: self.minimum_headroom_bytes,
+            samples: self.samples,
+            completed_sweeps: self.completed_sweeps,
+            epoch_cycle: DeviceCycle(self.epoch_cycle),
+            sampled_at: DeviceCycle(self.sampled_at),
+        }
+    }
+
+    /// Bytes covered by the measurement policy after the low exclusion.
+    pub const fn monitored_bytes(self) -> u32 {
+        self.allocated_bytes.saturating_sub(self.excluded_low_bytes)
+    }
+
+    /// Conservative maximum use observed in this partial epoch.
+    pub const fn observed_maximum_used_bytes(self) -> u32 {
+        self.monitored_bytes()
+            .saturating_sub(self.minimum_headroom_bytes)
+    }
+
+    /// Upper bytes never painted and therefore deliberately charged as used.
+    pub const fn unpainted_bytes(self) -> u32 {
+        self.monitored_bytes().saturating_sub(self.painted_bytes)
+    }
+
+    /// Whether at least one incremental scan reached the current low-water mark.
+    pub const fn has_completed_sweep(self) -> bool {
+        self.flags & StackWatermarkFlags::COMPLETE_SWEEP != 0
+    }
+
+    /// Whether stack activity before measurement initialization remains unknown.
+    pub const fn is_partial_boot_epoch(self) -> bool {
+        self.flags & StackWatermarkFlags::PARTIAL_BOOT_EPOCH != 0
+    }
+
+    /// Age of this executor observation at the enclosing response cycle.
+    pub const fn sample_age_cycles(self, snapshot_cycle: u64) -> u64 {
+        snapshot_cycle.saturating_sub(self.sampled_at)
+    }
+}
+
+/// Versioned JSON projection of one independently validated AHLT V1 response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeHealthWorkerSnapshot {
+    /// Service-core cycle at which the firmware formed this response.
+    pub snapshot_cycle: u64,
+    /// Ordered service-to-real-time command occupancy.
+    pub command_queue: QueueHealthSnapshot,
+    /// Deterministic real-time work-block occupancy.
+    pub work_queue: QueueHealthSnapshot,
+    /// Lossy real-time-to-service telemetry occupancy.
+    pub telemetry_queue: QueueHealthSnapshot,
+    /// Same-response service-core executor measurement.
+    pub service_stack: ExecutorStackSnapshot,
+    /// Latest real-time-core measurement, if one exists in this boot.
+    pub realtime_stack: Option<ExecutorStackSnapshot>,
+    /// Whether firmware classed the present real-time report as fresh.
+    pub realtime_stack_fresh: bool,
+}
+
+impl RuntimeHealthWorkerSnapshot {
+    /// Projects a validated native health view into its strict worker schema.
+    #[must_use]
+    pub fn from_view(view: RuntimeHealthView) -> Self {
+        let snapshot = view.snapshot();
+        Self {
+            snapshot_cycle: snapshot.snapshot_cycle.0,
+            command_queue: QueueHealthSnapshot {
+                depth: snapshot.command_queue_depth,
+                capacity: snapshot.command_queue_capacity,
+            },
+            work_queue: QueueHealthSnapshot {
+                depth: snapshot.work_queue_depth,
+                capacity: snapshot.work_queue_capacity,
+            },
+            telemetry_queue: QueueHealthSnapshot {
+                depth: snapshot.telemetry_queue_depth,
+                capacity: snapshot.telemetry_queue_capacity,
+            },
+            service_stack: ExecutorStackSnapshot::from_wire(snapshot.service_stack),
+            realtime_stack: view
+                .realtime_stack()
+                .map(|stack| ExecutorStackSnapshot::from_wire(stack.snapshot())),
+            realtime_stack_fresh: view.realtime_stack_fresh(),
+        }
+    }
+
+    /// Reconstructs and validates the native queue, stack, domain, and freshness rules.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed or internally inconsistent worker JSON projection.
+    pub fn validate(self) -> Result<(), WorkerContractError> {
+        self.command_queue.validate()?;
+        self.work_queue.validate()?;
+        self.telemetry_queue.validate()?;
+        let (realtime_stack, present) = self.realtime_stack.map_or_else(
+            || {
+                (
+                    StackWatermarkSnapshot::unavailable(StackDomain::RealtimeCore),
+                    false,
+                )
+            },
+            |stack| (stack.wire(), true),
+        );
+        let flags = (u8::from(present) * RuntimeHealthFlags::REALTIME_STACK_PRESENT)
+            | (u8::from(self.realtime_stack_fresh) * RuntimeHealthFlags::REALTIME_STACK_FRESH);
+        WireRuntimeHealthSnapshot {
+            flags: RuntimeHealthFlags(flags),
+            snapshot_cycle: DeviceCycle(self.snapshot_cycle),
+            command_queue_depth: self.command_queue.depth,
+            command_queue_capacity: self.command_queue.capacity,
+            work_queue_depth: self.work_queue.depth,
+            work_queue_capacity: self.work_queue.capacity,
+            telemetry_queue_depth: self.telemetry_queue.depth,
+            telemetry_queue_capacity: self.telemetry_queue.capacity,
+            service_stack: self.service_stack.wire(),
+            realtime_stack,
+        }
+        .validate()
+        .map_err(|_| WorkerContractError::RuntimeHealthSnapshot)
+    }
+}
+
 /// Redacted complete UI view of one worker-owned connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -300,6 +565,60 @@ pub struct DeviceSessionSnapshot {
     pub history: Vec<ClockHistoryRecord>,
     /// Latest diagnostic failure text, if any.
     pub last_error: Option<String>,
+    /// Support state of the passive runtime-health operation in this session.
+    pub runtime_health_availability: RuntimeHealthAvailabilitySnapshot,
+    /// Latest valid runtime-health evidence; retained across polling failures.
+    pub runtime_health: Option<RuntimeHealthWorkerSnapshot>,
+    /// Consecutive passive-health failures since the latest accepted result.
+    pub runtime_health_consecutive_failures: u32,
+    /// Latest passive-health failure text, independent from clock lifecycle.
+    pub runtime_health_last_error: Option<String>,
+}
+
+impl DeviceSessionSnapshot {
+    /// Independently validates bounded worker state before rendering it.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identity, bounds, diagnostic relationships, or health state.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0
+            || self.generation == 0
+            || self.label.is_empty()
+            || self.label.len() > MAXIMUM_LABEL_BYTES
+            || self.label.trim() != self.label
+            || self.origin.is_empty()
+            || self.origin.len() > MAXIMUM_ORIGIN_BYTES
+            || self.history.len() > MAXIMUM_CLOCK_HISTORY
+            || !diagnostic_is_valid(self.last_error.as_deref())
+            || !diagnostic_is_valid(self.runtime_health_last_error.as_deref())
+            || (self.consecutive_failures == 0) != self.last_error.is_none()
+            || (self.runtime_health_consecutive_failures == 0)
+                != self.runtime_health_last_error.is_none()
+        {
+            return Err(WorkerContractError::DeviceSnapshot);
+        }
+        match (self.runtime_health_availability, self.runtime_health) {
+            (RuntimeHealthAvailabilitySnapshot::Available, Some(snapshot)) => {
+                snapshot.validate()?;
+            }
+            (
+                RuntimeHealthAvailabilitySnapshot::Unobserved
+                | RuntimeHealthAvailabilitySnapshot::Unsupported,
+                None,
+            ) => {}
+            _ => return Err(WorkerContractError::RuntimeHealthSnapshot),
+        }
+        Ok(())
+    }
+}
+
+fn diagnostic_is_valid(diagnostic: Option<&str>) -> bool {
+    diagnostic.is_none_or(|message| {
+        !message.is_empty()
+            && message.len() <= MAXIMUM_WORKER_DIAGNOSTIC_BYTES
+            && message.trim() == message
+    })
 }
 
 /// One event delivered by the control worker to the UI realm.
@@ -314,7 +633,7 @@ pub enum WorkerEvent {
     /// Complete replacement snapshot for one connection.
     Snapshot {
         /// Redacted worker-owned state.
-        snapshot: DeviceSessionSnapshot,
+        snapshot: Box<DeviceSessionSnapshot>,
     },
     /// A disconnect erased a connection.
     Removed {
@@ -367,6 +686,19 @@ impl WorkerEventEnvelope {
             Err(WorkerContractError::SchemaVersion)
         }
     }
+
+    /// Enforces the exact version and independently validates snapshot payloads.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a mismatched version or invalid device snapshot.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        self.validate_version()?;
+        if let WorkerEvent::Snapshot { snapshot } = &self.event {
+            snapshot.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Bounded worker command or event contract failure.
@@ -386,6 +718,12 @@ pub enum WorkerContractError {
     ClockPolicy,
     /// Automatic heartbeat period was outside the supported range.
     HeartbeatInterval,
+    /// Passive runtime-health period was outside the supported range.
+    RuntimeHealthInterval,
+    /// A redacted device snapshot violated worker bounds or state relationships.
+    DeviceSnapshot,
+    /// Runtime-health JSON violated native queue, stack, domain, or freshness rules.
+    RuntimeHealthSnapshot,
 }
 
 impl fmt::Display for WorkerContractError {
@@ -400,6 +738,13 @@ impl fmt::Display for WorkerContractError {
             Self::HeartbeatInterval => {
                 formatter.write_str("heartbeat interval must be 100 through 60000 ms")
             }
+            Self::RuntimeHealthInterval => {
+                formatter.write_str("runtime health interval must be 1000 through 60000 ms")
+            }
+            Self::DeviceSnapshot => formatter.write_str("device snapshot is invalid"),
+            Self::RuntimeHealthSnapshot => {
+                formatter.write_str("runtime health snapshot is invalid")
+            }
         }
     }
 }
@@ -409,6 +754,44 @@ impl std::error::Error for WorkerContractError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn executor_stack(domain: ExecutorStackDomainSnapshot) -> ExecutorStackSnapshot {
+        ExecutorStackSnapshot {
+            domain,
+            flags: StackWatermarkFlags::INITIALIZED
+                | StackWatermarkFlags::PARTIAL_BOOT_EPOCH
+                | StackWatermarkFlags::CURRENT_POINTER_BOUND,
+            allocated_bytes: 32 * 1_024,
+            excluded_low_bytes: 256,
+            painted_bytes: 28 * 1_024,
+            minimum_headroom_bytes: 20 * 1_024,
+            samples: 4,
+            completed_sweeps: 0,
+            epoch_cycle: 10,
+            sampled_at: 190,
+        }
+    }
+
+    fn runtime_health() -> RuntimeHealthWorkerSnapshot {
+        RuntimeHealthWorkerSnapshot {
+            snapshot_cycle: 200,
+            command_queue: QueueHealthSnapshot {
+                depth: 2,
+                capacity: 8,
+            },
+            work_queue: QueueHealthSnapshot {
+                depth: 3,
+                capacity: 8,
+            },
+            telemetry_queue: QueueHealthSnapshot {
+                depth: 4,
+                capacity: 32,
+            },
+            service_stack: executor_stack(ExecutorStackDomainSnapshot::ServiceCore),
+            realtime_stack: Some(executor_stack(ExecutorStackDomainSnapshot::RealtimeCore)),
+            realtime_stack_fresh: true,
+        }
+    }
 
     fn request() -> DeviceConnectionRequest {
         DeviceConnectionRequest {
@@ -452,6 +835,12 @@ mod tests {
             Err(WorkerContractError::HeartbeatInterval)
         );
         candidate = request();
+        candidate.sampling.runtime_health_interval_ms = 999;
+        assert_eq!(
+            candidate.validate(),
+            Err(WorkerContractError::RuntimeHealthInterval)
+        );
+        candidate = request();
         candidate.sampling.maximum_timer_error_ns = 0;
         assert_eq!(candidate.validate(), Err(WorkerContractError::ClockPolicy));
     }
@@ -459,7 +848,7 @@ mod tests {
     #[test]
     fn snapshots_round_trip_without_a_credential_field() {
         let event = WorkerEventEnvelope::current(WorkerEvent::Snapshot {
-            snapshot: DeviceSessionSnapshot {
+            snapshot: Box::new(DeviceSessionSnapshot {
                 connection_id: 7,
                 label: "TinyBee bench".to_owned(),
                 origin: "http://192.168.4.1".to_owned(),
@@ -491,13 +880,122 @@ mod tests {
                     work_queue_depth: 1,
                 }],
                 last_error: None,
-            },
+                runtime_health_availability: RuntimeHealthAvailabilitySnapshot::Available,
+                runtime_health: Some(runtime_health()),
+                runtime_health_consecutive_failures: 0,
+                runtime_health_last_error: None,
+            }),
         });
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("secret"));
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
-        assert_eq!(decoded.validate_version(), Ok(()));
+        assert_eq!(decoded.validate(), Ok(()));
+        assert_eq!(WORKER_SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn health_json_is_revalidated_instead_of_trusted() {
+        let valid = runtime_health();
+        assert_eq!(valid.validate(), Ok(()));
+        assert_eq!(valid.command_queue.free(), 6);
+        assert_eq!(valid.service_stack.monitored_bytes(), 32 * 1_024 - 256);
+        assert_eq!(
+            valid.service_stack.observed_maximum_used_bytes(),
+            32 * 1_024 - 256 - 20 * 1_024
+        );
+        assert_eq!(valid.service_stack.unpainted_bytes(), 3_840);
+        assert_eq!(valid.service_stack.sample_age_cycles(200), 10);
+        assert!(valid.service_stack.is_partial_boot_epoch());
+        assert!(!valid.service_stack.has_completed_sweep());
+
+        let mut overflow = valid;
+        overflow.command_queue.depth = overflow.command_queue.capacity + 1;
+        assert_eq!(
+            overflow.validate(),
+            Err(WorkerContractError::RuntimeHealthSnapshot)
+        );
+
+        let mut substituted = valid;
+        substituted.service_stack.domain = ExecutorStackDomainSnapshot::RealtimeCore;
+        assert_eq!(
+            substituted.validate(),
+            Err(WorkerContractError::RuntimeHealthSnapshot)
+        );
+
+        let mut freshness_without_report = valid;
+        freshness_without_report.realtime_stack = None;
+        assert_eq!(
+            freshness_without_report.validate(),
+            Err(WorkerContractError::RuntimeHealthSnapshot)
+        );
+    }
+
+    #[test]
+    fn validated_native_health_projects_without_losing_exact_facts() {
+        let expected = runtime_health();
+        let native = WireRuntimeHealthSnapshot {
+            flags: RuntimeHealthFlags(
+                RuntimeHealthFlags::REALTIME_STACK_PRESENT
+                    | RuntimeHealthFlags::REALTIME_STACK_FRESH,
+            ),
+            snapshot_cycle: DeviceCycle(expected.snapshot_cycle),
+            command_queue_depth: expected.command_queue.depth,
+            command_queue_capacity: expected.command_queue.capacity,
+            work_queue_depth: expected.work_queue.depth,
+            work_queue_capacity: expected.work_queue.capacity,
+            telemetry_queue_depth: expected.telemetry_queue.depth,
+            telemetry_queue_capacity: expected.telemetry_queue.capacity,
+            service_stack: expected.service_stack.wire(),
+            realtime_stack: expected.realtime_stack.unwrap().wire(),
+        };
+        let mut model = crate::health::RuntimeHealthModel::new();
+        model
+            .accept_response(&crate::Response {
+                status: alumina_protocol::StatusCode::Ok,
+                body: native.encode().unwrap().to_vec(),
+            })
+            .unwrap();
+        let projected = RuntimeHealthWorkerSnapshot::from_view(model.latest().unwrap());
+        assert_eq!(projected, expected);
+        assert_eq!(projected.validate(), Ok(()));
+    }
+
+    #[test]
+    fn snapshot_availability_and_error_relationships_fail_closed() {
+        let mut snapshot = DeviceSessionSnapshot {
+            connection_id: 7,
+            label: "TinyBee bench".to_owned(),
+            origin: "http://192.168.4.1".to_owned(),
+            generation: 2,
+            phase: DeviceSessionPhase::Sampling,
+            boot_id: None,
+            accepted_samples: 0,
+            rejected_samples: 0,
+            consecutive_failures: 0,
+            estimate: None,
+            history: Vec::new(),
+            last_error: None,
+            runtime_health_availability: RuntimeHealthAvailabilitySnapshot::Unobserved,
+            runtime_health: None,
+            runtime_health_consecutive_failures: 0,
+            runtime_health_last_error: None,
+        };
+        assert_eq!(snapshot.validate(), Ok(()));
+        snapshot.runtime_health = Some(runtime_health());
+        assert_eq!(
+            snapshot.validate(),
+            Err(WorkerContractError::RuntimeHealthSnapshot)
+        );
+        snapshot.runtime_health_availability = RuntimeHealthAvailabilitySnapshot::Available;
+        assert_eq!(snapshot.validate(), Ok(()));
+        snapshot.runtime_health_consecutive_failures = 1;
+        assert_eq!(
+            snapshot.validate(),
+            Err(WorkerContractError::DeviceSnapshot)
+        );
+        snapshot.runtime_health_last_error = Some("health fetch failed".to_owned());
+        assert_eq!(snapshot.validate(), Ok(()));
     }
 
     #[test]

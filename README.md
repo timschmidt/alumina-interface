@@ -159,9 +159,10 @@ prototype.
   binds request/response proofs to the actual document origin.
 - The browser shell creates one dedicated module worker that owns each device's
   HMAC secret, HTTP session, causal clock model, automatic retry cadence, and a
-  bounded 64-observation history. The UI can add, probe, and disconnect
-  diagnostic sessions and never receives credentials. A headless Chromium
-  smoke check reaches the worker-ready state without contacting a device.
+  bounded 64-observation history. It also owns passive runtime-health polling,
+  retains independently validated queue/stack evidence and health-specific
+  failures, and publishes only strict schema-v2 redacted snapshots. The UI can
+  add, probe, and disconnect diagnostic sessions and never receives credentials.
 - That worker exchanges production-format authenticated heartbeat traffic with
   the deterministic host MCU fixture and recovers from response loss, a finite
   outage, and reboot while conservatively rejecting excessive delay.
@@ -325,8 +326,11 @@ boundary. It requests the exact zero-configuration `HealthSnapshot`, validates
 the fixed queue and dual-executor stack reports again, retains monotonic
 boot-scoped evidence across temporary real-time-report absence, and exposes
 integer queue/headroom facts without converting them to percentages or safety
-authority. Native tests and both window/worker WASM fetch adapters are present;
-automatic worker polling and the visible board-debug panel remain open.
+authority. The dedicated worker now polls no faster than its explicit 1–60
+second policy after successful heartbeats, resets boot/session-scoped evidence,
+keeps health failures separate from clock qualification, and renders the last
+valid queue and executor-stack facts in the live-device panel. Its strict JSON
+projection is validated again in the rendering realm before insertion.
 
 ## Value domains
 

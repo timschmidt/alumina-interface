@@ -6,15 +6,18 @@ use std::rc::Rc;
 
 use alumina_clock::{ClockFlags, ClockObservation};
 use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
+use alumina_interface_client::health::RuntimeHealthModel;
 use alumina_interface_client::http::AuthenticatedHttpSession;
 use alumina_interface_client::wasm::{
-    BrowserClockError, BrowserFetchError, DeviceOrigin, drive_clock_probe_in_worker,
+    BrowserClockError, BrowserFetchError, BrowserHealthError, DeviceOrigin,
+    drive_clock_probe_in_worker, drive_runtime_health_in_worker,
     open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
     ClockEstimateSnapshot, ClockHistoryRecord, DeviceConnectionRequest, DeviceSessionPhase,
-    DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY, WORKER_SCHEMA_VERSION, WorkerCommand,
-    WorkerCommandEnvelope, WorkerEvent, WorkerEventEnvelope,
+    DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY, MAXIMUM_WORKER_DIAGNOSTIC_BYTES,
+    RuntimeHealthWorkerSnapshot, WORKER_SCHEMA_VERSION, WorkerCommand, WorkerCommandEnvelope,
+    WorkerEvent, WorkerEventEnvelope,
 };
 use alumina_protocol::Digest;
 use wasm_bindgen::closure::Closure;
@@ -41,12 +44,16 @@ struct DeviceState {
     generation: u64,
     session: Option<AuthenticatedHttpSession>,
     clock: DeviceClockModel,
+    runtime_health: RuntimeHealthModel,
     history: VecDeque<ClockHistoryRecord>,
     phase: DeviceSessionPhase,
     consecutive_failures: u32,
     estimate: Option<ClockEstimateSnapshot>,
     last_error: Option<String>,
     next_attempt_ms: f64,
+    runtime_health_consecutive_failures: u32,
+    runtime_health_last_error: Option<String>,
+    next_runtime_health_attempt_ms: f64,
 }
 
 impl DeviceState {
@@ -70,12 +77,16 @@ impl DeviceState {
             generation,
             session: None,
             clock,
+            runtime_health: RuntimeHealthModel::new(),
             history: VecDeque::with_capacity(MAXIMUM_CLOCK_HISTORY),
             phase: DeviceSessionPhase::Connecting,
             consecutive_failures: 0,
             estimate: None,
             last_error: None,
             next_attempt_ms: 0.0,
+            runtime_health_consecutive_failures: 0,
+            runtime_health_last_error: None,
+            next_runtime_health_attempt_ms: 0.0,
         })
     }
 
@@ -93,6 +104,13 @@ impl DeviceState {
             estimate: self.estimate,
             history: self.history.iter().copied().collect(),
             last_error: self.last_error.clone(),
+            runtime_health_availability: self.runtime_health.availability().into(),
+            runtime_health: self
+                .runtime_health
+                .latest()
+                .map(RuntimeHealthWorkerSnapshot::from_view),
+            runtime_health_consecutive_failures: self.runtime_health_consecutive_failures,
+            runtime_health_last_error: self.runtime_health_last_error.clone(),
         }
     }
 
@@ -102,11 +120,11 @@ impl DeviceState {
         self.next_attempt_ms = now_ms + f64::from(self.sampling.heartbeat_interval_ms);
     }
 
-    fn schedule_failure(&mut self, now_ms: f64, error: String) {
+    fn schedule_failure(&mut self, now_ms: f64, error: &str) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.phase = DeviceSessionPhase::RetryWaiting;
         self.estimate = None;
-        self.last_error = Some(error);
+        self.last_error = Some(bounded_diagnostic(error));
         let exponent = self.consecutive_failures.saturating_sub(1).min(5);
         let multiplier = 1_u32 << exponent;
         let retry_ms = self
@@ -115,6 +133,36 @@ impl DeviceState {
             .saturating_mul(multiplier)
             .min(MAXIMUM_RETRY_MS);
         self.next_attempt_ms = now_ms + f64::from(retry_ms);
+    }
+
+    fn runtime_health_due(&self, now_ms: f64) -> bool {
+        self.next_runtime_health_attempt_ms <= now_ms
+    }
+
+    fn schedule_runtime_health_attempt(&mut self, now_ms: f64) {
+        self.next_runtime_health_attempt_ms =
+            now_ms + f64::from(self.sampling.runtime_health_interval_ms);
+    }
+
+    fn record_runtime_health_success(&mut self) {
+        self.runtime_health_consecutive_failures = 0;
+        self.runtime_health_last_error = None;
+    }
+
+    fn record_runtime_health_failure(&mut self, error: &str) {
+        self.runtime_health_consecutive_failures =
+            self.runtime_health_consecutive_failures.saturating_add(1);
+        self.runtime_health_last_error = Some(bounded_diagnostic(error));
+    }
+
+    fn reset_runtime_health_evidence(&mut self) {
+        self.runtime_health.reset();
+    }
+
+    fn reset_runtime_health_for_new_boot(&mut self) {
+        self.reset_runtime_health_evidence();
+        self.runtime_health_consecutive_failures = 0;
+        self.runtime_health_last_error = None;
     }
 
     fn record_observation(&mut self, observation: ClockObservation) {
@@ -168,6 +216,21 @@ impl DeviceState {
     }
 }
 
+fn bounded_diagnostic(diagnostic: &str) -> String {
+    let diagnostic = match diagnostic.trim() {
+        "" => "unspecified worker failure",
+        canonical => canonical,
+    };
+    if diagnostic.len() <= MAXIMUM_WORKER_DIAGNOSTIC_BYTES {
+        return diagnostic.to_owned();
+    }
+    let mut boundary = MAXIMUM_WORKER_DIAGNOSTIC_BYTES;
+    while !diagnostic.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    diagnostic[..boundary].to_owned()
+}
+
 impl Drop for DeviceState {
     fn drop(&mut self) {
         self.secret.fill(0);
@@ -178,7 +241,7 @@ enum DeviceEntry {
     Idle(Box<DeviceState>),
     Busy {
         generation: u64,
-        snapshot: DeviceSessionSnapshot,
+        snapshot: Box<DeviceSessionSnapshot>,
     },
 }
 
@@ -186,7 +249,7 @@ impl DeviceEntry {
     fn snapshot(&self) -> DeviceSessionSnapshot {
         match self {
             Self::Idle(state) => state.snapshot(),
-            Self::Busy { snapshot, .. } => snapshot.clone(),
+            Self::Busy { snapshot, .. } => snapshot.as_ref().clone(),
         }
     }
 }
@@ -415,7 +478,7 @@ fn take_idle_device(runtime: &SharedWorkerRuntime, connection_id: u64) -> Option
                 connection_id,
                 DeviceEntry::Busy {
                     generation,
-                    snapshot,
+                    snapshot: Box::new(snapshot),
                 },
             );
             Some(*state)
@@ -437,11 +500,12 @@ async fn connect_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -
     match result {
         Ok(session) => {
             state.session = Some(session);
+            state.reset_runtime_health_evidence();
             state.phase = DeviceSessionPhase::Sampling;
             state.schedule_success(now_ms);
             state.next_attempt_ms = now_ms;
         }
-        Err(error) => state.schedule_failure(now_ms, error.to_string()),
+        Err(error) => state.schedule_failure(now_ms, &error.to_string()),
     }
     state
 }
@@ -466,16 +530,46 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
         Ok(observation) => {
             state.record_observation(observation);
             state.schedule_success(now_ms);
+            if state.runtime_health_due(now_ms) {
+                let health_result = drive_runtime_health_in_worker(
+                    worker_scope,
+                    &state.origin,
+                    state
+                        .session
+                        .as_mut()
+                        .expect("clock probe retained its authenticated session"),
+                    &mut state.runtime_health,
+                    &state.secret,
+                )
+                .await;
+                let sampled_health_now_ms = worker_now_ms(&scope);
+                let health_now_ms = if sampled_health_now_ms.is_finite() {
+                    sampled_health_now_ms
+                } else {
+                    now_ms
+                };
+                state.schedule_runtime_health_attempt(health_now_ms);
+                match health_result {
+                    Ok(_) => state.record_runtime_health_success(),
+                    Err(error) => {
+                        if health_session_must_reopen(&error) {
+                            state.session = None;
+                        }
+                        state.record_runtime_health_failure(&error.to_string());
+                    }
+                }
+            }
         }
         Err(error) => {
             if clock_model_must_reset(&error) {
                 let _ = state.clock.reset();
                 state.history.clear();
+                state.reset_runtime_health_for_new_boot();
             }
             if session_must_reopen(&error) {
                 state.session = None;
             }
-            state.schedule_failure(now_ms, error.to_string());
+            state.schedule_failure(now_ms, &error.to_string());
         }
     }
     state
@@ -495,6 +589,21 @@ const fn session_must_reopen(error: &BrowserClockError) -> bool {
             | BrowserClockError::Clock(ClockProbeError::BootChanged { .. })
             | BrowserClockError::Fetch(
                 BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
+const fn health_session_must_reopen(error: &BrowserHealthError) -> bool {
+    matches!(
+        error,
+        BrowserHealthError::ConfigurationIdentity
+            | BrowserHealthError::Session(_)
+            | BrowserHealthError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
                     | BrowserFetchError::HttpStatus(_)
                     | BrowserFetchError::MissingHeader(_)
                     | BrowserFetchError::Media(_),
@@ -550,7 +659,12 @@ fn publish_snapshot(runtime: &SharedWorkerRuntime, connection_id: u64) {
         .get(&connection_id)
         .map(DeviceEntry::snapshot);
     if let Some(snapshot) = snapshot {
-        emit_worker_event(runtime, WorkerEvent::Snapshot { snapshot });
+        emit_worker_event(
+            runtime,
+            WorkerEvent::Snapshot {
+                snapshot: Box::new(snapshot),
+            },
+        );
     }
 }
 
@@ -623,10 +737,14 @@ impl MutableSupervisorView {
     }
 
     fn apply(&mut self, envelope: WorkerEventEnvelope) {
-        if envelope.schema_version != WORKER_SCHEMA_VERSION {
-            self.lifecycle = SupervisorLifecycle::Failed(
-                "control worker uses an incompatible message schema".to_owned(),
-            );
+        if let Err(error) = envelope.validate() {
+            if envelope.schema_version == WORKER_SCHEMA_VERSION {
+                self.push_diagnostic(format!("control worker snapshot rejected: {error}"));
+            } else {
+                self.lifecycle = SupervisorLifecycle::Failed(
+                    "control worker uses an incompatible message schema".to_owned(),
+                );
+            }
             return;
         }
         match envelope.event {
@@ -634,7 +752,7 @@ impl MutableSupervisorView {
                 self.lifecycle = SupervisorLifecycle::Ready { scope_origin };
             }
             WorkerEvent::Snapshot { snapshot } => {
-                self.devices.insert(snapshot.connection_id, snapshot);
+                self.devices.insert(snapshot.connection_id, *snapshot);
             }
             WorkerEvent::Removed { connection_id } => {
                 self.devices.remove(&connection_id);

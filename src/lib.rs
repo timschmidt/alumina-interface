@@ -33,7 +33,7 @@ use crate::machine_cam_ui::MachineCamWorkspace;
 #[cfg(target_arch = "wasm32")]
 use alumina_interface_client::worker::{
     ClockSamplingPolicy, DeviceConnectionRequest, DeviceSessionPhase, DeviceSessionSnapshot,
-    WorkerCommand,
+    ExecutorStackSnapshot, RuntimeHealthAvailabilitySnapshot, WorkerCommand,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -822,6 +822,7 @@ fn show_live_device_snapshot(
                     latest.missed_deadlines, latest.flags
                 ));
             }
+            show_runtime_health_snapshot(ui, snapshot);
             if snapshot.phase == DeviceSessionPhase::DeviceUnhealthy {
                 ui.colored_label(
                     egui::Color32::RED,
@@ -854,6 +855,125 @@ fn show_live_device_snapshot(
             }
         },
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_runtime_health_snapshot(ui: &mut egui::Ui, snapshot: &DeviceSessionSnapshot) {
+    ui.separator();
+    ui.strong("Passive runtime diagnostics");
+    match (
+        snapshot.runtime_health_availability,
+        snapshot.runtime_health,
+    ) {
+        (RuntimeHealthAvailabilitySnapshot::Unobserved, None) => {
+            ui.label("No authenticated runtime-health result in this session yet.");
+        }
+        (RuntimeHealthAvailabilitySnapshot::Unsupported, None) => {
+            ui.label("This firmware explicitly reports runtime-health as unsupported.");
+        }
+        (RuntimeHealthAvailabilitySnapshot::Available, Some(health)) => {
+            ui.label(format!(
+                "latest valid response cycle: {}",
+                health.snapshot_cycle
+            ));
+            for (label, queue) in [
+                ("command", health.command_queue),
+                ("work block", health.work_queue),
+                ("telemetry", health.telemetry_queue),
+            ] {
+                ui.label(format!(
+                    "{label} queue: {} / {} occupied; {} free",
+                    queue.depth,
+                    queue.capacity,
+                    queue.free()
+                ));
+            }
+            show_executor_stack_snapshot(
+                ui,
+                "service-core stack",
+                health.service_stack,
+                health.snapshot_cycle,
+            );
+            match health.realtime_stack {
+                Some(realtime) => {
+                    show_executor_stack_snapshot(
+                        ui,
+                        "real-time-core stack",
+                        realtime,
+                        health.snapshot_cycle,
+                    );
+                    if health.realtime_stack_fresh {
+                        ui.label("real-time stack witness: present and firmware-fresh");
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "real-time stack witness: present but stale",
+                        );
+                    }
+                }
+                None => {
+                    ui.label("real-time stack witness: not observed in this boot");
+                }
+            }
+            ui.small(
+                "Stack watermarks converge incrementally from a partial boot epoch; they are diagnostic evidence, not a transient-depth, sizing, or safety proof.",
+            );
+        }
+        _ => {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Worker runtime-health state was internally inconsistent.",
+            );
+        }
+    }
+    if snapshot.runtime_health_consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive runtime-health failures: {}",
+            snapshot.runtime_health_consecutive_failures
+        ));
+    }
+    if let Some(error) = &snapshot.runtime_health_last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+        if snapshot.runtime_health.is_some() {
+            ui.small("The last valid runtime-health snapshot remains visible above.");
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_executor_stack_snapshot(
+    ui: &mut egui::Ui,
+    label: &str,
+    stack: ExecutorStackSnapshot,
+    response_cycle: u64,
+) {
+    ui.label(format!(
+        "{label}: maximum observed use {} / {} monitored bytes; minimum headroom {} bytes",
+        stack.observed_maximum_used_bytes(),
+        stack.monitored_bytes(),
+        stack.minimum_headroom_bytes
+    ));
+    ui.label(format!(
+        "allocation {} bytes; low exclusion {}; painted {}; unpainted reserve {}",
+        stack.allocated_bytes,
+        stack.excluded_low_bytes,
+        stack.painted_bytes,
+        stack.unpainted_bytes()
+    ));
+    ui.label(format!(
+        "samples {}; completed sweeps {}; sample age {} cycles; epoch/sample cycles {}/{}",
+        stack.samples,
+        stack.completed_sweeps,
+        stack.sample_age_cycles(response_cycle),
+        stack.epoch_cycle,
+        stack.sampled_at
+    ));
+    ui.label(format!(
+        "partial boot epoch: {}; completed sweep observed: {}; raw flags: 0x{:04x}",
+        stack.is_partial_boot_epoch(),
+        stack.has_completed_sweep(),
+        stack.flags
+    ));
 }
 
 #[cfg(target_arch = "wasm32")]

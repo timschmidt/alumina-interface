@@ -15,6 +15,7 @@
       let configured = false;
       let timeout;
       let latestSnapshot;
+      let isolatedHealthFailureSnapshot;
       const eventKinds = [];
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
@@ -42,6 +43,14 @@
           finish("failed", { error: String(error) });
           return;
         }
+        if (envelope.schema_version !== 2) {
+          clearTimeout(timeout);
+          finish("failed", {
+            error: "worker schema version mismatch",
+            schema_version: envelope.schema_version,
+          });
+          return;
+        }
         const event = envelope.event;
         eventKinds.push(event.kind);
         if (event.kind === "ready" && !configured) {
@@ -51,11 +60,12 @@
               error: "clock qualification timed out",
               event_kinds: eventKinds,
               latest_snapshot: latestSnapshot,
+              isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
             });
           }, 15000);
           worker.postMessage(
             JSON.stringify({
-              schema_version: 1,
+              schema_version: 2,
               command: {
                 kind: "configure",
                 request: {
@@ -76,6 +86,7 @@
                     maximum_timer_error_ns: 2000000,
                     maximum_uncertainty_cycles: 1000000,
                     heartbeat_interval_ms: 100,
+                    runtime_health_interval_ms: 1000,
                   },
                 },
               },
@@ -86,11 +97,39 @@
         if (event.kind === "snapshot") {
           const snapshot = event.snapshot;
           latestSnapshot = snapshot;
+          const isolatedHealthFailure =
+            snapshot.phase === "clock_qualified" &&
+            snapshot.consecutive_failures === 0 &&
+            snapshot.last_error === null &&
+            snapshot.runtime_health_consecutive_failures >= 1 &&
+            snapshot.runtime_health_last_error !== null;
+          if (isolatedHealthFailure) {
+            isolatedHealthFailureSnapshot = snapshot;
+          }
+          const health = snapshot.runtime_health;
+          const runtimeHealthAvailable =
+            snapshot.runtime_health_availability === "available" &&
+            health !== null &&
+            health.command_queue.depth === 0 &&
+            health.command_queue.capacity === 8 &&
+            health.work_queue.depth === 0 &&
+            health.work_queue.capacity === 8 &&
+            health.telemetry_queue.depth === 1 &&
+            health.telemetry_queue.capacity === 32 &&
+            health.service_stack.domain === "service_core" &&
+            health.service_stack.samples >= 1 &&
+            health.realtime_stack !== null &&
+            health.realtime_stack.domain === "realtime_core" &&
+            health.realtime_stack.samples >= 1 &&
+            health.realtime_stack_fresh === true &&
+            snapshot.runtime_health_consecutive_failures === 0 &&
+            snapshot.runtime_health_last_error === null;
           const qualified =
             snapshot.phase === "clock_qualified" &&
             snapshot.accepted_samples >= 4 &&
             snapshot.estimate !== null &&
-            snapshot.history.length >= 4;
+            snapshot.history.length >= 4 &&
+            runtimeHealthAvailable;
           const conservativelyRejected =
             snapshot.rejected_samples >= 3 &&
             snapshot.accepted_samples === 0 &&
@@ -98,6 +137,17 @@
           if (expectation === "qualified" && qualified) {
             clearTimeout(timeout);
             finish("passed", { expectation, snapshot });
+          } else if (
+            expectation === "health-retry" &&
+            qualified &&
+            isolatedHealthFailureSnapshot !== undefined
+          ) {
+            clearTimeout(timeout);
+            finish("passed", {
+              expectation,
+              isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
+              recovered_snapshot: snapshot,
+            });
           } else if (
             expectation === "conservative-rejection" &&
             conservativelyRejected

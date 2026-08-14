@@ -15,6 +15,7 @@ For each UI-local connection identity, the worker exclusively owns:
 - the HMAC/AP secret;
 - the boot-nonce-bound HTTP/native-protocol session;
 - the exact causal `DeviceClockModel`;
+- a separate monotonic `RuntimeHealthModel`;
 - the explicit Wi-Fi sampling/error policy; and
 - at most 64 accepted causal heartbeat records.
 
@@ -29,7 +30,11 @@ The rendering realm receives complete replacement snapshots: connection label
 and origin, generation, lifecycle, public boot ID, accepted/rejected counts,
 consecutive failures, the latest conservative cycle interval, bounded causal
 history, queue/deadline facts, and a redacted error. It never mutates a worker
-clock model or treats GPU/render time as a machine timestamp.
+clock model or treats GPU/render time as a machine timestamp. Schema v2 also
+carries exact command/work/telemetry occupancies, service and real-time stack
+epochs, sample counters, headroom, freshness, and a separate bounded health
+failure diagnostic. The rendering realm reconstructs the native AHLT/ASWM
+relationships and rejects an invalid snapshot before inserting it.
 
 ## Lifecycle and recovery
 
@@ -44,6 +49,15 @@ clock probe identity. Exact-estimator rejections remain visible and retry with a
 bounded exponential delay. Authentication metadata failures reopen discovery;
 a validated changed boot resets the model and history before another sample can
 be admitted.
+
+After a successful heartbeat, the worker polls runtime health only when its
+explicit 1–60 second minimum interval is due. Manual clock probes cannot bypass
+that bound. A health transport or semantic failure retains the last valid
+health evidence and its own consecutive-failure/error state without changing
+clock phase, clock estimate, deadline state, or safety authority. A fresh
+authenticated session clears health evidence because its boot provenance is not
+yet known, while preserving the diagnostic that caused reauthentication; a
+validated boot change clears both evidence and prior-boot health failures.
 
 Firmware's replay window is global for one boot, so starting every replacement
 browser session at counter one is invalid. Browser sessions instead seed the
@@ -63,9 +77,14 @@ replace it with a bounded server-issued session/counter lease.
 
 The right-hand panel can add a labeled origin/passphrase, show worker readiness,
 request an immediate probe, disconnect, and inspect clock/queue/deadline history.
-It is deliberately labeled diagnostic-only. There are no arm, motion, process
-energy, or safety-reset controls in this checkpoint. A clock-qualified snapshot
-does not prove safety-chain freshness or physical timing.
+The same panel shows exact queue depth/capacity/free counts, executor allocation,
+low exclusion, painted/unpainted bytes, observed maximum use, minimum headroom,
+scan/sweep counts, sample age, and RT freshness. It explicitly identifies the
+partial boot epoch and incremental convergence. It is deliberately labeled
+diagnostic-only. There are no arm, motion, process energy, or safety-reset
+controls in this checkpoint. Neither a clock-qualified snapshot nor a stack
+watermark proves safety-chain freshness, physical timing, transient stack depth,
+or sufficient production sizing.
 
 ## Browser smoke evidence
 
@@ -89,9 +108,12 @@ reboot, latency spikes, or authenticated heartbeat traffic.
 seam. Served from the repository root, it creates the production worker without
 eframe,
 connects it to `alumina-sim-http` on localhost, and marks the DOM `passed` only
-after four authenticated observations yield a qualified exact interval and four
-history records. This makes headless-browser evidence inspectable without
-reading pixels from the canvas.
+after four authenticated observations yield a qualified exact interval and a
+schema-v2 health snapshot reports the exact expected queues, executor domains,
+samples, and fresh RT witness. A separate expectation retains a clock-qualified
+snapshot with an isolated health error after a deliberately lost health
+response, then requires bounded recovery. This makes headless-browser evidence
+inspectable without reading pixels from the canvas.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -126,9 +148,10 @@ the last valid health evidence after transport or semantic failure, and treat
 firmware `Unsupported` as an explicit observation rather than fabricated zero
 measurements.
 
-This seam is compiled for native and `wasm32-unknown-unknown` without building
-the CAD/CAM application or its moving Hyper dependencies. It is not yet
-scheduled by `ControlWorkerRuntime`, serialized into
-`DeviceSessionSnapshot`, or rendered in the board explorer. Those changes need
-a versioned worker-schema update plus bounded poll/error history and remain a
-separate checkpoint; no live device or network claim is made here.
+`ControlWorkerRuntime` now schedules this seam beside successful heartbeats,
+serializes it into strict schema-v2 `DeviceSessionSnapshot` values, and renders
+integer facts in the live-device explorer. The window-free client remains
+independently testable for native and `wasm32-unknown-unknown` without building
+the CAD/CAM application or moving Hyper dependencies. Localhost browser evidence
+covers the available-snapshot and lost-health-response recovery paths; no
+physical MCU, ESP radio, WLAN, motor, output, or safety claim is made here.
