@@ -75,6 +75,14 @@ frequency, capture ID, and resource authority. Reboot, device/capability change,
 new capture identity, generation replacement, and disconnect remove stale
 rendering evidence.
 
+Firmware retains a completed record until an exact stop. If the operator asks
+again, the worker retains at most one bounded pending request, drives the old
+machine's retry-safe `WaveformStop`/status reconciliation until it reaches
+`Stopped`, and only then rebuilds the replacement configuration from current
+identity, capability, boot, and clock authority. A reboot or stable-device
+change drops both active and pending requests rather than carrying authority
+across epochs.
+
 ## Offline transport evidence
 
 The tests drive these state machines through three progressively wider seams:

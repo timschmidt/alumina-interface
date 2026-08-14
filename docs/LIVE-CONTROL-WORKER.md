@@ -93,7 +93,12 @@ capture ID. Configure, explicit diagnostic arm, status reconciliation, and
 side-effect-free exact range reads share the worker's authenticated session.
 Ambiguous operations follow the transport-independent capture state machine;
 capture failures do not change clock, health, capability, machine-arm, lease, or
-output authority. A changed boot or stable device identity clears the capture.
+output authority. Firmware retains a completed record until its exact
+configuration reference is stopped. A repeat request therefore asks the old
+machine to stop, retains at most one bounded pending request, reconciles an
+ambiguous stop through status, and constructs the replacement only after the
+old machine reaches `Stopped`. A changed boot or stable device identity clears
+both active and pending capture state.
 
 Firmware's replay window is global for one boot, so starting every replacement
 browser session at counter one is invalid. Browser sessions instead seed the
@@ -158,7 +163,11 @@ event matches both public and signed identity. The extra post-completion
 heartbeat makes a duplicate document event observable. A waveform expectation
 then requests GPIO22/32/33/35, requires one complete `ALMDIG01` event, exact
 range completion, matching capture/generation/context, and zero waveform
-failures. Separate expectations retain a clock-qualified snapshot with an
+failures. The `waveform-repeat` expectation then releases that retained record
+through the production state machine, requests a second duration, and requires
+exactly two distinct capture IDs and canonical 2,000- then 3,000-cycle headers;
+malformed, excess, stale, or mismatched events fail the run. Separate
+expectations retain a clock-qualified snapshot with an
 isolated health error after a deliberately lost health response, or a clean
 clock/health snapshot with an isolated capability error after a deliberately
 lost first range, then require bounded recovery. This makes headless-browser
@@ -179,11 +188,13 @@ and deliberately closed claims are recorded in the sibling
 `aluminafw/docs/evidence/M7-BROWSER-AUTH-HTTP-SIM.md` evidence file.
 
 On 2026-08-14 the finalized release bundle and standalone simulator passed the
-new `expect=waveform` case in Chromium 147 over loopback only. The worker
-reported six accepted clock samples, the exact 3,435-byte TinyBee capability,
-public device ID `ALUM-SIM:TINYBEE`, and one 544-byte four-channel capture with
-16 simulated transitions and zero capture failures. Complete verification,
-artifact hashes, and closed physical claims are recorded in sibling
+`expect=waveform-repeat` case in Chromium 147 over loopback only. The worker
+reported seven accepted clock samples, the exact 3,435-byte TinyBee capability,
+public device ID `ALUM-SIM:TINYBEE`, and two distinct 544-byte four-channel
+captures with 2,000- then 3,000-cycle requested durations, 16 simulated
+transitions each, exact stop/release/reconfigure progress, and zero capture
+failures. Complete verification, artifact hashes, and closed physical claims
+are recorded in sibling
 `aluminafw/docs/evidence/M10-CAPABILITY-BOUND-WAVEFORM-WORKER-UI.md`.
 
 ## Runtime-health client seam
@@ -251,6 +262,13 @@ snapshot and admitted board document. A replacement capture, reboot, changed
 stable identity, changed capability, generation change, or disconnect removes
 stale displayed evidence. Screen projection is explicitly lossy; retained
 cycles and transitions remain integers and never flow back into control.
+
+A completed capture is not locally overwritten. The worker first drives the
+old machine's retry-safe stop/status reconciliation to `Stopped`, then installs
+the single pending request using the authority current at that moment. This
+prevents a retained firmware record from turning a repeat UI action into a
+conflicting configure and prevents stale boot or capability facts from being
+copied into the replacement request.
 
 The standalone simulator opts into a deterministic immediate-capture provider.
 Ordinary tests do not receive that provider implicitly, and firmware board
