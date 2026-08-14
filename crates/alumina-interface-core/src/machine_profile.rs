@@ -897,6 +897,9 @@ mod tests {
     use crate::compiler::{
         MachineCompileError, MotionCompilePolicy2, compile_certified_chord_program,
     };
+    use crate::direct_motion::{
+        DirectFiniteDifferencePolicy2, lower_certified_schedule_to_direct_finite_difference,
+    };
     use crate::global_job::{
         SharedGlobalJobCompilePolicy2, SharedScheduledJobParticipant2,
         compile_shared_scheduled_global_job,
@@ -908,8 +911,8 @@ mod tests {
         select_shared_timer_lattice_schedule,
     };
     use crate::partition::{
-        MachinePartitionError, MachinePartitionPolicy2, package_canonical_scheduled_program,
-        package_shared_retimed_scheduled_program,
+        MachinePartitionError, MachinePartitionPolicy2, package_canonical_direct_program,
+        package_canonical_scheduled_program, package_shared_retimed_scheduled_program,
     };
     use crate::schedule_evidence::{
         ScheduleEvidenceError, build_canonical_schedule_evidence,
@@ -928,10 +931,15 @@ mod tests {
         FactEvidence, Rational as ConfigurationRational, SignalPolarity,
     };
     use alumina_job::{JobNetworkPolicy, MachineJobGlobalFacts};
-    use alumina_machine_ir::{BlockValidationLimits, EXECUTION_BLOCK_BYTES, ValidationLimits};
+    use alumina_machine_ir::{
+        BlockValidationLimits, EXECUTION_BLOCK_BYTES, StreamTick, ValidationLimits,
+    };
     use alumina_motion::MotionError;
     use alumina_protocol::DeviceId;
-    use alumina_sim::motion::{CachedStepperReplayError, replay_cached_stepper_partition};
+    use alumina_sim::motion::{
+        CachedFiniteDifferenceReplayError, CachedStepperReplayError,
+        replay_cached_finite_difference_partition, replay_cached_stepper_partition,
+    };
     use alumina_storage::{CacheLimits, UploadId, sha256};
     use hypercurve::{
         CircularArc2, Curve2, CurveGeometry2, CurvePath2, LineSeg2, Point2 as CurvePoint2,
@@ -1401,6 +1409,20 @@ mod tests {
             assert_eq!(phases[3].ramp.end_feed, Real::zero());
             assert_eq!(phases[3].ramp.end_acceleration, Real::zero());
         }
+        assert!(matches!(
+            lower_certified_schedule_to_direct_finite_difference(
+                &schedule,
+                &profile,
+                &budget,
+                DirectFiniteDifferencePolicy2::interactive(Rational::fraction(1, 1_000).unwrap())
+                    .unwrap(),
+            ),
+            Err(
+                crate::direct_motion::DirectMotionError::UnsupportedRouteElement {
+                    element_index: 1
+                }
+            )
+        ));
 
         let lowered = lower_certified_schedule_to_v1(
             &schedule,
@@ -1627,6 +1649,282 @@ mod tests {
     }
 
     #[test]
+    fn stop_to_stop_line_lowers_to_certified_direct_finite_differences() {
+        let profile = profile_from(&machine_records()).unwrap();
+        let source = CurvePath2::try_new(vec![Curve2::new(CurveGeometry2::Line(
+            LineSeg2::try_new(
+                CurvePoint2::from_values(0, 0),
+                CurvePoint2::from_values(1, 0),
+            )
+            .unwrap(),
+        ))])
+        .unwrap();
+        let budget = MachineResolutionBudget2::certify(
+            &profile,
+            Rational::fraction(1, 10).unwrap(),
+            Rational::zero(),
+            Rational::fraction(1, 100).unwrap(),
+        )
+        .unwrap();
+        let schedule = certify_jerk_schedule(
+            &source,
+            &profile,
+            &budget,
+            MetricPathApproximationLimits2::INTERACTIVE,
+        )
+        .unwrap();
+        let policy =
+            DirectFiniteDifferencePolicy2::interactive(Rational::fraction(1, 1_000).unwrap())
+                .unwrap();
+        let direct = lower_certified_schedule_to_direct_finite_difference(
+            &schedule, &profile, &budget, policy,
+        )
+        .unwrap();
+
+        assert_eq!(direct.initial_position(), [0, 0]);
+        assert_eq!(direct.final_position(), [1_600, 0]);
+        assert_eq!(direct.grid_phases().len(), 1);
+        assert_eq!(direct.grid_phases()[0].len(), 4);
+        assert!(direct.grid_jerk_report().all_satisfied());
+        assert!(!direct.records().is_empty());
+        assert_eq!(
+            direct.executor_preflight().segment_count as usize,
+            direct.records().len()
+        );
+        assert_eq!(
+            direct.executor_preflight().update_count,
+            direct.evidence().total_update_count()
+        );
+        assert!(
+            direct.evidence().maximum_position_error_mm()
+                <= direct.evidence().policy().maximum_position_error_mm()
+        );
+        assert_eq!(
+            direct.evidence().phase_evidence().len(),
+            direct.grid_phases().len() * 4
+        );
+        assert_eq!(
+            direct.evidence().record_evidence().len(),
+            direct.records().len()
+        );
+        let mut incoming_error = [Rational::zero(), Rational::zero()];
+        for record in direct.evidence().record_evidence() {
+            for (axis, expected) in incoming_error.iter_mut().enumerate() {
+                assert_eq!(
+                    record.axes()[axis].incoming_position_error_steps(),
+                    expected
+                );
+                assert!(record.axes()[axis].terminal_position_error_steps() >= expected);
+                *expected = record.axes()[axis].terminal_position_error_steps().clone();
+            }
+        }
+        assert!(direct.records().iter().any(|record| {
+            record.update_count < direct.evidence().policy().maximum_updates_per_record()
+        }));
+
+        assert!(matches!(
+            DirectFiniteDifferencePolicy2::try_new(
+                0,
+                256,
+                10_000,
+                128,
+                Rational::fraction(1, 1_000).unwrap(),
+            ),
+            Err(crate::direct_motion::DirectMotionError::InvalidPolicy)
+        ));
+        let record_limited = DirectFiniteDifferencePolicy2::try_new(
+            1,
+            256,
+            10_000,
+            128,
+            Rational::fraction(1, 1_000).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            lower_certified_schedule_to_direct_finite_difference(
+                &schedule,
+                &profile,
+                &budget,
+                record_limited,
+            ),
+            Err(crate::direct_motion::DirectMotionError::RecordBudgetExceeded { maximum: 1 })
+        ));
+        let error_limited = DirectFiniteDifferencePolicy2::try_new(
+            65_536,
+            256,
+            10_000,
+            128,
+            Rational::fraction(1, 1_000_000_000_000).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            lower_certified_schedule_to_direct_finite_difference(
+                &schedule,
+                &profile,
+                &budget,
+                error_limited,
+            ),
+            Err(crate::direct_motion::DirectMotionError::PositionErrorBudgetExceeded { .. })
+        ));
+
+        let mut expected_tick = StreamTick(0);
+        let mut expected_finite_position = [0_i64; 2];
+        for (segment, evidence) in direct
+            .records()
+            .iter()
+            .zip(direct.evidence().record_evidence())
+        {
+            assert_eq!(segment, &evidence.segment());
+            assert_eq!(segment.start_tick, expected_tick);
+            assert_eq!(segment.update_period_ticks, profile.output_quantum_cycles());
+            for (axis, expected) in expected_finite_position.iter_mut().enumerate() {
+                assert_eq!(segment.axes[axis].initial_position, *expected);
+                assert_eq!(
+                    segment.axes[axis].first_difference,
+                    evidence.axes()[axis].first_difference().encoded_q31_32()
+                );
+                assert_eq!(
+                    segment.axes[axis].second_difference,
+                    evidence.axes()[axis].second_difference().encoded_q31_32()
+                );
+                assert_eq!(
+                    segment.axes[axis].third_difference,
+                    evidence.axes()[axis].third_difference().encoded_q31_32()
+                );
+                *expected = segment.position_at(axis, segment.update_count).unwrap();
+            }
+            expected_tick = segment.end_tick;
+        }
+        assert_eq!(
+            expected_finite_position,
+            direct.executor_preflight().terminal_finite_position
+        );
+
+        let partition_policy = MachinePartitionPolicy2::try_new(
+            [0x51; 16],
+            profile.capability_digest(),
+            profile.configuration_digest(),
+            BlockValidationLimits {
+                maximum_block_ticks: 10_000_000,
+                segment: ValidationLimits {
+                    maximum_segment_ticks: 10_000_000,
+                    maximum_steps_per_segment: 100_000,
+                },
+            },
+            UploadId(0x2233_4455_6677_8899),
+            700,
+            CacheLimits {
+                maximum_object_bytes: 4 * 1024 * 1024,
+                maximum_chunk_bytes: 1_024,
+                maximum_chunks: 10_000,
+            },
+        )
+        .unwrap();
+        let partition = package_canonical_direct_program(&direct, partition_policy).unwrap();
+        assert_eq!(
+            partition.execution_kind(),
+            alumina_machine_ir::ExecutionKind::FiniteDifference
+        );
+        assert_eq!(partition.maximum_segments_per_block(), 4);
+        assert_eq!(partition.initial_position(), [0, 0]);
+        assert_eq!(partition.final_position(), [1_600, 0]);
+        assert_eq!(
+            partition.terminal_finite_position(),
+            Some(direct.executor_preflight().terminal_finite_position)
+        );
+        assert_eq!(
+            partition.finite_difference_update_count(),
+            Some(direct.executor_preflight().update_count)
+        );
+        let descriptor = partition.job_descriptor(0x9988).unwrap();
+        assert_eq!(
+            descriptor.execution_kind,
+            alumina_machine_ir::ExecutionKind::FiniteDifference
+        );
+        assert_eq!(
+            descriptor.maximum_finite_difference_updates,
+            partition.maximum_finite_difference_updates()
+        );
+        let replay = replay_cached_finite_difference_partition::<2>(
+            partition.bytes(),
+            descriptor,
+            profile.stepper_timing(0),
+        )
+        .unwrap();
+        assert_eq!(replay.block_count, partition.block_count());
+        assert_eq!(replay.segment_count as usize, direct.records().len());
+        assert_eq!(
+            replay.update_count,
+            direct.executor_preflight().update_count
+        );
+        assert_eq!(replay.terminal_position, [1_600, 0]);
+        assert_eq!(
+            replay.terminal_finite_position,
+            direct.executor_preflight().terminal_finite_position
+        );
+        assert_eq!(replay.terminal_tick, direct.executor_preflight().end_tick);
+        assert_eq!(
+            replay.terminal_block_digest,
+            partition.terminal_progress().block_digest
+        );
+        let mut corrupt = partition.bytes().to_vec();
+        corrupt[EXECUTION_BLOCK_BYTES - 1] ^= 1;
+        assert_eq!(
+            replay_cached_finite_difference_partition::<2>(
+                &corrupt,
+                descriptor,
+                profile.stepper_timing(0),
+            ),
+            Err(CachedFiniteDifferenceReplayError::PartitionIdentity)
+        );
+
+        let evidence = crate::direct_motion_evidence::build_direct_motion_evidence(
+            &schedule, &direct, &partition,
+        )
+        .unwrap();
+        let rebuilt = crate::direct_motion_evidence::build_direct_motion_evidence(
+            &schedule, &direct, &partition,
+        )
+        .unwrap();
+        assert_eq!(evidence, rebuilt);
+        assert!(!evidence.digest().is_zero());
+        assert!(!evidence.transcript_digest().is_zero());
+        assert_eq!(evidence.encoded().len(), 344);
+        assert!(evidence.transcript_byte_len() > evidence.encoded().len() as u64);
+        assert_eq!(evidence.record_count() as usize, direct.records().len());
+        assert_eq!(
+            evidence.update_count(),
+            direct.executor_preflight().update_count
+        );
+        crate::direct_motion_evidence::replay_direct_motion_evidence(
+            &evidence, &schedule, &direct, &partition,
+        )
+        .unwrap();
+        let mut corrupt_evidence = evidence.encoded().to_vec();
+        corrupt_evidence[0] ^= 1;
+        assert!(matches!(
+            crate::direct_motion_evidence::verify_direct_motion_evidence_bytes(
+                &corrupt_evidence,
+                evidence.digest(),
+                &schedule,
+                &direct,
+                &partition,
+            ),
+            Err(crate::direct_motion_evidence::DirectMotionEvidenceError::DigestMismatch)
+        ));
+        assert!(matches!(
+            crate::direct_motion_evidence::verify_direct_motion_evidence_bytes(
+                &corrupt_evidence,
+                sha256(&corrupt_evidence).digest,
+                &schedule,
+                &direct,
+                &partition,
+            ),
+            Err(crate::direct_motion_evidence::DirectMotionEvidenceError::ReplayMismatch)
+        ));
+    }
+
+    #[test]
     fn exact_g1_split_retains_positive_feed_and_two_phase_transitions() {
         let profile = profile_from(&machine_records()).unwrap();
         let source = CurvePath2::try_new(vec![
@@ -1693,6 +1991,20 @@ mod tests {
                 .affine_axis_projection()
                 .is_some_and(|projection| projection.all_satisfied())
         );
+        assert!(matches!(
+            lower_certified_schedule_to_direct_finite_difference(
+                &schedule,
+                &profile,
+                &budget,
+                DirectFiniteDifferencePolicy2::interactive(Rational::fraction(1, 1_000).unwrap())
+                    .unwrap(),
+            ),
+            Err(
+                crate::direct_motion::DirectMotionError::UnsupportedNonstopSchedule {
+                    element_index: 0
+                }
+            )
+        ));
 
         let lowered = lower_certified_schedule_to_v1(
             &schedule,

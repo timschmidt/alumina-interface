@@ -12,20 +12,26 @@ use alumina_config::{
     Rational as ConfigurationRational, ResourceBinding, ScalarFact, SignalPolarity,
 };
 use alumina_interface_core::{
+    CanonicalDirectFiniteDifferenceProgram2, CanonicalDirectMotionEvidence1,
     CanonicalMachinePartition2, CanonicalScheduleEvidence3, CanonicalScheduledProgram2,
     CanonicalSharedScheduledGlobalJob2, CertifiedJerkSchedule2, CncGeometryImportLimits,
-    CncGeometryImportReport2, ExactValue, MachineDynamicsProfile2, MachinePartitionPolicy2,
-    MachineResolutionBudget2, MetricPathApproximationLimits2, Millimetres, ScheduledLoweringLimits,
-    SharedGlobalJobCompilePolicy2, SharedScheduledJobParticipant2, TimerDilationPolicy,
-    build_canonical_schedule_evidence, certify_jerk_schedule, compile_shared_scheduled_global_job,
-    import_exact_cnc_geometry, lower_certified_schedule_to_v1, package_canonical_scheduled_program,
-    project_for_display, replay_canonical_schedule_evidence, representative_curve_path,
-    verify_canonical_schedule_evidence_bytes,
+    CncGeometryImportReport2, DirectFiniteDifferencePolicy2, ExactValue, MachineDynamicsProfile2,
+    MachinePartitionPolicy2, MachineResolutionBudget2, MetricPathApproximationLimits2, Millimetres,
+    ScheduledLoweringLimits, SharedGlobalJobCompilePolicy2, SharedScheduledJobParticipant2,
+    TimerDilationPolicy, build_canonical_schedule_evidence, build_direct_motion_evidence,
+    certify_jerk_schedule, compile_shared_scheduled_global_job, import_exact_cnc_geometry,
+    lower_certified_schedule_to_direct_finite_difference, lower_certified_schedule_to_v1,
+    package_canonical_direct_program, package_canonical_scheduled_program, project_for_display,
+    replay_canonical_schedule_evidence, replay_direct_motion_evidence, representative_curve_path,
+    verify_canonical_schedule_evidence_bytes, verify_direct_motion_evidence_bytes,
 };
 use alumina_job::{JobNetworkPolicy, MachineJobGlobalFacts};
 use alumina_machine_ir::{BlockValidationLimits, ValidationLimits};
 use alumina_protocol::{DeviceId, Digest};
-use alumina_sim::motion::{CachedStepperReplayReport, replay_cached_stepper_partition};
+use alumina_sim::motion::{
+    CachedFiniteDifferenceReplayReport, CachedStepperReplayReport,
+    replay_cached_finite_difference_partition, replay_cached_stepper_partition,
+};
 use alumina_storage::{CacheLimits, UploadId, sha256};
 use eframe::egui;
 use hyperreal::{Rational, Real};
@@ -38,9 +44,12 @@ const MAXIMUM_EVIDENCE_BYTES: usize = 64 * 1024;
 const MAXIMUM_CNC_SOURCE_BYTES: usize = CncGeometryImportLimits::INTERACTIVE.maximum_source_bytes();
 const CONFIGURATION_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMCFG05 file", "almcfg");
 const EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMEVD03 file", "almevd");
+const DIRECT_EVIDENCE_FILE: BoundedFileSpec = BoundedFileSpec::new("ALMDFE01 file", "almdfe");
 const CNC_SOURCE_FILE: BoundedFileSpec = BoundedFileSpec::new("UI-only CNC geometry draft", "nc");
 const STREAM_ID: [u8; 16] = *b"tinybee-cam-v1!!";
+const DIRECT_STREAM_ID: [u8; 16] = *b"tinybee-direct01";
 const UPLOAD_ID: UploadId = UploadId(0x1122_3344_5566_7788);
+const DIRECT_UPLOAD_ID: UploadId = UploadId(0x1122_3344_5566_7799);
 const SHARED_STREAM_1: [u8; 16] = *b"shared-mcu-0001!";
 const SHARED_STREAM_2: [u8; 16] = *b"shared-mcu-0002!";
 const SHARED_DEVICE_1: DeviceId = DeviceId([0x11; 16]);
@@ -107,6 +116,18 @@ impl MachineCamSource {
     }
 }
 
+struct DirectMachineCamArtifacts {
+    program: CanonicalDirectFiniteDifferenceProgram2,
+    partition: CanonicalMachinePartition2,
+    replay: CachedFiniteDifferenceReplayReport<2>,
+    evidence: CanonicalDirectMotionEvidence1,
+}
+
+enum DirectMachineCamState {
+    Ready(Box<DirectMachineCamArtifacts>),
+    Unsupported(String),
+}
+
 struct MachineCamArtifacts {
     configuration_bytes: Vec<u8>,
     configuration_identity: ConfigurationIdentity,
@@ -119,6 +140,7 @@ struct MachineCamArtifacts {
     replay: CachedStepperReplayReport<2>,
     evidence: CanonicalScheduleEvidence3,
     shared_job: CanonicalSharedScheduledGlobalJob2,
+    direct: DirectMachineCamState,
 }
 
 impl MachineCamArtifacts {
@@ -173,6 +195,10 @@ impl MachineCamArtifacts {
             .map_err(|error| format!("canonical evidence replay rejected: {error}"))?;
 
         let shared_job = compile_shared_machine_cam_job(&profile, &schedule, &program, &evidence)?;
+        let direct = match compile_direct_machine_cam(&profile, &resolution_budget, &schedule) {
+            Ok(artifacts) => DirectMachineCamState::Ready(Box::new(artifacts)),
+            Err(error) => DirectMachineCamState::Unsupported(error),
+        };
 
         Ok(Self {
             configuration_bytes,
@@ -186,8 +212,51 @@ impl MachineCamArtifacts {
             replay,
             evidence,
             shared_job,
+            direct,
         })
     }
+}
+
+fn compile_direct_machine_cam(
+    profile: &MachineDynamicsProfile2,
+    resolution_budget: &MachineResolutionBudget2,
+    schedule: &CertifiedJerkSchedule2,
+) -> Result<DirectMachineCamArtifacts, String> {
+    let policy = DirectFiniteDifferencePolicy2::interactive(
+        Rational::fraction(1, 1_000).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("direct lowering policy rejected: {error}"))?;
+    let program = lower_certified_schedule_to_direct_finite_difference(
+        schedule,
+        profile,
+        resolution_budget,
+        policy,
+    )
+    .map_err(|error| format!("direct finite-difference lowering unavailable: {error}"))?;
+    let partition = package_canonical_direct_program(
+        &program,
+        machine_cam_partition_policy(DIRECT_STREAM_ID, DIRECT_UPLOAD_ID, profile)?,
+    )
+    .map_err(|error| format!("direct cached partition rejected: {error}"))?;
+    let descriptor = partition
+        .job_descriptor(PREPARE_ID)
+        .map_err(|error| format!("direct job descriptor rejected: {error}"))?;
+    let replay = replay_cached_finite_difference_partition::<2>(
+        partition.bytes(),
+        descriptor,
+        profile.stepper_timing(0),
+    )
+    .map_err(|error| format!("direct cached replay rejected: {error:?}"))?;
+    let evidence = build_direct_motion_evidence(schedule, &program, &partition)
+        .map_err(|error| format!("direct evidence construction rejected: {error}"))?;
+    replay_direct_motion_evidence(&evidence, schedule, &program, &partition)
+        .map_err(|error| format!("direct evidence replay rejected: {error}"))?;
+    Ok(DirectMachineCamArtifacts {
+        program,
+        partition,
+        replay,
+        evidence,
+    })
 }
 
 fn compile_shared_machine_cam_job(
@@ -286,6 +355,7 @@ pub(crate) struct MachineCamWorkspace {
     selected_segment: usize,
     configuration_file: BoundedFileBridge,
     evidence_file: BoundedFileBridge,
+    direct_evidence_file: BoundedFileBridge,
     cnc_source_file: BoundedFileBridge,
     cnc_draft: String,
     file_status: String,
@@ -301,6 +371,7 @@ impl MachineCamWorkspace {
             selected_segment: 0,
             configuration_file: BoundedFileBridge::default(),
             evidence_file: BoundedFileBridge::default(),
+            direct_evidence_file: BoundedFileBridge::default(),
             cnc_source_file: BoundedFileBridge::default(),
             cnc_draft: CNC_EXAMPLE.to_owned(),
             file_status: "canonical offline fixture reconstructed; no file exchange this session"
@@ -334,6 +405,17 @@ impl MachineCamWorkspace {
             artifacts.program.segments().len(),
             artifacts.partition.block_count()
         ));
+        match &artifacts.direct {
+            DirectMachineCamState::Ready(direct) => ui.label(format!(
+                "{} direct Q31.32 records · {} cache blocks · ALMDFE01 {}…",
+                direct.program.records().len(),
+                direct.partition.block_count(),
+                digest_prefix(direct.evidence.digest().0)
+            )),
+            DirectMachineCamState::Unsupported(error) => {
+                ui.weak(format!("direct Q31.32: typed blocker — {error}"))
+            }
+        };
         ui.label(format!(
             "{} synchronized MCU partitions · shared factor {} · ALMSYN01 {}…",
             artifacts.shared_job.global_job().participants().len(),
@@ -521,8 +603,59 @@ impl MachineCamWorkspace {
                     }
                 }
             }
+            self.show_direct_evidence_exchange(ui);
             ui.weak(&self.file_status);
         });
+    }
+
+    fn show_direct_evidence_exchange(&mut self, ui: &mut egui::Ui) {
+        let DirectMachineCamState::Ready(direct) = &self.artifacts.direct else {
+            return;
+        };
+        let evidence_name = format!(
+            "direct-{}.almdfe",
+            digest_prefix(direct.evidence.digest().0)
+        );
+        let events = self.direct_evidence_file.show(
+            ui,
+            direct.evidence.encoded(),
+            MAXIMUM_EVIDENCE_BYTES,
+            &evidence_name,
+            DIRECT_EVIDENCE_FILE,
+        );
+        for event in events {
+            match event {
+                BoundedFileEvent::Import(Ok(bytes)) => match verify_direct_motion_evidence_bytes(
+                    &bytes,
+                    direct.evidence.digest(),
+                    &self.artifacts.schedule,
+                    &direct.program,
+                    &direct.partition,
+                ) {
+                    Ok(()) => {
+                        self.file_status = format!(
+                            "verified {} imported ALMDFE01 bytes against the current direct reconstruction",
+                            bytes.len()
+                        );
+                    }
+                    Err(error) => {
+                        self.file_status = format!(
+                            "ALMDFE01 import rejected without changing the workspace: {error}"
+                        );
+                    }
+                },
+                BoundedFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("ALMDFE01 read rejected: {error}");
+                }
+                BoundedFileEvent::Export(Ok(bytes)) => {
+                    self.file_status =
+                        format!("exported {bytes} canonical ALMDFE01 evidence bytes");
+                }
+                BoundedFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("ALMDFE01 export failed: {error}");
+                }
+            }
+        }
     }
 
     #[allow(
@@ -1302,6 +1435,7 @@ impl MachineCamWorkspace {
             "{} canonical ALMEVD03 bytes",
             self.artifacts.evidence.encoded().len()
         ));
+        self.show_direct_cache_replay(ui);
         let shared = &self.artifacts.shared_job;
         let timing = shared.retiming();
         let shared_evidence = shared.timing_evidence();
@@ -1348,6 +1482,55 @@ impl MachineCamWorkspace {
             egui::Color32::LIGHT_BLUE,
             "Immutable bytes were decoded, admitted, event-replayed, acknowledged, and cross-checked through the production core-1 owners.",
         );
+    }
+
+    fn show_direct_cache_replay(&self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.strong("Direct Q31.32 finite-difference lowering");
+        match &self.artifacts.direct {
+            DirectMachineCamState::Ready(direct) => {
+                let replay = direct.replay;
+                ui.monospace(format!(
+                    "{} records / {} dense updates → {} ALMBLK02 blocks · maximum {} updates/record",
+                    direct.program.records().len(),
+                    replay.update_count,
+                    direct.partition.block_count(),
+                    direct.partition.maximum_finite_difference_updates()
+                ));
+                ui.monospace(format!(
+                    "terminal tick {} · integer {:?} · Q31.32 {:?} · rising edges {:?}",
+                    replay.terminal_tick.0,
+                    replay.terminal_position,
+                    replay.terminal_finite_position,
+                    replay.rising_edges
+                ));
+                ui.monospace(format!(
+                    "coefficient error ≤ {} mm of {} mm allocation",
+                    direct.program.evidence().maximum_position_error_mm(),
+                    direct
+                        .program
+                        .evidence()
+                        .policy()
+                        .maximum_position_error_mm()
+                ));
+                ui.monospace(format!(
+                    "ALMDFE01 {}… / {} bytes · ALMDFT01 {}… / {} streamed exact bytes",
+                    digest_prefix(direct.evidence.digest().0),
+                    direct.evidence.encoded().len(),
+                    digest_prefix(direct.evidence.transcript_digest().0),
+                    direct.evidence.transcript_byte_len()
+                ));
+            }
+            DirectMachineCamState::Unsupported(error) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("Typed direct-lowering blocker: {error}"),
+                );
+                ui.weak(
+                    "The canonical V1 preview above remains available; firmware receives no implicit compatibility fallback.",
+                );
+            }
+        }
     }
 }
 
@@ -1684,6 +1867,31 @@ mod tests {
                 .iter()
                 .all(|participant| participant.error_evidence_digest
                     == artifacts.shared_job.timing_evidence().digest())
+        );
+        assert!(matches!(
+            &artifacts.direct,
+            DirectMachineCamState::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn affine_cnc_source_exposes_replayed_direct_ir_and_evidence() {
+        let mut workspace = MachineCamWorkspace::try_new().unwrap();
+        let source = b"G21 G90 G17 G91.1\nG0 X0 Y0\nG1 X1 Y0\nM2\n";
+        workspace.import_cnc_source_bytes(source.to_vec()).unwrap();
+        let DirectMachineCamState::Ready(direct) = &workspace.artifacts.direct else {
+            panic!("one stop-to-stop affine span must support direct lowering")
+        };
+        assert!(!direct.program.records().is_empty());
+        assert_eq!(direct.replay.terminal_position, [1_600, 0]);
+        assert_eq!(
+            direct.replay.update_count,
+            direct.program.executor_preflight().update_count
+        );
+        assert_eq!(&direct.evidence.encoded()[..8], b"ALMDFE01");
+        assert_eq!(
+            direct.partition.terminal_finite_position(),
+            Some(direct.replay.terminal_finite_position)
         );
     }
 

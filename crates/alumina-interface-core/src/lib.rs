@@ -12,6 +12,8 @@ pub mod boundary;
 pub mod cnc_import;
 pub mod compiler;
 pub mod diagnostics;
+pub mod direct_motion;
+pub mod direct_motion_evidence;
 pub mod global_job;
 pub mod graph;
 pub mod machine_profile;
@@ -42,6 +44,17 @@ pub use compiler::{
 };
 pub use diagnostics::{
     DiagnosticExplorerError, DiagnosticExplorerSnapshot, build_diagnostic_explorer_snapshot,
+};
+pub use direct_motion::{
+    CanonicalDirectFiniteDifferenceProgram2, DirectAxisRecordEvidence2,
+    DirectCoefficientProjection2, DirectFiniteDifferenceEvidence2, DirectFiniteDifferencePolicy2,
+    DirectGridPhaseEvidence2, DirectMotionError, DirectMotionResult, DirectRecordEvidence2,
+    lower_certified_schedule_to_direct_finite_difference,
+};
+pub use direct_motion_evidence::{
+    CanonicalDirectMotionEvidence1, DirectMotionEvidenceError, DirectMotionEvidenceResult,
+    build_direct_motion_evidence, replay_direct_motion_evidence,
+    verify_direct_motion_evidence_bytes,
 };
 pub use global_job::{
     CanonicalGlobalJob2, CanonicalGlobalManifestChunk, CanonicalSharedScheduledGlobalJob2,
@@ -91,9 +104,10 @@ pub use motion_schedule::{
 };
 pub use partition::{
     CanonicalMachinePartition2, CanonicalPartitionChunk, MachinePartitionError,
-    MachinePartitionPolicy2, MachinePartitionResult, package_canonical_program,
-    package_canonical_scheduled_program, package_shared_retimed_scheduled_program,
-    representative_partition_policy, representative_partition_policy_for,
+    MachinePartitionPolicy2, MachinePartitionResult, package_canonical_direct_program,
+    package_canonical_program, package_canonical_scheduled_program,
+    package_shared_retimed_scheduled_program, representative_partition_policy,
+    representative_partition_policy_for,
 };
 pub use scene::{CurveDisplayEvidence, CurveRegionDisplayEvidence, ExactScene, SceneError};
 pub use schedule_evidence::{

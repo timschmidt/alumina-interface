@@ -10,11 +10,14 @@ use std::fmt;
 
 use alumina_job::{
     DescriptorError, JOB_DESCRIPTOR_WIRE_BYTES, JobDescriptor, JobDescriptorWireError,
+    MachineStreamProgress,
 };
 use alumina_machine_ir::{
     BlockError, BlockExpectation, BlockValidationLimits, EXECUTION_BLOCK_BYTES, ExecutionBlock,
-    MAX_EXECUTION_AXES, MotionStreamProgress, MotionStreamValidator, StreamId, StreamTick,
-    ValidationLimits, maximum_motion_segments_per_block,
+    ExecutionKind, FINITE_DIFFERENCE_ONE_STEP, FiniteDifferenceBlockValidationLimits,
+    FiniteDifferenceStreamValidator, FiniteDifferenceValidationLimits, MAX_EXECUTION_AXES,
+    MotionStreamValidator, StreamId, StreamTick, ValidationLimits,
+    maximum_finite_difference_segments_per_block, maximum_motion_segments_per_block,
 };
 use alumina_protocol::{DeviceId, Digest};
 use alumina_storage::{
@@ -23,6 +26,7 @@ use alumina_storage::{
 };
 
 use crate::compiler::CanonicalPathProgram2;
+use crate::direct_motion::CanonicalDirectFiniteDifferenceProgram2;
 use crate::motion_schedule::{CanonicalScheduledProgram2, SharedRetimedParticipant2};
 
 /// Result type for canonical per-MCU packaging.
@@ -179,7 +183,11 @@ pub struct CanonicalMachinePartition2 {
     local_timer_hz: u64,
     initial_position: [i64; 2],
     final_position: [i64; 2],
-    terminal_progress: MotionStreamProgress<2>,
+    execution_kind: ExecutionKind,
+    maximum_finite_difference_updates: u32,
+    terminal_progress: MachineStreamProgress<2>,
+    terminal_finite_position: Option<[i64; 2]>,
+    finite_difference_update_count: Option<u64>,
 }
 
 impl CanonicalMachinePartition2 {
@@ -257,8 +265,28 @@ impl CanonicalMachinePartition2 {
     }
 
     /// Return the independently replayed terminal chain/tick/displacement facts.
-    pub const fn terminal_progress(&self) -> MotionStreamProgress<2> {
+    pub const fn terminal_progress(&self) -> MachineStreamProgress<2> {
         self.terminal_progress
+    }
+
+    /// Return the canonical execution record family encoded in every block.
+    pub const fn execution_kind(&self) -> ExecutionKind {
+        self.execution_kind
+    }
+
+    /// Return the exact descriptor bound for dense updates in one direct record.
+    pub const fn maximum_finite_difference_updates(&self) -> u32 {
+        self.maximum_finite_difference_updates
+    }
+
+    /// Return exact terminal Q31.32 continuity for a direct partition.
+    pub const fn terminal_finite_position(&self) -> Option<[i64; 2]> {
+        self.terminal_finite_position
+    }
+
+    /// Return the exact dense update total for a direct partition.
+    pub const fn finite_difference_update_count(&self) -> Option<u64> {
+        self.finite_difference_update_count
     }
 
     /// Construct the real firmware `JobPrepare` descriptor only after a live
@@ -273,8 +301,8 @@ impl CanonicalMachinePartition2 {
             capability_digest: self.policy.capability_digest,
             config_digest: self.policy.config_digest,
             axis_count: 2,
-            execution_kind: alumina_machine_ir::ExecutionKind::Motion,
-            maximum_finite_difference_updates: 0,
+            execution_kind: self.execution_kind,
+            maximum_finite_difference_updates: self.maximum_finite_difference_updates,
             block_count: self.block_count,
             first_tick: StreamTick(0),
             initial_position,
@@ -370,6 +398,182 @@ pub fn package_canonical_scheduled_program(
         program.timer_ticks_per_second(),
         policy,
     )
+}
+
+/// Package an exact browser-lowered direct finite-difference program into the
+/// firmware's canonical cached block, storage, and job schemas.
+pub fn package_canonical_direct_program(
+    program: &CanonicalDirectFiniteDifferenceProgram2,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<CanonicalMachinePartition2> {
+    if program.configuration_digest() != policy.config_digest
+        || program.capability_digest() != policy.capability_digest
+    {
+        return Err(MachinePartitionError::ProgramIdentityMismatch);
+    }
+    let preflight = program.executor_preflight();
+    let terminal = program
+        .records()
+        .last()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    if preflight.position != program.final_position()
+        || preflight.end_tick != terminal.end_tick
+        || usize::try_from(preflight.segment_count).ok() != Some(program.records().len())
+        || preflight.update_count != program.evidence().total_update_count()
+    {
+        return Err(MachinePartitionError::TerminalMismatch);
+    }
+    package_canonical_finite_difference_segments(
+        program.records(),
+        program.initial_position(),
+        program.final_position(),
+        preflight.terminal_finite_position,
+        preflight.update_count,
+        program.timer_ticks_per_second(),
+        policy,
+    )
+}
+
+fn package_canonical_finite_difference_segments(
+    segments: &[alumina_machine_ir::FiniteDifferenceSegment<2>],
+    initial_position: [i64; 2],
+    expected_final: [i64; 2],
+    expected_terminal_finite_position: [i64; 2],
+    expected_update_count: u64,
+    local_timer_hz: u64,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<CanonicalMachinePartition2> {
+    let first = segments
+        .first()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+    if first.start_tick != StreamTick(0) || first.axes.iter().any(|axis| axis.initial_position != 0)
+    {
+        return Err(MachinePartitionError::ProgramMustStartAtZero);
+    }
+    let maximum_segments_per_block = maximum_finite_difference_segments_per_block::<2>()?;
+    if maximum_segments_per_block == 0 {
+        return Err(MachinePartitionError::Machine(BlockError::PayloadLength));
+    }
+    let maximum_finite_difference_updates = segments
+        .iter()
+        .map(|segment| segment.update_count)
+        .max()
+        .ok_or(MachinePartitionError::EmptyProgram)?;
+
+    let mut bytes = Vec::new();
+    let mut cursor = 0_usize;
+    let mut sequence = 0_u32;
+    let mut previous_digest = Digest::ZERO;
+    let mut maximum_observed_block_ticks = 0_u64;
+    while cursor < segments.len() {
+        let block_start_tick = segments[cursor].start_tick;
+        let mut end = cursor;
+        while end < segments.len() && end - cursor < maximum_segments_per_block {
+            let candidate_ticks = segments[end]
+                .end_tick
+                .0
+                .checked_sub(block_start_tick.0)
+                .ok_or(MachinePartitionError::ProgramTiming { segment: end })?;
+            if end > cursor && candidate_ticks > policy.block_limits.maximum_block_ticks {
+                break;
+            }
+            end += 1;
+            if candidate_ticks > policy.block_limits.maximum_block_ticks {
+                break;
+            }
+        }
+        let block = ExecutionBlock::encode_finite_difference(
+            policy.stream_id,
+            policy.capability_digest,
+            policy.config_digest,
+            sequence,
+            previous_digest,
+            &segments[cursor..end],
+        )?;
+        let header = block.header();
+        let block_ticks = header
+            .end_tick
+            .0
+            .checked_sub(header.start_tick.0)
+            .ok_or(MachinePartitionError::ProgramTiming { segment: cursor })?;
+        maximum_observed_block_ticks = maximum_observed_block_ticks.max(block_ticks);
+        bytes
+            .try_reserve_exact(EXECUTION_BLOCK_BYTES)
+            .map_err(|_| MachinePartitionError::AllocationOverflow)?;
+        bytes.extend_from_slice(block.as_bytes());
+        previous_digest = header.block_digest;
+        sequence = sequence
+            .checked_add(1)
+            .ok_or(MachinePartitionError::Machine(BlockError::SequenceOverflow))?;
+        cursor = end;
+    }
+    let block_count = sequence;
+    let limits = FiniteDifferenceBlockValidationLimits {
+        maximum_block_ticks: policy.block_limits.maximum_block_ticks,
+        segment: FiniteDifferenceValidationLimits {
+            maximum_segment_ticks: policy.block_limits.segment.maximum_segment_ticks,
+            maximum_update_count: maximum_finite_difference_updates,
+            maximum_steps_per_segment: policy.block_limits.segment.maximum_steps_per_segment,
+            maximum_absolute_first_difference: [FINITE_DIFFERENCE_ONE_STEP.unsigned_abs() - 1; 2],
+        },
+    };
+    let mut validator = FiniteDifferenceStreamValidator::<2>::new(
+        block_count,
+        BlockExpectation {
+            stream_id: policy.stream_id,
+            capability_digest: policy.capability_digest,
+            config_digest: policy.config_digest,
+            sequence: 0,
+            start_tick: StreamTick(0),
+            previous_digest: Digest::ZERO,
+        },
+        limits,
+    )?;
+    for encoded in bytes.chunks_exact(EXECUTION_BLOCK_BYTES) {
+        let mut owned = [0_u8; EXECUTION_BLOCK_BYTES];
+        owned.copy_from_slice(encoded);
+        validator.accept(&ExecutionBlock::decode(owned)?)?;
+    }
+    let direct_progress = validator.finish()?;
+    let final_position = [
+        initial_position[0]
+            .checked_add(direct_progress.position[0])
+            .ok_or(MachinePartitionError::TerminalMismatch)?,
+        initial_position[1]
+            .checked_add(direct_progress.position[1])
+            .ok_or(MachinePartitionError::TerminalMismatch)?,
+    ];
+    let expected_end_tick = segments
+        .last()
+        .ok_or(MachinePartitionError::EmptyProgram)?
+        .end_tick;
+    if final_position != expected_final
+        || direct_progress.end_tick != expected_end_tick
+        || direct_progress.finite_position != expected_terminal_finite_position
+        || direct_progress.update_count != expected_update_count
+        || direct_progress.block_digest != previous_digest
+    {
+        return Err(MachinePartitionError::TerminalMismatch);
+    }
+    let storage = build_partition_storage(bytes, policy)?;
+    Ok(CanonicalMachinePartition2 {
+        policy,
+        bytes: storage.bytes,
+        chunks: storage.chunks,
+        upload_plan: storage.upload_plan,
+        publication: storage.publication,
+        block_count,
+        maximum_segments_per_block,
+        maximum_observed_block_ticks,
+        local_timer_hz,
+        initial_position,
+        final_position,
+        execution_kind: ExecutionKind::FiniteDifference,
+        maximum_finite_difference_updates,
+        terminal_progress: direct_progress.into(),
+        terminal_finite_position: Some(direct_progress.finite_position),
+        finite_difference_update_count: Some(direct_progress.update_count),
+    })
 }
 
 /// Package one selected participant only after replaying its relationship to
@@ -568,6 +772,39 @@ fn package_canonical_segments(
         return Err(MachinePartitionError::TerminalMismatch);
     }
 
+    let storage = build_partition_storage(bytes, policy)?;
+
+    Ok(CanonicalMachinePartition2 {
+        policy,
+        bytes: storage.bytes,
+        chunks: storage.chunks,
+        upload_plan: storage.upload_plan,
+        publication: storage.publication,
+        block_count,
+        maximum_segments_per_block,
+        maximum_observed_block_ticks,
+        local_timer_hz,
+        initial_position,
+        final_position,
+        execution_kind: ExecutionKind::Motion,
+        maximum_finite_difference_updates: 0,
+        terminal_progress: terminal_progress.into(),
+        terminal_finite_position: None,
+        finite_difference_update_count: None,
+    })
+}
+
+struct PartitionStorage {
+    bytes: Vec<u8>,
+    chunks: Vec<CanonicalPartitionChunk>,
+    upload_plan: UploadPlan,
+    publication: PublishedObject,
+}
+
+fn build_partition_storage(
+    bytes: Vec<u8>,
+    policy: MachinePartitionPolicy2,
+) -> MachinePartitionResult<PartitionStorage> {
     let object = StoredObject {
         kind: ObjectKind::MachineJobPartition,
         content: sha256(&bytes),
@@ -614,21 +851,11 @@ fn package_canonical_segments(
         chunk_count,
     };
     upload_plan.validate(policy.cache_limits)?;
-    let publication = PublishedObject { object, manifest };
-
-    Ok(CanonicalMachinePartition2 {
-        policy,
+    Ok(PartitionStorage {
         bytes,
         chunks,
         upload_plan,
-        publication,
-        block_count,
-        maximum_segments_per_block,
-        maximum_observed_block_ticks,
-        local_timer_hz,
-        initial_position,
-        final_position,
-        terminal_progress,
+        publication: PublishedObject { object, manifest },
     })
 }
 

@@ -139,6 +139,32 @@ pub(crate) struct CanonicalDerivationDigests3 {
     pub(crate) lowering_transcript_byte_len: u64,
 }
 
+pub(crate) struct CanonicalPlannerDigests3 {
+    pub(crate) source_digest: Digest,
+    pub(crate) metric_path_digest: Digest,
+    pub(crate) source_approximation_digest: Digest,
+    pub(crate) planner_transcript_digest: Digest,
+    pub(crate) planner_transcript_byte_len: u64,
+}
+
+pub(crate) fn build_canonical_planner_digests(
+    schedule: &CertifiedJerkSchedule2,
+) -> ScheduleEvidenceResult<CanonicalPlannerDigests3> {
+    let source = encode_exact_path(schedule.source(), ExactPathDomain::Source)?;
+    let metric_path = encode_exact_path(schedule.metric_path().path(), ExactPathDomain::Metric)?;
+    let source_approximation =
+        encode_source_approximation(schedule.source(), schedule.metric_path())?;
+    let (planner_transcript_digest, planner_transcript_byte_len) =
+        encode_planner_transcript(schedule)?;
+    Ok(CanonicalPlannerDigests3 {
+        source_digest: sha256(&source).digest,
+        metric_path_digest: sha256(&metric_path).digest,
+        source_approximation_digest: sha256(&source_approximation).digest,
+        planner_transcript_digest,
+        planner_transcript_byte_len,
+    })
+}
+
 pub(crate) fn build_canonical_derivation_digests(
     schedule: &CertifiedJerkSchedule2,
     program: &CanonicalScheduledProgram2,
@@ -164,20 +190,15 @@ pub(crate) fn build_canonical_derivation_digests(
         return Err(ScheduleEvidenceError::PlannerMismatch);
     }
 
-    let source = encode_exact_path(program.source(), ExactPathDomain::Source)?;
-    let metric_path = encode_exact_path(program.metric_path().path(), ExactPathDomain::Metric)?;
-    let source_approximation =
-        encode_source_approximation(program.source(), program.metric_path())?;
-    let (planner_transcript_digest, planner_transcript_byte_len) =
-        encode_planner_transcript(schedule)?;
+    let planner = build_canonical_planner_digests(schedule)?;
     let (lowering_transcript_digest, lowering_transcript_byte_len) =
         encode_lowering_transcript(program)?;
     Ok(CanonicalDerivationDigests3 {
-        source_digest: sha256(&source).digest,
-        metric_path_digest: sha256(&metric_path).digest,
-        source_approximation_digest: sha256(&source_approximation).digest,
-        planner_transcript_digest,
-        planner_transcript_byte_len,
+        source_digest: planner.source_digest,
+        metric_path_digest: planner.metric_path_digest,
+        source_approximation_digest: planner.source_approximation_digest,
+        planner_transcript_digest: planner.planner_transcript_digest,
+        planner_transcript_byte_len: planner.planner_transcript_byte_len,
         lowering_transcript_digest,
         lowering_transcript_byte_len,
     })
