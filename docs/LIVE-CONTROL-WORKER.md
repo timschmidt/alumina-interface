@@ -16,8 +16,11 @@ For each UI-local connection identity, the worker exclusively owns:
 - the boot-nonce-bound HTTP/native-protocol session;
 - the exact causal `DeviceClockModel`;
 - a separate monotonic `RuntimeHealthModel`;
+- one bounded public device identity, retained only after strict schema decode;
 - a bounded contiguous `CapabilityDownloadMachine` and one-time publication
   state;
+- at most one capability-selected `WaveformCaptureMachine`, its exact canonical
+  configuration, and one-time retained-record publication state;
 - the explicit Wi-Fi sampling/error policy; and
 - at most 64 accepted causal heartbeat records.
 
@@ -37,16 +40,24 @@ carries exact command/work/telemetry occupancies, service and real-time stack
 epochs, sample counters, headroom, freshness, and a separate bounded health
 failure diagnostic. Schema v3 adds capability phase, contiguous byte count,
 stable complete identity, and a separate bounded capability failure diagnostic.
-The rendering realm reconstructs the native AHLT/ASWM and capability
-relationships and rejects an invalid snapshot before inserting it.
+Schema v4 adds stable device/board/credential-provenance facts and the complete
+one-shot waveform lifecycle, capture identity, exact range progress, and
+separate bounded capture failure state. The rendering realm reconstructs the
+native AHLT/ASWM, capability, identity, and capture relationships and rejects an
+invalid snapshot before inserting it.
 
 ## Lifecycle and recovery
 
-The worker opens authentication discovery with configuration digest zero for
-the clock operation, immediately begins sampling, and then probes automatically
-at the declared interval. One operation per device may be in flight. Atomic
-replacement and disconnect use a generation marker: a late asynchronous result
-from an erased/replaced session cannot restore itself.
+The worker opens authentication discovery with configuration digest zero,
+strictly fetches the same origin's bounded public identity, immediately begins
+sampling, and then probes automatically at the declared interval. The public
+identity is descriptive rather than arm authority: its board ID and capability
+identity must agree with the authenticated capability bytes, and its device ID,
+boot ID, capability identity, configuration digest, and frequency must all agree
+with a later canonical capture before the rendering realm admits it. One
+operation per device may be in flight. Atomic replacement and disconnect use a
+generation marker: a late asynchronous result from an erased/replaced session
+cannot restore itself.
 
 Transport ambiguity spends the native sequence, correlation, HMAC counter, and
 clock probe identity. Exact-estimator rejections remain visible and retry with a
@@ -71,6 +82,18 @@ failure abandons only the pending side-effect-free range, so the next attempt
 repeats its digest, offset, and byte bound. Capability failure state never
 changes clock qualification or retained health evidence. A validated boot
 change clears the old capability bytes and one-time publication state.
+
+The UI may request one immediate, input-only capture over one through four
+strictly ordered resources. The worker, not the UI, reconstructs each resource
+selector and requires `StableBooleanInput` authority in the complete capability
+document. It then builds the canonical zero-configuration request with the
+current device, boot, capability, and clock identities, a two-second maximum
+duration, 64-transition retention, 168-byte ranges, and a generation/sequence
+capture ID. Configure, explicit diagnostic arm, status reconciliation, and
+side-effect-free exact range reads share the worker's authenticated session.
+Ambiguous operations follow the transport-independent capture state machine;
+capture failures do not change clock, health, capability, machine-arm, lease, or
+output authority. A changed boot or stable device identity clears the capture.
 
 Firmware's replay window is global for one boot, so starting every replacement
 browser session at counter one is invalid. Browser sessions instead seed the
@@ -97,11 +120,14 @@ partial boot epoch and incremental convergence. After capability completion it
 also shows exact board/revision/chip/qualification, core assignment, memory,
 resource ownership/hazards/graph exposure, aliases, licensed visual/hotspot
 counts, HIL requirements, and the package's armable claim. It is deliberately
-labeled diagnostic-only. There are no arm, motion, process energy, or
-safety-reset controls in this checkpoint. Neither a clock-qualified snapshot,
-stack watermark, nor immutable capability document proves safety-chain
-freshness, physical timing, transient stack depth, or sufficient production
-sizing.
+labeled diagnostic-only. For boards with capability-admitted Boolean inputs it
+can request repeated 2 ms captures, show exact integer cycle/range progress,
+render an edge trace, and inspect each channel level at a hover cycle. Channel
+labels come from the same board capability used for authorization. There are no
+machine-arm, motion, output, process-energy, or safety-reset controls in this
+checkpoint. Neither a clock-qualified snapshot, stack watermark, immutable
+capability document, nor simulated trace proves safety-chain freshness, physical
+timing, transient stack depth, or sufficient production sizing.
 
 ## Browser smoke evidence
 
@@ -126,15 +152,17 @@ seam. Served from the repository root, it creates the production worker without
 eframe,
 connects it to `alumina-sim-http` on localhost, and marks the DOM `passed` only
 after at least five authenticated observations yield a qualified exact interval,
-a schema-v3 health snapshot reports the exact expected queues, executor domains,
+a schema-v4 health snapshot reports the exact expected queues, executor domains,
 samples, and fresh RT witness, and exactly one complete capability-document
-event matches the snapshot identity. The extra post-completion heartbeat makes
-a duplicate document event an observable failure. Separate expectations retain
-a clock-qualified snapshot with an isolated health error after a deliberately
-lost health response, or a clean clock/health snapshot with an isolated
-capability error after a deliberately lost first range, then require bounded
-recovery. This makes headless-browser evidence inspectable without reading
-pixels from the canvas.
+event matches both public and signed identity. The extra post-completion
+heartbeat makes a duplicate document event observable. A waveform expectation
+then requests GPIO22/32/33/35, requires one complete `ALMDIG01` event, exact
+range completion, matching capture/generation/context, and zero waveform
+failures. Separate expectations retain a clock-qualified snapshot with an
+isolated health error after a deliberately lost health response, or a clean
+clock/health snapshot with an isolated capability error after a deliberately
+lost first range, then require bounded recovery. This makes headless-browser
+evidence inspectable without reading pixels from the canvas.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -149,6 +177,14 @@ case passed only by retaining zero accepted samples and no estimate after three
 round-trip rejections. The complete commands, observations, artifact hashes,
 and deliberately closed claims are recorded in the sibling
 `aluminafw/docs/evidence/M7-BROWSER-AUTH-HTTP-SIM.md` evidence file.
+
+On 2026-08-14 the finalized release bundle and standalone simulator passed the
+new `expect=waveform` case in Chromium 147 over loopback only. The worker
+reported six accepted clock samples, the exact 3,435-byte TinyBee capability,
+public device ID `ALUM-SIM:TINYBEE`, and one 544-byte four-channel capture with
+16 simulated transitions and zero capture failures. Complete verification,
+artifact hashes, and closed physical claims are recorded in sibling
+`aluminafw/docs/evidence/M10-CAPABILITY-BOUND-WAVEFORM-WORKER-UI.md`.
 
 ## Runtime-health client seam
 
@@ -170,7 +206,7 @@ firmware `Unsupported` as an explicit observation rather than fabricated zero
 measurements.
 
 `ControlWorkerRuntime` now schedules this seam beside successful heartbeats,
-serializes it into strict schema-v3 `DeviceSessionSnapshot` values, and renders
+serializes it into strict schema-v4 `DeviceSessionSnapshot` values, and renders
 integer facts in the live-device explorer. The window-free client remains
 independently testable for native and `wasm32-unknown-unknown` without building
 the CAD/CAM application or moving Hyper dependencies. Localhost browser evidence
@@ -190,9 +226,34 @@ response-body/status rejection.
 
 The browser adapter uses the same zero-configuration authenticated session as
 clock and health. The worker publishes complete bytes once per generation only
-after validation. JSON transfer is deliberately treated as untrusted: schema v3
+after validation. JSON transfer is deliberately treated as untrusted: schema v4
 validates the document again, and the UI validates and decodes it once more into
 `BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
 the admitted explorer. The localhost capability-loss run and complete evidence
 are recorded in sibling
 `aluminafw/docs/evidence/M10-AUTHENTICATED-CAPABILITY-WORKER-UI.md`.
+
+## Capability-bound waveform seam
+
+The browser adapter now drives one `WaveformCaptureMachine` operation at a time
+through the same HMAC/native-frame transport as clock, health, and capability
+acquisition. Request construction requires configuration digest zero and spends
+both HMAC and diagnostic pending state on ambiguity. The worker advances at most
+eight waveform operations after one successful heartbeat so health and
+capability work retain their independent bounds.
+
+Complete bytes are emitted once per capture attempt as a credential-free
+`WorkerWaveformDocument`. The schema validator decodes `ALMDIG01` and requires
+configuration digest zero. The rendering supervisor decodes it again and binds
+device ID, boot ID, capability identity, zero configuration, clock frequency,
+capture ID, and every channel's stable Boolean input access to the current live
+snapshot and admitted board document. A replacement capture, reboot, changed
+stable identity, changed capability, generation change, or disconnect removes
+stale displayed evidence. Screen projection is explicitly lossy; retained
+cycles and transitions remain integers and never flow back into control.
+
+The standalone simulator opts into a deterministic immediate-capture provider.
+Ordinary tests do not receive that provider implicitly, and firmware board
+compositions remain unsupported until a separately qualified hardware capture
+task is attached. Live telemetry still requires an event transport such as the
+planned authenticated WebSocket path and is not part of this checkpoint.

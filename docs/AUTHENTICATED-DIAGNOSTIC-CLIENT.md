@@ -44,11 +44,36 @@ repeats the identical range after ambiguous transport loss. It bounds declared
 length before allocation and exposes bytes only after complete canonical decode
 and SHA-256 validation.
 
-Strict schema v3 carries progress separately from a one-time complete document.
+Strict schema v4 carries progress separately from a one-time complete document.
 The rendering realm revalidates the document and identity before constructing
 the board-name-independent explorer. This supplies immutable resource context;
-it does not subscribe to telemetry, configure a capture, obtain a diagnostic
-lease, or convert a descriptive resource into an allowed operation.
+by itself it does not subscribe to telemetry, configure a capture, obtain a
+diagnostic lease, or convert a descriptive resource into an allowed operation.
+
+## Live browser capture
+
+The WASM adapter provides both window- and worker-scope one-step drivers for the
+capture state machine. They require the existing zero-configuration HMAC
+session, preserve typed request/session/fetch/diagnostic failures, abandon both
+pending transport and diagnostic operations after ambiguity, and otherwise
+admit only an authenticated canonical response.
+
+The production worker constructs the complete configuration itself after
+reconciling strict public identity with the signed capability document and
+authenticated boot/clock facts. UI input is limited to one through four ordered
+resource selectors and a bounded duration. Every selector must be present in
+the exact capability graph palette as `StableBooleanInput`; the worker supplies
+all device, boot, capability, configuration, frequency, capture-ID, retention,
+range, trigger, and deadline fields. It explicitly requests diagnostic arm,
+which is distinct from and cannot create machine-arm, resource-lease, or output
+authority.
+
+Schema v4 transfers complete capture bytes once per attempt. Both the schema
+validator and rendering supervisor decode `ALMDIG01`; the supervisor then binds
+the record again to current device, boot, capability, zero configuration,
+frequency, capture ID, and resource authority. Reboot, device/capability change,
+new capture identity, generation replacement, and disconnect remove stale
+rendering evidence.
 
 ## Offline transport evidence
 
@@ -63,8 +88,10 @@ replace latest-only events, drop a live chunk, and then recover the authoritativ
 512-byte deterministic TinyBee capture through four 168-byte-or-smaller ranges.
 The same client crate is checked for `wasm32-unknown-unknown`.
 
-The telemetry and capture machines are not yet connected to the visible worker
-or a WebSocket event stream. The live explorer now receives the authenticated
-simulator capability document, while its offline fixtures remain available for
-deterministic UI tests. No physical Wi-Fi, serial device, GPIO, measurement,
-lease, or output authority is exercised.
+The capture machine is now connected to the visible worker and to an opt-in
+deterministic immediate provider in the standalone simulator. A loopback
+Chromium run completed the configure/diagnostic-arm/status/range lifecycle and
+rendering-realm admission for a 544-byte simulated record. Telemetry remains
+unconnected because it requires a pushed event transport such as the planned
+authenticated WebSocket path. No physical Wi-Fi, serial device, GPIO,
+measurement, lease, machine arm, or output authority is exercised.
