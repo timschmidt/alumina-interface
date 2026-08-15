@@ -307,8 +307,9 @@ original closed boundary are in sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
 The `cached-job-reattach` expectation replaces that unbounded boundary with a
-strict schema-V7 terminal result. After an ordinary two-participant completion,
-it installs the identical compiled request into a replacement worker while both
+strict terminal result introduced in schema V7 and retained in schema V8.
+After an ordinary two-participant completion, it installs the identical
+compiled request into a replacement worker while both
 simulator actors and boots remain unchanged. The fresh owner performs an
 all-participant read-only schedule-status round and may pass only as
 `retained_complete`, with exact descriptor-token matches, complete cache and
@@ -346,6 +347,20 @@ participant. The browser run passed in 393 snapshots at local cycles
 an all-`aborted`, zero-failure terminal. A fresh-actor ordinary completion then
 passed in 432 snapshots. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
+
+The `cached-job-abort-guard-outage` expectation extends that boundary with
+bounded repeated loss of the abort mutation while authenticated `JobStatus`
+remains available. It accepts stop only after both participants are globally
+confirmed, requires repeated one-failure fetch observations, forbids any local
+`aborted` state, observes the guard transition to `irrevocable`, and accepts
+only schema V8's explicit `completed_after_stop_request` terminal with both
+schedules exactly complete. On 2026-08-15 it passed in 432 snapshots while the
+two actors discarded 18 and one unapplied abort requests; terminal transport
+failure recovered to zero without erasing the missed-stop result. Fresh actors
+then passed ordinary `complete` in 412 snapshots. This is mutation-only
+localhost evidence, not a full network outage or a safety-chain claim. See
+sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-GUARD-OUTAGE.md`.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -413,7 +428,7 @@ response-body/status rejection.
 
 The browser adapter uses the same zero-configuration authenticated session as
 clock and health. The worker publishes complete bytes once per generation only
-after validation. JSON transfer is deliberately treated as untrusted: schema V7
+after validation. JSON transfer is deliberately treated as untrusted: schema V8
 validates the document again, and the UI validates and decodes it once more into
 `BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
 the admitted explorer. The localhost capability-loss run and complete evidence
@@ -431,7 +446,7 @@ advancing accepted evidence, making the next poll byte-identical.
 
 Complete newly advanced bytes cross the worker boundary in a credential-free
 `WorkerTelemetryDocument` alongside the exact subscription request. Introduced
-in schema V5 and retained in current schema V7, the validator decodes both. The
+in schema V5 and retained in current schema V8, the validator decodes both. The
 worker selects resources, cadence, and encoded byte ceilings
 from the authenticated `ALMDOV01` catalog rather than the graph palette. The
 rendering supervisor decodes the transfer again, binds every context and

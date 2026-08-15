@@ -73,8 +73,8 @@ storage policy cannot yield a partially constructed UI readiness table.
 
 ## Live worker lifecycle
 
-Worker schema V7 carries one bounded cached-job owner. A staged request carries the
-complete canonical global manifest and each sorted participant's descriptor,
+Worker schema V8 carries one bounded cached-job owner. A staged request carries
+the complete canonical global manifest and each sorted participant's descriptor,
 partition upload plan/bytes, and independent manifest upload plan. Before any
 I/O, the worker reconstructs all content/publication identities, manifest
 records, participant order, network policy, boot bindings, capability digests,
@@ -144,9 +144,10 @@ terminal completion. Fresh-actor no-fault behavior also passed. That run exposed
 the then-open fresh-owner terminal identity seam; see sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
-A later schema-V7 qualification completed one ordinary attempt, replaced the
-browser worker without restarting either simulated MCU, and restaged the
-identical compiled request. An initial read-only status round matched each
+A later reattachment qualification, introduced with schema V7 and retained in
+schema V8, completed one ordinary attempt, replaced the browser worker without
+restarting either simulated MCU, and restaged the identical compiled request.
+An initial read-only status round matched each
 retained boot/descriptor token and returned `retained_complete` in seven
 snapshots with the original local cycles, no UI epoch, no failures, and no new
 start command. Native tests additionally prove only status operations are
@@ -170,9 +171,19 @@ passed with the required `0 -> 1` locally aborted failure observations, and a
 fresh no-fault completion passed afterward. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
 
+Bounded repeated abort-mutation loss is now separately qualified through the
+point of no return while authenticated schedule status remains available. The
+worker accepts stop only after global confirmation, retains repeated fetch
+failures, observes no participant abort, crosses `irrevocable`, and terminates
+under schema V8 as `completed_after_stop_request` only after both schedules are
+exactly complete. The loopback run passed in 432 snapshots while the actors
+discarded 18 and one unapplied abort requests; fresh actors then passed ordinary
+`complete` in 412 snapshots. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-GUARD-OUTAGE.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
-durable browser job persistence, broader packet disorder/outage cases, live
-TinyBee/T-Deck Pro
+durable browser job persistence, full control/status outage, reordered or
+duplicated traffic, mixed abort/complete outcomes, live TinyBee/T-Deck Pro
 cached starts, electrical simultaneity measurement, and every physical
 motion/safety qualification claim.
