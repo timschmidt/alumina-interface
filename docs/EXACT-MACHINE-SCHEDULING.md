@@ -12,7 +12,7 @@ driver, machine, output waveform, or physical following-error claim.
 ## Authority flow
 
 ```text
-authenticated ALMCAP02 capability + canonical ALMCFG06 configuration
+authenticated ALMCAP03 capability + canonical ALMCFG06 configuration
     -> allocation-free ConfigurationDocumentView
     -> exact two-axis MachineDynamicsProfile2
     -> certified MachineResolutionBudget2

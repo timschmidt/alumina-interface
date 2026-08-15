@@ -4,8 +4,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use alumina_board::GraphResourceAccess;
-use alumina_capability::{BoardCapabilityLimits, decode_board_capability, decode_resource_id};
+use alumina_board::{DiagnosticObservationKind, GraphResourceAccess, ResourceId, SupportLevel};
+use alumina_capability::{
+    BoardCapabilityLimits, DiagnosticOverviewCapability, decode_board_capability,
+    decode_resource_id,
+};
 use alumina_clock::{ClockFlags, ClockObservation};
 use alumina_diagnostics::transport::{
     DiagnosticTransportLimits, SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
@@ -15,7 +18,7 @@ use alumina_diagnostics::transport::{
 };
 use alumina_diagnostics::{
     CaptureId, DiagnosticContext, DiagnosticLimits, DigitalCaptureView, DigitalTriggerCondition,
-    decode_digital_capture, resource_overview_encoded_len,
+    RESOURCE_OVERVIEW_VERSION, decode_digital_capture, resource_overview_encoded_len,
 };
 use alumina_interface_client::capability::{CapabilityDownloadMachine, CapabilityDownloadPhase};
 use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
@@ -62,7 +65,13 @@ const WAVEFORM_TRANSITION_CAPACITY: u32 = 64;
 const WAVEFORM_CHUNK_BYTES: u32 = 168;
 const WAVEFORM_ARM_HORIZON_SECONDS: u64 = 30;
 const TELEMETRY_RESOURCE_LIMIT: usize = 4;
-const TELEMETRY_UPDATES_PER_SECOND: u64 = 10;
+
+struct PassiveTelemetrySelection {
+    resources: Vec<ResourceId>,
+    encoded_request_bytes: usize,
+    encoded_event_bytes: usize,
+    nominal_period_micros: u32,
+}
 
 struct DeviceState {
     connection_id: u64,
@@ -359,18 +368,9 @@ impl DeviceState {
         if capability.board_id() != identity.board_id() {
             return Err("public board identity does not match capability bytes".to_owned());
         }
-        let mut resources: Vec<_> = capability
-            .graph()
-            .resources()
-            .filter(|resource| resource.access == GraphResourceAccess::StableBooleanInput)
-            .map(|resource| resource.resource)
-            .take(TELEMETRY_RESOURCE_LIMIT)
-            .collect();
-        resources.sort_unstable();
-        resources.dedup();
-        if resources.is_empty() {
+        let Some(selection) = select_passive_telemetry(capability.diagnostic_overview())? else {
             return Ok(false);
-        }
+        };
 
         let boot_id = self
             .clock
@@ -380,17 +380,11 @@ impl DeviceState {
             .history
             .back()
             .ok_or_else(|| "authenticated clock evidence is unavailable".to_owned())?;
-        let overview_bytes = resource_overview_encoded_len(resources.len())
-            .map_err(|error| format!("telemetry overview length rejected: {error}"))?;
-        let event_bytes = telemetry_event_encoded_len(overview_bytes)
-            .map_err(|error| format!("telemetry event length rejected: {error}"))?;
-        let encoded_len = telemetry_subscribe_encoded_len(resources.len())
-            .map_err(|error| format!("telemetry subscribe length rejected: {error}"))?;
         let mut encoded = Vec::new();
         encoded
-            .try_reserve_exact(encoded_len)
+            .try_reserve_exact(selection.encoded_request_bytes)
             .map_err(|_| "telemetry subscription allocation failed".to_owned())?;
-        encoded.resize(encoded_len, 0);
+        encoded.resize(selection.encoded_request_bytes, 0);
         let context = DiagnosticContext {
             device_id: identity.device_id(),
             boot_id,
@@ -404,14 +398,15 @@ impl DeviceState {
                     .map_err(|error| format!("telemetry identity rejected: {error}"))?,
                 context,
                 flags: TelemetrySubscribeFlags(TelemetrySubscribeFlags::LATEST_ONLY),
-                minimum_period_cycles: latest
-                    .frequency_hz
-                    .checked_div(TELEMETRY_UPDATES_PER_SECOND)
-                    .unwrap_or(0)
-                    .max(1),
-                maximum_event_bytes: u32::try_from(event_bytes)
+                minimum_period_cycles: cycles_for_micros_ceil(
+                    latest.frequency_hz,
+                    selection.nominal_period_micros,
+                )
+                .ok_or_else(|| "telemetry cadence does not fit device cycles".to_owned())?
+                .max(1),
+                maximum_event_bytes: u32::try_from(selection.encoded_event_bytes)
                     .map_err(|_| "telemetry event length does not fit protocol".to_owned())?,
-                resources: &resources,
+                resources: &selection.resources,
             },
             &mut encoded,
             DiagnosticTransportLimits::native_control(),
@@ -667,6 +662,62 @@ fn bounded_diagnostic(diagnostic: &str) -> String {
         boundary -= 1;
     }
     diagnostic[..boundary].to_owned()
+}
+
+fn select_passive_telemetry(
+    overview: DiagnosticOverviewCapability<'_>,
+) -> Result<Option<PassiveTelemetrySelection>, String> {
+    if !overview.is_implemented() {
+        return Ok(None);
+    }
+    if overview.schema_version() != RESOURCE_OVERVIEW_VERSION {
+        return Err("firmware diagnostic overview schema is not supported by this UI".to_owned());
+    }
+    let resource_limit = usize::from(overview.maximum_resources()).min(TELEMETRY_RESOURCE_LIMIT);
+    let mut resources: Vec<_> = overview
+        .resources()
+        .filter(|resource| {
+            resource.observation == DiagnosticObservationKind::StableBooleanInput
+                && resource.support >= SupportLevel::Compiles
+        })
+        .map(|resource| resource.resource)
+        .take(resource_limit)
+        .collect();
+    resources.sort_unstable();
+    resources.dedup();
+    if resources.is_empty() {
+        return Ok(None);
+    }
+
+    let overview_bytes = resource_overview_encoded_len(resources.len())
+        .map_err(|error| format!("telemetry overview length rejected: {error}"))?;
+    let encoded_event_bytes = telemetry_event_encoded_len(overview_bytes)
+        .map_err(|error| format!("telemetry event length rejected: {error}"))?;
+    let encoded_request_bytes = telemetry_subscribe_encoded_len(resources.len())
+        .map_err(|error| format!("telemetry subscribe length rejected: {error}"))?;
+    let (request_budget, event_budget) = overview.telemetry_bytes();
+    if u32::try_from(encoded_request_bytes)
+        .ok()
+        .is_none_or(|bytes| bytes > request_budget)
+        || u32::try_from(encoded_event_bytes)
+            .ok()
+            .is_none_or(|bytes| bytes > event_budget)
+    {
+        return Err("telemetry selection exceeds the firmware capability budget".to_owned());
+    }
+    Ok(Some(PassiveTelemetrySelection {
+        resources,
+        encoded_request_bytes,
+        encoded_event_bytes,
+        nominal_period_micros: overview.timing_micros().0,
+    }))
+}
+
+fn cycles_for_micros_ceil(frequency_hz: u64, micros: u32) -> Option<u64> {
+    let numerator = u128::from(frequency_hz)
+        .checked_mul(u128::from(micros))?
+        .checked_add(999_999)?;
+    u64::try_from(numerator / 1_000_000).ok()
 }
 
 impl Drop for DeviceState {
@@ -1808,11 +1859,15 @@ impl MutableSupervisorView {
                 .resource(sample.resource)
                 .ok_or("telemetry names a resource absent from the board capability")?;
             if !resource
-                .graph_accesses()
+                .diagnostic_observations()
                 .iter()
-                .any(|access| access.access == GraphResourceAccess::StableBooleanInput)
+                .any(|observation| {
+                    observation.observation == DiagnosticObservationKind::StableBooleanInput
+                })
             {
-                return Err("telemetry resource lacks stable Boolean input authority");
+                return Err(
+                    "telemetry resource lacks passive stable Boolean observation authority",
+                );
             }
         }
         Ok(())

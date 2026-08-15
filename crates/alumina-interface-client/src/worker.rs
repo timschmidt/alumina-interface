@@ -917,7 +917,7 @@ pub struct WorkerCapabilityDocument {
     pub generation: u64,
     /// Stable identity repeated separately for bounded preflight.
     pub identity: CapabilityIdentitySnapshot,
-    /// Complete canonical `ALMCAP02` bytes.
+    /// Complete canonical `ALMCAP03` bytes.
     document: Vec<u8>,
 }
 

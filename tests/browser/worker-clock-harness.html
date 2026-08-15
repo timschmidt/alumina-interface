@@ -142,7 +142,7 @@
           const magic = capability.document.slice(0, 8);
           const validMagic =
             JSON.stringify(magic) ===
-            JSON.stringify(Array.from(new TextEncoder().encode("ALMCAP02")));
+            JSON.stringify(Array.from(new TextEncoder().encode("ALMCAP03")));
           if (
             capability.connection_id !== 1 ||
             capability.generation < 1 ||

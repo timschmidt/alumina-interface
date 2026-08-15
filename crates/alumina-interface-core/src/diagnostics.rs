@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use alumina_board::ResourceId;
+use alumina_board::{DiagnosticObservationKind, ResourceId};
 use alumina_capability::CapabilityIdentity;
 use alumina_diagnostics::{
     CaptureId, CaptureQualityFlags, DiagnosticContext, DiagnosticError, DiagnosticLimits,
@@ -197,6 +197,8 @@ pub enum DiagnosticExplorerError {
     ProvenanceMismatch,
     /// Evidence names a typed resource absent from the bound board package.
     UnknownResource(ResourceId),
+    /// Overview evidence names a resource outside the passive observation palette.
+    UnadmittedOverviewResource(ResourceId),
     /// Bounded owned UI state could not be allocated.
     Allocation,
 }
@@ -246,7 +248,7 @@ pub fn build_diagnostic_explorer_snapshot(
         .try_reserve_exact(overview.sample_count())
         .map_err(|_| DiagnosticExplorerError::Allocation)?;
     for sample in overview.samples() {
-        require_board_resource(board, sample.resource)?;
+        require_overview_resource(board, sample.resource)?;
         overview_samples.push(sample);
     }
 
@@ -309,6 +311,26 @@ fn require_board_resource(
         Ok(())
     } else {
         Err(DiagnosticExplorerError::UnknownResource(resource))
+    }
+}
+
+fn require_overview_resource(
+    board: &BoardExplorerSnapshot,
+    resource: ResourceId,
+) -> Result<(), DiagnosticExplorerError> {
+    let Some(resource_descriptor) = board.resource(resource) else {
+        return Err(DiagnosticExplorerError::UnknownResource(resource));
+    };
+    if resource_descriptor
+        .diagnostic_observations()
+        .iter()
+        .any(|observation| observation.observation == DiagnosticObservationKind::StableBooleanInput)
+    {
+        Ok(())
+    } else {
+        Err(DiagnosticExplorerError::UnadmittedOverviewResource(
+            resource,
+        ))
     }
 }
 
@@ -426,6 +448,22 @@ mod tests {
             Err(DiagnosticExplorerError::UnknownResource(ResourceId::Gpio(
                 63
             )))
+        );
+
+        overview.copy_from_slice(fixture.overview_bytes());
+        overview[last_resource..last_resource + 4].copy_from_slice(
+            &alumina_capability::encode_resource_id(ResourceId::Gpio(34)),
+        );
+        assert_eq!(
+            build_diagnostic_explorer_snapshot(
+                &board,
+                &overview,
+                fixture.digital_capture_bytes(),
+                DiagnosticLimits::interactive(),
+            ),
+            Err(DiagnosticExplorerError::UnadmittedOverviewResource(
+                ResourceId::Gpio(34)
+            ))
         );
     }
 }

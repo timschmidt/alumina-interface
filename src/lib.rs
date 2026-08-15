@@ -1019,14 +1019,30 @@ fn show_live_capability_snapshot(
             "service core {service_core}; real-time core {realtime_core}; flash {flash}; internal SRAM {internal_sram}; PSRAM {psram} bytes"
         ));
         ui.label(format!(
-            "{} resources ({} service, {} real-time, {} hazardous, {} graph-addressable); {} aliases",
+            "{} resources ({} service, {} real-time, {} hazardous, {} graph-addressable, {} passively observable); {} aliases",
             board.resources().len(),
             summary.service,
             summary.realtime,
             summary.hazardous,
             summary.graph_addressable,
+            summary.diagnostic_observable,
             board.alias_count()
         ));
+        let diagnostics = board.diagnostic_overview();
+        if diagnostics.is_implemented() {
+            ui.label(format!(
+                "diagnostic overview V{}: {} / {} resources; {} / {} B request/event; {} µs cadence; {} µs freshness ceiling",
+                diagnostics.schema_version,
+                diagnostics.resource_count,
+                diagnostics.maximum_resources,
+                diagnostics.telemetry_request_bytes,
+                diagnostics.telemetry_event_bytes,
+                diagnostics.nominal_period_micros,
+                diagnostics.maximum_age_micros,
+            ));
+        } else {
+            ui.label("No passive diagnostic-overview provider is composed by this image.");
+        }
         ui.label(format!(
             "{} licensed visuals / {} reviewed hotspots; {} HIL requirements; armable claim: {}",
             board.visuals().len(),

@@ -162,6 +162,8 @@ struct TargetResourceProof {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BoardResourceFilter {
     All,
+    DiagnosticObservable,
+    DiagnosticClosed,
     GraphReadable,
     GraphClosed,
     Hazardous,
@@ -170,8 +172,10 @@ enum BoardResourceFilter {
 }
 
 impl BoardResourceFilter {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::All,
+        Self::DiagnosticObservable,
+        Self::DiagnosticClosed,
         Self::GraphReadable,
         Self::GraphClosed,
         Self::Hazardous,
@@ -182,6 +186,8 @@ impl BoardResourceFilter {
     const fn label(self) -> &'static str {
         match self {
             Self::All => "all described",
+            Self::DiagnosticObservable => "passively observable",
+            Self::DiagnosticClosed => "diagnostic-closed",
             Self::GraphReadable => "graph-readable",
             Self::GraphClosed => "graph-closed",
             Self::Hazardous => "hazardous",
@@ -265,7 +271,7 @@ impl BoardExplorerPanel {
             "Offline exact capability snapshot only — no board connection, live value, allocation, command, or output authority.",
         );
         ui.label(
-            "Descriptive resources state what is routed and its safe/hazard ownership. Only the separately published graph access records permit graph authoring; every other operation remains closed.",
+            "Descriptive resources state what is routed and its safe/hazard ownership. Passive diagnostic observations and graph operations are separately published authorities; every other operation remains closed.",
         );
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("{} resources", self.snapshot.resources().len()));
@@ -276,11 +282,30 @@ impl BoardExplorerPanel {
                 format!("{} hazardous", summary.hazardous),
             );
             ui.colored_label(
+                egui::Color32::from_rgb(103, 193, 232),
+                format!("{} passively observable", summary.diagnostic_observable),
+            );
+            ui.colored_label(
                 egui::Color32::from_rgb(123, 214, 149),
                 format!("{} graph-readable", summary.graph_addressable),
             );
             ui.label(format!("{} aliases", self.snapshot.alias_count()));
         });
+        let diagnostics = self.snapshot.diagnostic_overview();
+        if diagnostics.is_implemented() {
+            ui.label(format!(
+                "Passive overview V{} · {} / {} resources · {} / {} B request/event · {} µs cadence · {} µs freshness ceiling",
+                diagnostics.schema_version,
+                diagnostics.resource_count,
+                diagnostics.maximum_resources,
+                diagnostics.telemetry_request_bytes,
+                diagnostics.telemetry_event_bytes,
+                diagnostics.nominal_period_micros,
+                diagnostics.maximum_age_micros,
+            ));
+        } else {
+            ui.weak("This image composes no passive diagnostic-overview provider.");
+        }
     }
 
     fn show_filters(&mut self, ui: &mut egui::Ui) {
@@ -331,6 +356,7 @@ impl BoardExplorerPanel {
                         resource.aliases().join(", ")
                     };
                     let label = graph_resource_label(id);
+                    let diagnostic_observable = resource.is_diagnostic_observable();
                     let graph_addressable = resource.is_graph_addressable();
                     let selected = self.selected == Some(id);
                     ui.horizontal_wrapped(|ui| {
@@ -348,6 +374,18 @@ impl BoardExplorerPanel {
                                 "hazardous output",
                             );
                         }
+                        ui.colored_label(
+                            if diagnostic_observable {
+                                egui::Color32::from_rgb(103, 193, 232)
+                            } else {
+                                egui::Color32::GRAY
+                            },
+                            if diagnostic_observable {
+                                "passive semantic observation"
+                            } else {
+                                "no passive observation"
+                            },
+                        );
                         ui.colored_label(
                             if graph_addressable {
                                 egui::Color32::from_rgb(123, 214, 149)
@@ -410,7 +448,7 @@ impl BoardExplorerPanel {
                 if resource.graph_accesses().is_empty() {
                     ui.colored_label(
                         egui::Color32::YELLOW,
-                        "Descriptive only: no graph read, write, sample, schedule, or diagnostic-test operation is published.",
+                        "No graph read, write, sample, or schedule operation is published.",
                     );
                 } else {
                     for access in resource.graph_accesses() {
@@ -421,6 +459,22 @@ impl BoardExplorerPanel {
                                 access.class.get(),
                                 access.access,
                                 access.support
+                            ),
+                        );
+                    }
+                }
+                if resource.diagnostic_observations().is_empty() {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "No passive diagnostic observation is published for this resource.",
+                    );
+                } else {
+                    for observation in resource.diagnostic_observations() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(103, 193, 232),
+                            format!(
+                                "passive observation {:?} · {:?}",
+                                observation.observation, observation.support
                             ),
                         );
                     }
@@ -826,6 +880,8 @@ fn resource_matches_filter(
     let descriptor = resource.descriptor();
     match filter {
         BoardResourceFilter::All => true,
+        BoardResourceFilter::DiagnosticObservable => resource.is_diagnostic_observable(),
+        BoardResourceFilter::DiagnosticClosed => !resource.is_diagnostic_observable(),
         BoardResourceFilter::GraphReadable => resource.is_graph_addressable(),
         BoardResourceFilter::GraphClosed => !resource.is_graph_addressable(),
         BoardResourceFilter::Hazardous => descriptor.hazardous_output,
@@ -4224,7 +4280,7 @@ mod tests {
     }
 
     #[test]
-    fn tinybee_board_explorer_keeps_descriptive_hazard_and_graph_filters_distinct() {
+    fn tinybee_board_explorer_keeps_description_observation_and_graph_filters_distinct() {
         let panel = tinybee_board_explorer().unwrap();
         assert_eq!(
             panel.snapshot.identity(),
@@ -4233,6 +4289,27 @@ mod tests {
         assert!(panel.snapshot.visuals().is_empty());
         assert_eq!(panel.selected, Some(ResourceId::Gpio(33)));
         let resources = panel.snapshot.resources();
+        assert_eq!(panel.snapshot.diagnostic_overview().resource_count, 4);
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|resource| resource_matches_filter(
+                    resource,
+                    BoardResourceFilter::DiagnosticObservable
+                ))
+                .count(),
+            4
+        );
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|resource| resource_matches_filter(
+                    resource,
+                    BoardResourceFilter::DiagnosticClosed
+                ))
+                .count(),
+            resources.len() - 4
+        );
         assert_eq!(
             resources
                 .iter()
@@ -4258,6 +4335,7 @@ mod tests {
             .find(|resource| resource_matches_search(resource, "axis.x.step"))
             .unwrap();
         assert!(x_step.descriptor().hazardous_output);
+        assert!(!x_step.is_diagnostic_observable());
         assert!(!x_step.is_graph_addressable());
         assert_eq!(display_bytes(8 * 1_024 * 1_024), "8 MiB");
         assert_eq!(

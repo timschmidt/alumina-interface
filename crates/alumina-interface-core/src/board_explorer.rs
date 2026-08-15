@@ -8,21 +8,22 @@
 use core::fmt;
 
 use alumina_board::{
-    Chip, GraphResourceDescriptor, NormalizedPoint, OwnerDomain, Qualification, ResourceDescriptor,
-    ResourceId,
+    Chip, DiagnosticResourceDescriptor, GraphResourceDescriptor, NormalizedPoint, OwnerDomain,
+    Qualification, ResourceDescriptor, ResourceId, SupportLevel,
 };
 use alumina_capability::{
     BoardCapabilityLimits, CapabilityDocumentError, CapabilityIdentity, decode_board_capability,
 };
 use alumina_protocol::Digest;
 
-/// One descriptive board resource with its aliases and separately admitted
-/// graph operations.
+/// One descriptive board resource with aliases, passive observations, and
+/// separately admitted graph operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoardExplorerResource {
     descriptor: ResourceDescriptor,
     aliases: Vec<String>,
     graph_accesses: Vec<GraphResourceDescriptor>,
+    diagnostic_observations: Vec<DiagnosticResourceDescriptor>,
 }
 
 impl BoardExplorerResource {
@@ -44,6 +45,47 @@ impl BoardExplorerResource {
     /// Whether any graph operation is admitted for this resource.
     pub fn is_graph_addressable(&self) -> bool {
         !self.graph_accesses.is_empty()
+    }
+
+    /// Passive semantic observations published by the exact firmware image.
+    pub fn diagnostic_observations(&self) -> &[DiagnosticResourceDescriptor] {
+        &self.diagnostic_observations
+    }
+
+    /// Whether the exact image publishes this resource in passive overviews.
+    pub fn is_diagnostic_observable(&self) -> bool {
+        !self.diagnostic_observations.is_empty()
+    }
+}
+
+/// Fixed-memory passive diagnostic-overview facts owned by explorer state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BoardExplorerDiagnosticOverview {
+    /// Exact `ALMOVW` schema, or zero when no provider is composed.
+    pub schema_version: u16,
+    /// Whole-provider evidence floor.
+    pub support: Option<SupportLevel>,
+    /// Largest admitted subscription selection.
+    pub maximum_resources: u16,
+    /// Permanently reserved subscription bytes.
+    pub telemetry_request_bytes: u32,
+    /// Permanently reserved event bytes.
+    pub telemetry_event_bytes: u32,
+    /// Nominal publication period.
+    pub nominal_period_micros: u32,
+    /// Maximum fresh-sample age.
+    pub maximum_age_micros: u32,
+    /// Exact passive resource-palette length.
+    pub resource_count: usize,
+}
+
+impl BoardExplorerDiagnosticOverview {
+    /// Whether the exact image has at least a compiling overview provider.
+    pub const fn is_implemented(self) -> bool {
+        matches!(
+            self.support,
+            Some(SupportLevel::Compiles | SupportLevel::Bench | SupportLevel::Qualified)
+        )
     }
 }
 
@@ -147,6 +189,7 @@ pub struct BoardExplorerSnapshot {
     resources: Vec<BoardExplorerResource>,
     alias_count: usize,
     graph_resource_count: usize,
+    diagnostic_overview: BoardExplorerDiagnosticOverview,
     bus_count: usize,
     device_count: usize,
     flash_region_count: usize,
@@ -219,6 +262,11 @@ impl BoardExplorerSnapshot {
         self.graph_resource_count
     }
 
+    /// Passive diagnostic-overview facts, distinct from graph authority.
+    pub const fn diagnostic_overview(&self) -> BoardExplorerDiagnosticOverview {
+        self.diagnostic_overview
+    }
+
     /// Counts for buses, devices, flash regions, clocks, electrical
     /// constraints, interrupts, and shifted-output safe images.
     pub const fn supporting_section_counts(&self) -> [usize; 7] {
@@ -250,7 +298,7 @@ impl BoardExplorerSnapshot {
             .find(|resource| resource.descriptor.id == id)
     }
 
-    /// Count resources by executor ownership, hazard, and graph access.
+    /// Count resources by ownership, hazard, graph access, and observation.
     pub fn resource_summary(&self) -> BoardExplorerResourceSummary {
         let mut summary = BoardExplorerResourceSummary::default();
         for resource in &self.resources {
@@ -260,6 +308,7 @@ impl BoardExplorerSnapshot {
             }
             summary.hazardous += usize::from(resource.descriptor.hazardous_output);
             summary.graph_addressable += usize::from(resource.is_graph_addressable());
+            summary.diagnostic_observable += usize::from(resource.is_diagnostic_observable());
         }
         summary
     }
@@ -276,6 +325,8 @@ pub struct BoardExplorerResourceSummary {
     pub hazardous: usize,
     /// Resources with at least one explicit graph access record.
     pub graph_addressable: usize,
+    /// Resources with at least one passive diagnostic observation record.
+    pub diagnostic_observable: usize,
 }
 
 /// Failure while deriving bounded owned board-explorer state.
@@ -335,6 +386,14 @@ pub fn build_board_explorer_snapshot(
         .try_reserve_exact(capability.graph().resource_count())
         .map_err(|_| BoardExplorerError::Allocation)?;
     graph_resources.extend(capability.graph().resources());
+    let diagnostic_capability = capability.diagnostic_overview();
+    let mut diagnostic_resources = Vec::new();
+    diagnostic_resources
+        .try_reserve_exact(diagnostic_capability.resource_count())
+        .map_err(|_| BoardExplorerError::Allocation)?;
+    diagnostic_resources.extend(diagnostic_capability.resources().filter(|observation| {
+        diagnostic_capability.admits(observation.resource, observation.observation)
+    }));
     let mut resources = Vec::new();
     resources
         .try_reserve_exact(capability.resource_count())
@@ -368,10 +427,25 @@ pub fn build_board_explorer_snapshot(
                 .filter(|access| access.resource == descriptor.id)
                 .copied(),
         );
+        let diagnostic_count = diagnostic_resources
+            .iter()
+            .filter(|observation| observation.resource == descriptor.id)
+            .count();
+        let mut diagnostic_observations = Vec::new();
+        diagnostic_observations
+            .try_reserve_exact(diagnostic_count)
+            .map_err(|_| BoardExplorerError::Allocation)?;
+        diagnostic_observations.extend(
+            diagnostic_resources
+                .iter()
+                .filter(|observation| observation.resource == descriptor.id)
+                .copied(),
+        );
         resources.push(BoardExplorerResource {
             descriptor,
             aliases: resource_aliases,
             graph_accesses,
+            diagnostic_observations,
         });
     }
 
@@ -425,6 +499,16 @@ pub fn build_board_explorer_snapshot(
         resources,
         alias_count: capability.alias_count(),
         graph_resource_count: capability.graph().resource_count(),
+        diagnostic_overview: BoardExplorerDiagnosticOverview {
+            schema_version: diagnostic_capability.schema_version(),
+            support: diagnostic_capability.support(),
+            maximum_resources: diagnostic_capability.maximum_resources(),
+            telemetry_request_bytes: diagnostic_capability.telemetry_bytes().0,
+            telemetry_event_bytes: diagnostic_capability.telemetry_bytes().1,
+            nominal_period_micros: diagnostic_capability.timing_micros().0,
+            maximum_age_micros: diagnostic_capability.timing_micros().1,
+            resource_count: diagnostic_capability.resource_count(),
+        },
         bus_count: capability.bus_count(),
         device_count: capability.device_count(),
         flash_region_count: capability.flash_region_count(),
@@ -448,7 +532,7 @@ fn try_owned(value: &str) -> Result<String, BoardExplorerError> {
 
 #[cfg(test)]
 mod tests {
-    use alumina_board::{GraphResourceAccess, SafeValue};
+    use alumina_board::{DiagnosticObservationKind, GraphResourceAccess, SafeValue};
     use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
 
     use super::*;
@@ -486,6 +570,19 @@ mod tests {
         );
         assert_eq!(snapshot.alias_count(), board_mks_tinybee::ALIASES.len());
         assert_eq!(snapshot.graph_resource_count(), 4);
+        assert_eq!(
+            snapshot.diagnostic_overview(),
+            BoardExplorerDiagnosticOverview {
+                schema_version: 1,
+                support: Some(SupportLevel::Compiles),
+                maximum_resources: 4,
+                telemetry_request_bytes: 176,
+                telemetry_event_bytes: 432,
+                nominal_period_micros: 100_000,
+                maximum_age_micros: 500_000,
+                resource_count: 4,
+            }
+        );
         assert!(snapshot.visuals().is_empty());
         assert!(!snapshot.armable());
         let summary = snapshot.resource_summary();
@@ -496,6 +593,7 @@ mod tests {
                 realtime: 41,
                 hazardous: 21,
                 graph_addressable: 4,
+                diagnostic_observable: 4,
             }
         );
         assert_eq!(snapshot.supporting_section_counts(), [3, 1, 0, 2, 9, 4, 1]);
@@ -513,6 +611,11 @@ mod tests {
         assert_eq!(
             limit_x.graph_accesses()[0].access,
             GraphResourceAccess::StableBooleanInput
+        );
+        assert_eq!(limit_x.diagnostic_observations().len(), 1);
+        assert_eq!(
+            limit_x.diagnostic_observations()[0].observation,
+            DiagnosticObservationKind::StableBooleanInput
         );
 
         let x_step = snapshot

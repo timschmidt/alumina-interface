@@ -339,7 +339,7 @@ keeps health failures separate from clock qualification, and renders the last
 valid queue and executor-stack facts in the live-device panel. Its strict JSON
 projection is validated again in the rendering realm before insertion.
 
-The worker now also requests the selected MCU's canonical `ALMCAP02` document
+The worker now also requests the selected MCU's canonical `ALMCAP03` document
 through authenticated `CapabilitiesGet` ranges. It repeats the exact range
 after ambiguous loss, freezes the digest after discovery, bounds allocation,
 and independently decodes and hashes the complete document. Schema v3
@@ -348,8 +348,10 @@ and capture documents while preserving that capability contract. The rendering
 realm validates them again before constructing the board-name-independent
 explorer. The live
 panel shows exact board, revision, chip, core, memory, resource, hazard, visual,
-hotspot, HIL, and armability facts while granting no resource lease, output,
-arm transition, or safety authority.
+hotspot, HIL, and armability facts. It separately exposes passive diagnostic
+observations—including fixed budgets, cadence, and freshness—and graph
+operations while granting no resource lease, raw acquisition, output, arm
+transition, or safety authority.
 
 ## Value domains
 

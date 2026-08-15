@@ -1,7 +1,7 @@
 # Capability-derived board explorer V1
 
 The board explorer is a bounded diagnostic presentation of one complete
-canonical `ALMCAP02` V2 document. It has no board-name branches in its core
+canonical `ALMCAP03` V3 document. It has no board-name branches in its core
 model and grants no device operation merely because a resource is described.
 
 ## Identity and trust boundary
@@ -9,8 +9,9 @@ model and grants no device operation merely because a resource is described.
 `alumina-capability::decode_board_capability` independently checks the complete
 document header, exact length and SHA-256 identity, bounded nonempty UTF-8
 strings, canonical enums/Booleans/options/routes/reserved bytes, typed resource
-IDs, graph records, section counts, resource references, core ownership, safe
-images, licensed visual records, normalized hotspot polygons, and the exact end
+IDs, graph and passive-diagnostic records, section counts, resource references,
+core ownership, safe images, licensed visual records, normalized hotspot
+polygons, and the exact end
 of the byte string. Its zero-allocation views borrow the caller's immutable
 bytes. The interactive policy accepts at most:
 
@@ -30,27 +31,31 @@ package and labels the result as an offline reference.
 ## Description is not operation authority
 
 `BoardExplorerSnapshot` owns a bounded UI copy of the decoded summary,
-resources, aliases, visuals and hotspots. Each resource combines three facts
+resources, aliases, visuals and hotspots. Each resource combines four facts
 without conflating them:
 
 1. its descriptive typed ID, exclusive core owner, reset/fault safe value and
    hazardous-output marker;
-2. every canonical alias targeting that exact typed ID; and
-3. only the graph class/access/support records explicitly published for that
+2. every canonical alias targeting that exact typed ID;
+3. only passive semantic observation/support records explicitly published for
+   that resource, independent of graph access; and
+4. only the graph class/access/support records explicitly published for that
    resource by the fixed firmware image.
 
 A GPIO, UART, ADC, timer, shifted output, storage endpoint or radio appearing in
 the descriptive inventory does not imply raw read, write, scheduling, capture,
-test or graph access. V1 labels a resource as graph-readable only when the exact
+test or graph access. The explorer labels a resource passively observable only
+when `ALMDOV01` publishes an implemented record under an implemented provider,
+and graph-readable only when the exact
 graph section publishes the current `StableBooleanInput` operation. It exposes
 no output operation.
 
 ## TinyBee offline reference
 
 The visible explorer reconstructs the primary MKS TinyBee V1.x 8 MiB document
-through the same 240-byte range encoder used by firmware. The 3,435-byte
+through the same 240-byte range encoder used by firmware. The 3,531-byte
 document has SHA-256
-`0e82513896e52e0a58fb92de9130c446d590bf649fbc22742209b2d04c8cb0a5`.
+`27dcdd9ea4a1f9fcb1a4aeefb34984a4e4a0ca146c660f669bf632f98cac74af`.
 Its immutable view reports:
 
 | Fact | Count |
@@ -58,6 +63,7 @@ Its immutable view reports:
 | descriptive typed resources | 62 |
 | Service / Realtime owned | 21 / 41 |
 | hazardous-output resources | 21 |
+| passively observable resources | 4 |
 | graph-readable resources | 4 |
 | aliases | 51 |
 | buses / devices | 3 / 1 |
@@ -66,12 +72,16 @@ Its immutable view reports:
 | safe output images / HIL requirements | 1 / 8 |
 | licensed visuals | 0 |
 
-Search and mutually explicit filters expose all described, graph-readable,
-graph-closed, hazardous, Service-owned and Realtime-owned resources. Selecting
-a row shows the typed selector, aliases, owner, safe value, hazard state and
-exact graph operation list. The four graph-readable resources remain GPIO22,
-GPIO32, GPIO33 and GPIO35. For example, `axis.x.step` resolves to a hazardous
-I2S shifted-output bit but remains graph-closed.
+Search and mutually explicit filters expose all described, passively
+observable, diagnostic-closed, graph-readable, graph-closed, hazardous,
+Service-owned and Realtime-owned resources. Selecting a row shows the typed
+selector, aliases, owner, safe value, hazard state, exact passive observation
+list and exact graph operation list. TinyBee's four observable resources are
+GPIO22, GPIO32, GPIO33 and GPIO35; the graph palette independently happens to
+contain the same selectors today. The overview catalog also reports schema 1,
+176/432-byte request/event budgets, a 100,000 µs cadence, and a 500,000 µs
+freshness ceiling. For example, `axis.x.step` resolves to a hazardous I2S
+shifted-output bit but remains both diagnostic-closed and graph-closed.
 
 ## Physical image gate
 

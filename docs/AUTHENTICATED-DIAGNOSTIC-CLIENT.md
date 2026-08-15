@@ -45,7 +45,7 @@ evidence.
 
 ## Live target-context prerequisite
 
-The production worker now acquires the immutable `ALMCAP02` target document
+The production worker now acquires the immutable `ALMCAP03` target document
 before later live resource diagnostics can be admitted. Its separate
 `CapabilityDownloadMachine` requests only contiguous, at-most-240-byte ranges,
 uses a zero expected digest for discovery, freezes the returned identity, and
@@ -56,10 +56,12 @@ and SHA-256 validation.
 Strict schema v5 carries progress separately from complete capability,
 telemetry, and capture documents.
 The rendering realm revalidates the document and identity before constructing
-the board-name-independent explorer. This supplies immutable resource context;
-the worker may subsequently select only capability-admitted stable Boolean
-inputs for passive telemetry or capture. Descriptive resources still do not
-become allowed operations, and neither path obtains a diagnostic lease or
+the board-name-independent explorer. This supplies immutable resource context.
+The worker selects passive telemetry only from the dedicated diagnostic
+overview palette. The simulator-only capture client still uses the narrower
+graph-readable input palette until a separate raw/capture capability exists;
+physical board images advertise capture unsupported. Descriptive resources do
+not become allowed operations, and neither path obtains a diagnostic lease or
 output authority.
 
 ## Live browser telemetry
@@ -71,11 +73,13 @@ status, canonical decoding, and event-order failures remain typed and isolated
 from the clock, health, capability, and capture state machines.
 
 After public identity, authenticated boot/clock evidence, and the complete
-capability document agree, the production worker chooses the first four sorted
-`StableBooleanInput` resources. It constructs a latest-only subscription at a
-requested ten updates per second using the exact device, boot, capability,
-zero-configuration, and frequency context. The UI cannot supply raw pins,
-context, subscription identity, event bounds, or acknowledgement progress.
+capability document agree, the production worker chooses the bounded sorted
+`StableBooleanInput` records from `ALMDOV01`. It checks the exact encoded
+subscription/event sizes against the authenticated board budgets and converts
+the published nominal microsecond period upward into exact device cycles. For
+TinyBee this is four resources, 176/432 bytes, and 100,000 µs. The UI cannot
+supply raw pins, context, subscription identity, event bounds, cadence, or
+acknowledgement progress.
 
 Schema v5 transfers each newly advanced complete `ALMTEV01` event together with
 the immutable `ALMTLS01` request used to validate it. The schema validator

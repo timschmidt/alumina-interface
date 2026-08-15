@@ -11,7 +11,7 @@ create an editor node alone.
 
 The caller supplies:
 
-- the complete bounded `ALMCAP02` document;
+- the complete bounded `ALMCAP03` document;
 - one nonzero device, capability, and active-configuration target tuple;
 - the reviewed semantic/deployment registry for the application version; and
 - explicit document-byte and derived-entry limits.
@@ -45,9 +45,9 @@ binding, and firmware package replay. The catalog is not deployment authority.
 ## TinyBee offline proof
 
 The browser/native UI builds the exact MKS TinyBee V1 8 MiB capability bytes
-from the sibling `board-mks-tinybee` package. Its 3,435-byte document has
+from the sibling `board-mks-tinybee` package. Its 3,531-byte document has
 SHA-256
-`0e82513896e52e0a58fb92de9130c446d590bf649fbc22742209b2d04c8cb0a5`.
+`27dcdd9ea4a1f9fcb1a4aeefb34984a4e4a0ca146c660f669bf632f98cac74af`.
 The reviewed intersection exposes exactly four read-only resources, in
 canonical order:
 

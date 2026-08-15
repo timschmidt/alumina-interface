@@ -217,7 +217,7 @@ and deliberately closed claims are recorded in the sibling
 
 On 2026-08-14 the finalized release bundle and standalone simulator passed the
 `expect=waveform-repeat` case in Chromium 147 over loopback only. The worker
-reported seven accepted clock samples, the exact 3,435-byte TinyBee capability,
+reported seven accepted clock samples, the exact 3,531-byte TinyBee capability,
 public device ID `ALUM-SIM:TINYBEE`, and two distinct 544-byte four-channel
 captures with 2,000- then 3,000-cycle requested durations, 16 simulated
 transitions each, exact stop/release/reconfigure progress, and zero capture
@@ -258,7 +258,7 @@ physical MCU, ESP radio, WLAN, motor, output, or safety claim is made here.
 for firmware's immutable `CapabilitiesGet` operation. It checks caller limits
 before allocation, enforces exact status/body rules, binds every response to the
 pending range and first accepted identity, retains only a contiguous prefix, and
-does not expose completion until the full `ALMCAP02` document independently
+does not expose completion until the full `ALMCAP03` document independently
 decodes and hashes to that identity. Tests cover exact TinyBee reassembly,
 identical ambiguous retry, identity substitution, preallocation limits, and
 response-body/status rejection.
@@ -283,9 +283,11 @@ advancing accepted evidence, making the next poll byte-identical.
 
 Complete newly advanced bytes cross the worker boundary in a credential-free
 `WorkerTelemetryDocument` alongside the exact subscription request. Schema v5
-decodes both. The rendering supervisor decodes them again, binds every context
-and authority fact to the current live snapshot and board document, and admits
-only stable Boolean inputs. It rejects stale/forked sequence, loss, or
+decodes both. The worker selects resources, cadence, and encoded byte ceilings
+from the authenticated `ALMDOV01` catalog rather than the graph palette. The
+rendering supervisor decodes the transfer again, binds every context and
+authority fact to the current live snapshot and board document, and admits only
+catalogued passive stable Boolean inputs. It rejects stale/forked sequence, loss, or
 snapshot-cycle histories and retains at most 64 exact events. The UI's sampled
 logic plot is a passive, lossy display projection and provides no pin lease,
 write, machine-arm, motion, or safety-reset mechanism.
