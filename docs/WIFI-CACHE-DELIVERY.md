@@ -104,6 +104,15 @@ requires a non-simulated armable capability and device-stored production
 credential; the representative browser fixture deliberately requests
 simulation-only authority.
 
+Only one attempt is owned at a time. After a valid terminal snapshot, a strict
+`clear_cached_job` releases the rendering/worker owner and emits `job_removed`;
+it does not erase device evidence or storage. A subsequent request uses a new
+prepare ID, may reuse identical content-addressed publications, and selects a
+fresh future epoch. Firmware/simulator replacement remains transactional and
+closed until the previous actor is terminal and quiescent. Exact descriptor
+repetition continues to mean idempotent retry, while candidate validation
+failure preserves the prior terminal report.
+
 ## Present evidence boundary
 
 Native tests exercise HMAC interoperability, strict challenge decoding,
@@ -114,6 +123,11 @@ uploaded 127,264 bytes per MCU, prepared, installed, confirmed, primed, observed
 both simulated latches, and reached completion with zero failures. The complete
 record is in sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
+
+A second qualification ran two distinct attempts without rebooting or
+reconnecting those participant sessions. The second attempt reused all cached
+bytes and completed the full lifecycle at a new synchronized epoch. See sibling
+`aluminafw/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
 
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, live TinyBee/T-Deck Pro cached

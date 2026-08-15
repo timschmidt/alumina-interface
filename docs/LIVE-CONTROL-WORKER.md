@@ -174,6 +174,16 @@ raw native storage or schedule operation. Hardware mode remains fail-closed
 behind a non-simulated armable capability plus device-stored production
 credential; the committed browser fixture is simulation-only.
 
+Terminal clear is deliberately local to the worker/UI owner. The rendering
+realm first retains and revalidates the complete terminal snapshot, sends the
+strict versioned clear command, waits for the matching `job_removed` event, and
+only then may stage another request. The next logical execution must carry a
+different nonzero prepare ID; exact descriptor repetition remains an idempotent
+firmware retry. Immutable partition and manifest content may be reused. The
+device accepts the distinct descriptor only after its previous service,
+realtime executor, and schedule are terminal and quiescent, so neither worker
+clear nor Wi-Fi ordering becomes replacement authority.
+
 ## Operator boundary
 
 The right-hand panel can add a labeled origin/passphrase, show worker readiness,
@@ -191,8 +201,9 @@ value/provenance/quality/captured cycle/age, and up to 64 sampled logic lanes.
 It can also request repeated 2 ms captures, show exact integer cycle/range
 progress, render an edge trace, and inspect each channel level at a hover cycle.
 All labels come from the same board capability used for authorization. The
-machine workspace can now compile, stage, start, stop, and clear one cached job,
-with explicit simulation-only versus hardware authority and participant/cache/
+machine workspace can now compile, stage, start, stop, and clear one cached job
+at a time, then stage a distinct attempt without rebooting the devices, with
+explicit simulation-only versus hardware authority and participant/cache/
 schedule progress. It still provides no direct pin write, process-energy,
 safety-reset, or bypass control. Neither a clock-qualified snapshot, stack
 watermark, immutable capability document, simulated job, nor simulated trace
@@ -257,6 +268,17 @@ global `complete` after 432 validated job snapshots with zero failures. The
 shared UI epoch mapped to local cycles `80,884,539` and `79,719,862`. Complete
 authority facts and closed physical claims are recorded in sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
+
+The `cached-job-repeat` expectation accepts exactly two strict requests. On
+2026-08-15 it ran job IDs `2047934465` and `2047934466` consecutively on the same
+two simulator boots and worker generations. The first attempt uploaded 127,264
+bytes per participant and completed in 432 snapshots. After terminal capture
+and an acknowledged worker clear, the second attempt reused the complete cache,
+selected a fresh shared epoch, traversed every lifecycle phase, and completed in
+60 snapshots without a reload, reconnect, simulator restart, or failure. A
+following ordinary single-job run against the same simulator actors also passed
+in 60 snapshots. The exact cycles, commands, and closed claims are in sibling
+`aluminafw/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
