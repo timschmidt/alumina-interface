@@ -161,10 +161,12 @@ prototype.
   HMAC secret, HTTP session, causal clock model, automatic retry cadence, and a
   bounded 64-observation history. It also owns passive runtime-health polling,
   retains independently validated queue/stack evidence and health-specific
-  failures, and owns retry-safe bounded board-capability acquisition. Strict
-  schema-v3 snapshots expose only progress and immutable identity; one complete
-  canonical document crosses to the UI after independent validation. The UI can
-  add, probe, and disconnect diagnostic sessions and never receives credentials.
+  failures, retry-safe bounded board-capability acquisition, capability-selected
+  live telemetry, and bounded retained waveform capture. Strict schema-v5
+  snapshots expose only redacted progress and immutable identity; complete
+  canonical capability, telemetry, and capture documents cross to the UI only
+  after independent validation. The UI can add, probe, disconnect, and request
+  passive input capture without receiving credentials or raw-pin authority.
 - That worker exchanges production-format authenticated heartbeat traffic with
   the deterministic host MCU fixture and recovers from response loss, a finite
   outage, and reboot while conservatively rejecting excessive delay.
@@ -320,9 +322,11 @@ state reconciles ambiguous configure/arm/stop responses and reconstructs a
 retained record from exact digest-bound ranges before exposing it. In-memory,
 signed HTTP-fixture, and real localhost TCP/HTTP tests pass without contacting
 the board or WLAN. Immutable capability acquisition now supplies the visible
-worker/UI with target context, but these telemetry/capture machines are not yet
-connected to that worker or a live WebSocket stream. See the [authenticated diagnostic client
-checkpoint](docs/AUTHENTICATED-DIAGNOSTIC-CLIENT.md).
+worker/UI with target context. Canonical authenticated polling connects the
+telemetry machine to low-rate live status and sampled logic lanes, while the
+capture machine drives exact retained traces; a future WebSocket can reuse the
+event contract but is not a prerequisite. See the
+[authenticated diagnostic client checkpoint](docs/AUTHENTICATED-DIAGNOSTIC-CLIENT.md).
 
 The headless client now also owns the firmware's passive runtime-health
 boundary. It requests the exact zero-configuration `HealthSnapshot`, validates
@@ -338,9 +342,11 @@ projection is validated again in the rendering realm before insertion.
 The worker now also requests the selected MCU's canonical `ALMCAP02` document
 through authenticated `CapabilitiesGet` ranges. It repeats the exact range
 after ambiguous loss, freezes the digest after discovery, bounds allocation,
-and independently decodes and hashes the complete document. Strict schema v3
-transfers those bytes once per worker generation; the rendering realm validates
-them again before constructing the board-name-independent explorer. The live
+and independently decodes and hashes the complete document. Schema v3
+introduced one transfer per worker generation; current schema v5 adds telemetry
+and capture documents while preserving that capability contract. The rendering
+realm validates them again before constructing the board-name-independent
+explorer. The live
 panel shows exact board, revision, chip, core, memory, resource, hazard, visual,
 hotspot, HIL, and armability facts while granting no resource lease, output,
 arm transition, or safety authority.
@@ -392,8 +398,9 @@ The next interface milestones add native/tighter broader-curve metric carriers,
 certified nonzero-radius blends, direction-aware and broader-axis kinematics,
 complete public device/security/machine-membership discovery,
 physical-browser/radio qualification, full worker-owned cached-job driving,
-annotated board photography, capability-negotiated live telemetry, oscilloscope/logic-analyzer
-views, groups, nested component dependency/cycle handling, editable instance
+annotated board photography, higher-rate/triggered oscilloscope and
+logic-analyzer acquisition, analog telemetry, groups, nested component
+dependency/cycle handling, editable instance
 and library workflows, front-panel editing/execution, composite/identity-bearing parameter editing,
 label/domain editing, conflict-aware shared workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated

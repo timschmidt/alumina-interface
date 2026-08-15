@@ -15,9 +15,18 @@ reference.
 
 An accepted event must pass envelope and complete `ALMOVW01` validation, match
 the request's device/boot/capability/configuration/clock context and exact
-resource list, and advance both sequence and cumulative loss monotonically. An
-exact replay of the newest event is identified as a duplicate without changing
-progress. A same-sequence fork or counter regression is rejected.
+resource list, and advance sequence, cumulative loss, and snapshot cycle
+monotonically. Consecutive accepted snapshots must also respect the
+subscription's minimum device-cycle period. An exact replay of the newest event
+is identified as a duplicate without changing progress. A same-sequence fork,
+counter regression, cycle regression, or early sample is rejected.
+
+While active, `TelemetryPoll` carries the exact subscription reference and only
+the newest event sequence that the client has completely validated. The service
+retains the current latest-only event until that exact sequence is acknowledged.
+A lost response therefore repeats the same request without consuming unseen
+evidence. Sequence zero makes no acknowledgement claim, allowing a reconstructed
+page/worker to reattach to the same subscription and receive its retained event.
 
 ## Capture state
 
@@ -44,11 +53,44 @@ repeats the identical range after ambiguous transport loss. It bounds declared
 length before allocation and exposes bytes only after complete canonical decode
 and SHA-256 validation.
 
-Strict schema v4 carries progress separately from a one-time complete document.
+Strict schema v5 carries progress separately from complete capability,
+telemetry, and capture documents.
 The rendering realm revalidates the document and identity before constructing
 the board-name-independent explorer. This supplies immutable resource context;
-by itself it does not subscribe to telemetry, configure a capture, obtain a
-diagnostic lease, or convert a descriptive resource into an allowed operation.
+the worker may subsequently select only capability-admitted stable Boolean
+inputs for passive telemetry or capture. Descriptive resources still do not
+become allowed operations, and neither path obtains a diagnostic lease or
+output authority.
+
+## Live browser telemetry
+
+The WASM adapter provides window- and worker-scope one-step drivers for the
+subscription lifecycle and authenticated event poll. Both require the existing
+zero-configuration HMAC session. Request construction, fetch ambiguity, device
+status, canonical decoding, and event-order failures remain typed and isolated
+from the clock, health, capability, and capture state machines.
+
+After public identity, authenticated boot/clock evidence, and the complete
+capability document agree, the production worker chooses the first four sorted
+`StableBooleanInput` resources. It constructs a latest-only subscription at a
+requested ten updates per second using the exact device, boot, capability,
+zero-configuration, and frequency context. The UI cannot supply raw pins,
+context, subscription identity, event bounds, or acknowledgement progress.
+
+Schema v5 transfers each newly advanced complete `ALMTEV01` event together with
+the immutable `ALMTLS01` request used to validate it. The schema validator
+decodes both; the rendering supervisor decodes them again and binds the event to
+the live connection generation, public device identity, authenticated boot and
+frequency, admitted capability digest, subscription ID/digest, and stable
+Boolean input access. It keeps at most 64 exact events. Reboot, generation,
+identity, capability, subscription, lifecycle, or disconnect changes erase
+incompatible evidence.
+
+The live panel shows exact lifecycle, subscription reference, sequence/drop
+progress, provenance, quality, captured cycle, and sample age. It also projects
+the bounded Boolean history into sampled logic lanes. Only screen coordinates
+are lossy; canonical event bytes and device cycles remain integers and cannot
+flow back into control.
 
 ## Live browser capture
 
@@ -68,7 +110,7 @@ range, trigger, and deadline fields. It explicitly requests diagnostic arm,
 which is distinct from and cannot create machine-arm, resource-lease, or output
 authority.
 
-Schema v4 transfers complete capture bytes once per attempt. Both the schema
+Schema v5 transfers complete capture bytes once per attempt. Both the schema
 validator and rendering supervisor decode `ALMDIG01`; the supervisor then binds
 the record again to current device, boot, capability, zero configuration,
 frequency, capture ID, and resource authority. Reboot, device/capability change,
@@ -91,15 +133,19 @@ The tests drive these state machines through three progressively wider seams:
 2. the production-format origin-bound HMAC HTTP fixture; and
 3. an ephemeral `127.0.0.1` TCP listener carrying real HTTP bytes.
 
-The tests deliberately lose mutation/range responses, substitute identity,
-replace latest-only events, drop a live chunk, and then recover the authoritative
-512-byte deterministic TinyBee capture through four 168-byte-or-smaller ranges.
-The same client crate is checked for `wasm32-unknown-unknown`.
+The tests deliberately lose mutation, event-poll, and range responses,
+substitute identity, replace latest-only events, drop a live chunk, and then
+recover both exact telemetry and the authoritative 512-byte deterministic
+TinyBee capture through four 168-byte-or-smaller ranges. The same client crate
+is checked for `wasm32-unknown-unknown`.
 
 The capture machine is now connected to the visible worker and to an opt-in
 deterministic immediate provider in the standalone simulator. A loopback
 Chromium run completed the configure/diagnostic-arm/status/range lifecycle and
-rendering-realm admission for a 544-byte simulated record. Telemetry remains
-unconnected because it requires a pushed event transport such as the planned
-authenticated WebSocket path. No physical Wi-Fi, serial device, GPIO,
-measurement, lease, machine arm, or output authority is exercised.
+rendering-realm admission for a 544-byte simulated record. The telemetry
+machine is likewise connected through canonical authenticated polling; two
+same-boot Chromium workers proved retained-event reattachment and subsequent
+progress with exact 176-byte requests and 432-byte events. A future
+authenticated WebSocket may carry the same event contract at higher rates but
+is not required for this polling checkpoint. No physical Wi-Fi, serial device,
+GPIO, measurement, lease, machine arm, or output authority is exercised.
