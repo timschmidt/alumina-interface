@@ -10,7 +10,7 @@ use alumina_interface_client::schedule::{
 };
 use alumina_interface_core::CanonicalGlobalJob2;
 use alumina_job::{JobCommitId, JobCommitRequest, JobStartObservationSource};
-use alumina_protocol::DeviceId;
+use alumina_protocol::{DeviceCycle, DeviceId};
 use alumina_storage::{ObjectKind, PublishedObject};
 
 use crate::cache_delivery::ParticipantCacheReady;
@@ -334,7 +334,13 @@ impl DistributedScheduleCoordinator {
         }
         match self.intent {
             CoordinationIntent::Prepare => {
-                if self.participants.iter().all(|participant| {
+                if self
+                    .participants
+                    .iter()
+                    .any(|participant| participant.control.report().is_none())
+                {
+                    DistributedSchedulePhase::Preparing
+                } else if self.participants.iter().all(|participant| {
                     participant.control.phase() == ParticipantSchedulePhase::Ready
                 }) {
                     DistributedSchedulePhase::Ready
@@ -435,6 +441,23 @@ impl DistributedScheduleCoordinator {
     #[must_use]
     pub fn participant_commit(&self, device_id: DeviceId) -> Option<JobCommitRequest> {
         self.participant(device_id)?.planned_commit
+    }
+
+    /// Device-reported local start cycle after exact descriptor reconciliation.
+    #[must_use]
+    pub fn participant_local_start_cycle(&self, device_id: DeviceId) -> Option<DeviceCycle> {
+        let participant = self.participant(device_id)?;
+        participant
+            .planned_commit
+            .map(|commit| commit.local_start_cycle)
+            .or_else(|| {
+                participant
+                    .control
+                    .report()
+                    .and_then(|report| report.schedule)
+                    .filter(|schedule| schedule.policy.is_some())
+                    .map(|schedule| schedule.local_start_cycle)
+            })
     }
 
     /// Replays authenticated device-cycle start evidence into browser time.
@@ -812,6 +835,20 @@ impl DistributedScheduleCoordinator {
     pub fn next_request(
         &mut self,
     ) -> Result<Option<DistributedScheduleRequest>, DistributedScheduleError> {
+        if matches!(
+            self.phase(),
+            DistributedSchedulePhase::Aborted
+                | DistributedSchedulePhase::Cancelled
+                | DistributedSchedulePhase::Complete
+                | DistributedSchedulePhase::Faulted
+        ) {
+            return Ok(None);
+        }
+        let initial_status_round = self.intent == CoordinationIntent::Prepare
+            && self
+                .participants
+                .iter()
+                .any(|participant| participant.control.report().is_none());
         for participant in &mut self.participants {
             if participant.control.has_pending_request() {
                 continue;
@@ -819,6 +856,12 @@ impl DistributedScheduleCoordinator {
             let operation =
                 if participant.control.reconciliation_required() {
                     Some(participant.control.begin_status()?)
+                } else if initial_status_round {
+                    if participant.control.report().is_none() {
+                        Some(participant.control.begin_status()?)
+                    } else {
+                        None
+                    }
                 } else {
                     let phase = participant.control.phase();
                     match self.intent {
@@ -1287,23 +1330,33 @@ mod tests {
     fn prepare_all(coordinator: &mut DistributedScheduleCoordinator) -> Vec<Authority> {
         let mut authorities = Vec::new();
         while let Some(request) = coordinator.next_request().unwrap() {
-            assert_eq!(request.request.operation, Operation::JobPrepare);
-            let descriptor =
-                alumina_job::JobDescriptor::decode::<2>(&request.request.body).unwrap();
-            let boot_id = coordinator
-                .participant(request.device_id)
-                .unwrap()
-                .control
-                .boot_id();
-            let authority = Authority {
-                device_id: request.device_id,
-                schedule: PreparedJobSchedule::prepare::<2>(boot_id, descriptor).unwrap(),
-                descriptor,
-            };
-            coordinator
-                .accept_response(request.device_id, &response(&ready_status(&authority)))
-                .unwrap();
-            authorities.push(authority);
+            match request.request.operation {
+                Operation::JobStatus => {
+                    assert!(request.request.body.is_empty());
+                    coordinator
+                        .accept_response(request.device_id, &response(&JobStatusReport::default()))
+                        .unwrap();
+                }
+                Operation::JobPrepare => {
+                    let descriptor =
+                        alumina_job::JobDescriptor::decode::<2>(&request.request.body).unwrap();
+                    let boot_id = coordinator
+                        .participant(request.device_id)
+                        .unwrap()
+                        .control
+                        .boot_id();
+                    let authority = Authority {
+                        device_id: request.device_id,
+                        schedule: PreparedJobSchedule::prepare::<2>(boot_id, descriptor).unwrap(),
+                        descriptor,
+                    };
+                    coordinator
+                        .accept_response(request.device_id, &response(&ready_status(&authority)))
+                        .unwrap();
+                    authorities.push(authority);
+                }
+                operation => panic!("unexpected preparation operation {operation:?}"),
+            }
         }
         authorities.sort_unstable_by_key(|authority| authority.device_id);
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Ready);
@@ -1333,6 +1386,79 @@ mod tests {
                 },
             })
             .collect()
+    }
+
+    fn install_confirm_and_complete(
+        coordinator: &mut DistributedScheduleCoordinator,
+        authorities: &mut [Authority],
+        inputs: &[ParticipantStartInput<'_>],
+    ) {
+        coordinator
+            .bind_start(3_001_000_000, 5_000_000_000, inputs)
+            .unwrap();
+        while let Some(request) = coordinator.next_request().unwrap() {
+            assert_eq!(request.request.operation, Operation::JobCommit);
+            let commit = JobCommitRequest::decode(&request.request.body).unwrap();
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            authority
+                .schedule
+                .install(commit, admission(&authority.descriptor))
+                .unwrap();
+            coordinator
+                .accept_response(request.device_id, &response(&ready_status(authority)))
+                .unwrap();
+        }
+        coordinator
+            .begin_confirmation(3_002_000_000, inputs)
+            .unwrap();
+        while let Some(request) = coordinator.next_request().unwrap() {
+            assert_eq!(request.request.operation, Operation::JobConfirm);
+            let reference =
+                alumina_job::JobScheduleReference::decode(&request.request.body).unwrap();
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            authority
+                .schedule
+                .confirm(reference, DeviceCycle(4_000_000))
+                .unwrap();
+            coordinator
+                .accept_response(request.device_id, &response(&ready_status(authority)))
+                .unwrap();
+        }
+        for authority in authorities {
+            let commit = coordinator.participant_commit(authority.device_id).unwrap();
+            assert!(matches!(
+                authority.schedule.advance(commit.abort_guard_cycle),
+                alumina_job::JobScheduleAction::PrimeHardware { .. }
+            ));
+            authority
+                .schedule
+                .mark_primed(commit.abort_guard_cycle)
+                .unwrap();
+            assert!(matches!(
+                authority.schedule.advance(commit.local_start_cycle),
+                alumina_job::JobScheduleAction::Start { .. }
+            ));
+            authority
+                .schedule
+                .record_start_observation(alumina_job::JobStartObservation {
+                    source: JobStartObservationSource::SimulatedLatch,
+                    output_token: 17,
+                    scheduled_cycle: commit.local_start_cycle,
+                    earliest_cycle: commit.local_start_cycle,
+                    latest_cycle: commit.local_start_cycle,
+                })
+                .unwrap();
+            authority
+                .schedule
+                .complete(DeviceCycle(commit.local_start_cycle.0 + 1))
+                .unwrap();
+        }
     }
 
     #[test]
@@ -1412,6 +1538,60 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
+    }
+
+    #[test]
+    fn passive_initial_status_reattaches_only_the_exact_completed_attempt() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut original =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut original);
+        let inputs = start_inputs(&job, &clocks);
+        install_confirm_and_complete(&mut original, &mut authorities, &inputs);
+
+        let mut reattached =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut observed = 0;
+        while let Some(request) = reattached.next_request().unwrap() {
+            assert_eq!(request.request.operation, Operation::JobStatus);
+            assert!(request.request.body.is_empty());
+            let authority = authorities
+                .iter()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            reattached
+                .accept_response(request.device_id, &response(&ready_status(authority)))
+                .unwrap();
+            observed += 1;
+        }
+        assert_eq!(observed, authorities.len());
+        assert_eq!(reattached.phase(), DistributedSchedulePhase::Complete);
+        assert_eq!(reattached.target_ui_ns(), None);
+        for authority in &authorities {
+            assert_eq!(reattached.participant_commit(authority.device_id), None);
+            assert_eq!(
+                reattached.participant_local_start_cycle(authority.device_id),
+                Some(authority.schedule.report().local_start_cycle)
+            );
+        }
+
+        let mut divergent =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let first = divergent.next_request().unwrap().unwrap();
+        let first_authority = authorities
+            .iter()
+            .find(|authority| authority.device_id == first.device_id)
+            .unwrap();
+        divergent
+            .accept_response(first.device_id, &response(&ready_status(first_authority)))
+            .unwrap();
+        let second = divergent.next_request().unwrap().unwrap();
+        assert_eq!(second.request.operation, Operation::JobStatus);
+        divergent
+            .accept_response(second.device_id, &response(&JobStatusReport::default()))
+            .unwrap();
+        assert_eq!(divergent.phase(), DistributedSchedulePhase::Faulted);
+        assert_eq!(divergent.next_request().unwrap(), None);
     }
 
     #[test]

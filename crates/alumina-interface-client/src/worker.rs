@@ -33,7 +33,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 6;
+pub const WORKER_SCHEMA_VERSION: u16 = 7;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -1370,6 +1370,8 @@ pub enum WorkerCachedJobPhaseSnapshot {
     Cancelled,
     /// Every participant reported exact execution completion.
     Complete,
+    /// Every participant retained exact completion from this descriptor, but the new owner has no original UI epoch.
+    RetainedComplete,
     /// Exact validation, transport reconciliation, or a participant fault stopped progress.
     Faulted,
 }
@@ -1551,7 +1553,8 @@ impl WorkerCachedJobSnapshot {
             | WorkerCachedJobPhaseSnapshot::Preparing
             | WorkerCachedJobPhaseSnapshot::Ready
             | WorkerCachedJobPhaseSnapshot::Cancelling
-            | WorkerCachedJobPhaseSnapshot::Cancelled => self.target_ui_ns.is_none(),
+            | WorkerCachedJobPhaseSnapshot::Cancelled
+            | WorkerCachedJobPhaseSnapshot::RetainedComplete => self.target_ui_ns.is_none(),
             WorkerCachedJobPhaseSnapshot::Installing
             | WorkerCachedJobPhaseSnapshot::Installed
             | WorkerCachedJobPhaseSnapshot::Confirming
@@ -1624,11 +1627,13 @@ impl WorkerCachedJobSnapshot {
             {
                 return Err(WorkerContractError::CachedJobSnapshot);
             }
-            if self.phase == WorkerCachedJobPhaseSnapshot::Complete
-                && (participant.cache_artifact != WorkerCacheArtifactSnapshot::Complete
-                    || participant.schedule_phase
-                        != WorkerParticipantSchedulePhaseSnapshot::Complete
-                    || participant.local_start_cycle.is_none())
+            if matches!(
+                self.phase,
+                WorkerCachedJobPhaseSnapshot::Complete
+                    | WorkerCachedJobPhaseSnapshot::RetainedComplete
+            ) && (participant.cache_artifact != WorkerCacheArtifactSnapshot::Complete
+                || participant.schedule_phase != WorkerParticipantSchedulePhaseSnapshot::Complete
+                || participant.local_start_cycle.is_none())
             {
                 return Err(WorkerContractError::CachedJobSnapshot);
             }
@@ -2343,7 +2348,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 6);
+        assert_eq!(WORKER_SCHEMA_VERSION, 7);
     }
 
     #[test]
@@ -2382,6 +2387,20 @@ mod tests {
         snapshot.participants[0].local_start_cycle = None;
         assert_eq!(
             decoded.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+    }
+
+    #[test]
+    fn retained_complete_snapshot_never_invents_the_original_ui_epoch() {
+        let mut retained = complete_cached_job_snapshot();
+        retained.phase = WorkerCachedJobPhaseSnapshot::RetainedComplete;
+        retained.target_ui_ns = None;
+        assert_eq!(retained.validate(), Ok(()));
+
+        retained.target_ui_ns = Some(7);
+        assert_eq!(
+            retained.validate(),
             Err(WorkerContractError::CachedJobSnapshot)
         );
     }

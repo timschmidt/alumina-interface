@@ -402,14 +402,19 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
         let Some(schedule) = report.schedule else {
             return Ok(());
         };
+        if schedule.descriptor_token != self.prepared_token {
+            return Err(ScheduleControlError::Identity);
+        }
         if schedule.state == JobScheduleState::Prepared {
             if schedule.prepared_token != Some(self.prepared_token) {
                 return Err(ScheduleControlError::Identity);
             }
             return Ok(());
         }
-        let commit = self.commit.ok_or(ScheduleControlError::ForeignCommit)?;
-        if !schedule_matches_commit(schedule, commit) {
+        if self
+            .commit
+            .is_some_and(|commit| !schedule_matches_commit(schedule, commit))
+        {
             return Err(ScheduleControlError::Identity);
         }
         Ok(())
@@ -778,6 +783,44 @@ mod tests {
             ParticipantSchedulePhase::Installed
         );
         assert!(!machine.reconciliation_required());
+    }
+
+    #[test]
+    fn retained_complete_report_requires_the_exact_descriptor_token() {
+        let descriptor = descriptor();
+        let machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+        let commit = commit(&machine);
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut complete = authority.install(commit, admission()).unwrap();
+        complete.state = JobScheduleState::Complete;
+        complete.start_emitted = true;
+        complete.start_observation = Some(JobStartObservation {
+            source: JobStartObservationSource::SimulatedLatch,
+            output_token: 7,
+            scheduled_cycle: commit.local_start_cycle,
+            earliest_cycle: commit.local_start_cycle,
+            latest_cycle: commit.local_start_cycle,
+        });
+
+        let mut reattached = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+        reattached.begin_status().unwrap();
+        assert_eq!(
+            reattached
+                .accept_response(&response(StatusCode::Ok, status(complete)))
+                .unwrap(),
+            ParticipantSchedulePhase::Complete
+        );
+        assert_eq!(reattached.commit(), None);
+
+        let mut foreign = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+        let mut substituted = complete;
+        substituted.descriptor_token = PreparedJobToken(Digest([0x99; 32]));
+        foreign.begin_status().unwrap();
+        assert_eq!(
+            foreign.accept_response(&response(StatusCode::Ok, status(substituted))),
+            Err(ScheduleControlError::Identity)
+        );
+        assert_eq!(foreign.report(), None);
     }
 
     #[test]

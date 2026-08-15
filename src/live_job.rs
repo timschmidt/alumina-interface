@@ -278,7 +278,13 @@ impl LiveCachedJob {
         self.coordinator
             .as_ref()
             .map_or(WorkerCachedJobPhaseSnapshot::Caching, |coordinator| {
-                distributed_phase(coordinator.phase())
+                if coordinator.phase() == DistributedSchedulePhase::Complete
+                    && coordinator.target_ui_ns().is_none()
+                {
+                    WorkerCachedJobPhaseSnapshot::RetainedComplete
+                } else {
+                    distributed_phase(coordinator.phase())
+                }
             })
     }
 
@@ -290,6 +296,7 @@ impl LiveCachedJob {
             WorkerCachedJobPhaseSnapshot::Aborted
                 | WorkerCachedJobPhaseSnapshot::Cancelled
                 | WorkerCachedJobPhaseSnapshot::Complete
+                | WorkerCachedJobPhaseSnapshot::RetainedComplete
                 | WorkerCachedJobPhaseSnapshot::Faulted
         )
     }
@@ -505,8 +512,8 @@ impl LiveCachedJob {
                                 .participant_phase(participant.binding.device_id)
                                 .map_or(WorkerParticipantSchedulePhaseSnapshot::Empty, Into::into),
                             coordinator
-                                .participant_commit(participant.binding.device_id)
-                                .map(|commit| commit.local_start_cycle.0),
+                                .participant_local_start_cycle(participant.binding.device_id)
+                                .map(|cycle| cycle.0),
                         )
                     },
                 );
@@ -784,6 +791,7 @@ mod tests {
     use alumina_interface_core::{
         compile_representative_global_job, compile_representative_program,
     };
+    use alumina_job::JobStatusReport;
     use alumina_protocol::StatusCode;
     use alumina_storage::{ChunkUploadHeader, UploadId, UploadPhase, UploadProgress};
 
@@ -892,6 +900,10 @@ mod tests {
                 Operation::StorageFinalize => Response {
                     status: StatusCode::Ok,
                     body: Vec::new(),
+                },
+                Operation::JobStatus => Response {
+                    status: StatusCode::Ok,
+                    body: JobStatusReport::default().encode().unwrap().to_vec(),
                 },
                 other => panic!("unexpected operation {other:?}"),
             };

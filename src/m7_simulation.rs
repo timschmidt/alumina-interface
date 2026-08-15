@@ -518,6 +518,21 @@ fn prepare_all(
         .next_request()
         .map_err(|_| stage("emit simulated prepare"))?
     {
+        if request.request.operation == Operation::JobStatus {
+            coordinator
+                .accept_response(
+                    request.device_id,
+                    &Response {
+                        status: StatusCode::Ok,
+                        body: JobStatusReport::default()
+                            .encode()
+                            .map_err(|_| stage("encode empty simulated status"))?
+                            .to_vec(),
+                    },
+                )
+                .map_err(|_| stage("accept empty simulated status"))?;
+            continue;
+        }
         if request.request.operation != Operation::JobPrepare {
             return Err(stage("unexpected simulated prepare operation"));
         }
