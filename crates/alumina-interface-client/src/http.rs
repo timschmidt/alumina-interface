@@ -298,6 +298,7 @@ struct PendingRequest {
     sequence: u32,
     correlation: u32,
     http_counter: u64,
+    config_digest: Digest,
 }
 
 /// One fully authenticated HTTP request ready for native or browser async I/O.
@@ -470,6 +471,22 @@ impl AuthenticatedHttpSession {
         body: &[u8],
         secret: &[u8],
     ) -> Result<AuthenticatedProtocolRequest, HttpSessionError> {
+        self.begin_request_for_config(operation, body, self.config_digest, secret)
+    }
+
+    /// Constructs one request against an explicit active configuration identity.
+    ///
+    /// Cache and passive operations normally use the session's configuration.
+    /// Browser-compiled job operations use this method so one HTTP counter
+    /// stream can address exact per-job configuration identities without
+    /// reopening or weakening the boot-scoped authenticated session.
+    pub fn begin_request_for_config(
+        &mut self,
+        operation: Operation,
+        body: &[u8],
+        config_digest: Digest,
+        secret: &[u8],
+    ) -> Result<AuthenticatedProtocolRequest, HttpSessionError> {
         if self.pending.is_some() {
             return Err(HttpSessionError::RequestPending);
         }
@@ -479,7 +496,7 @@ impl AuthenticatedHttpSession {
             .ok_or(HttpSessionError::CounterExhausted)?;
         let sequence = self.next_sequence;
         let correlation = self.next_correlation;
-        let body = encode_request(operation, body, sequence, correlation, self.config_digest)?;
+        let body = encode_request(operation, body, sequence, correlation, config_digest)?;
         let proof = sign_request(
             secret,
             self.nonce,
@@ -497,6 +514,7 @@ impl AuthenticatedHttpSession {
             sequence,
             correlation,
             http_counter: counter,
+            config_digest,
         });
         self.next_http_counter = next_counter;
         self.next_sequence = self.next_sequence.wrapping_add(1);
@@ -551,7 +569,7 @@ impl AuthenticatedHttpSession {
             pending.operation,
             pending.sequence,
             pending.correlation,
-            self.config_digest,
+            pending.config_digest,
         )
         .map_err(HttpSessionError::Response)
     }
@@ -669,7 +687,7 @@ impl std::error::Error for HttpSessionError {}
 #[cfg(test)]
 mod tests {
     use alumina_net::{RequestProof, sign_response, verify_request_proof};
-    use alumina_protocol::StatusCode;
+    use alumina_protocol::{FrameHeader, StatusCode};
 
     use super::*;
     use crate::{SimulatedResponse, SimulatorTransport, Transport};
@@ -835,6 +853,54 @@ mod tests {
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.body, b"present");
         assert!(!session.has_pending_request());
+    }
+
+    #[test]
+    fn explicit_job_configuration_is_bound_to_its_pending_response() {
+        let boot = nonce(0x39);
+        let passive_config = Digest::ZERO;
+        let job_config = Digest([0x7a; 32]);
+        let mut session = AuthenticatedHttpSession::new(boot, passive_config, origin());
+        let request = session
+            .begin_request_for_config(Operation::JobPrepare, b"descriptor", job_config, SECRET)
+            .unwrap();
+        let frame = FrameHeader::decode(
+            &request.body()[..FrameHeader::WIRE_LEN],
+            crate::MAXIMUM_PAYLOAD_BYTES,
+        )
+        .unwrap();
+        assert_eq!(frame.config_digest, job_config);
+        assert_eq!(session.config_digest(), passive_config);
+
+        let mut transport = SimulatorTransport::new(|operation, body: &[u8]| {
+            assert_eq!(operation, Operation::JobPrepare);
+            assert_eq!(body, b"descriptor");
+            SimulatedResponse {
+                status: StatusCode::Ok,
+                body: b"prepared".to_vec(),
+            }
+        });
+        let native = transport.exchange(request.body()).unwrap();
+        let tag = response_tag(
+            boot,
+            request.counter(),
+            200,
+            AuthenticatedMedia::NativeFrame,
+            &native,
+        );
+        let response = session
+            .accept_response(
+                AuthenticatedProtocolResponse {
+                    http_status: 200,
+                    media: AuthenticatedMedia::NativeFrame,
+                    counter_header: &request.counter_header_value(),
+                    authorization_header: &tag,
+                    body: &native,
+                },
+                SECRET,
+            )
+            .unwrap();
+        assert_eq!(response.body, b"prepared");
     }
 
     #[test]

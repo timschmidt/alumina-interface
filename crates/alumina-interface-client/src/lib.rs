@@ -12,6 +12,7 @@ use alumina_protocol::{
 
 pub mod capability;
 pub mod clock;
+pub mod configuration;
 pub mod diagnostics;
 pub mod graph;
 pub mod health;

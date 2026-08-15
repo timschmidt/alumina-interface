@@ -7,6 +7,7 @@ pub mod browser_worker;
 pub mod cache_delivery;
 mod control_graph_ui;
 pub mod distributed_schedule;
+pub mod live_job;
 pub mod m7_simulation;
 mod machine_cam_ui;
 mod workspace_file;
@@ -41,14 +42,63 @@ use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
 use crate::control_graph_ui::WORKSPACE_STORAGE_KEY;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
+use crate::machine_cam_ui::MachineCamDeploymentTarget;
 use crate::machine_cam_ui::MachineCamWorkspace;
 #[cfg(target_arch = "wasm32")]
 use alumina_interface_client::worker::{
-    CapabilityDownloadPhaseSnapshot, ClockSamplingPolicy, DeviceConnectionRequest,
-    DeviceSessionPhase, DeviceSessionSnapshot, ExecutorStackSnapshot,
-    RuntimeHealthAvailabilitySnapshot, WaveformCapturePhaseSnapshot, WorkerCommand,
-    WorkerWaveformRequest,
+    CapabilityDownloadPhaseSnapshot, ClockSamplingPolicy, ConfigurationStatusAvailabilitySnapshot,
+    DeviceConnectionRequest, DeviceSessionPhase, DeviceSessionSnapshot, ExecutorStackSnapshot,
+    RuntimeHealthAvailabilitySnapshot, WaveformCapturePhaseSnapshot, WorkerCachedJobPhaseSnapshot,
+    WorkerCachedJobSnapshot, WorkerCommand, WorkerWaveformRequest,
 };
+
+/// Exact connected-MCU authority consumed by the representative browser CAM compiler.
+///
+/// This narrow entry point is shared by the egui shell and transport integration harnesses;
+/// it grants no device access and performs no network or hardware operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CachedJobDeploymentTarget {
+    /// UI-local worker connection identity.
+    pub connection_id: u64,
+    /// Worker generation observed with the remaining authority facts.
+    pub generation: u64,
+    /// Stable physical or simulated MCU identity.
+    pub device_id: alumina_protocol::DeviceId,
+    /// Authenticated boot identity to bind into the preparation receipt.
+    pub boot_id: [u8; 16],
+    /// Exact immutable board capability used for compilation.
+    pub capability_digest: alumina_protocol::Digest,
+    /// Exact active machine configuration used for compilation.
+    pub config_digest: alumina_protocol::Digest,
+}
+
+/// Compiles the built-in exact geometry fixture into one strict worker cache handoff.
+///
+/// The returned bytes follow the same Hyper-backed CAM path used by the visible machine workspace.
+/// No request is sent and no output authority is implied.
+///
+/// # Errors
+///
+/// Rejects missing, heterogeneous, stale, or unsupported target authority and every CAM,
+/// approximation, schedule, replay, packaging, or worker-contract failure.
+pub fn compile_representative_cached_job_request(
+    job_id: u64,
+    targets: &[CachedJobDeploymentTarget],
+) -> Result<alumina_interface_client::worker::WorkerCachedJobRequest, String> {
+    let workspace = MachineCamWorkspace::try_new()?;
+    let targets: Vec<_> = targets
+        .iter()
+        .map(|target| MachineCamDeploymentTarget {
+            connection_id: target.connection_id,
+            generation: target.generation,
+            device_id: target.device_id,
+            boot_id: target.boot_id,
+            capability_digest: target.capability_digest,
+            config_digest: target.config_digest,
+        })
+        .collect();
+    workspace.build_cached_job_request(job_id, &targets)
+}
 
 #[cfg(target_arch = "wasm32")]
 struct LiveDeviceForm {
@@ -207,6 +257,10 @@ pub struct AluminaApp {
     next_connection_id: u64,
     #[cfg(target_arch = "wasm32")]
     live_capture_cursors: BTreeMap<u64, u64>,
+    #[cfg(target_arch = "wasm32")]
+    next_job_id: u64,
+    #[cfg(target_arch = "wasm32")]
+    live_job_error: Option<String>,
 }
 
 impl AluminaApp {
@@ -319,6 +373,10 @@ impl AluminaApp {
             next_connection_id: 1,
             #[cfg(target_arch = "wasm32")]
             live_capture_cursors: BTreeMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            next_job_id: 1,
+            #[cfg(target_arch = "wasm32")]
+            live_job_error: None,
         }
     }
 
@@ -693,6 +751,7 @@ impl AluminaApp {
         let Some(view) = view else {
             return;
         };
+        self.show_live_job_control(ui, &view);
         let mut actions = Vec::new();
         for snapshot in &view.devices {
             let capability = view.capabilities.iter().find(|capability| {
@@ -735,6 +794,118 @@ impl AluminaApp {
                     ui.colored_label(egui::Color32::LIGHT_RED, diagnostic);
                 }
             });
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn show_live_job_control(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: &crate::browser_worker::SupervisorView,
+    ) {
+        ui.separator();
+        ui.heading("Exact cached job");
+        let targets = live_cam_targets(view);
+        ui.label(format!(
+            "{} connected MCU(s) have matching boot, capability, active configuration, and qualified clock authority",
+            targets.len()
+        ));
+        ui.weak(
+            "Stage recompiles the current exact CAM source for every selected live identity, then transfers only immutable manifest/partition artifacts to the worker.",
+        );
+
+        if let Some(job) = &view.job {
+            show_live_job_snapshot(ui, job);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        job.phase == WorkerCachedJobPhaseSnapshot::Ready,
+                        egui::Button::new("Start at common future epoch"),
+                    )
+                    .on_hover_text(
+                        "The worker independently revalidates armability, production credentials, clocks, boots, and active configurations before installing any commit.",
+                    )
+                    .clicked()
+                {
+                    self.send_live_job_command(WorkerCommand::StartCachedJob {
+                        job_id: job.job_id,
+                    });
+                }
+                let stoppable = !matches!(
+                    job.phase,
+                    WorkerCachedJobPhaseSnapshot::Aborted
+                        | WorkerCachedJobPhaseSnapshot::Cancelled
+                        | WorkerCachedJobPhaseSnapshot::Complete
+                        | WorkerCachedJobPhaseSnapshot::Faulted
+                );
+                if ui
+                    .add_enabled(stoppable, egui::Button::new("Stop safely"))
+                    .clicked()
+                {
+                    self.send_live_job_command(WorkerCommand::StopCachedJob {
+                        job_id: job.job_id,
+                    });
+                }
+                let clearable = matches!(
+                    job.phase,
+                    WorkerCachedJobPhaseSnapshot::Aborted
+                        | WorkerCachedJobPhaseSnapshot::Cancelled
+                        | WorkerCachedJobPhaseSnapshot::Complete
+                        | WorkerCachedJobPhaseSnapshot::Faulted
+                );
+                if ui
+                    .add_enabled(clearable, egui::Button::new("Clear retained job"))
+                    .clicked()
+                {
+                    self.send_live_job_command(WorkerCommand::ClearCachedJob {
+                        job_id: job.job_id,
+                    });
+                }
+            });
+        } else if ui
+            .add_enabled(
+                !targets.is_empty() && self.machine_cam.is_some(),
+                egui::Button::new("Compile exact CAM and stage immutable cache"),
+            )
+            .clicked()
+        {
+            let job_id = self.next_job_id;
+            let result = self
+                .machine_cam
+                .as_ref()
+                .ok_or_else(|| "machine/CAM workspace is unavailable".to_owned())
+                .and_then(|workspace| workspace.build_cached_job_request(job_id, &targets))
+                .and_then(|request| {
+                    self.worker
+                        .as_ref()
+                        .ok_or_else(|| "control worker is unavailable".to_owned())?
+                        .send(WorkerCommand::StageCachedJob {
+                            request: Box::new(request),
+                        })
+                });
+            match result {
+                Ok(()) => {
+                    self.next_job_id = self.next_job_id.saturating_add(1).max(1);
+                    self.live_job_error = None;
+                }
+                Err(error) => self.live_job_error = Some(error),
+            }
+        }
+        if let Some(error) = &self.live_job_error {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn send_live_job_command(&mut self, command: WorkerCommand) {
+        let result = self
+            .worker
+            .as_ref()
+            .ok_or_else(|| "control worker is unavailable".to_owned())
+            .and_then(|worker| worker.send(command));
+        match result {
+            Ok(()) => self.live_job_error = None,
+            Err(error) => self.live_job_error = Some(error),
         }
     }
 
@@ -834,6 +1005,124 @@ impl AluminaApp {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn live_cam_targets(
+    view: &crate::browser_worker::SupervisorView,
+) -> Vec<MachineCamDeploymentTarget> {
+    view.devices
+        .iter()
+        .filter_map(|snapshot| {
+            if snapshot.phase != DeviceSessionPhase::ClockQualified
+                || snapshot.capability_phase != CapabilityDownloadPhaseSnapshot::Complete
+            {
+                return None;
+            }
+            let boot_id = snapshot.boot_id?;
+            let identity = snapshot.device_identity.as_ref()?;
+            let capability = identity.capability.identity().ok()?;
+            let configuration = snapshot.configuration?;
+            if !configuration.jobs_authorized
+                || configuration.active_digest.iter().all(|byte| *byte == 0)
+                || !view.capabilities.iter().any(|document| {
+                    document.connection_id() == snapshot.connection_id
+                        && document.generation() == snapshot.generation
+                        && document.board().identity() == capability
+                })
+            {
+                return None;
+            }
+            Some(MachineCamDeploymentTarget {
+                connection_id: snapshot.connection_id,
+                generation: snapshot.generation,
+                device_id: alumina_protocol::DeviceId(identity.device_id),
+                boot_id,
+                capability_digest: capability.digest,
+                config_digest: alumina_protocol::Digest(configuration.active_digest),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn display_cache_progress(accepted_bytes: u64, total_bytes: u64) -> f32 {
+    const DISPLAY_STEPS: u128 = 10_000;
+    if total_bytes == 0 {
+        return 0.0;
+    }
+    let scaled =
+        u128::from(accepted_bytes.min(total_bytes)) * DISPLAY_STEPS / u128::from(total_bytes);
+    let scaled = u16::try_from(scaled).unwrap_or(10_000);
+    f32::from(scaled) / 10_000.0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
+    ui.separator();
+    ui.strong(format!(
+        "job {} · {:?} · {:?}",
+        job.job_id, job.execution_mode, job.phase
+    ));
+    ui.monospace(format!(
+        "manifest {}… / {} bytes · participants {}…",
+        encode_hex(&job.global_job_digest[..8]),
+        job.manifest_byte_len,
+        encode_hex(&job.participant_set_digest[..8])
+    ));
+    if let Some(target_ui_ns) = job.target_ui_ns {
+        ui.monospace(format!("shared future epoch: {target_ui_ns} ns"));
+    }
+    if job.execution_mode == alumina_interface_client::worker::WorkerJobExecutionMode::Hardware {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Hardware cache may be staged, but Start remains fail-closed unless every board and device-stored credential is production-armable.",
+        );
+    }
+    for participant in &job.participants {
+        ui.collapsing(
+            format!(
+                "MCU {}… · {:?}",
+                encode_hex(&participant.device_id[..4]),
+                participant.schedule_phase
+            ),
+            |ui| {
+                ui.label(format!(
+                    "connection {} generation {} · cache {:?}/{:?}",
+                    participant.connection_id,
+                    participant.generation,
+                    participant.cache_artifact,
+                    participant.cache_phase
+                ));
+                let fraction =
+                    display_cache_progress(participant.accepted_bytes, participant.total_bytes);
+                ui.add(
+                    egui::ProgressBar::new(fraction.clamp(0.0, 1.0)).text(format!(
+                        "{} / {} bytes",
+                        participant.accepted_bytes, participant.total_bytes
+                    )),
+                );
+                ui.monospace(format!(
+                    "capability {}… · config {}… · boot {}…",
+                    encode_hex(&participant.capability_digest[..8]),
+                    encode_hex(&participant.config_digest[..8]),
+                    encode_hex(&participant.boot_id[..8])
+                ));
+                if let Some(cycle) = participant.local_start_cycle {
+                    ui.monospace(format!("bound local start cycle: {cycle}"));
+                }
+            },
+        );
+    }
+    if job.consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive job failures: {}",
+            job.consecutive_failures
+        ));
+    }
+    if let Some(error) = &job.last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn show_live_device_snapshot(
     ui: &mut egui::Ui,
     snapshot: &DeviceSessionSnapshot,
@@ -893,6 +1182,7 @@ fn show_live_device_snapshot(
                 ));
             }
             show_live_capability_snapshot(ui, snapshot, capability);
+            show_live_configuration_snapshot(ui, snapshot);
             show_runtime_health_snapshot(ui, snapshot);
             show_live_telemetry_status(ui, snapshot, capability, telemetry);
             show_live_waveform_status(ui, snapshot, capability, waveform, capture_cursor);
@@ -1674,6 +1964,67 @@ fn live_capture_color(index: usize) -> egui::Color32 {
         egui::Color32::from_rgb(123, 216, 204),
     ];
     COLORS[index % COLORS.len()]
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_configuration_snapshot(ui: &mut egui::Ui, snapshot: &DeviceSessionSnapshot) {
+    ui.separator();
+    ui.strong("Authenticated active configuration");
+    match (snapshot.configuration_availability, snapshot.configuration) {
+        (ConfigurationStatusAvailabilitySnapshot::Unobserved, None) => {
+            ui.label("No canonical configuration status has been accepted yet.");
+        }
+        (ConfigurationStatusAvailabilitySnapshot::Unsupported, None) => {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "This image does not expose the active-configuration coordinator.",
+            );
+        }
+        (ConfigurationStatusAvailabilitySnapshot::Available, Some(configuration)) => {
+            ui.label(format!(
+                "phase: {:?} · jobs authorized: {} · transaction {}",
+                configuration.phase,
+                configuration.jobs_authorized,
+                configuration.active_transaction_id
+            ));
+            if configuration.active_bytes != 0 {
+                ui.monospace(format!(
+                    "ALMCFG {}… / {} bytes",
+                    encode_hex(&configuration.active_digest[..8]),
+                    configuration.active_bytes
+                ));
+            } else {
+                ui.label("No durable active machine configuration.");
+            }
+            if let Some(summary) = configuration.summary {
+                ui.label(format!(
+                    "{} records ({} RT) · {} bindings · {} stepper / {} FOC axes · safety binding: {}",
+                    summary.record_count,
+                    summary.realtime_record_count,
+                    summary.binding_count,
+                    summary.stepper_axes,
+                    summary.foc_axes,
+                    summary.safety_binding
+                ));
+                ui.monospace(format!("configuration flags: 0x{:08x}", summary.flags));
+            }
+        }
+        _ => {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Worker configuration snapshot failed its state relationship.",
+            );
+        }
+    }
+    if let Some(error) = &snapshot.configuration_last_error {
+        ui.colored_label(
+            egui::Color32::LIGHT_RED,
+            format!(
+                "configuration status failures: {} · {error}",
+                snapshot.configuration_consecutive_failures
+            ),
+        );
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -17,6 +17,9 @@ use crate::capability::{
     CapabilityDownloadError, CapabilityDownloadMachine, CapabilityDownloadPhase,
 };
 use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
+use crate::configuration::{
+    ConfigurationStatusClientError, ConfigurationStatusModel, ConfigurationStatusUpdate,
+};
 use crate::diagnostics::{
     DiagnosticClientError, TelemetryClientPhase, TelemetrySubscriptionMachine,
     WaveformCaptureMachine, WaveformClientPhase,
@@ -463,6 +466,59 @@ pub async fn drive_runtime_health_in_worker(
     secret: &[u8],
 ) -> Result<RuntimeHealthUpdate, BrowserHealthError> {
     drive_runtime_health_inner(worker, origin, session, model, secret).await
+}
+
+/// Acquires one authenticated, side-effect-free active-configuration status.
+///
+/// A zero-configuration request allows discovery of the current active digest
+/// without trusting a UI-supplied identity first. Transport or semantic
+/// failures retain the model's last valid evidence.
+pub async fn drive_configuration_status(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut ConfigurationStatusModel,
+    secret: &[u8],
+) -> Result<ConfigurationStatusUpdate, BrowserConfigurationError> {
+    drive_configuration_status_inner(window, origin, session, model, secret).await
+}
+
+/// Worker-scope variant of [`drive_configuration_status`].
+pub async fn drive_configuration_status_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut ConfigurationStatusModel,
+    secret: &[u8],
+) -> Result<ConfigurationStatusUpdate, BrowserConfigurationError> {
+    drive_configuration_status_inner(worker, origin, session, model, secret).await
+}
+
+async fn drive_configuration_status_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    model: &mut ConfigurationStatusModel,
+    secret: &[u8],
+) -> Result<ConfigurationStatusUpdate, BrowserConfigurationError> {
+    let operation = model.request();
+    if session.config_digest() != operation.config_digest() {
+        return Err(BrowserConfigurationError::ConfigurationIdentity);
+    }
+    let request = session
+        .begin_request(operation.operation(), operation.body(), secret)
+        .map_err(BrowserConfigurationError::Session)?;
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            return Err(BrowserConfigurationError::Fetch(error));
+        }
+    };
+    model
+        .accept_response(&response)
+        .map_err(BrowserConfigurationError::Configuration)
 }
 
 async fn drive_runtime_health_inner(
@@ -1115,6 +1171,41 @@ impl fmt::Display for BrowserHealthError {
 }
 
 impl std::error::Error for BrowserHealthError {}
+
+/// One authenticated browser configuration-status acquisition failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserConfigurationError {
+    /// Active identity discovery must use the zero-configuration session.
+    ConfigurationIdentity,
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+    /// The fixed firmware coordinator status was invalid.
+    Configuration(ConfigurationStatusClientError),
+}
+
+impl fmt::Display for BrowserConfigurationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigurationIdentity => {
+                formatter.write_str("configuration discovery requires a zero-configuration session")
+            }
+            Self::Session(error) => {
+                write!(
+                    formatter,
+                    "configuration request construction failed: {error}"
+                )
+            }
+            Self::Fetch(error) => write!(formatter, "configuration fetch failed: {error}"),
+            Self::Configuration(error) => {
+                write!(formatter, "configuration status rejected: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BrowserConfigurationError {}
 
 /// One authenticated browser capability-range acquisition failure.
 #[derive(Clone, Debug, Eq, PartialEq)]

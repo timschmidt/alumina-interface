@@ -1,11 +1,12 @@
 //! Exact resumable cache-upload state machine independent of browser/native I/O.
 
 use std::fmt;
+use std::sync::Arc;
 
 use alumina_protocol::{Operation, StatusCode};
 use alumina_storage::{
-    CacheLimits, ChunkUploadHeader, Error as StorageError, FinalizeUploadRequest, PublishedObject,
-    UploadPhase, UploadPlan, UploadProgress, WireError, sha256,
+    CacheLimits, ChunkUploadHeader, ContentId, Error as StorageError, FinalizeUploadRequest,
+    ManifestHasher, PublishedObject, UploadPhase, UploadPlan, UploadProgress, WireError, sha256,
 };
 
 use crate::Response;
@@ -21,6 +22,158 @@ pub trait UploadSource {
     /// Borrow the exact bytes named by [`Self::chunk_header`].
     fn chunk_bytes(&self, index: u32) -> Option<&[u8]>;
 }
+
+/// Owned, independently revalidated upload artifact suitable for a worker handoff.
+///
+/// The constructor checks object length/digest and recomputes every chunk name
+/// plus the canonical ordered manifest. Once constructed, retries borrow the
+/// same immutable bytes and never trust JSON-supplied chunk headers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedUploadSource {
+    plan: UploadPlan,
+    bytes: Arc<[u8]>,
+    chunks: Vec<ContentId>,
+}
+
+impl OwnedUploadSource {
+    /// Rebuilds all content identities under the declared storage limits.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed plan, byte-length or object-digest mismatch,
+    /// allocation overflow, or a different canonical chunk-manifest digest.
+    pub fn try_new(
+        plan: UploadPlan,
+        bytes: Vec<u8>,
+        limits: CacheLimits,
+    ) -> Result<Self, OwnedUploadSourceError> {
+        Self::try_new_shared(plan, Arc::from(bytes), limits)
+    }
+
+    /// Rebuilds identities while sharing immutable object storage across plans.
+    ///
+    /// This is used for one global manifest uploaded under distinct per-device
+    /// transaction IDs without multiplying its retained browser memory.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same exact validation as [`Self::try_new`].
+    pub fn try_new_shared(
+        plan: UploadPlan,
+        bytes: Arc<[u8]>,
+        limits: CacheLimits,
+    ) -> Result<Self, OwnedUploadSourceError> {
+        plan.validate(limits)
+            .map_err(OwnedUploadSourceError::Storage)?;
+        if u64::try_from(bytes.len()).ok() != Some(plan.object.byte_len) {
+            return Err(OwnedUploadSourceError::Length);
+        }
+        if sha256(&bytes) != plan.object.content {
+            return Err(OwnedUploadSourceError::ObjectDigest);
+        }
+        let chunk_count = usize::try_from(plan.chunk_count)
+            .map_err(|_| OwnedUploadSourceError::AllocationOverflow)?;
+        let mut chunks = Vec::new();
+        chunks
+            .try_reserve_exact(chunk_count)
+            .map_err(|_| OwnedUploadSourceError::AllocationOverflow)?;
+        let mut manifest =
+            ManifestHasher::new(plan.object, plan.chunk_bytes, plan.chunk_count, limits)
+                .map_err(OwnedUploadSourceError::Storage)?;
+        for index in 0..plan.chunk_count {
+            let range =
+                chunk_range(plan, bytes.len(), index).ok_or(OwnedUploadSourceError::Length)?;
+            let byte_len =
+                u32::try_from(range.len()).map_err(|_| OwnedUploadSourceError::Length)?;
+            let content = sha256(&bytes[range]);
+            manifest
+                .push(index, content, byte_len)
+                .map_err(OwnedUploadSourceError::Storage)?;
+            chunks.push(content);
+        }
+        if manifest
+            .finalize()
+            .map_err(OwnedUploadSourceError::Storage)?
+            != plan.manifest
+        {
+            return Err(OwnedUploadSourceError::ManifestDigest);
+        }
+        Ok(Self {
+            plan,
+            bytes,
+            chunks,
+        })
+    }
+
+    /// Complete immutable object bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl UploadSource for OwnedUploadSource {
+    fn upload_plan(&self) -> UploadPlan {
+        self.plan
+    }
+
+    fn chunk_header(&self, index: u32) -> Option<ChunkUploadHeader> {
+        let range = chunk_range(self.plan, self.bytes.len(), index)?;
+        Some(ChunkUploadHeader {
+            upload_id: self.plan.upload_id,
+            index,
+            byte_len: u32::try_from(range.len()).ok()?,
+            content: *self.chunks.get(usize::try_from(index).ok()?)?,
+        })
+    }
+
+    fn chunk_bytes(&self, index: u32) -> Option<&[u8]> {
+        self.bytes
+            .get(chunk_range(self.plan, self.bytes.len(), index)?)
+    }
+}
+
+fn chunk_range(plan: UploadPlan, bytes: usize, index: u32) -> Option<core::ops::Range<usize>> {
+    if index >= plan.chunk_count {
+        return None;
+    }
+    let start = usize::try_from(u64::from(index).checked_mul(u64::from(plan.chunk_bytes))?).ok()?;
+    let nominal_end = start.checked_add(usize::try_from(plan.chunk_bytes).ok()?)?;
+    let end = nominal_end.min(bytes);
+    (start < end).then_some(start..end)
+}
+
+/// Rejection while reconstructing an immutable worker-owned upload source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnedUploadSourceError {
+    /// The typed plan violates storage limits or canonical layout.
+    Storage(StorageError),
+    /// Exact object bytes do not match the declared length.
+    Length,
+    /// SHA-256 of the complete object differs from its declared identity.
+    ObjectDigest,
+    /// Recomputed ordered chunk manifest differs from its declared identity.
+    ManifestDigest,
+    /// The bounded chunk-identity table could not be allocated.
+    AllocationOverflow,
+}
+
+impl fmt::Display for OwnedUploadSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(error) => write!(formatter, "upload plan rejected: {error:?}"),
+            Self::Length => formatter.write_str("upload object length does not match its plan"),
+            Self::ObjectDigest => formatter.write_str("upload object digest does not match bytes"),
+            Self::ManifestDigest => {
+                formatter.write_str("upload chunk manifest digest does not match bytes")
+            }
+            Self::AllocationOverflow => {
+                formatter.write_str("upload chunk identity allocation failed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OwnedUploadSourceError {}
 
 /// One storage operation body ready for native-protocol framing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -510,6 +663,32 @@ mod tests {
             chunks,
             headers,
         }
+    }
+
+    #[test]
+    fn owned_source_reconstructs_every_identity_and_rejects_tampering() {
+        let fixture = source();
+        let bytes = fixture.chunks.concat();
+        let owned = OwnedUploadSource::try_new(fixture.plan, bytes.clone(), LIMITS).unwrap();
+        assert_eq!(owned.upload_plan(), fixture.plan);
+        assert_eq!(owned.bytes(), bytes);
+        for index in 0..fixture.plan.chunk_count {
+            assert_eq!(owned.chunk_header(index), fixture.chunk_header(index));
+            assert_eq!(owned.chunk_bytes(index), fixture.chunk_bytes(index));
+        }
+
+        let mut tampered = bytes.clone();
+        tampered[3] ^= 1;
+        assert_eq!(
+            OwnedUploadSource::try_new(fixture.plan, tampered, LIMITS),
+            Err(OwnedUploadSourceError::ObjectDigest)
+        );
+        let mut foreign_manifest = fixture.plan;
+        foreign_manifest.manifest = ContentId::from_sha256(Digest([0x44; 32]));
+        assert_eq!(
+            OwnedUploadSource::try_new(foreign_manifest, bytes, LIMITS),
+            Err(OwnedUploadSourceError::ManifestDigest)
+        );
     }
 
     struct Device {

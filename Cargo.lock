@@ -148,6 +148,7 @@ dependencies = [
  "alumina-board",
  "alumina-capability",
  "alumina-clock",
+ "alumina-config",
  "alumina-diagnostics",
  "alumina-graph-ir",
  "alumina-job",

@@ -26,31 +26,37 @@ use alumina_diagnostics::{
     resource_overview_encoded_len,
 };
 use alumina_interface_client::capability::{CapabilityDownloadMachine, CapabilityDownloadPhase};
-use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
+use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
+use alumina_interface_client::configuration::ConfigurationStatusModel;
 use alumina_interface_client::diagnostics::{
     TelemetrySubscriptionMachine, WaveformCaptureMachine, WaveformClientPhase,
 };
 use alumina_interface_client::health::RuntimeHealthModel;
 use alumina_interface_client::http::{AuthenticatedHttpSession, DeviceIdentity};
 use alumina_interface_client::wasm::{
-    BrowserCapabilityError, BrowserClockError, BrowserFetchError, BrowserHealthError,
-    BrowserTelemetryError, BrowserWaveformError, DeviceOrigin, drive_capability_step_in_worker,
-    drive_clock_probe_in_worker, drive_runtime_health_in_worker, drive_telemetry_step_in_worker,
-    drive_waveform_step_in_worker, fetch_device_identity_in_worker,
-    open_authenticated_session_in_worker, worker_origin,
+    BrowserCapabilityError, BrowserClockError, BrowserConfigurationError, BrowserFetchError,
+    BrowserHealthError, BrowserTelemetryError, BrowserWaveformError, DeviceOrigin,
+    drive_capability_step_in_worker, drive_clock_probe_in_worker,
+    drive_configuration_status_in_worker, drive_runtime_health_in_worker,
+    drive_telemetry_step_in_worker, drive_waveform_step_in_worker, fetch_device_identity_in_worker,
+    fetch_pending_request_in_worker, open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
     CapabilityDownloadPhaseSnapshot, CapabilityIdentitySnapshot, ClockEstimateSnapshot,
-    ClockHistoryRecord, DeviceConnectionRequest, DeviceIdentitySnapshot, DeviceSessionPhase,
-    DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY, MAXIMUM_WORKER_DIAGNOSTIC_BYTES,
-    RuntimeHealthWorkerSnapshot, TelemetryPhaseSnapshot, WORKER_SCHEMA_VERSION,
-    WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope, WorkerEvent,
-    WorkerEventEnvelope, WorkerTelemetryDocument, WorkerWaveformDocument, WorkerWaveformRequest,
+    ClockHistoryRecord, ConfigurationWorkerSnapshot, DeviceConnectionRequest,
+    DeviceIdentitySnapshot, DeviceSessionPhase, DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY,
+    MAXIMUM_WORKER_DIAGNOSTIC_BYTES, RuntimeHealthWorkerSnapshot, TelemetryPhaseSnapshot,
+    WORKER_SCHEMA_VERSION, WorkerCachedJobPhaseSnapshot, WorkerCachedJobRequest,
+    WorkerCachedJobSnapshot, WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope,
+    WorkerEvent, WorkerEventEnvelope, WorkerJobExecutionMode, WorkerTelemetryDocument,
+    WorkerWaveformDocument, WorkerWaveformRequest,
 };
 use alumina_interface_core::board_explorer::{
     BoardExplorerSnapshot, build_board_explorer_snapshot,
 };
+use alumina_job::JobCommitId;
 use alumina_protocol::{DeviceCycle, Digest};
+use alumina_storage::sha256;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::spawn_local;
@@ -59,14 +65,21 @@ use web_sys::{
     WorkerType,
 };
 
+use crate::distributed_schedule::{ParticipantStartInput, ParticipantStartTiming};
+use crate::live_job::{LiveCachedJob, LiveJobOperation, LiveJobParticipantBinding};
+
 const CONTROL_WORKER_URL: &str = "alumina-worker.js";
 const WORKER_TICK_MS: i32 = 100;
-const MAXIMUM_COMMAND_JSON_BYTES: usize = 8 * 1024;
+const MAXIMUM_COMMAND_JSON_BYTES: usize = 48 * 1024 * 1024;
 const MAXIMUM_UI_DIAGNOSTICS: usize = 16;
 const MAXIMUM_RETRY_MS: u32 = 30_000;
 const CAPABILITY_RANGES_PER_HEARTBEAT: usize = 4;
 const WAVEFORM_OPERATIONS_PER_HEARTBEAT: usize = 8;
 const TELEMETRY_RESOURCE_LIMIT: usize = 4;
+const JOB_START_LEAD_NS: u64 = 5_000_000_000;
+const JOB_CONFIRMATION_LEAD_SECONDS: u64 = 3;
+const JOB_ABORT_GUARD_LEAD_SECONDS: u64 = 1;
+const JOB_LEASE_SLACK_SECONDS: u64 = 30;
 
 struct PassiveTelemetrySelection {
     resources: Vec<ResourceId>,
@@ -87,6 +100,7 @@ struct DeviceState {
     identity: Option<DeviceIdentity>,
     clock: DeviceClockModel,
     runtime_health: RuntimeHealthModel,
+    configuration: ConfigurationStatusModel,
     capability: CapabilityDownloadMachine,
     capability_event_published: bool,
     history: VecDeque<ClockHistoryRecord>,
@@ -98,6 +112,9 @@ struct DeviceState {
     runtime_health_consecutive_failures: u32,
     runtime_health_last_error: Option<String>,
     next_runtime_health_attempt_ms: f64,
+    configuration_consecutive_failures: u32,
+    configuration_last_error: Option<String>,
+    next_configuration_attempt_ms: f64,
     capability_consecutive_failures: u32,
     capability_last_error: Option<String>,
     telemetry: Option<TelemetrySubscriptionMachine>,
@@ -137,6 +154,7 @@ impl DeviceState {
             identity: None,
             clock,
             runtime_health: RuntimeHealthModel::new(),
+            configuration: ConfigurationStatusModel::new(),
             capability,
             capability_event_published: false,
             history: VecDeque::with_capacity(MAXIMUM_CLOCK_HISTORY),
@@ -148,6 +166,9 @@ impl DeviceState {
             runtime_health_consecutive_failures: 0,
             runtime_health_last_error: None,
             next_runtime_health_attempt_ms: 0.0,
+            configuration_consecutive_failures: 0,
+            configuration_last_error: None,
+            next_configuration_attempt_ms: 0.0,
             capability_consecutive_failures: 0,
             capability_last_error: None,
             telemetry: None,
@@ -233,6 +254,13 @@ impl DeviceState {
                 .map(RuntimeHealthWorkerSnapshot::from_view),
             runtime_health_consecutive_failures: self.runtime_health_consecutive_failures,
             runtime_health_last_error: self.runtime_health_last_error.clone(),
+            configuration_availability: self.configuration.availability().into(),
+            configuration: self
+                .configuration
+                .latest()
+                .map(ConfigurationWorkerSnapshot::from_status),
+            configuration_consecutive_failures: self.configuration_consecutive_failures,
+            configuration_last_error: self.configuration_last_error.clone(),
             capability_phase: self.capability.phase().into(),
             capability_received_bytes: self.capability.progress().received_bytes,
             capability_identity: self
@@ -306,6 +334,33 @@ impl DeviceState {
         self.reset_runtime_health_evidence();
         self.runtime_health_consecutive_failures = 0;
         self.runtime_health_last_error = None;
+    }
+
+    fn configuration_due(&self, now_ms: f64) -> bool {
+        self.next_configuration_attempt_ms <= now_ms
+    }
+
+    fn schedule_configuration_attempt(&mut self, now_ms: f64) {
+        self.next_configuration_attempt_ms =
+            now_ms + f64::from(self.sampling.runtime_health_interval_ms);
+    }
+
+    fn record_configuration_success(&mut self) {
+        self.configuration_consecutive_failures = 0;
+        self.configuration_last_error = None;
+    }
+
+    fn record_configuration_failure(&mut self, error: &str) {
+        self.configuration_consecutive_failures =
+            self.configuration_consecutive_failures.saturating_add(1);
+        self.configuration_last_error = Some(bounded_diagnostic(error));
+    }
+
+    fn reset_configuration_for_new_boot(&mut self) {
+        self.configuration.reset();
+        self.configuration_consecutive_failures = 0;
+        self.configuration_last_error = None;
+        self.next_configuration_attempt_ms = 0.0;
     }
 
     fn record_capability_success(&mut self) {
@@ -812,6 +867,33 @@ enum DeviceEntry {
     },
 }
 
+enum JobEntry {
+    Idle(Box<LiveCachedJob>),
+    Busy {
+        job_id: u64,
+        snapshot: Box<WorkerCachedJobSnapshot>,
+    },
+}
+
+impl JobEntry {
+    fn snapshot(&self) -> WorkerCachedJobSnapshot {
+        match self {
+            Self::Idle(job) => job.snapshot(),
+            Self::Busy { snapshot, .. } => snapshot.as_ref().clone(),
+        }
+    }
+
+    fn binding(&self, connection_id: u64) -> bool {
+        match self {
+            Self::Idle(job) => job.binding(connection_id).is_some(),
+            Self::Busy { snapshot, .. } => snapshot
+                .participants
+                .iter()
+                .any(|participant| participant.connection_id == connection_id),
+        }
+    }
+}
+
 impl DeviceEntry {
     fn snapshot(&self) -> DeviceSessionSnapshot {
         match self {
@@ -825,6 +907,8 @@ struct ControlWorkerRuntime {
     scope: DedicatedWorkerGlobalScope,
     devices: BTreeMap<u64, DeviceEntry>,
     next_generation: u64,
+    job: Option<JobEntry>,
+    pending_start_job_id: Option<u64>,
 }
 
 impl ControlWorkerRuntime {
@@ -833,6 +917,8 @@ impl ControlWorkerRuntime {
             scope,
             devices: BTreeMap::new(),
             next_generation: 1,
+            job: None,
+            pending_start_job_id: None,
         }
     }
 
@@ -867,7 +953,12 @@ pub fn install_control_worker(scope: &DedicatedWorkerGlobalScope) -> Result<(), 
     on_message.forget();
 
     let tick_runtime = Rc::clone(&runtime);
-    let on_tick = Closure::<dyn FnMut()>::new(move || launch_due_devices(&tick_runtime));
+    let on_tick = Closure::<dyn FnMut()>::new(move || {
+        // A staged job must make bounded forward progress even when heartbeat,
+        // health, and telemetry intervals coincide with every worker tick.
+        launch_job_step(&tick_runtime);
+        launch_due_devices(&tick_runtime);
+    });
     scope.set_interval_with_callback_and_timeout_and_arguments_0(
         on_tick.as_ref().unchecked_ref(),
         WORKER_TICK_MS,
@@ -899,7 +990,7 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
     };
     let connection_id = command_connection_id(&envelope.command);
     if let Err(error) = envelope.validate_version() {
-        reject_command(runtime, Some(connection_id), &error.to_string());
+        reject_command(runtime, connection_id, &error.to_string());
         return;
     }
     match envelope.command {
@@ -918,17 +1009,25 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
         WorkerCommand::CaptureWaveform { request } => {
             start_waveform_capture(runtime, &request);
         }
+        WorkerCommand::StageCachedJob { request } => stage_cached_job(runtime, *request),
+        WorkerCommand::StartCachedJob { job_id } => start_cached_job(runtime, job_id),
+        WorkerCommand::StopCachedJob { job_id } => stop_cached_job(runtime, job_id),
+        WorkerCommand::ClearCachedJob { job_id } => clear_cached_job(runtime, job_id),
         WorkerCommand::Disconnect { connection_id } => disconnect_device(runtime, connection_id),
     }
 }
 
-const fn command_connection_id(command: &WorkerCommand) -> u64 {
+const fn command_connection_id(command: &WorkerCommand) -> Option<u64> {
     match command {
-        WorkerCommand::Configure { request } => request.connection_id,
-        WorkerCommand::CaptureWaveform { request } => request.connection_id,
+        WorkerCommand::Configure { request } => Some(request.connection_id),
+        WorkerCommand::CaptureWaveform { request } => Some(request.connection_id),
         WorkerCommand::ProbeNow { connection_id } | WorkerCommand::Disconnect { connection_id } => {
-            *connection_id
+            Some(*connection_id)
         }
+        WorkerCommand::StageCachedJob { .. }
+        | WorkerCommand::StartCachedJob { .. }
+        | WorkerCommand::StopCachedJob { .. }
+        | WorkerCommand::ClearCachedJob { .. } => None,
     }
 }
 
@@ -956,8 +1055,408 @@ fn start_waveform_capture(runtime: &SharedWorkerRuntime, request: &WorkerWavefor
     launch_device_step(runtime, connection_id, false);
 }
 
+fn stage_cached_job(runtime: &SharedWorkerRuntime, request: WorkerCachedJobRequest) {
+    let job_id = request.job_id;
+    let job = match LiveCachedJob::try_new(request) {
+        Ok(job) => job,
+        Err(error) => {
+            reject_command(
+                runtime,
+                None,
+                &format!("cached job {job_id} rejected: {error}"),
+            );
+            return;
+        }
+    };
+    let result = {
+        let mut runtime_ref = runtime.borrow_mut();
+        if runtime_ref.job.is_some() {
+            Err("clear the retained cached job before staging another".to_owned())
+        } else {
+            validate_staged_job(&runtime_ref, &job).map(|()| {
+                runtime_ref.job = Some(JobEntry::Idle(Box::new(job)));
+            })
+        }
+    };
+    if let Err(error) = result {
+        reject_command(runtime, None, &format!("cached job {job_id}: {error}"));
+        return;
+    }
+    publish_job_snapshot(runtime);
+    launch_job_step(runtime);
+}
+
+fn validate_staged_job(runtime: &ControlWorkerRuntime, job: &LiveCachedJob) -> Result<(), String> {
+    let bindings: Vec<_> = job.bindings().collect();
+    for binding in bindings {
+        let snapshot = runtime
+            .devices
+            .get(&binding.connection_id)
+            .map(DeviceEntry::snapshot)
+            .ok_or_else(|| format!("connection {} does not exist", binding.connection_id))?;
+        validate_compiled_binding(&snapshot, binding)?;
+        let identity = snapshot.device_identity.as_ref().ok_or_else(|| {
+            format!(
+                "connection {} has no stable identity",
+                binding.connection_id
+            )
+        })?;
+        match job.execution_mode() {
+            WorkerJobExecutionMode::SimulationOnly if !identity.board_id.starts_with("sim-") => {
+                return Err(format!(
+                    "connection {} is not an explicitly simulated board",
+                    binding.connection_id
+                ));
+            }
+            WorkerJobExecutionMode::Hardware if identity.board_id.starts_with("sim-") => {
+                return Err(format!(
+                    "connection {} is simulated and cannot be staged as hardware",
+                    binding.connection_id
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_compiled_binding(
+    snapshot: &DeviceSessionSnapshot,
+    binding: LiveJobParticipantBinding,
+) -> Result<(), String> {
+    validate_binding_identity(snapshot, binding)?;
+    if snapshot.phase != DeviceSessionPhase::ClockQualified {
+        return Err(format!(
+            "connection {} does not have a qualified healthy clock",
+            binding.connection_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_binding_identity(
+    snapshot: &DeviceSessionSnapshot,
+    binding: LiveJobParticipantBinding,
+) -> Result<(), String> {
+    let identity = snapshot
+        .device_identity
+        .as_ref()
+        .ok_or_else(|| "stable device identity is unavailable".to_owned())?;
+    let configuration = snapshot
+        .configuration
+        .ok_or_else(|| "active configuration identity is unavailable".to_owned())?;
+    let capability = identity
+        .capability
+        .identity()
+        .map_err(|error| error.to_string())?;
+    if snapshot.connection_id != binding.connection_id
+        || snapshot.generation != binding.generation
+        || identity.device_id != binding.device_id.0
+        || snapshot.boot_id != Some(binding.boot_id.as_bytes())
+        || capability.digest != binding.capability_digest
+        || configuration.active_digest != binding.config_digest.0
+        || !configuration.jobs_authorized
+    {
+        return Err(format!(
+            "connection {} no longer matches its compiled device, boot, capability, or configuration",
+            binding.connection_id
+        ));
+    }
+    Ok(())
+}
+
+fn start_cached_job(runtime: &SharedWorkerRuntime, job_id: u64) {
+    let result = {
+        let mut runtime_ref = runtime.borrow_mut();
+        if runtime_ref.pending_start_job_id.is_some() {
+            Err("a cached-job start request is already pending".to_owned())
+        } else {
+            match runtime_ref.job.as_ref() {
+                None => Err("no cached job is retained".to_owned()),
+                Some(JobEntry::Busy { .. }) => {
+                    Err(format!("cached job {job_id} is busy; retry start"))
+                }
+                Some(JobEntry::Idle(job)) if job.job_id() != job_id => {
+                    Err(format!("cached job {job_id} is not retained"))
+                }
+                Some(JobEntry::Idle(job)) if job.phase() != WorkerCachedJobPhaseSnapshot::Ready => {
+                    Err(format!(
+                        "cached job {job_id} is {:?}, not ready",
+                        job.phase()
+                    ))
+                }
+                Some(JobEntry::Idle(_)) => {
+                    runtime_ref.pending_start_job_id = Some(job_id);
+                    Ok(())
+                }
+            }
+        }
+    };
+    if let Err(error) = result {
+        reject_command(runtime, None, &error);
+        return;
+    }
+    launch_job_step(runtime);
+}
+
+fn begin_pending_job_start(runtime: &SharedWorkerRuntime) -> Result<bool, String> {
+    let mut runtime_ref = runtime.borrow_mut();
+    let Some(job_id) = runtime_ref.pending_start_job_id else {
+        return Ok(false);
+    };
+    let Some(entry) = runtime_ref.job.take() else {
+        runtime_ref.pending_start_job_id = None;
+        return Err("pending cached-job start has no retained job".to_owned());
+    };
+    let JobEntry::Idle(mut job) = entry else {
+        runtime_ref.job = Some(entry);
+        return Ok(false);
+    };
+    if job.job_id() != job_id || job.phase() != WorkerCachedJobPhaseSnapshot::Ready {
+        runtime_ref.pending_start_job_id = None;
+        runtime_ref.job = Some(JobEntry::Idle(job));
+        return Err(format!(
+            "pending cached job {job_id} no longer has ready retained state"
+        ));
+    }
+    if job.bindings().any(|binding| {
+        !matches!(
+            runtime_ref.devices.get(&binding.connection_id),
+            Some(DeviceEntry::Idle(_))
+        )
+    }) {
+        runtime_ref.job = Some(JobEntry::Idle(job));
+        return Ok(false);
+    }
+
+    let result = (|| {
+        let now_ui_ns = worker_monotonic_ns(&runtime_ref.scope)
+            .ok_or_else(|| "worker monotonic clock is unavailable".to_owned())?;
+        let target_ui_ns = now_ui_ns
+            .checked_add(JOB_START_LEAD_NS)
+            .ok_or_else(|| "future start epoch overflowed".to_owned())?;
+        let inputs = participant_start_inputs(&runtime_ref, &job, target_ui_ns)?;
+        job.begin_start(now_ui_ns, target_ui_ns, &inputs)
+            .map_err(|error| format!("cached job {job_id} start rejected: {error}"))
+    })();
+    runtime_ref.pending_start_job_id = None;
+    if let Err(error) = &result {
+        job.mark_fault(error);
+    }
+    runtime_ref.job = Some(JobEntry::Idle(job));
+    result.map(|()| true)
+}
+
+fn participant_start_inputs<'a>(
+    runtime: &'a ControlWorkerRuntime,
+    job: &LiveCachedJob,
+    target_ui_ns: u64,
+) -> Result<Vec<ParticipantStartInput<'a>>, String> {
+    let mut inputs = Vec::new();
+    inputs
+        .try_reserve_exact(job.bindings().count())
+        .map_err(|_| "participant timing allocation failed".to_owned())?;
+    for binding in job.bindings() {
+        let state = match runtime.devices.get(&binding.connection_id) {
+            Some(DeviceEntry::Idle(state)) => state.as_ref(),
+            Some(DeviceEntry::Busy { .. }) => {
+                return Err(format!(
+                    "connection {} is busy; retry deterministic start",
+                    binding.connection_id
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "connection {} no longer exists",
+                    binding.connection_id
+                ));
+            }
+        };
+        validate_start_eligibility(state, binding, job.execution_mode())?;
+        let heartbeat = state.clock.latest_response().ok_or_else(|| {
+            format!(
+                "connection {} has no accepted heartbeat",
+                binding.connection_id
+            )
+        })?;
+        let frequency_hz = heartbeat.frequency_hz;
+        let duration_cycles = ceil_product_ratio(
+            job.identity().duration_ticks,
+            frequency_hz,
+            job.identity().global_timebase_hz,
+        )
+        .ok_or_else(|| "job duration does not fit the device clock".to_owned())?;
+        let lease_slack = frequency_hz
+            .checked_mul(JOB_LEASE_SLACK_SECONDS)
+            .ok_or_else(|| "job lease margin overflowed".to_owned())?;
+        let timing = ParticipantStartTiming {
+            maximum_uncertainty_cycles: state.sampling.maximum_uncertainty_cycles,
+            required_sync_tolerance_cycles: state.sampling.maximum_uncertainty_cycles,
+            confirmation_lead_cycles: frequency_hz
+                .checked_mul(JOB_CONFIRMATION_LEAD_SECONDS)
+                .ok_or_else(|| "confirmation lead overflowed".to_owned())?,
+            abort_guard_lead_cycles: frequency_hz
+                .checked_mul(JOB_ABORT_GUARD_LEAD_SECONDS)
+                .ok_or_else(|| "abort guard lead overflowed".to_owned())?,
+            lease_cycles: duration_cycles
+                .checked_add(lease_slack)
+                .ok_or_else(|| "job lease overflowed".to_owned())?,
+            commit_id: job_commit_id(job.job_id(), binding, target_ui_ns)?,
+        };
+        inputs.push(ParticipantStartInput {
+            device_id: binding.device_id,
+            clock: &state.clock,
+            timing,
+        });
+    }
+    Ok(inputs)
+}
+
+fn validate_start_eligibility(
+    state: &DeviceState,
+    binding: LiveJobParticipantBinding,
+    execution_mode: WorkerJobExecutionMode,
+) -> Result<(), String> {
+    validate_compiled_binding(&state.snapshot(), binding)?;
+    if state.session.is_none() || state.clock.boot_id() != Some(binding.boot_id) {
+        return Err(format!(
+            "connection {} has no current authenticated boot session",
+            binding.connection_id
+        ));
+    }
+    let identity = state.identity.as_ref().ok_or_else(|| {
+        format!(
+            "connection {} has no current device identity",
+            binding.connection_id
+        )
+    })?;
+    match execution_mode {
+        WorkerJobExecutionMode::SimulationOnly => {
+            if !identity.board_id().starts_with("sim-") {
+                return Err(format!(
+                    "connection {} is not an explicitly simulated board",
+                    binding.connection_id
+                ));
+            }
+        }
+        WorkerJobExecutionMode::Hardware => {
+            if !identity.credential_source().production_armable() {
+                return Err(format!(
+                    "connection {} lacks a device-stored production credential",
+                    binding.connection_id
+                ));
+            }
+            let document = state.capability.document().ok_or_else(|| {
+                format!(
+                    "connection {} has no complete capability document",
+                    binding.connection_id
+                )
+            })?;
+            let capability =
+                decode_board_capability(document, BoardCapabilityLimits::interactive())
+                    .map_err(|error| format!("board capability rejected: {error:?}"))?;
+            if !capability.armable() {
+                return Err(format!(
+                    "connection {} capability is intentionally non-armable",
+                    binding.connection_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn job_commit_id(
+    job_id: u64,
+    binding: LiveJobParticipantBinding,
+    target_ui_ns: u64,
+) -> Result<JobCommitId, String> {
+    let mut transcript = [0_u8; 40];
+    transcript[0..8].copy_from_slice(&job_id.to_le_bytes());
+    transcript[8..16].copy_from_slice(&binding.connection_id.to_le_bytes());
+    transcript[16..24].copy_from_slice(&target_ui_ns.to_le_bytes());
+    transcript[24..40].copy_from_slice(&binding.device_id.0);
+    let digest = sha256(&transcript).digest;
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.0[..16]);
+    JobCommitId::new(bytes).map_err(|error| format!("commit identity rejected: {error:?}"))
+}
+
+fn ceil_product_ratio(value: u64, multiplier: u64, divisor: u64) -> Option<u64> {
+    let divisor = u128::from(divisor);
+    if divisor == 0 {
+        return None;
+    }
+    let numerator = u128::from(value)
+        .checked_mul(u128::from(multiplier))?
+        .checked_add(divisor - 1)?;
+    u64::try_from(numerator / divisor).ok()
+}
+
+fn stop_cached_job(runtime: &SharedWorkerRuntime, job_id: u64) {
+    let result = {
+        let mut runtime_ref = runtime.borrow_mut();
+        if runtime_ref.pending_start_job_id == Some(job_id) {
+            runtime_ref.pending_start_job_id = None;
+        }
+        match runtime_ref.job.as_mut() {
+            Some(JobEntry::Idle(job)) if job.job_id() == job_id => job
+                .request_stop()
+                .map_err(|error| format!("cached job {job_id} cannot stop: {error}")),
+            Some(JobEntry::Busy { job_id: active, .. }) if *active == job_id => {
+                Err(format!("cached job {job_id} is busy; retry stop"))
+            }
+            Some(_) => Err(format!("cached job {job_id} is not retained")),
+            None => Err("no cached job is retained".to_owned()),
+        }
+    };
+    if let Err(error) = result {
+        reject_command(runtime, None, &error);
+        return;
+    }
+    publish_job_snapshot(runtime);
+    launch_job_step(runtime);
+}
+
+fn clear_cached_job(runtime: &SharedWorkerRuntime, job_id: u64) {
+    let removed = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let removable = matches!(
+            runtime_ref.job.as_ref(),
+            Some(JobEntry::Idle(job)) if job.job_id() == job_id && job.terminal()
+        );
+        if removable {
+            runtime_ref.job = None;
+            runtime_ref.pending_start_job_id = None;
+        }
+        removable
+    };
+    if removed {
+        emit_worker_event(runtime, WorkerEvent::JobRemoved { job_id });
+    } else {
+        reject_command(
+            runtime,
+            None,
+            &format!("cached job {job_id} is absent, busy, or nonterminal"),
+        );
+    }
+}
+
 fn configure_device(runtime: &SharedWorkerRuntime, request: DeviceConnectionRequest) {
     let connection_id = request.connection_id;
+    if runtime
+        .borrow()
+        .job
+        .as_ref()
+        .is_some_and(|job| job.binding(connection_id))
+    {
+        reject_command(
+            runtime,
+            Some(connection_id),
+            "clear the retained cached job before replacing a participant connection",
+        );
+        return;
+    }
     if let Err(error) = request.validate() {
         reject_command(runtime, Some(connection_id), &error.to_string());
         return;
@@ -995,6 +1494,19 @@ fn configure_device(runtime: &SharedWorkerRuntime, request: DeviceConnectionRequ
 }
 
 fn disconnect_device(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    if runtime
+        .borrow()
+        .job
+        .as_ref()
+        .is_some_and(|job| job.binding(connection_id))
+    {
+        reject_command(
+            runtime,
+            Some(connection_id),
+            "clear the retained cached job before disconnecting a participant",
+        );
+        return;
+    }
     let removed = runtime
         .borrow_mut()
         .devices
@@ -1011,12 +1523,25 @@ fn launch_due_devices(runtime: &SharedWorkerRuntime) {
     let (now_ms, due): (f64, Vec<u64>) = {
         let runtime_ref = runtime.borrow();
         let now_ms = worker_now_ms(&runtime_ref.scope);
+        let pending_start = runtime_ref.pending_start_job_id.is_some();
         let due = runtime_ref
             .devices
             .iter()
-            .filter_map(|(connection_id, entry)| match entry {
-                DeviceEntry::Idle(state) if state.next_attempt_ms <= now_ms => Some(*connection_id),
-                _ => None,
+            .filter_map(|(connection_id, entry)| {
+                if pending_start
+                    && runtime_ref
+                        .job
+                        .as_ref()
+                        .is_some_and(|job| job.binding(*connection_id))
+                {
+                    return None;
+                }
+                match entry {
+                    DeviceEntry::Idle(state) if state.next_attempt_ms <= now_ms => {
+                        Some(*connection_id)
+                    }
+                    _ => None,
+                }
             })
             .collect();
         (now_ms, due)
@@ -1027,6 +1552,252 @@ fn launch_due_devices(runtime: &SharedWorkerRuntime) {
     for connection_id in due {
         launch_device_step(runtime, connection_id, false);
     }
+}
+
+fn launch_job_step(runtime: &SharedWorkerRuntime) {
+    match begin_pending_job_start(runtime) {
+        Ok(true) => publish_job_snapshot(runtime),
+        Ok(false) => {}
+        Err(error) => {
+            publish_job_snapshot(runtime);
+            reject_command(runtime, None, &format!("cached job start faulted: {error}"));
+            return;
+        }
+    }
+    match take_live_job_task(runtime) {
+        Ok(Some((scope, job, state, operation))) => {
+            let task_runtime = Rc::clone(runtime);
+            spawn_local(async move {
+                let connection_id = operation.binding.connection_id;
+                let generation = operation.binding.generation;
+                let job_id = job.job_id();
+                let (job, state) = perform_live_job_operation(&scope, job, state, operation).await;
+                finish_live_job_step(&task_runtime, job_id, connection_id, generation, job, state);
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            publish_job_snapshot(runtime);
+            reject_command(runtime, None, &format!("cached job faulted: {error}"));
+        }
+    }
+}
+
+fn take_live_job_task(
+    runtime: &SharedWorkerRuntime,
+) -> Result<
+    Option<(
+        DedicatedWorkerGlobalScope,
+        LiveCachedJob,
+        DeviceState,
+        LiveJobOperation,
+    )>,
+    String,
+> {
+    let mut runtime_ref = runtime.borrow_mut();
+    let Some(entry) = runtime_ref.job.take() else {
+        return Ok(None);
+    };
+    let JobEntry::Idle(mut job) = entry else {
+        runtime_ref.job = Some(entry);
+        return Ok(None);
+    };
+    if job.terminal() {
+        runtime_ref.job = Some(JobEntry::Idle(job));
+        return Ok(None);
+    }
+
+    let bindings: Vec<_> = job.bindings().collect();
+    for binding in bindings {
+        let Some(DeviceEntry::Idle(state)) = runtime_ref.devices.get(&binding.connection_id) else {
+            runtime_ref.job = Some(JobEntry::Idle(job));
+            return Ok(None);
+        };
+        if state.session.is_none() || state.phase != DeviceSessionPhase::ClockQualified {
+            runtime_ref.job = Some(JobEntry::Idle(job));
+            return Ok(None);
+        }
+        if let Err(error) = validate_binding_identity(&state.snapshot(), binding) {
+            job.mark_fault(&error);
+            runtime_ref.job = Some(JobEntry::Idle(job));
+            return Err(error);
+        }
+    }
+
+    let operation = match prepare_next_job_operation(&runtime_ref, &mut job) {
+        Ok(Some(operation)) => operation,
+        Ok(None) => {
+            runtime_ref.job = Some(JobEntry::Idle(job));
+            return Ok(None);
+        }
+        Err(error) => {
+            job.mark_fault(&error);
+            runtime_ref.job = Some(JobEntry::Idle(job));
+            return Err(error);
+        }
+    };
+    let connection_id = operation.binding.connection_id;
+    let Some(device_entry) = runtime_ref.devices.remove(&connection_id) else {
+        let _ = job.abandon_pending(connection_id);
+        job.mark_fault("compiled participant connection disappeared");
+        runtime_ref.job = Some(JobEntry::Idle(job));
+        return Err("compiled participant connection disappeared".to_owned());
+    };
+    let DeviceEntry::Idle(state) = device_entry else {
+        runtime_ref.devices.insert(connection_id, device_entry);
+        let _ = job.abandon_pending(connection_id);
+        runtime_ref.job = Some(JobEntry::Idle(job));
+        return Ok(None);
+    };
+    if let Err(error) = validate_binding_identity(&state.snapshot(), operation.binding) {
+        let _ = job.abandon_pending(connection_id);
+        job.mark_fault(&error);
+        runtime_ref
+            .devices
+            .insert(connection_id, DeviceEntry::Idle(state));
+        runtime_ref.job = Some(JobEntry::Idle(job));
+        return Err(error);
+    }
+
+    let scope = runtime_ref.scope.clone();
+    let job_id = job.job_id();
+    let job_snapshot = job.snapshot();
+    let generation = state.generation;
+    let device_snapshot = state.snapshot();
+    runtime_ref.job = Some(JobEntry::Busy {
+        job_id,
+        snapshot: Box::new(job_snapshot),
+    });
+    runtime_ref.devices.insert(
+        connection_id,
+        DeviceEntry::Busy {
+            generation,
+            snapshot: Box::new(device_snapshot),
+        },
+    );
+    Ok(Some((scope, *job, *state, operation)))
+}
+
+fn prepare_next_job_operation(
+    runtime: &ControlWorkerRuntime,
+    job: &mut LiveCachedJob,
+) -> Result<Option<LiveJobOperation>, String> {
+    if let Some(operation) = job.next_operation().map_err(|error| error.to_string())? {
+        return Ok(Some(operation));
+    }
+    match job.phase() {
+        WorkerCachedJobPhaseSnapshot::Installed => {
+            let now_ui_ns = worker_monotonic_ns(&runtime.scope)
+                .ok_or_else(|| "worker monotonic clock is unavailable".to_owned())?;
+            let target_ui_ns = job
+                .target_ui_ns()
+                .ok_or_else(|| "installed job has no shared start epoch".to_owned())?;
+            let inputs = participant_start_inputs(runtime, job, target_ui_ns)?;
+            job.begin_confirmation(now_ui_ns, &inputs)
+                .map_err(|error| error.to_string())?;
+        }
+        WorkerCachedJobPhaseSnapshot::Confirmed | WorkerCachedJobPhaseSnapshot::Irrevocable => job
+            .begin_status_round()
+            .map_err(|error| error.to_string())?,
+        _ => return Ok(None),
+    }
+    job.next_operation().map_err(|error| error.to_string())
+}
+
+async fn perform_live_job_operation(
+    scope: &DedicatedWorkerGlobalScope,
+    mut job: LiveCachedJob,
+    mut state: DeviceState,
+    operation: LiveJobOperation,
+) -> (LiveCachedJob, DeviceState) {
+    let connection_id = operation.binding.connection_id;
+    let Some(session) = state.session.as_mut() else {
+        let _ = job.abandon_pending(connection_id);
+        job.record_failure("authenticated participant session is unavailable");
+        return (job, state);
+    };
+    let request = match session.begin_request_for_config(
+        operation.operation,
+        &operation.body,
+        operation.frame_config_digest,
+        &state.secret,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = job.abandon_pending(connection_id);
+            job.record_failure(&format!("job request construction failed: {error}"));
+            return (job, state);
+        }
+    };
+    let worker_scope: &WorkerGlobalScope = scope.as_ref();
+    let response = fetch_pending_request_in_worker(
+        worker_scope,
+        &state.origin,
+        session,
+        &request,
+        &state.secret,
+    )
+    .await;
+    match response {
+        Ok(response) => {
+            if let Err(error) = job.accept_response(connection_id, &response) {
+                job.record_failure(&format!("job response rejected: {error}"));
+            }
+        }
+        Err(error) => {
+            let _ = job.abandon_pending(connection_id);
+            if job_session_must_reopen(&error) {
+                state.session = None;
+            }
+            job.record_failure(&format!("job fetch failed: {error}"));
+        }
+    }
+    (job, state)
+}
+
+fn finish_live_job_step(
+    runtime: &SharedWorkerRuntime,
+    job_id: u64,
+    connection_id: u64,
+    generation: u64,
+    job: LiveCachedJob,
+    state: DeviceState,
+) {
+    let restored = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let job_matches = matches!(
+            runtime_ref.job.as_ref(),
+            Some(JobEntry::Busy { job_id: active, .. }) if *active == job_id
+        );
+        let device_matches = matches!(
+            runtime_ref.devices.get(&connection_id),
+            Some(DeviceEntry::Busy { generation: active, .. }) if *active == generation
+        );
+        if job_matches && device_matches {
+            runtime_ref.job = Some(JobEntry::Idle(Box::new(job)));
+            runtime_ref
+                .devices
+                .insert(connection_id, DeviceEntry::Idle(Box::new(state)));
+            true
+        } else {
+            false
+        }
+    };
+    if restored {
+        publish_snapshot(runtime, connection_id);
+        publish_job_snapshot(runtime);
+    }
+}
+
+const fn job_session_must_reopen(error: &BrowserFetchError) -> bool {
+    matches!(
+        error,
+        BrowserFetchError::DocumentOrigin
+            | BrowserFetchError::Session(_)
+            | BrowserFetchError::HttpStatus(_)
+            | BrowserFetchError::MissingHeader(_)
+            | BrowserFetchError::Media(_)
+    )
 }
 
 fn launch_device_step(runtime: &SharedWorkerRuntime, connection_id: u64, reject_busy: bool) {
@@ -1109,6 +1880,7 @@ async fn connect_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -
                 state.history.clear();
                 state.estimate = None;
                 state.reset_runtime_health_for_new_boot();
+                state.reset_configuration_for_new_boot();
                 state.reset_capability_for_new_boot();
                 state.reset_waveform_for_new_boot();
             } else if state
@@ -1122,6 +1894,7 @@ async fn connect_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -
             state.session = Some(session);
             state.identity = Some(identity);
             state.reset_runtime_health_evidence();
+            state.reset_configuration_for_new_boot();
             state.phase = DeviceSessionPhase::Sampling;
             state.schedule_success(now_ms);
             state.next_attempt_ms = now_ms;
@@ -1152,6 +1925,7 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
             state.record_observation(observation);
             state.schedule_success(now_ms);
             probe_runtime_health(&scope, worker_scope, &mut state, now_ms).await;
+            probe_configuration_status(&scope, worker_scope, &mut state, now_ms).await;
             download_capability(worker_scope, &mut state).await;
             if state.session.is_some()
                 && state.capability.phase() == CapabilityDownloadPhase::Complete
@@ -1178,6 +1952,7 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
                 let _ = state.clock.reset();
                 state.history.clear();
                 state.reset_runtime_health_for_new_boot();
+                state.reset_configuration_for_new_boot();
                 state.reset_capability_for_new_boot();
                 state.reset_waveform_for_new_boot();
                 state.identity = None;
@@ -1224,6 +1999,43 @@ async fn probe_runtime_health(
                 state.session = None;
             }
             state.record_runtime_health_failure(&error.to_string());
+        }
+    }
+}
+
+async fn probe_configuration_status(
+    scope: &DedicatedWorkerGlobalScope,
+    worker_scope: &WorkerGlobalScope,
+    state: &mut DeviceState,
+    fallback_now_ms: f64,
+) {
+    if state.session.is_none() || !state.configuration_due(fallback_now_ms) {
+        return;
+    }
+    let result = drive_configuration_status_in_worker(
+        worker_scope,
+        &state.origin,
+        state
+            .session
+            .as_mut()
+            .expect("clock probe retained its authenticated session"),
+        &mut state.configuration,
+        &state.secret,
+    )
+    .await;
+    let sampled_now_ms = worker_now_ms(scope);
+    state.schedule_configuration_attempt(if sampled_now_ms.is_finite() {
+        sampled_now_ms
+    } else {
+        fallback_now_ms
+    });
+    match result {
+        Ok(_) => state.record_configuration_success(),
+        Err(error) => {
+            if configuration_session_must_reopen(&error) {
+                state.session = None;
+            }
+            state.record_configuration_failure(&error.to_string());
         }
     }
 }
@@ -1458,6 +2270,21 @@ const fn capability_session_must_reopen(error: &BrowserCapabilityError) -> bool 
     )
 }
 
+const fn configuration_session_must_reopen(error: &BrowserConfigurationError) -> bool {
+    matches!(
+        error,
+        BrowserConfigurationError::ConfigurationIdentity
+            | BrowserConfigurationError::Session(_)
+            | BrowserConfigurationError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
 const fn waveform_session_must_reopen(error: &BrowserWaveformError) -> bool {
     matches!(
         error,
@@ -1649,6 +2476,12 @@ fn worker_now_ms(scope: &DedicatedWorkerGlobalScope) -> f64 {
         .map_or(f64::NAN, |clock| clock.now())
 }
 
+fn worker_monotonic_ns(scope: &DedicatedWorkerGlobalScope) -> Option<u64> {
+    MonotonicTimeBounds::from_milliseconds(worker_now_ms(scope), 1)
+        .ok()
+        .map(MonotonicTimeBounds::latest_ns)
+}
+
 fn publish_snapshot(runtime: &SharedWorkerRuntime, connection_id: u64) {
     let snapshot = runtime
         .borrow()
@@ -1659,6 +2492,18 @@ fn publish_snapshot(runtime: &SharedWorkerRuntime, connection_id: u64) {
         emit_worker_event(
             runtime,
             WorkerEvent::Snapshot {
+                snapshot: Box::new(snapshot),
+            },
+        );
+    }
+}
+
+fn publish_job_snapshot(runtime: &SharedWorkerRuntime) {
+    let snapshot = runtime.borrow().job.as_ref().map(JobEntry::snapshot);
+    if let Some(snapshot) = snapshot {
+        emit_worker_event(
+            runtime,
+            WorkerEvent::JobSnapshot {
                 snapshot: Box::new(snapshot),
             },
         );
@@ -1705,6 +2550,8 @@ pub struct SupervisorView {
     pub lifecycle: SupervisorLifecycle,
     /// Stable connection snapshots sorted by UI-local identity.
     pub devices: Vec<DeviceSessionSnapshot>,
+    /// Complete replacement state for the worker-owned cached job, if any.
+    pub job: Option<WorkerCachedJobSnapshot>,
     /// Canonical connected-board documents decoded once per matching generation.
     pub capabilities: Vec<ConnectedCapabilityView>,
     /// Bounded exact overview history per connected telemetry subscription.
@@ -1851,6 +2698,7 @@ impl ConnectedCapabilityView {
 struct MutableSupervisorView {
     lifecycle: SupervisorLifecycle,
     devices: BTreeMap<u64, DeviceSessionSnapshot>,
+    job: Option<WorkerCachedJobSnapshot>,
     capabilities: BTreeMap<u64, ConnectedCapabilityView>,
     telemetry: BTreeMap<u64, ConnectedTelemetryView>,
     waveforms: BTreeMap<u64, ConnectedWaveformView>,
@@ -1862,6 +2710,7 @@ impl Default for MutableSupervisorView {
         Self {
             lifecycle: SupervisorLifecycle::Starting,
             devices: BTreeMap::new(),
+            job: None,
             capabilities: BTreeMap::new(),
             telemetry: BTreeMap::new(),
             waveforms: BTreeMap::new(),
@@ -2184,6 +3033,7 @@ impl MutableSupervisorView {
                 self.lifecycle = SupervisorLifecycle::Ready { scope_origin };
             }
             WorkerEvent::Snapshot { snapshot } => self.apply_snapshot(*snapshot),
+            WorkerEvent::JobSnapshot { snapshot } => self.job = Some(*snapshot),
             WorkerEvent::CapabilityDocument { capability } => {
                 let connection_id = capability.connection_id;
                 let generation = capability.generation;
@@ -2235,6 +3085,11 @@ impl MutableSupervisorView {
                 self.telemetry.remove(&connection_id);
                 self.waveforms.remove(&connection_id);
             }
+            WorkerEvent::JobRemoved { job_id } => {
+                if self.job.as_ref().is_some_and(|job| job.job_id == job_id) {
+                    self.job = None;
+                }
+            }
             WorkerEvent::CommandRejected {
                 connection_id,
                 message,
@@ -2255,6 +3110,7 @@ impl MutableSupervisorView {
         SupervisorView {
             lifecycle: self.lifecycle.clone(),
             devices: self.devices.values().cloned().collect(),
+            job: self.job.clone(),
             capabilities: self.capabilities.values().cloned().collect(),
             telemetry: self.telemetry.values().cloned().collect(),
             waveforms: self.waveforms.values().cloned().collect(),

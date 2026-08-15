@@ -11,6 +11,7 @@ use alumina_interface_client::schedule::{
 use alumina_interface_core::CanonicalGlobalJob2;
 use alumina_job::{JobCommitId, JobCommitRequest, JobStartObservationSource};
 use alumina_protocol::DeviceId;
+use alumina_storage::{ObjectKind, PublishedObject};
 
 use crate::cache_delivery::ParticipantCacheReady;
 
@@ -25,6 +26,34 @@ pub struct ParticipantPreparation {
     pub boot_id: BootId,
     /// Nonzero lifecycle correlation unique within that device boot.
     pub prepare_id: u64,
+}
+
+/// Fully decoded cached descriptor and boot identity supplied by a worker handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CachedParticipantSchedule {
+    /// Stable MCU identity from the canonical global manifest.
+    pub device_id: DeviceId,
+    /// Current authenticated boot that derives the prepare receipt.
+    pub boot_id: BootId,
+    /// Exact descriptor whose partition was observed in this MCU's cache.
+    pub descriptor: alumina_job::JobDescriptor,
+}
+
+/// Manifest-wide identities needed by the schedule protocol after cache delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DistributedJobIdentity {
+    /// SHA-256 of the complete canonical global manifest.
+    pub global_job_digest: alumina_protocol::Digest,
+    /// Digest of the sorted participant-record set.
+    pub participant_set_digest: alumina_protocol::Digest,
+    /// Integer ticks per exact global second.
+    pub global_timebase_hz: u64,
+    /// Exact terminal global tick.
+    pub duration_ticks: u64,
+    /// Network-loss behavior committed by the manifest.
+    pub network_policy: alumina_job::JobNetworkPolicy,
+    /// Exact manifest publication observed on every participant MCU.
+    pub global_manifest: PublishedObject,
 }
 
 /// Exact device-cycle margins derived from capabilities and UI scheduling policy.
@@ -198,8 +227,8 @@ impl DistributedScheduleCoordinator {
         let mut preparation = preparations.to_vec();
         preparation.sort_unstable_by_key(|item| item.device_id);
 
-        let mut participants = Vec::new();
-        participants
+        let mut cached = Vec::new();
+        cached
             .try_reserve_exact(job.participants().len())
             .map_err(|_| DistributedScheduleError::AllocationOverflow)?;
         for (index, package) in job.participants().iter().enumerate() {
@@ -213,20 +242,81 @@ impl DistributedScheduleCoordinator {
                 return Err(DistributedScheduleError::ParticipantSet);
             }
             let descriptor = package.partition().job_descriptor(preparation.prepare_id)?;
-            participants.push(ParticipantCoordinator {
+            cached.push(CachedParticipantSchedule {
                 device_id: package.device_id(),
-                control: ParticipantScheduleMachine::new(descriptor, preparation.boot_id)?,
-                planned_commit: None,
+                boot_id: preparation.boot_id,
+                descriptor,
             });
         }
         let global = job.policy().global();
+        Self::after_cached_artifacts(
+            DistributedJobIdentity {
+                global_job_digest: job.global_job_digest(),
+                participant_set_digest: job.participant_set_digest(),
+                global_timebase_hz: global.global_timebase_hz,
+                duration_ticks: global.duration_ticks,
+                network_policy: global.network_policy,
+                global_manifest: job.publication(),
+            },
+            &ready,
+            &cached,
+        )
+    }
+
+    /// Constructs the same coordinator from independently decoded worker artifacts.
+    ///
+    /// This is the strict UI/worker seam: the caller cannot substitute a
+    /// descriptor, device, partition publication, or global manifest after the
+    /// cache proofs have been formed.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty, mismatched, duplicated, or substituted participant
+    /// set, allocation failure, and any invalid participant schedule descriptor.
+    pub fn after_cached_artifacts(
+        identity: DistributedJobIdentity,
+        cache_ready: &[ParticipantCacheReady],
+        cached: &[CachedParticipantSchedule],
+    ) -> Result<Self, DistributedScheduleError> {
+        if cache_ready.is_empty()
+            || cache_ready.len() != cached.len()
+            || identity.global_job_digest.is_zero()
+            || identity.participant_set_digest.is_zero()
+            || identity.global_timebase_hz == 0
+            || identity.duration_ticks == 0
+            || identity.global_manifest.object.kind != ObjectKind::MachineJobManifest
+            || identity.global_manifest.object.content.digest != identity.global_job_digest
+        {
+            return Err(DistributedScheduleError::ParticipantSet);
+        }
+        let mut ready = cache_ready.to_vec();
+        ready.sort_unstable_by_key(|item| item.device_id());
+        let mut cached = cached.to_vec();
+        cached.sort_unstable_by_key(|item| item.device_id);
+        let mut participants = Vec::new();
+        participants
+            .try_reserve_exact(cached.len())
+            .map_err(|_| DistributedScheduleError::AllocationOverflow)?;
+        for (ready, cached) in ready.into_iter().zip(cached) {
+            if ready.device_id() != cached.device_id
+                || ready.partition() != cached.descriptor.partition
+                || ready.global_manifest() != identity.global_manifest
+            {
+                return Err(DistributedScheduleError::ParticipantSet);
+            }
+            participants.push(ParticipantCoordinator {
+                device_id: cached.device_id,
+                control: ParticipantScheduleMachine::new(cached.descriptor, cached.boot_id)?,
+                planned_commit: None,
+            });
+        }
         Ok(Self {
             participants,
-            global_job_digest: job.global_job_digest(),
-            participant_set_digest: job.participant_set_digest(),
-            global_timebase_hz: global.global_timebase_hz,
-            duration_ticks: global.duration_ticks,
-            network_policy: global.network_policy,
+            global_job_digest: identity.global_job_digest,
+            participant_set_digest: identity.participant_set_digest,
+            global_timebase_hz: identity.global_timebase_hz,
+            duration_ticks: identity.duration_ticks,
+            network_policy: identity.network_policy,
             target_ui_ns: None,
             intent: CoordinationIntent::Prepare,
         })

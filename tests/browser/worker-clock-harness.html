@@ -15,9 +15,18 @@
       let configured = false;
       let timeout;
       let latestSnapshot;
+      const deviceSnapshots = new Map();
+      let cachedJobRequest;
+      let cachedJobStaged = false;
+      let cachedJobStarted = false;
+      let cachedJobSnapshotCount = 0;
+      let latestCachedJobSnapshot;
+      const cachedJobTransitions = [];
+      let priorCachedJobState;
       let isolatedHealthFailureSnapshot;
       let isolatedCapabilityFailureSnapshot;
       let capabilityDocument;
+      const capabilityDocuments = new Map();
       const telemetryDocuments = [];
       let waveformDocument;
       const waveformDocuments = [];
@@ -27,6 +36,141 @@
       const eventKinds = [];
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
+
+      window.installCachedJobRequest = (request) => {
+        cachedJobRequest = request;
+        maybeStageCachedJob();
+      };
+
+      const exactArray = (left, right) =>
+        JSON.stringify(left) === JSON.stringify(right);
+
+      const compactCachedJobSnapshot = (snapshot) => ({
+        job_id: snapshot.job_id,
+        phase: snapshot.phase,
+        execution_mode: snapshot.execution_mode,
+        target_ui_ns: snapshot.target_ui_ns,
+        consecutive_failures: snapshot.consecutive_failures,
+        last_error: snapshot.last_error,
+        participants: snapshot.participants.map((participant) => ({
+          connection_id: participant.connection_id,
+          generation: participant.generation,
+          cache_artifact: participant.cache_artifact,
+          cache_phase: participant.cache_phase,
+          accepted_bytes: participant.accepted_bytes,
+          total_bytes: participant.total_bytes,
+          next_chunk: participant.next_chunk,
+          schedule_phase: participant.schedule_phase,
+          local_start_cycle: participant.local_start_cycle,
+        })),
+      });
+
+      const compactDeviceSnapshot = (snapshot) => ({
+        connection_id: snapshot.connection_id,
+        generation: snapshot.generation,
+        phase: snapshot.phase,
+        boot_id: snapshot.boot_id,
+        device_identity: snapshot.device_identity,
+        accepted_samples: snapshot.accepted_samples,
+        rejected_samples: snapshot.rejected_samples,
+        consecutive_failures: snapshot.consecutive_failures,
+        last_error: snapshot.last_error,
+        runtime_health_availability: snapshot.runtime_health_availability,
+        runtime_health_consecutive_failures:
+          snapshot.runtime_health_consecutive_failures,
+        runtime_health_last_error: snapshot.runtime_health_last_error,
+        configuration_availability: snapshot.configuration_availability,
+        configuration: snapshot.configuration,
+        configuration_consecutive_failures:
+          snapshot.configuration_consecutive_failures,
+        configuration_last_error: snapshot.configuration_last_error,
+        capability_phase: snapshot.capability_phase,
+        capability_identity: snapshot.capability_identity,
+        capability_consecutive_failures:
+          snapshot.capability_consecutive_failures,
+        capability_last_error: snapshot.capability_last_error,
+        telemetry_phase: snapshot.telemetry_phase,
+        telemetry_event_sequence: snapshot.telemetry_event_sequence,
+        telemetry_dropped_events: snapshot.telemetry_dropped_events,
+        telemetry_consecutive_failures: snapshot.telemetry_consecutive_failures,
+        telemetry_last_error: snapshot.telemetry_last_error,
+      });
+
+      const compactDeviceSnapshots = () =>
+        Array.from(deviceSnapshots.values(), compactDeviceSnapshot);
+
+      const recordCachedJobSnapshot = (snapshot) => {
+        cachedJobSnapshotCount += 1;
+        latestCachedJobSnapshot = compactCachedJobSnapshot(snapshot);
+        const state = JSON.stringify({
+          phase: latestCachedJobSnapshot.phase,
+          participants: latestCachedJobSnapshot.participants.map(
+            (participant) => [
+              participant.cache_artifact,
+              participant.cache_phase,
+              participant.schedule_phase,
+            ],
+          ),
+        });
+        if (state !== priorCachedJobState) {
+          cachedJobTransitions.push(latestCachedJobSnapshot);
+          priorCachedJobState = state;
+        }
+      };
+
+      window.inspectCachedJobHarness = () => ({
+        staged: cachedJobStaged,
+        started: cachedJobStarted,
+        snapshot_count: cachedJobSnapshotCount,
+        latest_cached_job_snapshot: latestCachedJobSnapshot,
+        cached_job_transitions: cachedJobTransitions,
+      });
+
+      const maybeStageCachedJob = () => {
+        if (
+          expectation !== "cached-job" ||
+          cachedJobRequest === undefined ||
+          cachedJobStaged
+        ) {
+          return;
+        }
+        const ready = cachedJobRequest.participants.every((participant) => {
+          const snapshot = deviceSnapshots.get(participant.connection_id);
+          const capability = capabilityDocuments.get(participant.connection_id);
+          return (
+            snapshot !== undefined &&
+            capability !== undefined &&
+            Array.isArray(participant.descriptor) &&
+            participant.descriptor.length > 0 &&
+            snapshot.generation === participant.generation &&
+            capability.generation === participant.generation &&
+            snapshot.phase === "clock_qualified" &&
+            snapshot.device_identity?.board_id.startsWith("sim-") &&
+            exactArray(
+              snapshot.device_identity.device_id,
+              participant.device_id,
+            ) &&
+            snapshot.capability_phase === "complete" &&
+            exactArray(
+              snapshot.capability_identity?.digest,
+              capability.identity.digest,
+            ) &&
+            snapshot.configuration_availability === "available" &&
+            snapshot.configuration?.phase === "active" &&
+            snapshot.configuration.jobs_authorized === true &&
+            snapshot.configuration_consecutive_failures === 0 &&
+            snapshot.configuration_last_error === null
+          );
+        });
+        if (!ready) return;
+        cachedJobStaged = true;
+        worker.postMessage(
+          JSON.stringify({
+            schema_version: 6,
+            command: { kind: "stage_cached_job", request: cachedJobRequest },
+          }),
+        );
+      };
 
       const finish = (status, detail) => {
         output.dataset.status = status;
@@ -40,7 +184,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 5,
+            schema_version: 6,
             command: {
               kind: "capture_waveform",
               request: {
@@ -72,7 +216,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 5) {
+        if (envelope.schema_version !== 6) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -86,7 +230,10 @@
           configured = true;
           timeout = setTimeout(() => {
             finish("failed", {
-              error: "clock qualification timed out",
+              error:
+                expectation === "cached-job"
+                  ? "cached-job workflow timed out"
+                  : "clock qualification timed out",
               event_kinds: eventKinds,
               latest_snapshot: latestSnapshot,
               isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
@@ -96,55 +243,129 @@
               telemetry_documents: telemetryDocuments,
               waveform_document: waveformDocument,
               waveform_documents: waveformDocuments,
+              cached_job_snapshot_count: cachedJobSnapshotCount,
+              latest_cached_job_snapshot: latestCachedJobSnapshot,
+              cached_job_transitions: cachedJobTransitions,
+              device_snapshots: compactDeviceSnapshots(),
             });
-          }, 30000);
-          worker.postMessage(
-            JSON.stringify({
-              schema_version: 5,
-              command: {
-                kind: "configure",
-                request: {
-                  connection_id: 1,
-                  label: "authenticated HTTP simulator",
-                  origin: "http://127.0.0.1:8098",
-                  secret: Array.from(
-                    new TextEncoder().encode("alumina-development"),
-                  ),
-                  sampling: {
-                    maximum_round_trip_ns: 1000000000,
-                    maximum_device_processing_cycles: 2000000,
-                    maximum_drift_ppm: 250,
-                    maximum_sample_age_ns: 5000000000,
-                    maximum_schedule_horizon_ns: 30000000000,
-                    minimum_schedule_lead_ns: 500000000,
-                    minimum_samples: 4,
-                    maximum_timer_error_ns: 2000000,
-                    maximum_uncertainty_cycles: 1000000,
-                    heartbeat_interval_ms: 100,
-                    runtime_health_interval_ms: 1000,
+          }, expectation === "cached-job" ? 180000 : 30000);
+          const simulatorCount = expectation === "cached-job" ? 2 : 1;
+          for (let index = 0; index < simulatorCount; index += 1) {
+            worker.postMessage(
+              JSON.stringify({
+                schema_version: 6,
+                command: {
+                  kind: "configure",
+                  request: {
+                    connection_id: index + 1,
+                    label: `authenticated HTTP simulator ${index + 1}`,
+                    origin: `http://127.0.0.1:${8098 + index}`,
+                    secret: Array.from(
+                      new TextEncoder().encode("alumina-development"),
+                    ),
+                    sampling: {
+                      maximum_round_trip_ns: 1000000000,
+                      maximum_device_processing_cycles: 2000000,
+                      maximum_drift_ppm: 250,
+                      maximum_sample_age_ns: 5000000000,
+                      maximum_schedule_horizon_ns: 30000000000,
+                      minimum_schedule_lead_ns: 500000000,
+                      minimum_samples: 4,
+                      maximum_timer_error_ns: 2000000,
+                      maximum_uncertainty_cycles: 1000000,
+                      heartbeat_interval_ms: 100,
+                      runtime_health_interval_ms: 1000,
+                    },
                   },
                 },
-              },
-            }),
-          );
+              }),
+            );
+          }
           return;
         }
-        if (event.kind === "capability_document") {
-          if (capabilityDocument !== undefined) {
+        if (event.kind === "job_snapshot") {
+          const snapshot = event.snapshot;
+          recordCachedJobSnapshot(snapshot);
+          if (expectation !== "cached-job") {
             clearTimeout(timeout);
             finish("failed", {
-              error: "capability document was emitted more than once",
-              event_kinds: eventKinds,
+              error: "unexpected cached-job snapshot",
+              snapshot,
             });
             return;
           }
+          if (snapshot.phase === "faulted") {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "cached job faulted",
+              cached_job_snapshot_count: cachedJobSnapshotCount,
+              latest_cached_job_snapshot: latestCachedJobSnapshot,
+              cached_job_transitions: cachedJobTransitions,
+              device_snapshots: compactDeviceSnapshots(),
+            });
+            return;
+          }
+          if (snapshot.phase === "ready" && !cachedJobStarted) {
+            cachedJobStarted = true;
+            worker.postMessage(
+              JSON.stringify({
+                schema_version: 6,
+                command: {
+                  kind: "start_cached_job",
+                  job_id: snapshot.job_id,
+                },
+              }),
+            );
+            return;
+          }
+          if (snapshot.phase === "complete") {
+            const valid =
+              cachedJobStarted &&
+              snapshot.execution_mode === "simulation_only" &&
+              snapshot.target_ui_ns !== null &&
+              snapshot.consecutive_failures === 0 &&
+              snapshot.last_error === null &&
+              snapshot.participants.length === 2 &&
+              snapshot.participants.every(
+                (participant) =>
+                  participant.cache_artifact === "complete" &&
+                  participant.cache_phase === "complete" &&
+                  participant.accepted_bytes === participant.total_bytes &&
+                  participant.schedule_phase === "complete" &&
+                  participant.local_start_cycle !== null,
+              );
+            clearTimeout(timeout);
+            finish(valid ? "passed" : "failed", {
+              expectation,
+              error: valid ? undefined : "terminal cached-job snapshot was invalid",
+              cached_job_snapshot_count: cachedJobSnapshotCount,
+              latest_cached_job_snapshot: latestCachedJobSnapshot,
+              cached_job_transitions: cachedJobTransitions,
+              device_snapshots: compactDeviceSnapshots(),
+            });
+            return;
+          }
+          return;
+        }
+        if (event.kind === "capability_document") {
           const capability = event.capability;
+          if (capabilityDocuments.has(capability.connection_id)) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "capability document was emitted more than once for a connection",
+              event_kinds: eventKinds,
+              connection_id: capability.connection_id,
+            });
+            return;
+          }
           const magic = capability.document.slice(0, 8);
           const validMagic =
             JSON.stringify(magic) ===
             JSON.stringify(Array.from(new TextEncoder().encode("ALMCAP04")));
           if (
-            capability.connection_id !== 1 ||
+            capability.connection_id < 1 ||
+            capability.connection_id >
+              (expectation === "cached-job" ? 2 : 1) ||
             capability.generation < 1 ||
             capability.identity.document_bytes !== capability.document.length ||
             capability.identity.digest.length !== 32 ||
@@ -157,10 +378,12 @@
             });
             return;
           }
-          capabilityDocument = capability;
+          capabilityDocuments.set(capability.connection_id, capability);
+          if (capability.connection_id === 1) capabilityDocument = capability;
           return;
         }
         if (event.kind === "telemetry_document") {
+          if (expectation === "cached-job") return;
           const telemetry = event.telemetry;
           const subscription = Uint8Array.from(telemetry.subscription);
           const record = Uint8Array.from(telemetry.event);
@@ -258,6 +481,8 @@
         if (event.kind === "snapshot") {
           const snapshot = event.snapshot;
           latestSnapshot = snapshot;
+          deviceSnapshots.set(snapshot.connection_id, snapshot);
+          maybeStageCachedJob();
           const isolatedHealthFailure =
             snapshot.phase === "clock_qualified" &&
             snapshot.consecutive_failures === 0 &&
@@ -305,6 +530,12 @@
               snapshot.capability_identity.document_bytes &&
             snapshot.capability_consecutive_failures === 0 &&
             snapshot.capability_last_error === null &&
+            snapshot.configuration_availability === "available" &&
+            snapshot.configuration !== null &&
+            snapshot.configuration.phase === "active" &&
+            snapshot.configuration.jobs_authorized === true &&
+            snapshot.configuration_consecutive_failures === 0 &&
+            snapshot.configuration_last_error === null &&
             snapshot.device_identity !== null &&
             snapshot.device_identity.board_id === "sim-mks-tinybee-v1" &&
             snapshot.device_identity.device_id.length === 16 &&

@@ -109,6 +109,26 @@ pub struct ParticipantCacheReady {
 }
 
 impl ParticipantCacheReady {
+    /// Forms crate-internal evidence from publications already reconciled by
+    /// worker-owned upload machines.
+    pub(crate) fn from_reconciled(
+        device_id: DeviceId,
+        partition: PublishedObject,
+        global_manifest: PublishedObject,
+    ) -> Result<Self, ParticipantCacheDeliveryError> {
+        if device_id.0.iter().all(|byte| *byte == 0)
+            || partition.object.kind != alumina_storage::ObjectKind::MachineJobPartition
+            || global_manifest.object.kind != alumina_storage::ObjectKind::MachineJobManifest
+        {
+            return Err(ParticipantCacheDeliveryError::Participant);
+        }
+        Ok(Self {
+            device_id,
+            partition,
+            global_manifest,
+        })
+    }
+
     /// Stable target device whose cache was reconciled.
     #[must_use]
     pub const fn device_id(self) -> DeviceId {

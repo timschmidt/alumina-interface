@@ -4,12 +4,14 @@
 //! from them. The egui layer only projects retained exact values for display;
 //! neither painter coordinates nor formatted text can flow back into CAM.
 
-use alumina_board::{OwnerDomain, ResourceId};
+use alumina_board::BoardPackage;
 use alumina_config::{
-    BindingFlags, BindingRole, CONFIGURATION_HEADER_BYTES, CONFIGURATION_RECORD_BYTES,
-    ConfigurationDocumentView, ConfigurationFlags, ConfigurationHeader, ConfigurationIdentity,
-    ConfigurationRecord, ExactScalar, FactEvidence, MAX_CONFIGURATION_RECORDS,
-    Rational as ConfigurationRational, ResourceBinding, ScalarFact, SignalPolarity,
+    CONFIGURATION_HEADER_BYTES, CONFIGURATION_RECORD_BYTES, ConfigurationDocumentView,
+    ConfigurationIdentity, MAX_CONFIGURATION_RECORDS,
+};
+use alumina_interface_client::worker::{
+    MAXIMUM_CACHED_JOB_PARTICIPANTS, WorkerCachedJobParticipant, WorkerCachedJobRequest,
+    WorkerJobExecutionMode,
 };
 use alumina_interface_core::{
     CanonicalDirectFiniteDifferenceProgram2, CanonicalDirectMotionEvidence1,
@@ -64,6 +66,24 @@ N20 G1 X4 Y0\n\
 N30 G2 X8 Y0 I2 J0\n\
 M30\n\
 %\n";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MachineCamParticipantSpec {
+    device: DeviceId,
+    stream: [u8; 16],
+    partition_upload: UploadId,
+}
+
+/// Exact live authority selected by the UI for one deployment compilation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MachineCamDeploymentTarget {
+    pub(crate) connection_id: u64,
+    pub(crate) generation: u64,
+    pub(crate) device_id: DeviceId,
+    pub(crate) boot_id: [u8; 16],
+    pub(crate) capability_digest: Digest,
+    pub(crate) config_digest: Digest,
+}
 
 #[derive(Clone, Debug)]
 enum MachineCamSource {
@@ -129,6 +149,7 @@ enum DirectMachineCamState {
 }
 
 struct MachineCamArtifacts {
+    board_package: BoardPackage<'static>,
     configuration_bytes: Vec<u8>,
     configuration_identity: ConfigurationIdentity,
     source: MachineCamSource,
@@ -144,10 +165,16 @@ struct MachineCamArtifacts {
 }
 
 impl MachineCamArtifacts {
-    fn compile(configuration_bytes: Vec<u8>, source: MachineCamSource) -> Result<Self, String> {
+    fn compile(
+        board_package: &BoardPackage<'static>,
+        configuration_bytes: Vec<u8>,
+        source: MachineCamSource,
+        shared_participants: &[MachineCamParticipantSpec],
+        global_upload_id: UploadId,
+    ) -> Result<Self, String> {
         let configuration_digest = sha256(&configuration_bytes).digest;
         let view = ConfigurationDocumentView::decode::<MAX_CONFIGURATION_RECORDS>(
-            &board_mks_tinybee::PACKAGE,
+            board_package,
             &configuration_bytes,
             configuration_digest,
         )
@@ -194,13 +221,21 @@ impl MachineCamArtifacts {
         replay_canonical_schedule_evidence(&evidence, &schedule, &program, &partition)
             .map_err(|error| format!("canonical evidence replay rejected: {error}"))?;
 
-        let shared_job = compile_shared_machine_cam_job(&profile, &schedule, &program, &evidence)?;
+        let shared_job = compile_shared_machine_cam_job(
+            &profile,
+            &schedule,
+            &program,
+            &evidence,
+            shared_participants,
+            global_upload_id,
+        )?;
         let direct = match compile_direct_machine_cam(&profile, &resolution_budget, &schedule) {
             Ok(artifacts) => DirectMachineCamState::Ready(Box::new(artifacts)),
             Err(error) => DirectMachineCamState::Unsupported(error),
         };
 
         Ok(Self {
+            board_package: *board_package,
             configuration_bytes,
             configuration_identity,
             source,
@@ -264,7 +299,12 @@ fn compile_shared_machine_cam_job(
     schedule: &CertifiedJerkSchedule2,
     program: &CanonicalScheduledProgram2,
     evidence: &CanonicalScheduleEvidence3,
+    participants: &[MachineCamParticipantSpec],
+    global_upload_id: UploadId,
 ) -> Result<CanonicalSharedScheduledGlobalJob2, String> {
+    if participants.is_empty() || participants.len() > MAXIMUM_CACHED_JOB_PARTICIPANTS {
+        return Err("shared cached job requires one through eight participants".to_owned());
+    }
     let global_template = MachineJobGlobalFacts {
         network_policy: JobNetworkPolicy::NetworkAttended,
         global_timebase_hz: 0,
@@ -280,7 +320,7 @@ fn compile_shared_machine_cam_job(
     };
     let shared_policy = SharedGlobalJobCompilePolicy2::try_new(
         global_template,
-        UploadId(0x3344_5566_7788_9900),
+        global_upload_id,
         700,
         CacheLimits {
             maximum_object_bytes: 4 * 1024 * 1024,
@@ -289,35 +329,46 @@ fn compile_shared_machine_cam_job(
         },
     )
     .map_err(|error| format!("shared global policy rejected: {error}"))?;
-    let board_package_digest = sha256(b"MKS TinyBee v1.0 board package").digest;
+    let board_package_digest = profile.capability_digest();
     let resource_set_digest = profile.configuration_digest();
     let safety_envelope_digest = global_template.safety_policy_digest;
-    let first = SharedScheduledJobParticipant2::new(
-        SHARED_DEVICE_1,
-        board_package_digest,
-        resource_set_digest,
-        safety_envelope_digest,
-        schedule,
-        program,
-        profile,
-        machine_cam_partition_policy(SHARED_STREAM_1, UploadId(0x1122_3344_5566_0001), profile)?,
-    );
-    let second = SharedScheduledJobParticipant2::new(
-        SHARED_DEVICE_2,
-        board_package_digest,
-        resource_set_digest,
-        safety_envelope_digest,
-        schedule,
-        program,
-        profile,
-        machine_cam_partition_policy(SHARED_STREAM_2, UploadId(0x1122_3344_5566_0002), profile)?,
-    );
-    compile_shared_scheduled_global_job(
-        shared_policy,
-        TimerDilationPolicy::INTERACTIVE,
-        vec![second, first],
-    )
-    .map_err(|error| format!("shared cached-job compilation rejected: {error}"))
+    let mut shared = Vec::new();
+    shared
+        .try_reserve_exact(participants.len())
+        .map_err(|_| "shared participant allocation failed".to_owned())?;
+    for participant in participants {
+        shared.push(SharedScheduledJobParticipant2::new(
+            participant.device,
+            board_package_digest,
+            resource_set_digest,
+            safety_envelope_digest,
+            schedule,
+            program,
+            profile,
+            machine_cam_partition_policy(
+                participant.stream,
+                participant.partition_upload,
+                profile,
+            )?,
+        ));
+    }
+    compile_shared_scheduled_global_job(shared_policy, TimerDilationPolicy::INTERACTIVE, shared)
+        .map_err(|error| format!("shared cached-job compilation rejected: {error}"))
+}
+
+const fn baseline_shared_participants() -> [MachineCamParticipantSpec; 2] {
+    [
+        MachineCamParticipantSpec {
+            device: SHARED_DEVICE_1,
+            stream: SHARED_STREAM_1,
+            partition_upload: UploadId(0x1122_3344_5566_0001),
+        },
+        MachineCamParticipantSpec {
+            device: SHARED_DEVICE_2,
+            stream: SHARED_STREAM_2,
+            partition_upload: UploadId(0x1122_3344_5566_0002),
+        },
+    ]
 }
 
 fn machine_cam_partition_policy(
@@ -361,11 +412,49 @@ pub(crate) struct MachineCamWorkspace {
     file_status: String,
 }
 
+fn validate_deployment_targets(
+    job_id: u64,
+    targets: &[MachineCamDeploymentTarget],
+) -> Result<(Vec<MachineCamDeploymentTarget>, Digest, Digest), String> {
+    if job_id == 0 || targets.is_empty() || targets.len() > MAXIMUM_CACHED_JOB_PARTICIPANTS {
+        return Err("deployment requires a nonzero job and one through eight MCUs".to_owned());
+    }
+    let mut targets = targets.to_vec();
+    targets.sort_unstable_by_key(|target| target.device_id);
+    if targets.windows(2).any(|pair| {
+        pair[0].device_id >= pair[1].device_id || pair[0].connection_id == pair[1].connection_id
+    }) {
+        return Err("deployment targets must have unique devices and connections".to_owned());
+    }
+    let capability_digest = targets[0].capability_digest;
+    let config_digest = targets[0].config_digest;
+    if targets.iter().any(|target| {
+        target.connection_id == 0
+            || target.generation == 0
+            || target.device_id.is_zero()
+            || target.boot_id.iter().all(|byte| *byte == 0)
+            || target.capability_digest != capability_digest
+            || target.config_digest != config_digest
+    }) {
+        return Err(
+            "initial live CAM requires one homogeneous nonzero board/configuration set".to_owned(),
+        );
+    }
+    Ok((targets, capability_digest, config_digest))
+}
+
 impl MachineCamWorkspace {
     pub(crate) fn try_new() -> Result<Self, String> {
         let source = MachineCamSource::exact_fixture()?;
+        let package = board_mks_tinybee::PACKAGE;
         Ok(Self {
-            artifacts: MachineCamArtifacts::compile(representative_configuration_bytes()?, source)?,
+            artifacts: MachineCamArtifacts::compile(
+                &package,
+                representative_configuration_bytes(package.board.capability_digest)?,
+                source,
+                &baseline_shared_participants(),
+                UploadId(0x3344_5566_7788_9900),
+            )?,
             selected_axis: 0,
             selected_point: 0,
             selected_segment: 0,
@@ -379,11 +468,105 @@ impl MachineCamWorkspace {
         })
     }
 
+    /// Recompiles the current exact source against live board/configuration authority.
+    pub(crate) fn build_cached_job_request(
+        &self,
+        job_id: u64,
+        targets: &[MachineCamDeploymentTarget],
+    ) -> Result<WorkerCachedJobRequest, String> {
+        let (targets, capability_digest, config_digest) =
+            validate_deployment_targets(job_id, targets)?;
+        let package = deployment_board_package(capability_digest)?;
+        let configuration_bytes = if self.artifacts.configuration_identity.capability_digest
+            == capability_digest
+            && self.artifacts.configuration_identity.digest == config_digest
+        {
+            self.artifacts.configuration_bytes.clone()
+        } else {
+            let bytes = representative_configuration_bytes(capability_digest)?;
+            if sha256(&bytes).digest != config_digest {
+                return Err(
+                    "live active configuration has no exact canonical document in this UI"
+                        .to_owned(),
+                );
+            }
+            bytes
+        };
+        let specs: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| MachineCamParticipantSpec {
+                device: target.device_id,
+                stream: deployment_stream_id(target.device_id),
+                partition_upload: deployment_upload_id(job_id, index, 0xa100_0000_0000_0000),
+            })
+            .collect();
+        let artifacts = MachineCamArtifacts::compile(
+            &package,
+            configuration_bytes,
+            self.artifacts.source.clone(),
+            &specs,
+            deployment_upload_id(job_id, 0, 0xc100_0000_0000_0000),
+        )?;
+        let global = artifacts.shared_job.global_job();
+        if global.participants().len() != targets.len() {
+            return Err("compiled global participant set changed unexpectedly".to_owned());
+        }
+        let mut participants = Vec::new();
+        participants
+            .try_reserve_exact(targets.len())
+            .map_err(|_| "worker participant allocation failed".to_owned())?;
+        for (index, (target, package)) in targets.iter().zip(global.participants()).enumerate() {
+            if target.device_id != package.device_id() {
+                return Err("compiled participant ordering changed unexpectedly".to_owned());
+            }
+            let prepare_id = job_id
+                .rotate_left(17)
+                .wrapping_add(u64::try_from(index).map_err(|_| "participant index overflowed")?)
+                .wrapping_add(1)
+                .max(1);
+            let descriptor = package
+                .partition()
+                .job_descriptor(prepare_id)
+                .map_err(|error| format!("live descriptor rejected: {error}"))?;
+            let manifest_plan = global
+                .upload_plan_for(deployment_upload_id(job_id, index, 0xb100_0000_0000_0000))
+                .map_err(|error| format!("live manifest upload rejected: {error}"))?;
+            participants.push(WorkerCachedJobParticipant {
+                connection_id: target.connection_id,
+                generation: target.generation,
+                device_id: target.device_id.0,
+                boot_id: target.boot_id,
+                descriptor: descriptor
+                    .encode::<2>()
+                    .map_err(|error| format!("live descriptor encoding rejected: {error:?}"))?
+                    .to_vec(),
+                partition_plan: package.partition().upload_plan().encode().to_vec(),
+                partition_bytes: package.partition().bytes().to_vec(),
+                manifest_plan: manifest_plan.encode().to_vec(),
+            });
+        }
+        let request = WorkerCachedJobRequest {
+            job_id,
+            execution_mode: if package.board.id.starts_with("sim-") {
+                WorkerJobExecutionMode::SimulationOnly
+            } else {
+                WorkerJobExecutionMode::Hardware
+            },
+            manifest_bytes: global.manifest_bytes().to_vec(),
+            participants,
+        };
+        request
+            .validate()
+            .map_err(|error| format!("worker cached-job handoff rejected: {error}"))?;
+        Ok(request)
+    }
+
     pub(crate) fn show_sidebar(&self, ui: &mut egui::Ui) {
         let artifacts = &self.artifacts;
         ui.label("Authoritative machine-bound CAM");
-        ui.strong(board_mks_tinybee::PACKAGE.board.id);
-        ui.label(board_mks_tinybee::PACKAGE.board.revision);
+        ui.strong(artifacts.board_package.board.id);
+        ui.label(artifacts.board_package.board.revision);
         ui.monospace(format!(
             "config {}…",
             digest_prefix(artifacts.configuration_identity.digest.0)
@@ -439,7 +622,13 @@ impl MachineCamWorkspace {
 
     fn import_configuration_bytes(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
         let byte_len = bytes.len();
-        let artifacts = MachineCamArtifacts::compile(bytes, self.artifacts.source.clone())?;
+        let artifacts = MachineCamArtifacts::compile(
+            &self.artifacts.board_package,
+            bytes,
+            self.artifacts.source.clone(),
+            &baseline_shared_participants(),
+            UploadId(0x3344_5566_7788_9900),
+        )?;
         self.artifacts = artifacts;
         self.selected_point = 0;
         self.selected_segment = 0;
@@ -456,8 +645,13 @@ impl MachineCamWorkspace {
             raw_bytes: bytes,
             report,
         };
-        let artifacts =
-            MachineCamArtifacts::compile(self.artifacts.configuration_bytes.clone(), source)?;
+        let artifacts = MachineCamArtifacts::compile(
+            &self.artifacts.board_package,
+            self.artifacts.configuration_bytes.clone(),
+            source,
+            &baseline_shared_participants(),
+            UploadId(0x3344_5566_7788_9900),
+        )?;
         self.artifacts = artifacts;
         self.selected_point = 0;
         self.selected_segment = 0;
@@ -466,8 +660,13 @@ impl MachineCamWorkspace {
 
     fn restore_exact_fixture(&mut self) -> Result<(), String> {
         let source = MachineCamSource::exact_fixture()?;
-        let artifacts =
-            MachineCamArtifacts::compile(self.artifacts.configuration_bytes.clone(), source)?;
+        let artifacts = MachineCamArtifacts::compile(
+            &self.artifacts.board_package,
+            self.artifacts.configuration_bytes.clone(),
+            source,
+            &baseline_shared_participants(),
+            UploadId(0x3344_5566_7788_9900),
+        )?;
         self.artifacts = artifacts;
         self.selected_point = 0;
         self.selected_segment = 0;
@@ -1534,202 +1733,37 @@ impl MachineCamWorkspace {
     }
 }
 
-fn wire_rational(numerator: i64, denominator: u64) -> Result<ConfigurationRational, String> {
-    ConfigurationRational::new(numerator, denominator)
-        .map_err(|error| format!("configuration rational rejected: {error:?}"))
-}
-
-fn binding(
-    instance: u16,
-    role: BindingRole,
-    resource: ResourceId,
-    polarity: SignalPolarity,
-) -> ConfigurationRecord {
-    let safety = role == BindingRole::EmergencyStop;
-    ConfigurationRecord::Binding(ResourceBinding {
-        instance,
-        role,
-        resource,
-        owner: OwnerDomain::Realtime,
-        polarity,
-        flags: BindingFlags(if safety {
-            BindingFlags::REQUIRED_INTERLOCK
-        } else {
-            0
-        }),
-        minimum_active_cycles: 48,
-        minimum_inactive_cycles: 48,
-        maximum_frequency_hz: if safety { 0 } else { 100_000 },
-        watchdog_cycles: 240_000,
-    })
-}
-
-fn scalar(
-    instance: u16,
-    fact: ScalarFact,
-    numerator: i64,
-    denominator: u64,
-    uncertainty_numerator: i64,
-    uncertainty_denominator: u64,
-) -> Result<ConfigurationRecord, String> {
-    Ok(ConfigurationRecord::Scalar(ExactScalar {
-        instance,
-        fact,
-        value: wire_rational(numerator, denominator)?,
-        uncertainty: wire_rational(uncertainty_numerator, uncertainty_denominator)?,
-        evidence: FactEvidence::Declared,
-    }))
-}
-
-fn axis_scalars(instance: u16) -> Result<Vec<ConfigurationRecord>, String> {
-    Ok(vec![
-        scalar(instance, ScalarFact::AxisFullStepsPerTurn, 200, 1, 0, 1)?,
-        scalar(instance, ScalarFact::AxisMicrosteps, 16, 1, 0, 1)?,
-        scalar(
-            instance,
-            ScalarFact::AxisMotorTurnsPerOutputTurn,
-            1,
-            1,
-            0,
-            1,
-        )?,
-        scalar(
-            instance,
-            ScalarFact::AxisTravelMetresPerOutputTurn,
-            1,
-            500,
-            0,
-            1,
-        )?,
-        scalar(
-            instance,
-            ScalarFact::AxisCalibrationScale,
-            1,
-            1,
-            1,
-            1_000_000,
-        )?,
-        scalar(instance, ScalarFact::AxisPositionMinimumMetres, 0, 1, 0, 1)?,
-        scalar(instance, ScalarFact::AxisPositionMaximumMetres, 3, 10, 0, 1)?,
-        scalar(
-            instance,
-            ScalarFact::AxisVelocityLimitMetresPerSecond,
-            1,
-            20,
-            1,
-            1_000,
-        )?,
-        scalar(
-            instance,
-            ScalarFact::AxisAccelerationLimitMetresPerSecondSquared,
-            1,
-            2,
-            1,
-            100,
-        )?,
-        scalar(
-            instance,
-            ScalarFact::AxisJerkLimitMetresPerSecondCubed,
-            5,
-            1,
-            1,
-            10,
-        )?,
-        scalar(
-            instance,
-            ScalarFact::AxisFollowingErrorMetres,
-            1,
-            100_000,
-            1,
-            500_000,
-        )?,
-    ])
-}
-
-fn representative_configuration_bytes() -> Result<Vec<u8>, String> {
-    let mut records = vec![
-        binding(
-            0,
-            BindingRole::AxisStep,
-            ResourceId::I2sOut { engine: 0, bit: 1 },
-            SignalPolarity::ActiveHigh,
-        ),
-        binding(
-            0,
-            BindingRole::AxisDirection,
-            ResourceId::I2sOut { engine: 0, bit: 2 },
-            SignalPolarity::ActiveHigh,
-        ),
-        binding(
-            0,
-            BindingRole::AxisDisable,
-            ResourceId::I2sOut { engine: 0, bit: 0 },
-            SignalPolarity::ActiveHigh,
-        ),
-        binding(
-            0,
-            BindingRole::EmergencyStop,
-            ResourceId::Gpio(33),
-            SignalPolarity::ActiveLow,
-        ),
-        binding(
-            1,
-            BindingRole::AxisStep,
-            ResourceId::I2sOut { engine: 0, bit: 4 },
-            SignalPolarity::ActiveHigh,
-        ),
-        binding(
-            1,
-            BindingRole::AxisDirection,
-            ResourceId::I2sOut { engine: 0, bit: 5 },
-            SignalPolarity::ActiveHigh,
-        ),
-        binding(
-            1,
-            BindingRole::AxisDisable,
-            ResourceId::I2sOut { engine: 0, bit: 3 },
-            SignalPolarity::ActiveHigh,
-        ),
-    ];
-    records.extend(axis_scalars(0)?);
-    records.push(scalar(0, ScalarFact::TimerTickHertz, 1_000_000, 1, 0, 1)?);
-    records.push(scalar(
-        0,
-        ScalarFact::StepperOutputQuantumCycles,
-        1,
-        1,
-        0,
-        1,
-    )?);
-    records.extend(axis_scalars(1)?);
-    records.sort_by_key(|record| record.canonical_order_key());
-    let realtime_record_count = records
-        .iter()
-        .filter(|record| record.realtime_relevant())
-        .count();
-    let header = ConfigurationHeader {
-        capability_digest: board_mks_tinybee::CAPABILITY_DIGEST,
-        record_count: u16::try_from(records.len())
-            .map_err(|_| "configuration record count exceeds u16".to_owned())?,
-        realtime_record_count: u16::try_from(realtime_record_count)
-            .map_err(|_| "realtime configuration record count exceeds u16".to_owned())?,
-        flags: ConfigurationFlags(
-            ConfigurationFlags::MOTION | ConfigurationFlags::CACHED_AUTONOMOUS,
-        ),
-    };
-    let mut bytes = Vec::from(
-        header
-            .encode()
-            .map_err(|error| format!("configuration header rejected: {error:?}"))?,
-    );
-    for record in records {
-        bytes.extend_from_slice(
-            &record
-                .encode()
-                .map_err(|error| format!("configuration record rejected: {error:?}"))?,
-        );
+fn deployment_board_package(capability_digest: Digest) -> Result<BoardPackage<'static>, String> {
+    if capability_digest == board_mks_tinybee::CAPABILITY_DIGEST {
+        Ok(board_mks_tinybee::PACKAGE)
+    } else if capability_digest == alumina_sim::capability::CAPABILITY_DIGEST {
+        Ok(alumina_sim::capability::package())
+    } else {
+        Err(format!(
+            "capability {}… has no live CAM board package in this release",
+            digest_prefix(capability_digest.0)
+        ))
     }
-    Ok(bytes)
+}
+
+fn deployment_stream_id(device_id: DeviceId) -> [u8; 16] {
+    let mut transcript = [0_u8; 32];
+    transcript[..16].copy_from_slice(b"ALUM-LIVE-STREAM");
+    transcript[16..].copy_from_slice(&device_id.0);
+    let digest = sha256(&transcript).digest;
+    let mut stream = [0_u8; 16];
+    stream.copy_from_slice(&digest.0[..16]);
+    stream
+}
+
+fn deployment_upload_id(job_id: u64, index: usize, domain: u64) -> UploadId {
+    let index = u64::try_from(index).unwrap_or(u64::MAX);
+    UploadId((domain ^ job_id.rotate_left(29) ^ index.wrapping_add(1)).max(1))
+}
+
+fn representative_configuration_bytes(capability_digest: Digest) -> Result<Vec<u8>, String> {
+    alumina_sim::configuration::representative_tinybee_configuration_bytes(capability_digest)
+        .map_err(|error| format!("representative TinyBee configuration rejected: {error:?}"))
 }
 
 fn exact_row(ui: &mut egui::Ui, label: &str, value: String) {
@@ -1875,12 +1909,63 @@ mod tests {
     }
 
     #[test]
+    fn live_handoff_recompiles_for_exact_physical_and_simulated_authority() {
+        let workspace = MachineCamWorkspace::try_new().unwrap();
+        let physical_config = workspace.artifacts.configuration_identity.digest;
+        let physical = workspace
+            .build_cached_job_request(
+                19,
+                &[MachineCamDeploymentTarget {
+                    connection_id: 3,
+                    generation: 7,
+                    device_id: DeviceId([0x41; 16]),
+                    boot_id: [0x51; 16],
+                    capability_digest: board_mks_tinybee::CAPABILITY_DIGEST,
+                    config_digest: physical_config,
+                }],
+            )
+            .unwrap();
+        assert_eq!(physical.execution_mode, WorkerJobExecutionMode::Hardware);
+        assert_eq!(physical.validate(), Ok(()));
+
+        let simulated_config = sha256(
+            &representative_configuration_bytes(alumina_sim::capability::CAPABILITY_DIGEST)
+                .unwrap(),
+        )
+        .digest;
+        let simulated = workspace
+            .build_cached_job_request(
+                20,
+                &[MachineCamDeploymentTarget {
+                    connection_id: 4,
+                    generation: 8,
+                    device_id: DeviceId(*b"ALUM-SIM:TINYBEE"),
+                    boot_id: [0x61; 16],
+                    capability_digest: alumina_sim::capability::CAPABILITY_DIGEST,
+                    config_digest: simulated_config,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            simulated.execution_mode,
+            WorkerJobExecutionMode::SimulationOnly
+        );
+        assert_eq!(simulated.validate(), Ok(()));
+    }
+
+    #[test]
     fn retired_configuration_v5_is_rejected_without_a_compatibility_path() {
         let workspace = MachineCamWorkspace::try_new().unwrap();
         let mut legacy = workspace.artifacts.configuration_bytes.clone();
         legacy[..8].copy_from_slice(b"ALMCFG05");
         legacy[8..10].copy_from_slice(&5_u16.to_le_bytes());
-        let result = MachineCamArtifacts::compile(legacy, workspace.artifacts.source.clone());
+        let result = MachineCamArtifacts::compile(
+            &workspace.artifacts.board_package,
+            legacy,
+            workspace.artifacts.source.clone(),
+            &baseline_shared_participants(),
+            UploadId(0x3344_5566_7788_9900),
+        );
         let Err(error) = result else {
             panic!("retired configuration unexpectedly compiled");
         };

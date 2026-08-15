@@ -7,24 +7,33 @@ use alumina_capability::{
     decode_board_capability, decode_resource_id,
 };
 use alumina_clock::ClockEstimationPolicy;
+use alumina_config::{
+    ConfigurationCoordinatorFlags, ConfigurationCoordinatorPhase, ConfigurationCoordinatorStatus,
+};
 use alumina_diagnostics::transport::{
     DiagnosticTransportLimits, decode_telemetry_event, decode_telemetry_subscribe,
 };
 use alumina_diagnostics::{DiagnosticLimits, decode_digital_capture};
+use alumina_job::{DecodedMachineJobManifest, JOB_DESCRIPTOR_WIRE_BYTES, JobDescriptor};
+use alumina_machine_ir::MAX_EXECUTION_AXES;
 use alumina_protocol::{DeviceCycle, DeviceId, Digest};
 use alumina_runtime::health::{
     RuntimeHealthFlags, RuntimeHealthSnapshot as WireRuntimeHealthSnapshot,
 };
 use alumina_runtime::stack::{StackDomain, StackWatermarkFlags, StackWatermarkSnapshot};
+use alumina_storage::{CacheLimits, ObjectKind, UploadPlan};
 use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilityDownloadPhase;
+use crate::configuration::ConfigurationStatusAvailability;
 use crate::diagnostics::{TelemetryClientPhase, WaveformClientPhase};
 use crate::health::{RuntimeHealthAvailability, RuntimeHealthView};
 use crate::http::{DeviceCredentialSource, DeviceIdentity};
+use crate::schedule::ParticipantSchedulePhase;
+use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 5;
+pub const WORKER_SCHEMA_VERSION: u16 = 6;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -33,6 +42,16 @@ pub const MAXIMUM_WORKER_DIAGNOSTIC_BYTES: usize = 512;
 const MAXIMUM_LABEL_BYTES: usize = 64;
 const MAXIMUM_ORIGIN_BYTES: usize = 256;
 const MAXIMUM_SECRET_BYTES: usize = 256;
+/// Maximum independently scheduled MCUs in one initial browser-owned job.
+pub const MAXIMUM_CACHED_JOB_PARTICIPANTS: usize = 8;
+/// Aggregate canonical manifest and partition bytes accepted in one worker command.
+pub const MAXIMUM_CACHED_JOB_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
+/// Storage policy used to independently decode compiler-supplied upload plans.
+pub const WORKER_CACHED_JOB_LIMITS: CacheLimits = CacheLimits {
+    maximum_object_bytes: 4 * 1024 * 1024,
+    maximum_chunk_bytes: 1_024,
+    maximum_chunks: 10_000,
+};
 /// Bounded capability-selected one-shot digital-capture request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +86,173 @@ impl WorkerWaveformRequest {
                 return Err(WorkerContractError::WaveformRequest);
             }
             previous = Some(resource);
+        }
+        Ok(())
+    }
+}
+
+/// Authority class requested for a cached job's eventual start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerJobExecutionMode {
+    /// Host simulator only; never a physical-output claim.
+    SimulationOnly,
+    /// Physical execution, admitted later only by armable capability and credential policy.
+    Hardware,
+}
+
+/// One sorted MCU package transferred from authoritative CAM to the control worker.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCachedJobParticipant {
+    /// UI-local authenticated connection that must still own this device.
+    pub connection_id: u64,
+    /// Exact worker generation observed during compilation.
+    pub generation: u64,
+    /// Stable MCU identity repeated in the global manifest.
+    pub device_id: [u8; 16],
+    /// Boot identity used to derive the prepare receipt.
+    pub boot_id: [u8; 16],
+    /// Canonical fixed `JobPrepare` descriptor bytes.
+    pub descriptor: Vec<u8>,
+    /// Canonical `StorageBeginUpload` plan for the local partition.
+    pub partition_plan: Vec<u8>,
+    /// Complete immutable local execution partition.
+    pub partition_bytes: Vec<u8>,
+    /// Device-local upload plan for the identical global manifest.
+    pub manifest_plan: Vec<u8>,
+}
+
+/// Complete exact cached-job handoff from browser CAM to the network worker.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCachedJobRequest {
+    /// Nonzero UI-local job identity.
+    pub job_id: u64,
+    /// Explicit simulator versus physical execution boundary.
+    pub execution_mode: WorkerJobExecutionMode,
+    /// Complete canonical ALMJMF02 global manifest bytes.
+    pub manifest_bytes: Vec<u8>,
+    /// Strictly device-sorted participant artifacts.
+    pub participants: Vec<WorkerCachedJobParticipant>,
+}
+
+impl WorkerCachedJobRequest {
+    /// Independently decodes every canonical artifact and cross-checks all identities.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid bounds, ordering, upload identities, object bytes,
+    /// descriptors, manifest records, or network policy before device I/O.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.job_id == 0
+            || self.participants.is_empty()
+            || self.participants.len() > MAXIMUM_CACHED_JOB_PARTICIPANTS
+        {
+            return Err(WorkerContractError::CachedJobRequest);
+        }
+        let total_bytes =
+            self.participants
+                .iter()
+                .try_fold(self.manifest_bytes.len(), |total, participant| {
+                    total
+                        .checked_add(participant.partition_bytes.len())
+                        .and_then(|total| total.checked_add(participant.descriptor.len()))
+                        .and_then(|total| total.checked_add(participant.partition_plan.len()))
+                        .and_then(|total| total.checked_add(participant.manifest_plan.len()))
+                });
+        if total_bytes.is_none_or(|bytes| bytes > MAXIMUM_CACHED_JOB_ARTIFACT_BYTES) {
+            return Err(WorkerContractError::CachedJobRequest);
+        }
+        let manifest = DecodedMachineJobManifest::decode(&self.manifest_bytes)
+            .map_err(|_| WorkerContractError::CachedJobRequest)?;
+        if manifest.participant_count() != self.participants.len()
+            || manifest.global().network_policy != alumina_job::JobNetworkPolicy::NetworkAttended
+        {
+            return Err(WorkerContractError::CachedJobRequest);
+        }
+
+        let mut previous_device = None;
+        let mut connection_ids = std::collections::BTreeSet::new();
+        let mut partition_upload_ids = std::collections::BTreeSet::new();
+        let mut manifest_upload_ids = std::collections::BTreeSet::new();
+        let expected_manifest_content = alumina_storage::sha256(&self.manifest_bytes);
+        let mut expected_manifest_publication = None;
+        for (index, participant) in self.participants.iter().enumerate() {
+            if participant.connection_id == 0
+                || participant.generation == 0
+                || participant.device_id.iter().all(|byte| *byte == 0)
+                || participant.boot_id.iter().all(|byte| *byte == 0)
+                || participant.descriptor.len() != JOB_DESCRIPTOR_WIRE_BYTES
+                || !connection_ids.insert(participant.connection_id)
+            {
+                return Err(WorkerContractError::CachedJobRequest);
+            }
+            let device_id = DeviceId(participant.device_id);
+            if previous_device.is_some_and(|previous| previous >= device_id) {
+                return Err(WorkerContractError::CachedJobRequest);
+            }
+            previous_device = Some(device_id);
+
+            let partition_plan =
+                UploadPlan::decode(&participant.partition_plan, WORKER_CACHED_JOB_LIMITS)
+                    .map_err(|_| WorkerContractError::CachedJobRequest)?;
+            let manifest_plan =
+                UploadPlan::decode(&participant.manifest_plan, WORKER_CACHED_JOB_LIMITS)
+                    .map_err(|_| WorkerContractError::CachedJobRequest)?;
+            if partition_plan.object.kind != ObjectKind::MachineJobPartition
+                || manifest_plan.object.kind != ObjectKind::MachineJobManifest
+                || manifest_plan.object.content != expected_manifest_content
+                || !partition_upload_ids.insert(partition_plan.upload_id.0)
+                || !manifest_upload_ids.insert(manifest_plan.upload_id.0)
+            {
+                return Err(WorkerContractError::CachedJobRequest);
+            }
+            OwnedUploadSource::try_new(
+                partition_plan,
+                participant.partition_bytes.clone(),
+                WORKER_CACHED_JOB_LIMITS,
+            )
+            .map_err(|_| WorkerContractError::CachedJobRequest)?;
+            OwnedUploadSource::try_new(
+                manifest_plan,
+                self.manifest_bytes.clone(),
+                WORKER_CACHED_JOB_LIMITS,
+            )
+            .map_err(|_| WorkerContractError::CachedJobRequest)?;
+            let publication = (manifest_plan.object, manifest_plan.manifest);
+            if expected_manifest_publication.is_some_and(|expected| expected != publication) {
+                return Err(WorkerContractError::CachedJobRequest);
+            }
+            expected_manifest_publication = Some(publication);
+
+            let descriptor = JobDescriptor::decode::<2>(&participant.descriptor)
+                .map_err(|_| WorkerContractError::CachedJobRequest)?;
+            let record = manifest
+                .participant(index)
+                .map_err(|_| WorkerContractError::CachedJobRequest)?
+                .ok_or(WorkerContractError::CachedJobRequest)?;
+            if descriptor.prepare_id == 0
+                || descriptor.partition.object != partition_plan.object
+                || descriptor.partition.manifest != partition_plan.manifest
+                || record.device_id != device_id
+                || record.stream_id != descriptor.stream_id
+                || record.capability_digest != descriptor.capability_digest
+                || record.config_digest != descriptor.config_digest
+                || record.partition_digest != partition_plan.object.content.digest
+                || record.partition_manifest_digest != partition_plan.manifest.digest
+                || record.partition_byte_len != partition_plan.object.byte_len
+                || record.block_count != descriptor.block_count
+                || record.axis_count != descriptor.axis_count
+                || record.execution_kind != descriptor.execution_kind
+                || record.dense_update_period_ticks != descriptor.dense_update_period_ticks
+                || record.maximum_dense_updates != descriptor.maximum_dense_updates
+                || record.first_tick != descriptor.first_tick
+                || record.initial_position != descriptor.initial_position
+                || usize::from(descriptor.axis_count) > MAX_EXECUTION_AXES
+            {
+                return Err(WorkerContractError::CachedJobRequest);
+            }
         }
         Ok(())
     }
@@ -238,6 +424,26 @@ pub enum WorkerCommand {
     CaptureWaveform {
         /// Complete bounded capture request; the worker supplies trusted context.
         request: WorkerWaveformRequest,
+    },
+    /// Validate and stage one exact compiled job through immutable cache and prepare.
+    StageCachedJob {
+        /// Complete bounded artifact handoff from authoritative browser CAM.
+        request: Box<WorkerCachedJobRequest>,
+    },
+    /// Install and confirm one already prepared job at a common future epoch.
+    StartCachedJob {
+        /// UI-local job identity retained by the worker.
+        job_id: u64,
+    },
+    /// Select safe precommit cancellation or pre-guard abort for one job.
+    StopCachedJob {
+        /// UI-local job identity retained by the worker.
+        job_id: u64,
+    },
+    /// Remove one terminal job snapshot and its retained artifact bytes.
+    ClearCachedJob {
+        /// UI-local job identity retained by the worker.
+        job_id: u64,
     },
     /// Remove one session and erase its worker-owned secret/model.
     Disconnect {
@@ -588,6 +794,168 @@ impl RuntimeHealthWorkerSnapshot {
         }
         .validate()
         .map_err(|_| WorkerContractError::RuntimeHealthSnapshot)
+    }
+}
+
+/// Rendering-safe support state for passive active-configuration discovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationStatusAvailabilitySnapshot {
+    /// No authenticated configuration response has been accepted.
+    Unobserved,
+    /// The image explicitly does not expose the coordinator.
+    Unsupported,
+    /// A complete canonical coordinator status is retained.
+    Available,
+}
+
+impl From<ConfigurationStatusAvailability> for ConfigurationStatusAvailabilitySnapshot {
+    fn from(value: ConfigurationStatusAvailability) -> Self {
+        match value {
+            ConfigurationStatusAvailability::Unobserved => Self::Unobserved,
+            ConfigurationStatusAvailability::Unsupported => Self::Unsupported,
+            ConfigurationStatusAvailability::Available => Self::Available,
+        }
+    }
+}
+
+/// Exact core-0 configuration lifecycle projected without relying on display text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationPhaseSnapshot {
+    /// No candidate or active configuration exists.
+    Empty,
+    /// Durable boot selection is being reconstructed.
+    Recovering,
+    /// Core 0 is decoding and checking a candidate.
+    Validating,
+    /// Both validation owners accepted the candidate.
+    CandidateValid,
+    /// A durable transition is being prepared.
+    Preparing,
+    /// Core 1 is activating the selected identity.
+    Activating,
+    /// Durable selection is being committed.
+    Committing,
+    /// Job actors are receiving the committed identity.
+    Authorizing,
+    /// The durable identity is active and job-authorized.
+    Active,
+    /// A rollback is clearing the active identity.
+    Clearing,
+    /// A candidate transaction is being abandoned.
+    Aborting,
+    /// Validation or transition failed closed.
+    Rejected,
+}
+
+impl From<ConfigurationCoordinatorPhase> for ConfigurationPhaseSnapshot {
+    fn from(value: ConfigurationCoordinatorPhase) -> Self {
+        match value {
+            ConfigurationCoordinatorPhase::Empty => Self::Empty,
+            ConfigurationCoordinatorPhase::Recovering => Self::Recovering,
+            ConfigurationCoordinatorPhase::Validating => Self::Validating,
+            ConfigurationCoordinatorPhase::CandidateValid => Self::CandidateValid,
+            ConfigurationCoordinatorPhase::Preparing => Self::Preparing,
+            ConfigurationCoordinatorPhase::Activating => Self::Activating,
+            ConfigurationCoordinatorPhase::Committing => Self::Committing,
+            ConfigurationCoordinatorPhase::Authorizing => Self::Authorizing,
+            ConfigurationCoordinatorPhase::Active => Self::Active,
+            ConfigurationCoordinatorPhase::Clearing => Self::Clearing,
+            ConfigurationCoordinatorPhase::Aborting => Self::Aborting,
+            ConfigurationCoordinatorPhase::Rejected => Self::Rejected,
+        }
+    }
+}
+
+/// Bounded exact summary of one active machine configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationSummarySnapshot {
+    /// Total canonical ALMCFG records.
+    pub record_count: u16,
+    /// Records consumed by the real-time owner.
+    pub realtime_record_count: u16,
+    /// Resource-binding records.
+    pub binding_count: u16,
+    /// Complete stepper axis instances.
+    pub stepper_axes: u8,
+    /// Complete field-oriented servo axis instances.
+    pub foc_axes: u8,
+    /// Whether a required safety input was validated.
+    pub safety_binding: bool,
+    /// Exact native configuration policy bits.
+    pub flags: u32,
+}
+
+/// Strict worker projection of the identity needed before compiled work can be staged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationWorkerSnapshot {
+    /// Core-0 lifecycle that produced these facts.
+    pub phase: ConfigurationPhaseSnapshot,
+    /// Both configuration owners explicitly authorize jobs for this identity.
+    pub jobs_authorized: bool,
+    /// Durable active transaction identity, or zero when no configuration is active.
+    pub active_transaction_id: u64,
+    /// Exact active ALMCFG digest, zero only when inactive.
+    pub active_digest: [u8; 32],
+    /// Exact active document length, zero only when inactive.
+    pub active_bytes: u32,
+    /// Independently validated core-0 summary, absent when inactive.
+    pub summary: Option<ConfigurationSummarySnapshot>,
+}
+
+impl ConfigurationWorkerSnapshot {
+    /// Projects an already canonically decoded firmware status.
+    #[must_use]
+    pub fn from_status(status: ConfigurationCoordinatorStatus) -> Self {
+        Self {
+            phase: status.phase.into(),
+            jobs_authorized: status
+                .flags
+                .contains(ConfigurationCoordinatorFlags::JOBS_AUTHORIZED),
+            active_transaction_id: status.active_transaction_id,
+            active_digest: status.active_digest.0,
+            active_bytes: status.active_bytes,
+            summary: status.summary.map(|summary| ConfigurationSummarySnapshot {
+                record_count: summary.record_count,
+                realtime_record_count: summary.realtime_record_count,
+                binding_count: summary.binding_count,
+                stepper_axes: summary.stepper_axes,
+                foc_axes: summary.foc_axes,
+                safety_binding: summary.safety_binding,
+                flags: summary.flags.0,
+            }),
+        }
+    }
+
+    /// Enforces the active/inactive identity relationship after JSON transfer.
+    pub fn validate(self) -> Result<(), WorkerContractError> {
+        let active = self.active_transaction_id != 0
+            && self.active_digest.iter().any(|byte| *byte != 0)
+            && self.active_bytes != 0
+            && self.summary.is_some();
+        let inactive = self.active_transaction_id == 0
+            && self.active_digest.iter().all(|byte| *byte == 0)
+            && self.active_bytes == 0
+            && self.summary.is_none();
+        if (!active && !inactive)
+            || (self.jobs_authorized && !active)
+            || (self.phase == ConfigurationPhaseSnapshot::Active && !self.jobs_authorized)
+            || (self.phase == ConfigurationPhaseSnapshot::Empty && !inactive)
+        {
+            return Err(WorkerContractError::ConfigurationSnapshot);
+        }
+        if let Some(summary) = self.summary
+            && (summary.record_count == 0
+                || summary.realtime_record_count > summary.record_count
+                || summary.binding_count > summary.record_count
+                || u16::from(summary.stepper_axes).saturating_add(u16::from(summary.foc_axes)) > 16)
+        {
+            return Err(WorkerContractError::ConfigurationSnapshot);
+        }
+        Ok(())
     }
 }
 
@@ -972,6 +1340,303 @@ impl WorkerCapabilityDocument {
     }
 }
 
+/// Rendering-safe global lifecycle for the one worker-owned cached job.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCachedJobPhaseSnapshot {
+    /// Immutable partition and global-manifest publications are being reconciled.
+    Caching,
+    /// Cached participants are preparing their boot-bound execution actors.
+    Preparing,
+    /// Every participant is prepared; no future start has been installed.
+    Ready,
+    /// Exact per-device future commits are being installed without start authority.
+    Installing,
+    /// Every participant reported its exact future commit installed.
+    Installed,
+    /// Start-authority confirmations are being reconciled after all installs.
+    Confirming,
+    /// Every participant reported start authority while the abort guard remains open.
+    Confirmed,
+    /// At least one participant may have crossed its abort guard or started.
+    Irrevocable,
+    /// Installed participants are being safely aborted before their guards.
+    Aborting,
+    /// Every potentially installed participant is safely aborted or expired.
+    Aborted,
+    /// Prepared actors are being cancelled before any commit was bound.
+    Cancelling,
+    /// Every prepared actor is absent or fully cancelled.
+    Cancelled,
+    /// Every participant reported exact execution completion.
+    Complete,
+    /// Exact validation, transport reconciliation, or a participant fault stopped progress.
+    Faulted,
+}
+
+/// Which immutable cache artifact currently owns one participant's progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCacheArtifactSnapshot {
+    /// Device-local executable partition.
+    Partition,
+    /// Identical global job manifest uploaded under a device-local transaction.
+    GlobalManifest,
+    /// Both exact publications were observed.
+    Complete,
+}
+
+/// Rendering-safe resumable upload phase for the selected cache artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerCachePhaseSnapshot {
+    /// Exact publication identity is being inspected before mutation.
+    Inspecting,
+    /// The declared upload is being begun or resumed.
+    Resuming,
+    /// The first missing independently hashed chunk is being transferred.
+    Uploading,
+    /// Aggregate identities are being verified and published atomically.
+    Finalizing,
+    /// The selected publication was authoritatively observed.
+    Complete,
+}
+
+impl From<CacheUploadPhase> for WorkerCachePhaseSnapshot {
+    fn from(value: CacheUploadPhase) -> Self {
+        match value {
+            CacheUploadPhase::Inspecting => Self::Inspecting,
+            CacheUploadPhase::Resuming => Self::Resuming,
+            CacheUploadPhase::Uploading { .. } => Self::Uploading,
+            CacheUploadPhase::Finalizing => Self::Finalizing,
+            CacheUploadPhase::Complete => Self::Complete,
+        }
+    }
+}
+
+/// Rendering-safe device-observed schedule phase for one participant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerParticipantSchedulePhaseSnapshot {
+    /// No correlated job actors were observed.
+    Empty,
+    /// Boot-bound preparation is incomplete.
+    Preparing,
+    /// Cache actors and the prepared receipt are ready.
+    Ready,
+    /// A local commit is bound but not yet observed installed.
+    Installing,
+    /// The exact commit is installed without start authority.
+    Installed,
+    /// Start authority was confirmed and abort remains open.
+    Confirmed,
+    /// The abort guard closed and hardware priming is in progress.
+    Priming,
+    /// The complete future hardware horizon is primed.
+    Primed,
+    /// The scheduled local start was emitted.
+    Running,
+    /// The installed schedule was safely aborted.
+    Aborted,
+    /// Cached and real-time preparation actors were cancelled.
+    Cancelled,
+    /// An unconfirmed schedule expired locally.
+    Expired,
+    /// Exact local execution completed.
+    Complete,
+    /// The local schedule or execution owner faulted.
+    Faulted,
+}
+
+impl From<ParticipantSchedulePhase> for WorkerParticipantSchedulePhaseSnapshot {
+    fn from(value: ParticipantSchedulePhase) -> Self {
+        match value {
+            ParticipantSchedulePhase::Empty => Self::Empty,
+            ParticipantSchedulePhase::Preparing => Self::Preparing,
+            ParticipantSchedulePhase::Ready => Self::Ready,
+            ParticipantSchedulePhase::Installing => Self::Installing,
+            ParticipantSchedulePhase::Installed => Self::Installed,
+            ParticipantSchedulePhase::Confirmed => Self::Confirmed,
+            ParticipantSchedulePhase::Priming => Self::Priming,
+            ParticipantSchedulePhase::Primed => Self::Primed,
+            ParticipantSchedulePhase::Running => Self::Running,
+            ParticipantSchedulePhase::Aborted => Self::Aborted,
+            ParticipantSchedulePhase::Cancelled => Self::Cancelled,
+            ParticipantSchedulePhase::Expired => Self::Expired,
+            ParticipantSchedulePhase::Complete => Self::Complete,
+            ParticipantSchedulePhase::Faulted => Self::Faulted,
+        }
+    }
+}
+
+/// Redacted progress for one exact participant artifact and schedule.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCachedJobParticipantSnapshot {
+    /// UI-local connection that owns the authenticated session.
+    pub connection_id: u64,
+    /// Exact worker session generation bound by CAM.
+    pub generation: u64,
+    /// Stable MCU identity from the global manifest.
+    pub device_id: [u8; 16],
+    /// Boot identity bound into the prepared receipt.
+    pub boot_id: [u8; 16],
+    /// Exact active configuration used by CAM and native job operations.
+    pub config_digest: [u8; 32],
+    /// Exact immutable board capability used by authoritative CAM.
+    pub capability_digest: [u8; 32],
+    /// Cache artifact that currently owns the progress fields.
+    pub cache_artifact: WorkerCacheArtifactSnapshot,
+    /// Retry-safe phase of the selected cache artifact.
+    pub cache_phase: WorkerCachePhaseSnapshot,
+    /// Durably accepted bytes for the selected artifact when known.
+    pub accepted_bytes: u64,
+    /// Exact total bytes in the selected artifact.
+    pub total_bytes: u64,
+    /// First chunk not durably acknowledged while uploading.
+    pub next_chunk: u32,
+    /// Latest exact device-observed schedule phase after caching.
+    pub schedule_phase: WorkerParticipantSchedulePhaseSnapshot,
+    /// Bound local device start cycle, once a future commit exists.
+    pub local_start_cycle: Option<u64>,
+}
+
+/// Complete replacement state for the one worker-owned cached job.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCachedJobSnapshot {
+    /// Nonzero UI-local job identity.
+    pub job_id: u64,
+    /// Explicit simulator versus physical execution boundary.
+    pub execution_mode: WorkerJobExecutionMode,
+    /// Current global cache/schedule lifecycle.
+    pub phase: WorkerCachedJobPhaseSnapshot,
+    /// Exact global manifest content digest.
+    pub global_job_digest: [u8; 32],
+    /// Exact digest of the canonically sorted participant set.
+    pub participant_set_digest: [u8; 32],
+    /// Exact retained canonical ALMJMF02 manifest length.
+    pub manifest_byte_len: u32,
+    /// Shared future browser-worker epoch after start binding.
+    pub target_ui_ns: Option<u64>,
+    /// Consecutive transport or reconciliation failures since latest progress.
+    pub consecutive_failures: u32,
+    /// Latest bounded failure text, independent from retained exact state.
+    pub last_error: Option<String>,
+    /// Canonically device-sorted participant progress.
+    pub participants: Vec<WorkerCachedJobParticipantSnapshot>,
+}
+
+impl WorkerCachedJobSnapshot {
+    /// Independently validates bounds and canonical lifecycle relationships.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed identities, progress, ordering, diagnostics, or manifest data.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.job_id == 0
+            || self.manifest_byte_len == 0
+            || u64::from(self.manifest_byte_len) > WORKER_CACHED_JOB_LIMITS.maximum_object_bytes
+            || self.global_job_digest.iter().all(|byte| *byte == 0)
+            || self.participant_set_digest.iter().all(|byte| *byte == 0)
+            || self.participants.is_empty()
+            || self.participants.len() > MAXIMUM_CACHED_JOB_PARTICIPANTS
+            || (self.consecutive_failures == 0) != self.last_error.is_none()
+            || !diagnostic_is_valid(self.last_error.as_deref())
+        {
+            return Err(WorkerContractError::CachedJobSnapshot);
+        }
+        let target_relationship_valid = match self.phase {
+            WorkerCachedJobPhaseSnapshot::Caching
+            | WorkerCachedJobPhaseSnapshot::Preparing
+            | WorkerCachedJobPhaseSnapshot::Ready
+            | WorkerCachedJobPhaseSnapshot::Cancelling
+            | WorkerCachedJobPhaseSnapshot::Cancelled => self.target_ui_ns.is_none(),
+            WorkerCachedJobPhaseSnapshot::Installing
+            | WorkerCachedJobPhaseSnapshot::Installed
+            | WorkerCachedJobPhaseSnapshot::Confirming
+            | WorkerCachedJobPhaseSnapshot::Confirmed
+            | WorkerCachedJobPhaseSnapshot::Irrevocable
+            | WorkerCachedJobPhaseSnapshot::Aborting
+            | WorkerCachedJobPhaseSnapshot::Aborted
+            | WorkerCachedJobPhaseSnapshot::Complete => self.target_ui_ns.is_some(),
+            WorkerCachedJobPhaseSnapshot::Faulted => true,
+        };
+        if !target_relationship_valid {
+            return Err(WorkerContractError::CachedJobSnapshot);
+        }
+
+        let mut previous_device = None;
+        let mut connection_ids = std::collections::BTreeSet::new();
+        for participant in &self.participants {
+            let device_id = DeviceId(participant.device_id);
+            if participant.connection_id == 0
+                || participant.generation == 0
+                || participant.device_id.iter().all(|byte| *byte == 0)
+                || participant.boot_id.iter().all(|byte| *byte == 0)
+                || participant.config_digest.iter().all(|byte| *byte == 0)
+                || participant.capability_digest.iter().all(|byte| *byte == 0)
+                || previous_device.is_some_and(|previous| previous >= device_id)
+                || !connection_ids.insert(participant.connection_id)
+                || participant.total_bytes == 0
+                || participant.accepted_bytes > participant.total_bytes
+            {
+                return Err(WorkerContractError::CachedJobSnapshot);
+            }
+            previous_device = Some(device_id);
+            match participant.cache_phase {
+                WorkerCachePhaseSnapshot::Uploading => {
+                    if participant.next_chunk == 0
+                        && participant.accepted_bytes == participant.total_bytes
+                    {
+                        return Err(WorkerContractError::CachedJobSnapshot);
+                    }
+                }
+                WorkerCachePhaseSnapshot::Complete => {
+                    if participant.accepted_bytes != participant.total_bytes
+                        || participant.next_chunk != 0
+                    {
+                        return Err(WorkerContractError::CachedJobSnapshot);
+                    }
+                }
+                _ => {
+                    if participant.next_chunk != 0 {
+                        return Err(WorkerContractError::CachedJobSnapshot);
+                    }
+                }
+            }
+            if (participant.cache_artifact == WorkerCacheArtifactSnapshot::Complete)
+                != (participant.cache_phase == WorkerCachePhaseSnapshot::Complete)
+                || (participant.local_start_cycle.is_some()
+                    && !matches!(
+                        participant.schedule_phase,
+                        WorkerParticipantSchedulePhaseSnapshot::Installing
+                            | WorkerParticipantSchedulePhaseSnapshot::Installed
+                            | WorkerParticipantSchedulePhaseSnapshot::Confirmed
+                            | WorkerParticipantSchedulePhaseSnapshot::Priming
+                            | WorkerParticipantSchedulePhaseSnapshot::Primed
+                            | WorkerParticipantSchedulePhaseSnapshot::Running
+                            | WorkerParticipantSchedulePhaseSnapshot::Aborted
+                            | WorkerParticipantSchedulePhaseSnapshot::Expired
+                            | WorkerParticipantSchedulePhaseSnapshot::Complete
+                            | WorkerParticipantSchedulePhaseSnapshot::Faulted
+                    ))
+            {
+                return Err(WorkerContractError::CachedJobSnapshot);
+            }
+            if self.phase == WorkerCachedJobPhaseSnapshot::Complete
+                && (participant.cache_artifact != WorkerCacheArtifactSnapshot::Complete
+                    || participant.schedule_phase
+                        != WorkerParticipantSchedulePhaseSnapshot::Complete
+                    || participant.local_start_cycle.is_none())
+            {
+                return Err(WorkerContractError::CachedJobSnapshot);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Redacted complete UI view of one worker-owned connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1010,6 +1675,14 @@ pub struct DeviceSessionSnapshot {
     pub runtime_health_consecutive_failures: u32,
     /// Latest passive-health failure text, independent from clock lifecycle.
     pub runtime_health_last_error: Option<String>,
+    /// Support state of the passive active-configuration operation.
+    pub configuration_availability: ConfigurationStatusAvailabilitySnapshot,
+    /// Latest exact active configuration identity and summary.
+    pub configuration: Option<ConfigurationWorkerSnapshot>,
+    /// Consecutive configuration-status failures since the latest accepted result.
+    pub configuration_consecutive_failures: u32,
+    /// Latest configuration-status failure, isolated from clock and health state.
+    pub configuration_last_error: Option<String>,
     /// Current authenticated canonical capability acquisition phase.
     pub capability_phase: CapabilityDownloadPhaseSnapshot,
     /// Contiguous capability bytes retained by the worker.
@@ -1065,12 +1738,15 @@ impl DeviceSessionSnapshot {
             || self.history.len() > MAXIMUM_CLOCK_HISTORY
             || !diagnostic_is_valid(self.last_error.as_deref())
             || !diagnostic_is_valid(self.runtime_health_last_error.as_deref())
+            || !diagnostic_is_valid(self.configuration_last_error.as_deref())
             || !diagnostic_is_valid(self.capability_last_error.as_deref())
             || !diagnostic_is_valid(self.telemetry_last_error.as_deref())
             || !diagnostic_is_valid(self.waveform_last_error.as_deref())
             || (self.consecutive_failures == 0) != self.last_error.is_none()
             || (self.runtime_health_consecutive_failures == 0)
                 != self.runtime_health_last_error.is_none()
+            || (self.configuration_consecutive_failures == 0)
+                != self.configuration_last_error.is_none()
             || (self.capability_consecutive_failures == 0) != self.capability_last_error.is_none()
             || (self.telemetry_consecutive_failures == 0) != self.telemetry_last_error.is_none()
             || (self.waveform_consecutive_failures == 0) != self.waveform_last_error.is_none()
@@ -1090,6 +1766,17 @@ impl DeviceSessionSnapshot {
                 None,
             ) => {}
             _ => return Err(WorkerContractError::RuntimeHealthSnapshot),
+        }
+        match (self.configuration_availability, self.configuration) {
+            (ConfigurationStatusAvailabilitySnapshot::Available, Some(snapshot)) => {
+                snapshot.validate()?;
+            }
+            (
+                ConfigurationStatusAvailabilitySnapshot::Unobserved
+                | ConfigurationStatusAvailabilitySnapshot::Unsupported,
+                None,
+            ) => {}
+            _ => return Err(WorkerContractError::ConfigurationSnapshot),
         }
         match (self.capability_phase, self.capability_identity) {
             (CapabilityDownloadPhaseSnapshot::Discovering, None)
@@ -1200,6 +1887,11 @@ pub enum WorkerEvent {
         /// Redacted worker-owned state.
         snapshot: Box<DeviceSessionSnapshot>,
     },
+    /// Complete replacement snapshot for the one worker-owned cached job.
+    JobSnapshot {
+        /// Redacted exact cache and schedule state.
+        snapshot: Box<WorkerCachedJobSnapshot>,
+    },
     /// One complete canonical capability document, emitted once per generation.
     CapabilityDocument {
         /// Independently validated immutable bytes and owning session identity.
@@ -1219,6 +1911,11 @@ pub enum WorkerEvent {
     Removed {
         /// UI-local stable connection identity.
         connection_id: u64,
+    },
+    /// A terminal cached job and its immutable artifact bytes were erased.
+    JobRemoved {
+        /// UI-local job identity that no longer exists in the worker.
+        job_id: u64,
     },
     /// One command was rejected without mutating the named session.
     CommandRejected {
@@ -1277,6 +1974,9 @@ impl WorkerEventEnvelope {
         if let WorkerEvent::Snapshot { snapshot } = &self.event {
             snapshot.validate()?;
         }
+        if let WorkerEvent::JobSnapshot { snapshot } = &self.event {
+            snapshot.validate()?;
+        }
         if let WorkerEvent::CapabilityDocument { capability } = &self.event {
             capability.validate()?;
         }
@@ -1313,6 +2013,8 @@ pub enum WorkerContractError {
     DeviceSnapshot,
     /// Runtime-health JSON violated native queue, stack, domain, or freshness rules.
     RuntimeHealthSnapshot,
+    /// Active-configuration availability, identity, or summary was inconsistent.
+    ConfigurationSnapshot,
     /// Capability acquisition progress or identity relationships were invalid.
     CapabilityProgress,
     /// A one-time capability document transfer failed canonical validation.
@@ -1327,6 +2029,10 @@ pub enum WorkerContractError {
     WaveformProgress,
     /// A one-time capture transfer failed canonical validation.
     WaveformDocument,
+    /// Compiled cached-job transfer was oversized, malformed, or internally inconsistent.
+    CachedJobRequest,
+    /// A cached-job progress event contradicted its canonical manifest or lifecycle.
+    CachedJobSnapshot,
     /// Public device identity projection was malformed or inconsistent.
     DeviceIdentity,
 }
@@ -1350,6 +2056,9 @@ impl fmt::Display for WorkerContractError {
             Self::RuntimeHealthSnapshot => {
                 formatter.write_str("runtime health snapshot is invalid")
             }
+            Self::ConfigurationSnapshot => {
+                formatter.write_str("active configuration snapshot is invalid")
+            }
             Self::CapabilityProgress => {
                 formatter.write_str("capability download progress is invalid")
             }
@@ -1361,6 +2070,8 @@ impl fmt::Display for WorkerContractError {
             Self::WaveformRequest => formatter.write_str("waveform request is invalid"),
             Self::WaveformProgress => formatter.write_str("waveform progress is invalid"),
             Self::WaveformDocument => formatter.write_str("waveform document transfer is invalid"),
+            Self::CachedJobRequest => formatter.write_str("cached job request is invalid"),
+            Self::CachedJobSnapshot => formatter.write_str("cached job snapshot is invalid"),
             Self::DeviceIdentity => formatter.write_str("device identity snapshot is invalid"),
         }
     }
@@ -1456,6 +2167,39 @@ mod tests {
             origin: "http://192.168.4.1".to_owned(),
             secret: b"private test secret".to_vec(),
             sampling: ClockSamplingPolicy::CONSERVATIVE_WIFI,
+        }
+    }
+
+    fn complete_cached_job_snapshot() -> WorkerCachedJobSnapshot {
+        let participant = |connection_id, device_id| WorkerCachedJobParticipantSnapshot {
+            connection_id,
+            generation: connection_id,
+            device_id,
+            boot_id: [0x31; 16],
+            config_digest: [0x42; 32],
+            capability_digest: [0x43; 32],
+            cache_artifact: WorkerCacheArtifactSnapshot::Complete,
+            cache_phase: WorkerCachePhaseSnapshot::Complete,
+            accepted_bytes: 125_952,
+            total_bytes: 125_952,
+            next_chunk: 0,
+            schedule_phase: WorkerParticipantSchedulePhaseSnapshot::Complete,
+            local_start_cycle: Some(10_000_000 + connection_id),
+        };
+        WorkerCachedJobSnapshot {
+            job_id: 0x7a11_0001,
+            execution_mode: WorkerJobExecutionMode::SimulationOnly,
+            phase: WorkerCachedJobPhaseSnapshot::Complete,
+            global_job_digest: [0x44; 32],
+            participant_set_digest: [0x45; 32],
+            manifest_byte_len: 1_024,
+            target_ui_ns: Some(20_000_000_000),
+            consecutive_failures: 0,
+            last_error: None,
+            participants: vec![
+                participant(1, *b"ALUM-SIM:TINYBEE"),
+                participant(2, *b"ALUM-SIM:TINYBEF"),
+            ],
         }
     }
 
@@ -1570,6 +2314,10 @@ mod tests {
                 runtime_health: Some(runtime_health()),
                 runtime_health_consecutive_failures: 0,
                 runtime_health_last_error: None,
+                configuration_availability: ConfigurationStatusAvailabilitySnapshot::Unobserved,
+                configuration: None,
+                configuration_consecutive_failures: 0,
+                configuration_last_error: None,
                 capability_phase: CapabilityDownloadPhaseSnapshot::Discovering,
                 capability_received_bytes: 0,
                 capability_identity: None,
@@ -1595,7 +2343,47 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 5);
+        assert_eq!(WORKER_SCHEMA_VERSION, 6);
+    }
+
+    #[test]
+    fn cached_job_snapshot_round_trip_revalidates_terminal_authority() {
+        let event = WorkerEventEnvelope::current(WorkerEvent::JobSnapshot {
+            snapshot: Box::new(complete_cached_job_snapshot()),
+        });
+        let json = serde_json::to_vec(&event).unwrap();
+        let mut decoded: WorkerEventEnvelope = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.validate(), Ok(()));
+
+        let WorkerEvent::JobSnapshot { snapshot } = &mut decoded.event else {
+            panic!("round trip changed cached-job event kind");
+        };
+        snapshot.participants[0].accepted_bytes -= 1;
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+
+        let WorkerEvent::JobSnapshot { snapshot } = &mut decoded.event else {
+            unreachable!();
+        };
+        snapshot.participants[0].accepted_bytes = snapshot.participants[0].total_bytes;
+        snapshot.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Running;
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+
+        let WorkerEvent::JobSnapshot { snapshot } = &mut decoded.event else {
+            unreachable!();
+        };
+        snapshot.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Complete;
+        snapshot.participants[0].local_start_cycle = None;
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
     }
 
     #[test]
@@ -1685,6 +2473,10 @@ mod tests {
             runtime_health: None,
             runtime_health_consecutive_failures: 0,
             runtime_health_last_error: None,
+            configuration_availability: ConfigurationStatusAvailabilitySnapshot::Unobserved,
+            configuration: None,
+            configuration_consecutive_failures: 0,
+            configuration_last_error: None,
             capability_phase: CapabilityDownloadPhaseSnapshot::Discovering,
             capability_received_bytes: 0,
             capability_identity: None,

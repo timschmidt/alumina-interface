@@ -463,6 +463,7 @@ fn schedule_report_advances(previous: JobScheduleReport, next: JobScheduleReport
                 | JobScheduleState::Running
                 | JobScheduleState::Aborted
                 | JobScheduleState::Expired
+                | JobScheduleState::Complete
                 | JobScheduleState::Faulted
         ),
         JobScheduleState::Confirmed => matches!(
@@ -471,15 +472,19 @@ fn schedule_report_advances(previous: JobScheduleReport, next: JobScheduleReport
                 | JobScheduleState::Primed
                 | JobScheduleState::Running
                 | JobScheduleState::Aborted
+                | JobScheduleState::Complete
                 | JobScheduleState::Faulted
         ),
         JobScheduleState::Priming => matches!(
             next.state,
-            JobScheduleState::Primed | JobScheduleState::Running | JobScheduleState::Faulted
+            JobScheduleState::Primed
+                | JobScheduleState::Running
+                | JobScheduleState::Complete
+                | JobScheduleState::Faulted
         ),
         JobScheduleState::Primed => matches!(
             next.state,
-            JobScheduleState::Running | JobScheduleState::Faulted
+            JobScheduleState::Running | JobScheduleState::Complete | JobScheduleState::Faulted
         ),
         JobScheduleState::Running => matches!(
             next.state,
@@ -928,6 +933,69 @@ mod tests {
                 .unwrap()
                 .start_observation,
             Some(observation)
+        );
+    }
+
+    #[test]
+    fn polling_may_observe_complete_after_primed_without_an_intermediate_running_report() {
+        let descriptor = descriptor();
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+
+        machine.begin_prepare().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let commit = commit(&machine);
+        machine.begin_install(commit).unwrap();
+        authority.install(commit, admission()).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        machine.begin_confirm().unwrap();
+        let confirm =
+            JobScheduleReference::for_commit(JobScheduleReferenceAction::Confirm, commit).unwrap();
+        authority.confirm(confirm, DeviceCycle(4_000_000)).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+
+        assert!(matches!(
+            authority.advance(commit.abort_guard_cycle),
+            alumina_job::JobScheduleAction::PrimeHardware { .. }
+        ));
+        authority
+            .mark_primed(DeviceCycle(commit.abort_guard_cycle.0 + 1))
+            .unwrap();
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Primed
+        );
+
+        assert!(matches!(
+            authority.advance(commit.local_start_cycle),
+            alumina_job::JobScheduleAction::Start { .. }
+        ));
+        let observation = JobStartObservation {
+            source: JobStartObservationSource::SimulatedLatch,
+            output_token: 17,
+            scheduled_cycle: commit.local_start_cycle,
+            earliest_cycle: commit.local_start_cycle,
+            latest_cycle: commit.local_start_cycle,
+        };
+        authority.record_start_observation(observation).unwrap();
+        authority
+            .complete(DeviceCycle(commit.local_start_cycle.0 + 1))
+            .unwrap();
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Complete
         );
     }
 }
