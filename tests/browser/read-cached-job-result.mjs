@@ -5,17 +5,23 @@ import { fileURLToPath } from "node:url";
 const cdpPort = process.argv[2] ?? "9224";
 const mode = process.argv[3] ?? "single";
 if (
-  !["single", "repeat", "recovery", "confirm-recovery", "reattach"].includes(
-    mode,
-  )
+  ![
+    "single",
+    "repeat",
+    "recovery",
+    "confirm-recovery",
+    "abort-recovery",
+    "reattach",
+  ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, repeat, recovery, confirm-recovery, or reattach",
+    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, or reattach",
   );
 }
 const repeat = mode === "repeat";
 const recovery = mode === "recovery";
 const confirmRecovery = mode === "confirm-recovery";
+const abortRecovery = mode === "abort-recovery";
 const reattach = mode === "reattach";
 const repository = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -64,9 +70,11 @@ const expectation = repeat
     ? "cached-job-reattach"
     : confirmRecovery
       ? "cached-job-confirm-recovery"
-      : recovery
-        ? "cached-job-recovery"
-        : "cached-job";
+      : abortRecovery
+        ? "cached-job-abort-recovery"
+        : recovery
+          ? "cached-job-recovery"
+          : "cached-job";
 
 const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) =>
   response.json(),

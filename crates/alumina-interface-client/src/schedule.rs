@@ -786,6 +786,43 @@ mod tests {
     }
 
     #[test]
+    fn lost_abort_response_reconciles_before_any_second_mutation() {
+        let descriptor = descriptor();
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+        machine.begin_prepare().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let commit = commit(&machine);
+        machine.begin_install(commit).unwrap();
+        authority.install(commit, admission()).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+
+        let abort = machine.begin_abort().unwrap();
+        let reference = JobScheduleReference::decode(&abort.body).unwrap();
+        authority.abort(reference, DeviceCycle(4_100_000)).unwrap();
+        assert!(machine.abandon_pending());
+        assert_eq!(
+            machine.begin_abort(),
+            Err(ScheduleControlError::ReconciliationRequired)
+        );
+        assert_eq!(
+            machine.begin_status().unwrap().operation,
+            Operation::JobStatus
+        );
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Aborted
+        );
+        assert!(!machine.reconciliation_required());
+    }
+
+    #[test]
     fn retained_complete_report_requires_the_exact_descriptor_token() {
         let descriptor = descriptor();
         let machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();

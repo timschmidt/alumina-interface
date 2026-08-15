@@ -1541,6 +1541,68 @@ mod tests {
     }
 
     #[test]
+    fn lost_abort_responses_reconcile_before_the_next_participant_mutates() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut coordinator);
+        let inputs = start_inputs(&job, &clocks);
+        coordinator
+            .bind_start(3_001_000_000, 5_000_000_000, &inputs)
+            .unwrap();
+        while let Some(request) = coordinator.next_request().unwrap() {
+            assert_eq!(request.request.operation, Operation::JobCommit);
+            let commit = JobCommitRequest::decode(&request.request.body).unwrap();
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            authority
+                .schedule
+                .install(commit, admission(&authority.descriptor))
+                .unwrap();
+            coordinator
+                .accept_response(request.device_id, &response(&ready_status(authority)))
+                .unwrap();
+        }
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Installed);
+        coordinator.begin_abort().unwrap();
+
+        let mut lost_aborts = 0;
+        let mut reconciled_aborts = 0;
+        while let Some(request) = coordinator.next_request().unwrap() {
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            match request.request.operation {
+                Operation::JobAbort => {
+                    assert_eq!(lost_aborts, reconciled_aborts);
+                    let reference =
+                        alumina_job::JobScheduleReference::decode(&request.request.body).unwrap();
+                    let commit = coordinator.participant_commit(request.device_id).unwrap();
+                    authority
+                        .schedule
+                        .abort(reference, DeviceCycle(commit.confirm_deadline_cycle.0 - 1))
+                        .unwrap();
+                    assert!(coordinator.abandon_pending(request.device_id).unwrap());
+                    lost_aborts += 1;
+                }
+                Operation::JobStatus => {
+                    coordinator
+                        .accept_response(request.device_id, &response(&ready_status(authority)))
+                        .unwrap();
+                    reconciled_aborts += 1;
+                }
+                operation => panic!("unexpected abort-recovery operation {operation:?}"),
+            }
+        }
+        assert_eq!(lost_aborts, authorities.len());
+        assert_eq!(reconciled_aborts, authorities.len());
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborted);
+    }
+
+    #[test]
     fn passive_initial_status_reattaches_only_the_exact_completed_attempt() {
         let (job, ready, preparations, clocks) = fixture();
         let mut original =

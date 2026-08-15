@@ -21,6 +21,7 @@
       let cachedJobRequestIndex = 0;
       let cachedJobStaged = false;
       let cachedJobStarted = false;
+      let cachedJobStopRequested = false;
       let cachedJobClearing = false;
       let cachedJobSnapshotCount = 0;
       let latestCachedJobSnapshot;
@@ -48,6 +49,7 @@
         expectation === "cached-job-repeat" ||
         expectation === "cached-job-recovery" ||
         expectation === "cached-job-confirm-recovery" ||
+        expectation === "cached-job-abort-recovery" ||
         expectation === "cached-job-reattach";
 
       window.installCachedJobRequest = (requestOrRequests) => {
@@ -162,6 +164,7 @@
       window.inspectCachedJobHarness = () => ({
         staged: cachedJobStaged,
         started: cachedJobStarted,
+        stop_requested: cachedJobStopRequested,
         clearing: cachedJobClearing,
         request_index: cachedJobRequestIndex,
         request_count: cachedJobRequests.length,
@@ -386,16 +389,42 @@
             return;
           }
           if (
+            snapshot.phase === "installed" &&
+            expectation === "cached-job-abort-recovery" &&
+            !cachedJobStopRequested
+          ) {
+            cachedJobStopRequested = true;
+            worker.postMessage(
+              JSON.stringify({
+                schema_version: 7,
+                command: {
+                  kind: "stop_cached_job",
+                  job_id: snapshot.job_id,
+                },
+              }),
+            );
+            return;
+          }
+          if (
             snapshot.phase === "complete" ||
-            snapshot.phase === "retained_complete"
+            snapshot.phase === "retained_complete" ||
+            snapshot.phase === "aborted"
           ) {
             const retained = expectation === "cached-job-reattach";
+            const aborted = expectation === "cached-job-abort-recovery";
             const valid =
-              cachedJobStarted !== retained &&
+              (retained
+                ? !cachedJobStarted && !cachedJobStopRequested
+                : cachedJobStarted &&
+                  cachedJobStopRequested === aborted) &&
               cachedJobRequest !== undefined &&
               snapshot.job_id === cachedJobRequest.job_id &&
               snapshot.phase ===
-                (retained ? "retained_complete" : "complete") &&
+                (retained
+                  ? "retained_complete"
+                  : aborted
+                    ? "aborted"
+                    : "complete") &&
               snapshot.execution_mode === "simulation_only" &&
               (retained
                 ? snapshot.target_ui_ns === null
@@ -408,7 +437,8 @@
                   participant.cache_artifact === "complete" &&
                   participant.cache_phase === "complete" &&
                   participant.accepted_bytes === participant.total_bytes &&
-                  participant.schedule_phase === "complete" &&
+                  participant.schedule_phase ===
+                    (aborted ? "aborted" : "complete") &&
                   participant.local_start_cycle !== null,
               );
             const recoveryValid =
@@ -436,6 +466,29 @@
                       observation.participants.filter(
                         (participant) =>
                           participant.schedule_phase === "confirmed",
+                      ).length === index,
+                  ))) &&
+              (expectation !== "cached-job-abort-recovery" ||
+                (cachedJobFailureObservations.length === 2 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.every(
+                    (observation, index) =>
+                      observation.phase === "aborting" &&
+                      observation.consecutive_failures === 1 &&
+                      observation.last_error?.includes("fetch failed") &&
+                      observation.participants.length === 2 &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          (participant.schedule_phase === "installed" ||
+                            participant.schedule_phase === "aborted"),
+                      ) &&
+                      observation.participants.filter(
+                        (participant) =>
+                          participant.schedule_phase === "aborted",
                       ).length === index,
                   ))) &&
               (expectation !== "cached-job-reattach" ||
@@ -517,6 +570,7 @@
           cachedJobRequest = cachedJobRequests[cachedJobRequestIndex];
           cachedJobStaged = false;
           cachedJobStarted = false;
+          cachedJobStopRequested = false;
           cachedJobClearing = false;
           cachedJobSnapshotCount = 0;
           latestCachedJobSnapshot = undefined;
