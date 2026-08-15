@@ -129,7 +129,15 @@ reconnecting those participant sessions. The second attempt reused all cached
 bytes and completed the full lifecycle at a new synchronized epoch. See sibling
 `aluminafw/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
 
+An operation-specific fault qualification then discarded one successful
+applied chunk response and one successful applied schedule-commit response on
+different participants. The live worker exposed both transient failures,
+reconciled them through storage inspection and schedule status, and reached a
+valid two-participant terminal snapshot; a fresh no-fault regression also
+passed. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
-real SD media, background-tab qualification, live TinyBee/T-Deck Pro cached
-starts, electrical simultaneity measurement, and every physical motion/safety
-qualification claim.
+real SD media, background-tab qualification, lost confirm/abort and broader
+packet disorder/outage cases, live TinyBee/T-Deck Pro cached starts, electrical
+simultaneity measurement, and every physical motion/safety qualification claim.

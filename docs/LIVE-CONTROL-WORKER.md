@@ -280,11 +280,24 @@ following ordinary single-job run against the same simulator actors also passed
 in 60 snapshots. The exact cycles, commands, and closed claims are in sibling
 `aluminafw/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
 
+The `cached-job-recovery` expectation accepts one strict request and requires at
+least two independently observed transient failure states, later zero-failure
+recovery, and the same fully valid terminal participant facts. On 2026-08-15,
+one simulator discarded a successful applied `StoragePutChunk` response and the
+other discarded a successful applied `JobCommit` response. The production
+worker recovered through storage inspection and schedule status, respectively,
+then completed both participants after 434 snapshots with zero terminal
+failures. A fresh ordinary no-fault run passed afterward in 432 snapshots. The
+exact epochs, cycles, selector contract, and closed claims are in sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
-reboot before a selected control request. The harness has separate qualified
-and conservative-rejection expectations so an excessive causal interval must
-remain unusable instead of being mistaken for successful recovery.
+reboot before a selected control request. It can also discard the first
+successful response for one named canonical storage or schedule operation only
+after the fixture has applied it. The harness has separate qualified and
+conservative-rejection expectations so an excessive causal interval must remain
+unusable instead of being mistaken for successful recovery.
 
 At `alumina-interface` commit `0e0a53e` and sibling `aluminafw` simulator commit
 `ba888db`, Chromium runs passed nominal, selected-response-loss, finite-outage,
