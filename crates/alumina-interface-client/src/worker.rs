@@ -1645,6 +1645,21 @@ impl WorkerCachedJobSnapshot {
                 return Err(WorkerContractError::CachedJobSnapshot);
             }
         }
+        if self.phase == WorkerCachedJobPhaseSnapshot::Aborted {
+            for participant in &self.participants {
+                if participant.cache_artifact != WorkerCacheArtifactSnapshot::Complete {
+                    return Err(WorkerContractError::CachedJobSnapshot);
+                }
+                match participant.schedule_phase {
+                    WorkerParticipantSchedulePhaseSnapshot::Aborted
+                    | WorkerParticipantSchedulePhaseSnapshot::Expired
+                        if participant.local_start_cycle.is_some() => {}
+                    WorkerParticipantSchedulePhaseSnapshot::Cancelled
+                        if participant.local_start_cycle.is_none() => {}
+                    _ => return Err(WorkerContractError::CachedJobSnapshot),
+                }
+            }
+        }
         if self.phase == WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest {
             let mut stopped = false;
             let mut completed = false;
@@ -2449,6 +2464,30 @@ mod tests {
         stopped_too_late.target_ui_ns = None;
         assert_eq!(
             stopped_too_late.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+    }
+
+    #[test]
+    fn aborted_snapshot_distinguishes_installed_stop_from_preinstall_cancel() {
+        let mut aborted = complete_cached_job_snapshot();
+        aborted.phase = WorkerCachedJobPhaseSnapshot::Aborted;
+        aborted.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Aborted;
+        aborted.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Cancelled;
+        aborted.participants[1].local_start_cycle = None;
+        assert_eq!(aborted.validate(), Ok(()));
+
+        aborted.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Ready;
+        assert_eq!(
+            aborted.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+        aborted.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Cancelled;
+        aborted.participants[1].cache_artifact = WorkerCacheArtifactSnapshot::Partition;
+        aborted.participants[1].cache_phase = WorkerCachePhaseSnapshot::Finalizing;
+        aborted.participants[1].accepted_bytes -= 1;
+        assert_eq!(
+            aborted.validate(),
             Err(WorkerContractError::CachedJobSnapshot)
         );
     }

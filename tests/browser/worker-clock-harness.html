@@ -54,13 +54,18 @@
         expectation === "cached-job-confirmed-abort-request-recovery" ||
         expectation === "cached-job-abort-guard-outage" ||
         expectation === "cached-job-abort-split-outage" ||
+        expectation === "cached-job-installing-stop" ||
         expectation === "cached-job-reattach";
       const cachedJobAbortGuardOutage =
         expectation === "cached-job-abort-guard-outage";
       const cachedJobAbortSplitOutage =
         expectation === "cached-job-abort-split-outage";
+      const cachedJobInstallingStop =
+        expectation === "cached-job-installing-stop";
       const cachedJobStopPhase =
-        expectation === "cached-job-abort-recovery"
+        cachedJobInstallingStop
+          ? "installing"
+          : expectation === "cached-job-abort-recovery"
           ? "installed"
           : expectation === "cached-job-confirmed-abort-recovery" ||
               expectation === "cached-job-confirmed-abort-request-recovery" ||
@@ -73,7 +78,10 @@
         const requests = Array.isArray(requestOrRequests)
           ? requestOrRequests
           : [requestOrRequests];
-        const expectedCount = expectation === "cached-job-repeat" ? 2 : 1;
+        const expectedCount =
+          expectation === "cached-job-repeat" || cachedJobInstallingStop
+            ? 2
+            : 1;
         if (!cachedJobExpectation || requests.length !== expectedCount) {
           finish("failed", {
             error: `expected ${expectedCount} cached-job request(s) for ${expectation}`,
@@ -360,10 +368,12 @@
         if (event.kind === "job_snapshot") {
           const snapshot = event.snapshot;
           if (cachedJobClearing) {
+            const completedPhase =
+              completedCachedJobs.at(-1)?.latest_cached_job_snapshot?.phase;
             if (
               cachedJobRequest !== undefined &&
               snapshot.job_id === cachedJobRequest.job_id &&
-              snapshot.phase === "complete"
+              snapshot.phase === completedPhase
             ) {
               return;
             }
@@ -410,6 +420,14 @@
           }
           if (
             snapshot.phase === cachedJobStopPhase &&
+            (!cachedJobInstallingStop || cachedJobRequestIndex === 0) &&
+            (!cachedJobInstallingStop ||
+              (snapshot.participants.filter(
+                (participant) => participant.schedule_phase === "installed",
+              ).length === 1 &&
+                snapshot.participants.filter(
+                  (participant) => participant.schedule_phase === "ready",
+                ).length === 1)) &&
             !cachedJobStopRequested
           ) {
             cachedJobStopRequested = true;
@@ -434,8 +452,13 @@
             const retained = expectation === "cached-job-reattach";
             const stopMissed = cachedJobAbortGuardOutage;
             const stopSplit = cachedJobAbortSplitOutage;
+            const stopCleanup =
+              cachedJobInstallingStop && cachedJobRequestIndex === 0;
+            const stopFlowActive =
+              cachedJobStopPhase !== undefined &&
+              (!cachedJobInstallingStop || stopCleanup);
             const aborted =
-              cachedJobStopPhase !== undefined && !stopMissed && !stopSplit;
+              stopFlowActive && !stopMissed && !stopSplit;
             const expectedTerminalPhase = retained
               ? "retained_complete"
               : stopMissed
@@ -450,22 +473,35 @@
                 (participant) =>
                   participant.cache_artifact === "complete" &&
                   participant.cache_phase === "complete" &&
-                  participant.accepted_bytes === participant.total_bytes &&
-                  participant.local_start_cycle !== null,
+                  participant.accepted_bytes === participant.total_bytes,
               ) &&
               (stopSplit
                 ? snapshot.participants.filter(
                     (participant) =>
-                      participant.schedule_phase === "aborted",
+                      participant.schedule_phase === "aborted" &&
+                      participant.local_start_cycle !== null,
                   ).length === 1 &&
                   snapshot.participants.filter(
                     (participant) =>
-                      participant.schedule_phase === "complete",
+                      participant.schedule_phase === "complete" &&
+                      participant.local_start_cycle !== null,
                   ).length === 1
-                : snapshot.participants.every(
+                : stopCleanup
+                  ? snapshot.participants.filter(
+                      (participant) =>
+                        participant.schedule_phase === "aborted" &&
+                        participant.local_start_cycle !== null,
+                    ).length === 1 &&
+                    snapshot.participants.filter(
+                      (participant) =>
+                        participant.schedule_phase === "cancelled" &&
+                        participant.local_start_cycle === null,
+                    ).length === 1
+                  : snapshot.participants.every(
                     (participant) =>
                       participant.schedule_phase ===
-                      (aborted ? "aborted" : "complete"),
+                        (aborted ? "aborted" : "complete") &&
+                      participant.local_start_cycle !== null,
                   ));
             const valid =
               (retained
@@ -511,9 +547,10 @@
                           participant.schedule_phase === "confirmed",
                       ).length === index,
                   ))) &&
-              (cachedJobStopPhase === undefined ||
+              (!stopFlowActive ||
                 stopMissed ||
                 stopSplit ||
+                stopCleanup ||
                 (cachedJobFailureObservations.length === 2 &&
                   cachedJobRecovered &&
                   cachedJobFailureObservations.every(
@@ -606,6 +643,21 @@
                   ) &&
                   cachedJobTransitions.some(
                     (transition) => transition.phase === "irrevocable",
+                  ))) &&
+              (!stopCleanup ||
+                (cachedJobFailureObservations.length === 0 &&
+                  !cachedJobRecovered &&
+                  cachedJobTransitions.some(
+                    (transition) =>
+                      transition.phase === "installing" &&
+                      transition.participants.filter(
+                        (participant) =>
+                          participant.schedule_phase === "installed",
+                      ).length === 1 &&
+                      transition.participants.filter(
+                        (participant) =>
+                          participant.schedule_phase === "ready",
+                      ).length === 1,
                   ))) &&
               (expectation !== "cached-job-reattach" ||
                 (cachedJobFailureObservations.length === 0 &&

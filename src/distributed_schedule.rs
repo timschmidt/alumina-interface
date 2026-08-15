@@ -452,7 +452,8 @@ impl DistributedScheduleCoordinator {
     pub fn participant_local_start_cycle(&self, device_id: DeviceId) -> Option<DeviceCycle> {
         let participant = self.participant(device_id)?;
         participant
-            .planned_commit
+            .control
+            .commit()
             .map(|commit| commit.local_start_cycle)
             .or_else(|| {
                 participant
@@ -901,23 +902,7 @@ impl DistributedScheduleCoordinator {
                             phase if post_guard(phase) => None,
                             _ => return Err(DistributedScheduleError::ParticipantState),
                         },
-                        CoordinationIntent::Abort => {
-                            if participant.control.commit().is_none() {
-                                None
-                            } else {
-                                match phase {
-                                    ParticipantSchedulePhase::Installing
-                                    | ParticipantSchedulePhase::Installed
-                                    | ParticipantSchedulePhase::Confirmed => {
-                                        Some(participant.control.begin_abort()?)
-                                    }
-                                    ParticipantSchedulePhase::Aborted
-                                    | ParticipantSchedulePhase::Expired => None,
-                                    phase if post_guard(phase) => None,
-                                    _ => return Err(DistributedScheduleError::ParticipantState),
-                                }
-                            }
-                        }
+                        CoordinationIntent::Abort => next_abort_operation(participant)?,
                         CoordinationIntent::Cancel => match phase {
                             ParticipantSchedulePhase::Empty
                             | ParticipantSchedulePhase::Cancelled => None,
@@ -1045,12 +1030,46 @@ const fn post_guard(phase: ParticipantSchedulePhase) -> bool {
 
 fn participant_safe_after_abort(participant: &ParticipantCoordinator) -> bool {
     if participant.control.commit().is_none() {
-        return true;
+        return matches!(
+            participant.control.phase(),
+            ParticipantSchedulePhase::Empty | ParticipantSchedulePhase::Cancelled
+        );
     }
     matches!(
         participant.control.phase(),
         ParticipantSchedulePhase::Aborted | ParticipantSchedulePhase::Expired
     )
+}
+
+fn next_abort_operation(
+    participant: &mut ParticipantCoordinator,
+) -> Result<Option<ScheduleOperation>, DistributedScheduleError> {
+    let phase = participant.control.phase();
+    if participant.control.commit().is_none() {
+        return match phase {
+            ParticipantSchedulePhase::Empty | ParticipantSchedulePhase::Cancelled => Ok(None),
+            ParticipantSchedulePhase::Preparing
+            | ParticipantSchedulePhase::Ready
+            | ParticipantSchedulePhase::Faulted => participant
+                .control
+                .begin_cancel()
+                .map(Some)
+                .map_err(Into::into),
+            _ => Err(DistributedScheduleError::ParticipantState),
+        };
+    }
+    match phase {
+        ParticipantSchedulePhase::Installing
+        | ParticipantSchedulePhase::Installed
+        | ParticipantSchedulePhase::Confirmed => participant
+            .control
+            .begin_abort()
+            .map(Some)
+            .map_err(Into::into),
+        ParticipantSchedulePhase::Aborted | ParticipantSchedulePhase::Expired => Ok(None),
+        phase if post_guard(phase) => Ok(None),
+        _ => Err(DistributedScheduleError::ParticipantState),
+    }
 }
 
 fn split_after_abort_is_terminal(participants: &[ParticipantCoordinator]) -> bool {
@@ -1634,6 +1653,85 @@ mod tests {
         assert_eq!(lost_aborts, authorities.len());
         assert_eq!(reconciled_aborts, authorities.len());
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborted);
+    }
+
+    #[test]
+    fn bound_stop_aborts_installed_and_cancels_never_installed_participants() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut coordinator);
+        let inputs = start_inputs(&job, &clocks);
+        coordinator
+            .bind_start(3_001_000_000, 5_000_000_000, &inputs)
+            .unwrap();
+
+        let install = coordinator.next_request().unwrap().unwrap();
+        assert_eq!(install.request.operation, Operation::JobCommit);
+        let commit = JobCommitRequest::decode(&install.request.body).unwrap();
+        let installed_device = install.device_id;
+        let authority = authorities
+            .iter_mut()
+            .find(|authority| authority.device_id == installed_device)
+            .unwrap();
+        authority
+            .schedule
+            .install(commit, admission(&authority.descriptor))
+            .unwrap();
+        coordinator
+            .accept_response(installed_device, &response(&ready_status(authority)))
+            .unwrap();
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Installing);
+        coordinator.begin_abort().unwrap();
+
+        let mut cancelled_device = None;
+        while let Some(request) = coordinator.next_request().unwrap() {
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            match request.request.operation {
+                Operation::JobAbort => {
+                    assert_eq!(request.device_id, installed_device);
+                    let reference =
+                        alumina_job::JobScheduleReference::decode(&request.request.body).unwrap();
+                    authority
+                        .schedule
+                        .abort(reference, DeviceCycle(commit.confirm_deadline_cycle.0 - 1))
+                        .unwrap();
+                    coordinator
+                        .accept_response(request.device_id, &response(&ready_status(authority)))
+                        .unwrap();
+                }
+                Operation::JobCancel => {
+                    assert_ne!(request.device_id, installed_device);
+                    cancelled_device = Some(request.device_id);
+                    coordinator
+                        .accept_response(request.device_id, &response(&cancelled_status(authority)))
+                        .unwrap();
+                }
+                operation => panic!("unexpected bound-stop operation {operation:?}"),
+            }
+        }
+        let cancelled_device = cancelled_device.unwrap();
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborted);
+        assert_eq!(
+            coordinator.participant_phase(installed_device),
+            Some(ParticipantSchedulePhase::Aborted)
+        );
+        assert_eq!(
+            coordinator.participant_phase(cancelled_device),
+            Some(ParticipantSchedulePhase::Cancelled)
+        );
+        assert!(
+            coordinator
+                .participant_local_start_cycle(installed_device)
+                .is_some()
+        );
+        assert_eq!(
+            coordinator.participant_local_start_cycle(cancelled_device),
+            None
+        );
     }
 
     #[test]

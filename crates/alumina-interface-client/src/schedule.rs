@@ -332,6 +332,18 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
             return Err(ScheduleControlError::DeviceStatus(response.status));
         }
         let report = JobStatusReport::decode(&response.body)?;
+        if action == ScheduleAction::Status
+            && self.report.is_none()
+            && self.commit.is_none()
+            && replaceable_foreign_terminal(self.descriptor, report)
+        {
+            self.report = Some(JobStatusReport::default());
+            self.reconciliation_required = false;
+            if response.status != StatusCode::Ok {
+                return Err(ScheduleControlError::DeviceStatus(response.status));
+            }
+            return Ok(ParticipantSchedulePhase::Empty);
+        }
         self.validate_report(report)?;
         if let Some(previous) = self.report
             && !job_report_advances(previous, report)
@@ -418,6 +430,28 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
             return Err(ScheduleControlError::Identity);
         }
         Ok(())
+    }
+}
+
+fn replaceable_foreign_terminal(descriptor: JobDescriptor, report: JobStatusReport) -> bool {
+    let (Some(service), Some(realtime)) = (report.service, report.realtime) else {
+        return false;
+    };
+    if service.prepare_id == descriptor.prepare_id {
+        return false;
+    }
+    match report.schedule {
+        None => {
+            service.state == ServiceJobState::Cancelled
+                && realtime.state == RealtimeJobState::Cancelled
+        }
+        Some(schedule) => matches!(
+            schedule.state,
+            JobScheduleState::Aborted
+                | JobScheduleState::Expired
+                | JobScheduleState::Complete
+                | JobScheduleState::Faulted
+        ),
     }
 }
 
@@ -968,6 +1002,86 @@ mod tests {
             Err(ScheduleControlError::Identity)
         );
         assert_eq!(foreign.report(), None);
+    }
+
+    #[test]
+    fn initial_status_treats_distinct_terminal_jobs_as_replaceable() {
+        let target = descriptor();
+
+        let mut cancelled = status(
+            PreparedJobSchedule::prepare::<2>(boot(), target)
+                .unwrap()
+                .report(),
+        );
+        cancelled.service.as_mut().unwrap().prepare_id = target.prepare_id - 1;
+        cancelled.service.as_mut().unwrap().state = ServiceJobState::Cancelled;
+        let realtime = cancelled.realtime.as_mut().unwrap();
+        realtime.prepare_id = target.prepare_id - 1;
+        realtime.state = RealtimeJobState::Cancelled;
+        realtime.admitted_progress = None;
+        realtime.outstanding = false;
+        cancelled.schedule = None;
+
+        let mut after_cancel = ParticipantScheduleMachine::<2>::new(target, boot()).unwrap();
+        after_cancel.begin_status().unwrap();
+        assert_eq!(
+            after_cancel
+                .accept_response(&response(StatusCode::Ok, cancelled))
+                .unwrap(),
+            ParticipantSchedulePhase::Empty
+        );
+        assert_eq!(after_cancel.report(), Some(JobStatusReport::default()));
+        assert_eq!(
+            after_cancel.begin_prepare().unwrap().operation,
+            Operation::JobPrepare
+        );
+
+        let mut prior_descriptor = target;
+        prior_descriptor.prepare_id -= 1;
+        let prior_machine = ParticipantScheduleMachine::<2>::new(prior_descriptor, boot()).unwrap();
+        let mut prior_authority =
+            PreparedJobSchedule::prepare::<2>(boot(), prior_descriptor).unwrap();
+        let prior_commit = commit(&prior_machine);
+        prior_authority.install(prior_commit, admission()).unwrap();
+        prior_authority
+            .abort(
+                JobScheduleReference::for_commit(JobScheduleReferenceAction::Abort, prior_commit)
+                    .unwrap(),
+                DeviceCycle(4_100_000),
+            )
+            .unwrap();
+        let mut aborted = status(prior_authority.report());
+        aborted.service.as_mut().unwrap().prepare_id = prior_descriptor.prepare_id;
+        aborted.realtime.as_mut().unwrap().prepare_id = prior_descriptor.prepare_id;
+
+        let mut after_abort = ParticipantScheduleMachine::<2>::new(target, boot()).unwrap();
+        after_abort.begin_status().unwrap();
+        assert_eq!(
+            after_abort
+                .accept_response(&response(StatusCode::Ok, aborted))
+                .unwrap(),
+            ParticipantSchedulePhase::Empty
+        );
+        assert_eq!(after_abort.report(), Some(JobStatusReport::default()));
+    }
+
+    #[test]
+    fn initial_status_rejects_distinct_active_job() {
+        let target = descriptor();
+        let mut prior_descriptor = target;
+        prior_descriptor.prepare_id -= 1;
+        let prior_authority = PreparedJobSchedule::prepare::<2>(boot(), prior_descriptor).unwrap();
+        let mut active = status(prior_authority.report());
+        active.service.as_mut().unwrap().prepare_id = prior_descriptor.prepare_id;
+        active.realtime.as_mut().unwrap().prepare_id = prior_descriptor.prepare_id;
+
+        let mut machine = ParticipantScheduleMachine::<2>::new(target, boot()).unwrap();
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine.accept_response(&response(StatusCode::Ok, active)),
+            Err(ScheduleControlError::Identity)
+        );
+        assert_eq!(machine.report(), None);
     }
 
     #[test]

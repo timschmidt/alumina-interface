@@ -15,11 +15,12 @@ if (
     "confirmed-abort-request-recovery",
     "abort-guard-outage",
     "abort-split-outage",
+    "installing-stop",
     "reattach",
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, or reattach",
+    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, installing-stop, or reattach",
   );
 }
 const repeat = mode === "repeat";
@@ -31,6 +32,8 @@ const confirmedAbortRequestRecovery =
   mode === "confirmed-abort-request-recovery";
 const abortGuardOutage = mode === "abort-guard-outage";
 const abortSplitOutage = mode === "abort-split-outage";
+const installingStop = mode === "installing-stop";
+const multipleAttempts = repeat || installingStop;
 const reattach = mode === "reattach";
 const repository = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -42,7 +45,9 @@ const deviceIds = [
   "414c554d2d53494d3a54494e59424546",
 ];
 
-const jobIds = repeat ? ["2047934465", "2047934466"] : ["2047934465"];
+const jobIds = multipleAttempts
+  ? ["2047934465", "2047934466"]
+  : ["2047934465"];
 const cachedJobRequests = jobIds.map((jobId) => {
   const requestText = execFileSync(
     "cargo",
@@ -72,7 +77,9 @@ const cachedJobRequests = jobIds.map((jobId) => {
   );
   return JSON.parse(requestText);
 });
-const cachedJobRequest = repeat ? cachedJobRequests : cachedJobRequests[0];
+const cachedJobRequest = multipleAttempts
+  ? cachedJobRequests
+  : cachedJobRequests[0];
 const expectation = repeat
   ? "cached-job-repeat"
   : reattach
@@ -89,6 +96,8 @@ const expectation = repeat
               ? "cached-job-abort-guard-outage"
               : abortSplitOutage
                 ? "cached-job-abort-split-outage"
+                : installingStop
+                  ? "cached-job-installing-stop"
               : recovery
                 ? "cached-job-recovery"
                 : "cached-job";
@@ -243,7 +252,7 @@ if (result.status === "passed") {
     };
   };
   const completedCachedJobs = (detail.completed_cached_jobs ?? []).map(compactRun);
-  result.detail = repeat
+  result.detail = multipleAttempts
     ? {
         expectation: detail.expectation,
         completed_cached_jobs: completedCachedJobs,
