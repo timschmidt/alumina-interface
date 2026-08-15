@@ -87,6 +87,7 @@ dependencies = [
  "alumina-capability",
  "alumina-clock",
  "alumina-protocol",
+ "alumina-safety",
  "sha2",
 ]
 
