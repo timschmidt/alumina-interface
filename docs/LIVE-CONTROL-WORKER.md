@@ -374,6 +374,18 @@ snapshots after actor two discarded 18 unapplied abort requests. Fresh actors
 then passed ordinary `complete` in 431 snapshots. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-SPLIT-OUTAGE.md`.
 
+The `cached-job-installing-stop` expectation exercises a bound job before all
+local commits exist. It requests stop only with one exact `installed` and one
+exact `ready` participant. The coordinator issues `JobAbort` to the former and
+`JobCancel` to the latter, and schema V9 accepts global `aborted` only with
+complete caches, an `aborted`/cycle fact, and a `cancelled`/no-cycle fact. The
+first attempt passed in 386 snapshots. The harness then clears that terminal
+and stages a distinct prepare ID; initial read-only status treats only a
+distinct terminal predecessor as replaceable, and a second attempt completes
+on the same connections and boots in 60 snapshots. Active foreign work and a
+same-ID descriptor-token mismatch remain hard errors. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first

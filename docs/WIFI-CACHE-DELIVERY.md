@@ -190,9 +190,20 @@ participant set. That Chromium run passed in 434 snapshots; fresh actors then
 passed ordinary `complete` in 431 snapshots. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-SPLIT-OUTAGE.md`.
 
+The `installing-stop` qualification now covers the exact installed/ready split.
+The worker stops only after one participant has accepted `JobCommit` while the
+other has not. It aborts the installed actor, cancels the never-installed actor,
+retains a local cycle only for the former, and reaches global `aborted` without
+transport failure. After terminal clear, an initial read-only status round
+recognizes each distinctly identified prior terminal as replaceable while
+still rejecting active foreign work and same-ID token substitution. A second
+job then completes on the same sessions and MCU boots. The final production
+run passed in 386 and 60 snapshots, respectively. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
 durable browser job persistence, full control/status outage, reordered or
-duplicated traffic, split outcomes involving faulted, cancelled, or
-never-installed actors, live TinyBee/T-Deck Pro cached starts, electrical
+duplicated traffic, faulted or other terminal mixtures, live TinyBee/T-Deck Pro
+cached starts, electrical
 simultaneity measurement, and every physical motion/safety qualification claim.
