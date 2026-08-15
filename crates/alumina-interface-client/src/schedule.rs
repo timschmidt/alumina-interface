@@ -870,6 +870,69 @@ mod tests {
     }
 
     #[test]
+    fn lost_confirmed_abort_request_reconciles_then_retries_the_mutation() {
+        let descriptor = descriptor();
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+        machine.begin_prepare().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let commit = commit(&machine);
+        machine.begin_install(commit).unwrap();
+        authority.install(commit, admission()).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let confirm = machine.begin_confirm().unwrap();
+        authority
+            .confirm(
+                JobScheduleReference::decode(&confirm.body).unwrap(),
+                DeviceCycle(4_000_000),
+            )
+            .unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+
+        assert_eq!(
+            machine.begin_abort().unwrap().operation,
+            Operation::JobAbort
+        );
+        assert!(machine.abandon_pending());
+        assert_eq!(
+            machine.begin_abort(),
+            Err(ScheduleControlError::ReconciliationRequired)
+        );
+        assert_eq!(
+            machine.begin_status().unwrap().operation,
+            Operation::JobStatus
+        );
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Confirmed
+        );
+        assert!(!machine.reconciliation_required());
+
+        let retry = machine.begin_abort().unwrap();
+        assert_eq!(retry.operation, Operation::JobAbort);
+        authority
+            .abort(
+                JobScheduleReference::decode(&retry.body).unwrap(),
+                DeviceCycle(4_100_000),
+            )
+            .unwrap();
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Aborted
+        );
+    }
+
+    #[test]
     fn retained_complete_report_requires_the_exact_descriptor_token() {
         let descriptor = descriptor();
         let machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();

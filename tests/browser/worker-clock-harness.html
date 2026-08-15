@@ -51,11 +51,13 @@
         expectation === "cached-job-confirm-recovery" ||
         expectation === "cached-job-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-recovery" ||
+        expectation === "cached-job-confirmed-abort-request-recovery" ||
         expectation === "cached-job-reattach";
       const cachedJobStopPhase =
         expectation === "cached-job-abort-recovery"
           ? "installed"
-          : expectation === "cached-job-confirmed-abort-recovery"
+          : expectation === "cached-job-confirmed-abort-recovery" ||
+              expectation === "cached-job-confirmed-abort-request-recovery"
             ? "confirmed"
             : undefined;
 
