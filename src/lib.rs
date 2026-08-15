@@ -21,7 +21,9 @@ use alumina_board::GraphResourceAccess;
 #[cfg(target_arch = "wasm32")]
 use alumina_capability::encode_resource_id;
 #[cfg(target_arch = "wasm32")]
-use alumina_diagnostics::{DigitalCaptureFlags, DigitalLevel};
+use alumina_diagnostics::{
+    DigitalCaptureFlags, DigitalLevel, OverviewFlags, ResourceValue, SampleQuality,
+};
 use alumina_interface_core::{
     CanonicalGlobalJob2, CanonicalMachinePartition2, CanonicalPathProgram2, ExactScene, ExactValue,
     Millimetres, compile_representative_global_job, compile_representative_program,
@@ -34,7 +36,8 @@ use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 
 #[cfg(target_arch = "wasm32")]
 use crate::browser_worker::{
-    BrowserWorkerSupervisor, ConnectedCapabilityView, ConnectedWaveformView, SupervisorLifecycle,
+    BrowserWorkerSupervisor, ConnectedCapabilityView, ConnectedTelemetryView,
+    ConnectedWaveformView, SupervisorLifecycle,
 };
 use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
@@ -703,11 +706,23 @@ impl AluminaApp {
                     && waveform.generation() == snapshot.generation
                     && snapshot.waveform_capture_id == Some(waveform.capture_id())
             });
+            let telemetry = view.telemetry.iter().find(|telemetry| {
+                telemetry.connection_id() == snapshot.connection_id
+                    && telemetry.generation() == snapshot.generation
+            });
             let cursor = self
                 .live_capture_cursors
                 .entry(snapshot.connection_id)
                 .or_insert(0);
-            show_live_device_snapshot(ui, snapshot, capability, waveform, cursor, &mut actions);
+            show_live_device_snapshot(
+                ui,
+                snapshot,
+                capability,
+                telemetry,
+                waveform,
+                cursor,
+                &mut actions,
+            );
         }
         self.live_capture_cursors.retain(|connection_id, _| {
             view.devices
@@ -825,6 +840,7 @@ fn show_live_device_snapshot(
     ui: &mut egui::Ui,
     snapshot: &DeviceSessionSnapshot,
     capability: Option<&ConnectedCapabilityView>,
+    telemetry: Option<&ConnectedTelemetryView>,
     waveform: Option<&ConnectedWaveformView>,
     capture_cursor: &mut u64,
     actions: &mut Vec<LiveDeviceAction>,
@@ -880,6 +896,7 @@ fn show_live_device_snapshot(
             }
             show_live_capability_snapshot(ui, snapshot, capability);
             show_runtime_health_snapshot(ui, snapshot);
+            show_live_telemetry_status(ui, snapshot, capability, telemetry);
             show_live_waveform_status(ui, snapshot, capability, waveform, capture_cursor);
             if snapshot.phase == DeviceSessionPhase::DeviceUnhealthy {
                 ui.colored_label(
@@ -1071,6 +1088,254 @@ fn default_live_waveform_request(
         channels: resources.into_iter().map(encode_resource_id).collect(),
         duration_cycles: duration_cycles.max(1),
     })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_telemetry_status(
+    ui: &mut egui::Ui,
+    snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
+    telemetry: Option<&ConnectedTelemetryView>,
+) {
+    ui.separator();
+    ui.strong("Live capability-bound input status");
+    match snapshot.telemetry_phase {
+        None => {
+            ui.label("No telemetry subscription is available for this session yet.");
+        }
+        Some(phase) => {
+            ui.label(format!("telemetry subscription: {phase:?}"));
+            if let (Some(subscription_id), Some(digest)) = (
+                snapshot.telemetry_subscription_id,
+                snapshot.telemetry_subscription_digest,
+            ) {
+                ui.monospace(format!(
+                    "{subscription_id:016x} · {}…",
+                    encode_hex(&digest[..8])
+                ));
+            }
+            ui.label(format!(
+                "newest exact event: {}; device-side latest-only replacements: {}",
+                snapshot.telemetry_event_sequence, snapshot.telemetry_dropped_events
+            ));
+        }
+    }
+    if snapshot.telemetry_consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive telemetry failures: {}",
+            snapshot.telemetry_consecutive_failures
+        ));
+    }
+    if let Some(error) = &snapshot.telemetry_last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+    match (
+        capability,
+        telemetry.and_then(ConnectedTelemetryView::latest),
+    ) {
+        (Some(capability), Some(event)) => {
+            let overview = event.overview();
+            let simulated = overview.flags().contains(OverviewFlags::SIMULATED);
+            ui.colored_label(
+                if simulated {
+                    egui::Color32::YELLOW
+                } else {
+                    egui::Color32::LIGHT_GREEN
+                },
+                if simulated {
+                    "SIMULATED sampled input evidence — no physical measurement claim"
+                } else {
+                    "Canonical device-sampled input evidence"
+                },
+            );
+            ui.label(format!(
+                "event {} · overview {} · snapshot cycle {} · {} retained UI samples",
+                event.event_sequence(),
+                overview.sequence(),
+                overview.snapshot_cycle().0,
+                telemetry
+                    .expect("latest telemetry came from this view")
+                    .event_count()
+            ));
+            for sample in overview.samples() {
+                let age = overview
+                    .snapshot_cycle()
+                    .0
+                    .saturating_sub(sample.captured_cycle.0);
+                ui.colored_label(
+                    live_telemetry_quality_color(sample.quality),
+                    format!(
+                        "{}: {} · {:?} / {:?} · captured {} · age {} cycles",
+                        live_resource_label(capability.board(), sample.resource),
+                        live_resource_value(sample.value),
+                        sample.provenance,
+                        sample.quality,
+                        sample.captured_cycle.0,
+                        age
+                    ),
+                );
+            }
+            show_live_telemetry_plot(
+                ui,
+                capability.board(),
+                telemetry.expect("latest telemetry came from this view"),
+            );
+        }
+        (_, None) if snapshot.telemetry_phase.is_some() => {
+            ui.label("The subscription is awaiting its first complete exact overview event.");
+        }
+        _ => {}
+    }
+    ui.small(
+        "These low-rate, latest-only samples are passive input observations. Labels resolve through the same typed capability resources used by any reviewed board-image hotspots; this path cannot write or lease an I/O.",
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn live_resource_value(value: ResourceValue) -> String {
+    match value {
+        ResourceValue::Unavailable => "unavailable".to_owned(),
+        ResourceValue::Boolean(value) => if value { "HIGH" } else { "LOW" }.to_owned(),
+        ResourceValue::Unsigned(value) => value.to_string(),
+        ResourceValue::Signed(value) => value.to_string(),
+        ResourceValue::ExactRatio {
+            numerator,
+            denominator,
+        } => format!("{numerator}/{denominator}"),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn live_telemetry_quality_color(quality: SampleQuality) -> egui::Color32 {
+    match quality {
+        SampleQuality::Valid => egui::Color32::LIGHT_GREEN,
+        SampleQuality::Stale => egui::Color32::YELLOW,
+        SampleQuality::Unavailable | SampleQuality::Faulted => egui::Color32::LIGHT_RED,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "bounded sampled-history projection is lossy while retained cycles remain exact"
+)]
+fn show_live_telemetry_plot(
+    ui: &mut egui::Ui,
+    board: &alumina_interface_core::BoardExplorerSnapshot,
+    telemetry: &ConnectedTelemetryView,
+) {
+    let Some(latest) = telemetry.latest() else {
+        return;
+    };
+    let resources = latest
+        .overview()
+        .samples()
+        .map(|sample| sample.resource)
+        .collect::<Vec<_>>();
+    if resources.is_empty() {
+        return;
+    }
+    let cycles = telemetry
+        .events()
+        .map(|event| event.overview().snapshot_cycle().0)
+        .collect::<Vec<_>>();
+    let Some(start_cycle) = cycles.first().copied() else {
+        return;
+    };
+    let end_cycle = cycles
+        .last()
+        .copied()
+        .unwrap_or(start_cycle)
+        .max(start_cycle.saturating_add(1));
+    let duration = end_cycle.saturating_sub(start_cycle).max(1);
+    let width = ui.available_width().max(360.0);
+    let height = 34.0 + 36.0 * resources.len() as f32;
+    let (response, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
+    let plot = egui::Rect::from_min_max(
+        response.rect.min + egui::vec2(170.0, 8.0),
+        response.rect.max - egui::vec2(12.0, 22.0),
+    );
+    painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+    let lane_height = plot.height() / resources.len() as f32;
+    for (index, resource) in resources.into_iter().enumerate() {
+        let center = plot.top() + lane_height * (index as f32 + 0.5);
+        let color = live_capture_color(index);
+        painter.text(
+            egui::pos2(plot.left() - 8.0, center),
+            egui::Align2::RIGHT_CENTER,
+            live_resource_label(board, resource),
+            egui::FontId::monospace(10.0),
+            color,
+        );
+        let mut points = telemetry.events().filter_map(|event| {
+            let overview = event.overview();
+            let sample = overview.sample(resource)?;
+            let ResourceValue::Boolean(level) = sample.value else {
+                return None;
+            };
+            Some((overview.snapshot_cycle().0, level))
+        });
+        let Some((mut prior_cycle, mut prior_level)) = points.next() else {
+            continue;
+        };
+        for (cycle, level) in points {
+            let from_x = live_telemetry_x(plot, prior_cycle, start_cycle, duration);
+            let to_x = live_telemetry_x(plot, cycle, start_cycle, duration);
+            let from_y = live_boolean_y(center, prior_level);
+            let to_y = live_boolean_y(center, level);
+            painter.line_segment(
+                [egui::pos2(from_x, from_y), egui::pos2(to_x, from_y)],
+                egui::Stroke::new(1.8_f32, color),
+            );
+            painter.line_segment(
+                [egui::pos2(to_x, from_y), egui::pos2(to_x, to_y)],
+                egui::Stroke::new(1.8_f32, color),
+            );
+            prior_cycle = cycle;
+            prior_level = level;
+        }
+        painter.line_segment(
+            [
+                egui::pos2(
+                    live_telemetry_x(plot, prior_cycle, start_cycle, duration),
+                    live_boolean_y(center, prior_level),
+                ),
+                egui::pos2(plot.right(), live_boolean_y(center, prior_level)),
+            ],
+            egui::Stroke::new(1.8_f32, color),
+        );
+    }
+    painter.text(
+        egui::pos2(plot.left(), plot.bottom() + 3.0),
+        egui::Align2::LEFT_TOP,
+        start_cycle.to_string(),
+        egui::FontId::monospace(9.0),
+        egui::Color32::GRAY,
+    );
+    painter.text(
+        egui::pos2(plot.right(), plot.bottom() + 3.0),
+        egui::Align2::RIGHT_TOP,
+        end_cycle.to_string(),
+        egui::FontId::monospace(9.0),
+        egui::Color32::GRAY,
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "bounded sampled-history projection is lossy"
+)]
+fn live_telemetry_x(rect: egui::Rect, cycle: u64, start: u64, duration: u64) -> f32 {
+    rect.left()
+        + rect.width() * (cycle.saturating_sub(start).min(duration) as f64 / duration as f64) as f32
+}
+
+#[cfg(target_arch = "wasm32")]
+const fn live_boolean_y(center: f32, level: bool) -> f32 {
+    if level { center - 7.0 } else { center + 7.0 }
 }
 
 #[cfg(target_arch = "wasm32")]

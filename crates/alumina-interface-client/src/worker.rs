@@ -7,6 +7,9 @@ use alumina_capability::{
     decode_board_capability, decode_resource_id,
 };
 use alumina_clock::ClockEstimationPolicy;
+use alumina_diagnostics::transport::{
+    DiagnosticTransportLimits, decode_telemetry_event, decode_telemetry_subscribe,
+};
 use alumina_diagnostics::{DiagnosticLimits, decode_digital_capture};
 use alumina_protocol::{DeviceCycle, DeviceId, Digest};
 use alumina_runtime::health::{
@@ -16,12 +19,12 @@ use alumina_runtime::stack::{StackDomain, StackWatermarkFlags, StackWatermarkSna
 use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilityDownloadPhase;
-use crate::diagnostics::WaveformClientPhase;
+use crate::diagnostics::{TelemetryClientPhase, WaveformClientPhase};
 use crate::health::{RuntimeHealthAvailability, RuntimeHealthView};
 use crate::http::{DeviceCredentialSource, DeviceIdentity};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 4;
+pub const WORKER_SCHEMA_VERSION: u16 = 5;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -767,6 +770,96 @@ impl From<WaveformClientPhase> for WaveformCapturePhaseSnapshot {
     }
 }
 
+/// Rendering-safe telemetry subscription lifecycle retained in a snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryPhaseSnapshot {
+    /// Initial subscribe mutation is pending or being reconciled.
+    Subscribing,
+    /// Subscription is active and exact event polls are admitted.
+    Active,
+    /// Exact unsubscribe mutation is pending or being reconciled.
+    Unsubscribing,
+    /// Device confirmed removal.
+    Unsubscribed,
+}
+
+impl From<TelemetryClientPhase> for TelemetryPhaseSnapshot {
+    fn from(value: TelemetryClientPhase) -> Self {
+        match value {
+            TelemetryClientPhase::Subscribing | TelemetryClientPhase::ReconcilingSubscribe => {
+                Self::Subscribing
+            }
+            TelemetryClientPhase::Active => Self::Active,
+            TelemetryClientPhase::Unsubscribing | TelemetryClientPhase::ReconcilingUnsubscribe => {
+                Self::Unsubscribing
+            }
+            TelemetryClientPhase::Unsubscribed => Self::Unsubscribed,
+        }
+    }
+}
+
+/// Credential-free canonical telemetry event transferred from worker to UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerTelemetryDocument {
+    /// UI-local connection identity owning the subscription.
+    pub connection_id: u64,
+    /// Exact worker session generation that acquired the event.
+    pub generation: u64,
+    /// Complete canonical `ALMTLS01` request used to validate the event.
+    subscription: Vec<u8>,
+    /// Complete canonical `ALMTEV01` event and embedded overview.
+    event: Vec<u8>,
+}
+
+impl WorkerTelemetryDocument {
+    /// Constructs and independently validates one worker-to-UI transfer.
+    pub fn try_new(
+        connection_id: u64,
+        generation: u64,
+        subscription: Vec<u8>,
+        event: Vec<u8>,
+    ) -> Result<Self, WorkerContractError> {
+        let transfer = Self {
+            connection_id,
+            generation,
+            subscription,
+            event,
+        };
+        transfer.validate()?;
+        Ok(transfer)
+    }
+
+    /// Complete immutable canonical subscription bytes.
+    pub fn subscription(&self) -> &[u8] {
+        &self.subscription
+    }
+
+    /// Complete immutable canonical event bytes.
+    pub fn event(&self) -> &[u8] {
+        &self.event
+    }
+
+    /// Revalidates session identity, subscription, and embedded overview.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0 || self.generation == 0 {
+            return Err(WorkerContractError::TelemetryDocument);
+        }
+        let subscription = decode_telemetry_subscribe(
+            &self.subscription,
+            DiagnosticTransportLimits::native_control(),
+        )
+        .map_err(|_| WorkerContractError::TelemetryDocument)?;
+        if subscription.context().config_digest != Digest::ZERO {
+            return Err(WorkerContractError::TelemetryDocument);
+        }
+        decode_telemetry_event(&self.event, subscription, DiagnosticLimits::interactive())
+            .map_err(|_| WorkerContractError::TelemetryDocument)?;
+        Ok(())
+    }
+}
+
 /// One-time credential-free canonical capture transferred from worker to UI.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -930,6 +1023,20 @@ pub struct DeviceSessionSnapshot {
     pub capability_consecutive_failures: u32,
     /// Latest capability acquisition failure, independent from clock/health state.
     pub capability_last_error: Option<String>,
+    /// Current capability-derived overview subscription lifecycle.
+    pub telemetry_phase: Option<TelemetryPhaseSnapshot>,
+    /// Nonzero worker-created subscription identity while telemetry exists.
+    pub telemetry_subscription_id: Option<u64>,
+    /// SHA-256 of the complete canonical subscription request.
+    pub telemetry_subscription_digest: Option<[u8; 32]>,
+    /// Newest complete event sequence independently admitted by the worker.
+    pub telemetry_event_sequence: u64,
+    /// Cumulative device-side latest-only replacements at that event.
+    pub telemetry_dropped_events: u64,
+    /// Consecutive telemetry-operation failures since the latest accepted response.
+    pub telemetry_consecutive_failures: u32,
+    /// Latest telemetry failure, isolated from other worker lifecycles.
+    pub telemetry_last_error: Option<String>,
     /// Current input-only diagnostic acquisition lifecycle, when requested.
     pub waveform_phase: Option<WaveformCapturePhaseSnapshot>,
     /// Capture attempt identity retained while a waveform lifecycle exists.
@@ -962,11 +1069,13 @@ impl DeviceSessionSnapshot {
             || !diagnostic_is_valid(self.last_error.as_deref())
             || !diagnostic_is_valid(self.runtime_health_last_error.as_deref())
             || !diagnostic_is_valid(self.capability_last_error.as_deref())
+            || !diagnostic_is_valid(self.telemetry_last_error.as_deref())
             || !diagnostic_is_valid(self.waveform_last_error.as_deref())
             || (self.consecutive_failures == 0) != self.last_error.is_none()
             || (self.runtime_health_consecutive_failures == 0)
                 != self.runtime_health_last_error.is_none()
             || (self.capability_consecutive_failures == 0) != self.capability_last_error.is_none()
+            || (self.telemetry_consecutive_failures == 0) != self.telemetry_last_error.is_none()
             || (self.waveform_consecutive_failures == 0) != self.waveform_last_error.is_none()
         {
             return Err(WorkerContractError::DeviceSnapshot);
@@ -1012,6 +1121,26 @@ impl DeviceSessionSnapshot {
             if identity.capability != capability {
                 return Err(WorkerContractError::DeviceIdentity);
             }
+        }
+        match (
+            self.telemetry_phase,
+            self.telemetry_subscription_id,
+            self.telemetry_subscription_digest,
+        ) {
+            (None, None, None)
+                if self.telemetry_event_sequence == 0 && self.telemetry_dropped_events == 0 => {}
+            (Some(_), Some(subscription_id), Some(digest))
+                if subscription_id != 0 && digest.iter().any(|byte| *byte != 0) =>
+            {
+                if self.boot_id.is_none()
+                    || self.device_identity.is_none()
+                    || self.capability_phase != CapabilityDownloadPhaseSnapshot::Complete
+                    || self.telemetry_dropped_events > self.telemetry_event_sequence
+                {
+                    return Err(WorkerContractError::TelemetryProgress);
+                }
+            }
+            _ => return Err(WorkerContractError::TelemetryProgress),
         }
         match (self.waveform_phase, self.waveform_capture_id) {
             (None, None) if self.waveform_received_bytes == 0 && self.waveform_total_bytes == 0 => {
@@ -1084,6 +1213,11 @@ pub enum WorkerEvent {
         /// Independently validated retained record and owning session identity.
         waveform: Box<WorkerWaveformDocument>,
     },
+    /// One newly admitted complete canonical resource-overview event.
+    TelemetryDocument {
+        /// Independently validated event and exact owning subscription.
+        telemetry: Box<WorkerTelemetryDocument>,
+    },
     /// A disconnect erased a connection.
     Removed {
         /// UI-local stable connection identity.
@@ -1152,6 +1286,9 @@ impl WorkerEventEnvelope {
         if let WorkerEvent::WaveformDocument { waveform } = &self.event {
             waveform.validate()?;
         }
+        if let WorkerEvent::TelemetryDocument { telemetry } = &self.event {
+            telemetry.validate()?;
+        }
         Ok(())
     }
 }
@@ -1183,6 +1320,10 @@ pub enum WorkerContractError {
     CapabilityProgress,
     /// A one-time capability document transfer failed canonical validation.
     CapabilityDocument,
+    /// Telemetry lifecycle identity or event progress was inconsistent.
+    TelemetryProgress,
+    /// A telemetry event transfer failed canonical validation.
+    TelemetryDocument,
     /// A bounded capture command was malformed or noncanonical.
     WaveformRequest,
     /// Waveform progress fields contradicted the retained lifecycle.
@@ -1218,6 +1359,8 @@ impl fmt::Display for WorkerContractError {
             Self::CapabilityDocument => {
                 formatter.write_str("capability document transfer is invalid")
             }
+            Self::TelemetryProgress => formatter.write_str("telemetry progress is invalid"),
+            Self::TelemetryDocument => formatter.write_str("telemetry document is invalid"),
             Self::WaveformRequest => formatter.write_str("waveform request is invalid"),
             Self::WaveformProgress => formatter.write_str("waveform progress is invalid"),
             Self::WaveformDocument => formatter.write_str("waveform document transfer is invalid"),
@@ -1234,7 +1377,14 @@ mod tests {
     use alumina_capability::{
         MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, encode_resource_id, read_verified_range,
     };
-    use alumina_sim::diagnostics::tinybee_diagnostic_fixture_for_context;
+    use alumina_diagnostics::transport::{
+        SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
+        decode_telemetry_subscribe, encode_telemetry_subscribe, telemetry_subscribe_encoded_len,
+    };
+    use alumina_service::diagnostics::{DiagnosticProviderPolicy, DiagnosticServiceState};
+    use alumina_sim::diagnostics::{
+        simulated_resource_overview, tinybee_diagnostic_fixture_for_context,
+    };
 
     use super::*;
 
@@ -1427,6 +1577,13 @@ mod tests {
                 capability_identity: None,
                 capability_consecutive_failures: 0,
                 capability_last_error: None,
+                telemetry_phase: None,
+                telemetry_subscription_id: None,
+                telemetry_subscription_digest: None,
+                telemetry_event_sequence: 0,
+                telemetry_dropped_events: 0,
+                telemetry_consecutive_failures: 0,
+                telemetry_last_error: None,
                 waveform_phase: None,
                 waveform_capture_id: None,
                 waveform_received_bytes: 0,
@@ -1440,7 +1597,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 4);
+        assert_eq!(WORKER_SCHEMA_VERSION, 5);
     }
 
     #[test]
@@ -1535,6 +1692,13 @@ mod tests {
             capability_identity: None,
             capability_consecutive_failures: 0,
             capability_last_error: None,
+            telemetry_phase: None,
+            telemetry_subscription_id: None,
+            telemetry_subscription_digest: None,
+            telemetry_event_sequence: 0,
+            telemetry_dropped_events: 0,
+            telemetry_consecutive_failures: 0,
+            telemetry_last_error: None,
             waveform_phase: None,
             waveform_capture_id: None,
             waveform_received_bytes: 0,
@@ -1652,6 +1816,82 @@ mod tests {
         assert_eq!(
             decoded.validate(),
             Err(WorkerContractError::WaveformDocument)
+        );
+    }
+
+    #[test]
+    fn telemetry_document_event_is_revalidated_after_json_transfer() {
+        const RESOURCES: [ResourceId; 4] = [
+            ResourceId::Gpio(22),
+            ResourceId::Gpio(32),
+            ResourceId::Gpio(33),
+            ResourceId::Gpio(35),
+        ];
+        type TestService = DiagnosticServiceState<176, 432, 0, 0>;
+
+        let (identity, _) = tinybee_document();
+        let context = alumina_diagnostics::DiagnosticContext {
+            device_id: DeviceId(*b"ALUM-SIM:TINYBEE"),
+            boot_id: alumina_clock::BootId::new([0x31; 16]).unwrap(),
+            capability: identity,
+            config_digest: Digest::ZERO,
+            clock_frequency_hz: 1_000_000,
+        };
+        let request = TelemetrySubscribeRequest {
+            subscription_id: SubscriptionId::new(19).unwrap(),
+            context,
+            flags: TelemetrySubscribeFlags(TelemetrySubscribeFlags::LATEST_ONLY),
+            minimum_period_cycles: 100_000,
+            maximum_event_bytes: 432,
+            resources: &RESOURCES,
+        };
+        let mut subscription =
+            vec![0_u8; telemetry_subscribe_encoded_len(RESOURCES.len()).unwrap()];
+        let used = encode_telemetry_subscribe(
+            &request,
+            &mut subscription,
+            DiagnosticTransportLimits::native_control(),
+        )
+        .unwrap();
+        subscription.truncate(used);
+        let subscription_view =
+            decode_telemetry_subscribe(&subscription, DiagnosticTransportLimits::native_control())
+                .unwrap();
+        let mut service = TestService::new(
+            context,
+            DiagnosticProviderPolicy::SIMULATED,
+            DiagnosticTransportLimits::native_control(),
+            DiagnosticLimits::interactive(),
+        );
+        service.subscribe(&subscription).unwrap();
+        let overview = simulated_resource_overview(
+            subscription_view,
+            1,
+            alumina_protocol::DeviceCycle(2_000_000),
+        )
+        .unwrap();
+        service.publish_overview(&overview).unwrap();
+        let transfer = WorkerTelemetryDocument::try_new(
+            7,
+            3,
+            subscription,
+            service.pending_telemetry_event().unwrap().to_vec(),
+        )
+        .unwrap();
+        let event = WorkerEventEnvelope::current(WorkerEvent::TelemetryDocument {
+            telemetry: Box::new(transfer),
+        });
+        let json = serde_json::to_vec(&event).unwrap();
+        let mut decoded: WorkerEventEnvelope = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.validate(), Ok(()));
+        if let WorkerEvent::TelemetryDocument { telemetry } = &mut decoded.event {
+            telemetry.event[0] ^= 1;
+        } else {
+            panic!("round trip changed telemetry event kind");
+        }
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::TelemetryDocument)
         );
     }
 

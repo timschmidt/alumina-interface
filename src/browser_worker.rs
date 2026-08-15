@@ -8,31 +8,36 @@ use alumina_board::GraphResourceAccess;
 use alumina_capability::{BoardCapabilityLimits, decode_board_capability, decode_resource_id};
 use alumina_clock::{ClockFlags, ClockObservation};
 use alumina_diagnostics::transport::{
-    DiagnosticTransportLimits, WaveformConfigureFlags, WaveformConfigureRequest,
-    encode_waveform_configure, waveform_configure_encoded_len,
+    DiagnosticTransportLimits, SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
+    WaveformConfigureFlags, WaveformConfigureRequest, decode_telemetry_event,
+    decode_telemetry_subscribe, encode_telemetry_subscribe, encode_waveform_configure,
+    telemetry_event_encoded_len, telemetry_subscribe_encoded_len, waveform_configure_encoded_len,
 };
 use alumina_diagnostics::{
     CaptureId, DiagnosticContext, DiagnosticLimits, DigitalCaptureView, DigitalTriggerCondition,
-    decode_digital_capture,
+    decode_digital_capture, resource_overview_encoded_len,
 };
 use alumina_interface_client::capability::{CapabilityDownloadMachine, CapabilityDownloadPhase};
 use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
-use alumina_interface_client::diagnostics::{WaveformCaptureMachine, WaveformClientPhase};
+use alumina_interface_client::diagnostics::{
+    TelemetrySubscriptionMachine, WaveformCaptureMachine, WaveformClientPhase,
+};
 use alumina_interface_client::health::RuntimeHealthModel;
 use alumina_interface_client::http::{AuthenticatedHttpSession, DeviceIdentity};
 use alumina_interface_client::wasm::{
     BrowserCapabilityError, BrowserClockError, BrowserFetchError, BrowserHealthError,
-    BrowserWaveformError, DeviceOrigin, drive_capability_step_in_worker,
-    drive_clock_probe_in_worker, drive_runtime_health_in_worker, drive_waveform_step_in_worker,
-    fetch_device_identity_in_worker, open_authenticated_session_in_worker, worker_origin,
+    BrowserTelemetryError, BrowserWaveformError, DeviceOrigin, drive_capability_step_in_worker,
+    drive_clock_probe_in_worker, drive_runtime_health_in_worker, drive_telemetry_step_in_worker,
+    drive_waveform_step_in_worker, fetch_device_identity_in_worker,
+    open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
     CapabilityDownloadPhaseSnapshot, CapabilityIdentitySnapshot, ClockEstimateSnapshot,
     ClockHistoryRecord, DeviceConnectionRequest, DeviceIdentitySnapshot, DeviceSessionPhase,
     DeviceSessionSnapshot, MAXIMUM_CLOCK_HISTORY, MAXIMUM_WORKER_DIAGNOSTIC_BYTES,
-    RuntimeHealthWorkerSnapshot, WORKER_SCHEMA_VERSION, WorkerCapabilityDocument, WorkerCommand,
-    WorkerCommandEnvelope, WorkerEvent, WorkerEventEnvelope, WorkerWaveformDocument,
-    WorkerWaveformRequest,
+    RuntimeHealthWorkerSnapshot, TelemetryPhaseSnapshot, WORKER_SCHEMA_VERSION,
+    WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope, WorkerEvent,
+    WorkerEventEnvelope, WorkerTelemetryDocument, WorkerWaveformDocument, WorkerWaveformRequest,
 };
 use alumina_interface_core::board_explorer::{
     BoardExplorerSnapshot, build_board_explorer_snapshot,
@@ -56,6 +61,8 @@ const WAVEFORM_OPERATIONS_PER_HEARTBEAT: usize = 8;
 const WAVEFORM_TRANSITION_CAPACITY: u32 = 64;
 const WAVEFORM_CHUNK_BYTES: u32 = 168;
 const WAVEFORM_ARM_HORIZON_SECONDS: u64 = 30;
+const TELEMETRY_RESOURCE_LIMIT: usize = 4;
+const TELEMETRY_UPDATES_PER_SECOND: u64 = 10;
 
 struct DeviceState {
     connection_id: u64,
@@ -82,6 +89,10 @@ struct DeviceState {
     next_runtime_health_attempt_ms: f64,
     capability_consecutive_failures: u32,
     capability_last_error: Option<String>,
+    telemetry: Option<TelemetrySubscriptionMachine>,
+    pending_telemetry_event: Option<Vec<u8>>,
+    telemetry_consecutive_failures: u32,
+    telemetry_last_error: Option<String>,
     waveform: Option<WaveformCaptureMachine>,
     pending_waveform_request: Option<WorkerWaveformRequest>,
     waveform_event_published: bool,
@@ -128,6 +139,10 @@ impl DeviceState {
             next_runtime_health_attempt_ms: 0.0,
             capability_consecutive_failures: 0,
             capability_last_error: None,
+            telemetry: None,
+            pending_telemetry_event: None,
+            telemetry_consecutive_failures: 0,
+            telemetry_last_error: None,
             waveform: None,
             pending_waveform_request: None,
             waveform_event_published: false,
@@ -138,6 +153,26 @@ impl DeviceState {
     }
 
     fn snapshot(&self) -> DeviceSessionSnapshot {
+        let (
+            telemetry_phase,
+            telemetry_subscription_id,
+            telemetry_subscription_digest,
+            telemetry_event_sequence,
+            telemetry_dropped_events,
+        ) = self
+            .telemetry
+            .as_ref()
+            .map_or((None, None, None, 0, 0), |telemetry| {
+                let reference = telemetry.reference();
+                let progress = telemetry.event_progress();
+                (
+                    Some(telemetry.phase().into()),
+                    Some(reference.subscription_id.get()),
+                    Some(reference.subscription_digest.0),
+                    progress.map_or(0, |progress| progress.event_sequence),
+                    progress.map_or(0, |progress| progress.dropped_events),
+                )
+            });
         let (waveform_phase, waveform_capture_id, waveform_received_bytes, waveform_total_bytes) =
             self.waveform
                 .as_ref()
@@ -195,6 +230,13 @@ impl DeviceState {
                 .map(CapabilityIdentitySnapshot::from_identity),
             capability_consecutive_failures: self.capability_consecutive_failures,
             capability_last_error: self.capability_last_error.clone(),
+            telemetry_phase,
+            telemetry_subscription_id,
+            telemetry_subscription_digest,
+            telemetry_event_sequence,
+            telemetry_dropped_events,
+            telemetry_consecutive_failures: self.telemetry_consecutive_failures,
+            telemetry_last_error: self.telemetry_last_error.clone(),
             waveform_phase,
             waveform_capture_id,
             waveform_received_bytes,
@@ -271,6 +313,122 @@ impl DeviceState {
         self.capability_event_published = false;
         self.capability_consecutive_failures = 0;
         self.capability_last_error = None;
+        self.reset_telemetry_for_new_boot();
+    }
+
+    fn record_telemetry_success(&mut self) {
+        self.telemetry_consecutive_failures = 0;
+        self.telemetry_last_error = None;
+    }
+
+    fn record_telemetry_failure(&mut self, error: &str) {
+        self.telemetry_consecutive_failures = self.telemetry_consecutive_failures.saturating_add(1);
+        self.telemetry_last_error = Some(bounded_diagnostic(error));
+    }
+
+    fn reset_telemetry_for_new_boot(&mut self) {
+        self.telemetry = None;
+        self.pending_telemetry_event = None;
+        self.telemetry_consecutive_failures = 0;
+        self.telemetry_last_error = None;
+    }
+
+    fn start_telemetry(&mut self) -> Result<bool, String> {
+        if self.telemetry.is_some() {
+            return Ok(true);
+        }
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| "device identity has not been acquired".to_owned())?;
+        let capability_identity = self
+            .capability
+            .identity()
+            .ok_or_else(|| "board capability identity is unavailable".to_owned())?;
+        if self.capability.phase() != CapabilityDownloadPhase::Complete
+            || capability_identity != identity.capability()
+        {
+            return Err("device identity and complete capability are not reconciled".to_owned());
+        }
+        let document = self
+            .capability
+            .document()
+            .ok_or_else(|| "complete capability bytes are unavailable".to_owned())?;
+        let capability = decode_board_capability(document, BoardCapabilityLimits::interactive())
+            .map_err(|error| format!("board capability rejected: {error:?}"))?;
+        if capability.board_id() != identity.board_id() {
+            return Err("public board identity does not match capability bytes".to_owned());
+        }
+        let mut resources: Vec<_> = capability
+            .graph()
+            .resources()
+            .filter(|resource| resource.access == GraphResourceAccess::StableBooleanInput)
+            .map(|resource| resource.resource)
+            .take(TELEMETRY_RESOURCE_LIMIT)
+            .collect();
+        resources.sort_unstable();
+        resources.dedup();
+        if resources.is_empty() {
+            return Ok(false);
+        }
+
+        let boot_id = self
+            .clock
+            .boot_id()
+            .ok_or_else(|| "authenticated boot identity is unavailable".to_owned())?;
+        let latest = self
+            .history
+            .back()
+            .ok_or_else(|| "authenticated clock evidence is unavailable".to_owned())?;
+        let overview_bytes = resource_overview_encoded_len(resources.len())
+            .map_err(|error| format!("telemetry overview length rejected: {error}"))?;
+        let event_bytes = telemetry_event_encoded_len(overview_bytes)
+            .map_err(|error| format!("telemetry event length rejected: {error}"))?;
+        let encoded_len = telemetry_subscribe_encoded_len(resources.len())
+            .map_err(|error| format!("telemetry subscribe length rejected: {error}"))?;
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(encoded_len)
+            .map_err(|_| "telemetry subscription allocation failed".to_owned())?;
+        encoded.resize(encoded_len, 0);
+        let context = DiagnosticContext {
+            device_id: identity.device_id(),
+            boot_id,
+            capability: capability_identity,
+            config_digest: Digest::ZERO,
+            clock_frequency_hz: latest.frequency_hz,
+        };
+        let used = encode_telemetry_subscribe(
+            &TelemetrySubscribeRequest {
+                subscription_id: SubscriptionId::new(self.generation)
+                    .map_err(|error| format!("telemetry identity rejected: {error}"))?,
+                context,
+                flags: TelemetrySubscribeFlags(TelemetrySubscribeFlags::LATEST_ONLY),
+                minimum_period_cycles: latest
+                    .frequency_hz
+                    .checked_div(TELEMETRY_UPDATES_PER_SECOND)
+                    .unwrap_or(0)
+                    .max(1),
+                maximum_event_bytes: u32::try_from(event_bytes)
+                    .map_err(|_| "telemetry event length does not fit protocol".to_owned())?,
+                resources: &resources,
+            },
+            &mut encoded,
+            DiagnosticTransportLimits::native_control(),
+        )
+        .map_err(|error| format!("telemetry subscription rejected: {error}"))?;
+        encoded.truncate(used);
+        self.telemetry = Some(
+            TelemetrySubscriptionMachine::new(
+                encoded,
+                DiagnosticTransportLimits::native_control(),
+                DiagnosticLimits::interactive(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        self.pending_telemetry_event = None;
+        self.record_telemetry_success();
+        Ok(true)
     }
 
     fn record_waveform_success(&mut self) {
@@ -873,6 +1031,15 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
                 state.record_capability_failure(error);
                 state.session = None;
             }
+            if state.session.is_some()
+                && state.capability.phase() == CapabilityDownloadPhase::Complete
+            {
+                match state.start_telemetry() {
+                    Ok(true) => drive_state_telemetry(worker_scope, &mut state).await,
+                    Ok(false) => {}
+                    Err(error) => state.record_telemetry_failure(&error),
+                }
+            }
             if state.session.is_some() && state.waveform.is_some() {
                 drive_waveform_burst(worker_scope, &mut state).await;
             }
@@ -1012,6 +1179,37 @@ async fn drive_state_waveform(
     .await
 }
 
+async fn drive_state_telemetry(worker_scope: &WorkerGlobalScope, state: &mut DeviceState) {
+    let result = drive_telemetry_step_in_worker(
+        worker_scope,
+        &state.origin,
+        state
+            .session
+            .as_mut()
+            .expect("caller checked authenticated session"),
+        state
+            .telemetry
+            .as_mut()
+            .expect("start_telemetry admitted a subscription"),
+        &state.secret,
+    )
+    .await;
+    match result {
+        Ok(update) => {
+            state.record_telemetry_success();
+            if let Some(event) = update.event {
+                state.pending_telemetry_event = Some(event);
+            }
+        }
+        Err(error) => {
+            if telemetry_session_must_reopen(&error) {
+                state.session = None;
+            }
+            state.record_telemetry_failure(&error.to_string());
+        }
+    }
+}
+
 async fn drive_waveform_burst(worker_scope: &WorkerGlobalScope, state: &mut DeviceState) {
     for _ in 0..WAVEFORM_OPERATIONS_PER_HEARTBEAT {
         if let Err(error) = install_pending_waveform(state) {
@@ -1146,6 +1344,21 @@ const fn waveform_session_must_reopen(error: &BrowserWaveformError) -> bool {
     )
 }
 
+const fn telemetry_session_must_reopen(error: &BrowserTelemetryError) -> bool {
+    matches!(
+        error,
+        BrowserTelemetryError::ConfigurationIdentity
+            | BrowserTelemetryError::Session(_)
+            | BrowserTelemetryError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
 fn finish_device_step(
     runtime: &SharedWorkerRuntime,
     connection_id: u64,
@@ -1175,10 +1388,46 @@ fn finish_device_step(
         return;
     }
     publish_capability_document(runtime, connection_id);
+    publish_telemetry_document(runtime, connection_id);
     publish_waveform_document(runtime, connection_id);
     publish_snapshot(runtime, connection_id);
     if probe_immediately {
         launch_device_step(runtime, connection_id, false);
+    }
+}
+
+fn publish_telemetry_document(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    let transfer = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let Some(DeviceEntry::Idle(state)) = runtime_ref.devices.get_mut(&connection_id) else {
+            return;
+        };
+        let Some(event) = state.pending_telemetry_event.take() else {
+            return;
+        };
+        let Some(telemetry) = state.telemetry.as_ref() else {
+            return;
+        };
+        WorkerTelemetryDocument::try_new(
+            state.connection_id,
+            state.generation,
+            telemetry.request_bytes().to_vec(),
+            event,
+        )
+    };
+    match transfer {
+        Ok(telemetry) => emit_worker_event(
+            runtime,
+            WorkerEvent::TelemetryDocument {
+                telemetry: Box::new(telemetry),
+            },
+        ),
+        Err(error) => emit_worker_event(
+            runtime,
+            WorkerEvent::Fatal {
+                message: format!("validated telemetry transfer failed: {error}"),
+            },
+        ),
     }
 }
 
@@ -1329,10 +1578,70 @@ pub struct SupervisorView {
     pub devices: Vec<DeviceSessionSnapshot>,
     /// Canonical connected-board documents decoded once per matching generation.
     pub capabilities: Vec<ConnectedCapabilityView>,
+    /// Bounded exact overview history per connected telemetry subscription.
+    pub telemetry: Vec<ConnectedTelemetryView>,
     /// Latest complete capability- and boot-bound digital capture per connection.
     pub waveforms: Vec<ConnectedWaveformView>,
     /// Oldest-to-newest bounded supervision diagnostics.
     pub diagnostics: Vec<String>,
+}
+
+/// Rendering-realm telemetry evidence independently rebound to live authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedTelemetryView {
+    connection_id: u64,
+    generation: u64,
+    subscription: Vec<u8>,
+    events: VecDeque<Vec<u8>>,
+}
+
+impl ConnectedTelemetryView {
+    /// UI-local connection identity owning this subscription.
+    #[must_use]
+    pub const fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
+
+    /// Worker generation in which the subscription was created.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Number of exact canonical events retained for plots and status history.
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Reborrows the newest independently validated telemetry event.
+    #[must_use]
+    pub fn latest(&self) -> Option<alumina_diagnostics::transport::TelemetryEventView<'_>> {
+        let subscription = decode_telemetry_subscribe(
+            &self.subscription,
+            DiagnosticTransportLimits::native_control(),
+        )
+        .ok()?;
+        self.events.back().and_then(|event| {
+            decode_telemetry_event(event, subscription, DiagnosticLimits::interactive()).ok()
+        })
+    }
+
+    /// Iterates oldest-to-newest exact canonical event history.
+    pub fn events(
+        &self,
+    ) -> impl Iterator<Item = alumina_diagnostics::transport::TelemetryEventView<'_>> + '_ {
+        let subscription = decode_telemetry_subscribe(
+            &self.subscription,
+            DiagnosticTransportLimits::native_control(),
+        )
+        .ok();
+        self.events.iter().filter_map(move |event| {
+            subscription.and_then(|subscription| {
+                decode_telemetry_event(event, subscription, DiagnosticLimits::interactive()).ok()
+            })
+        })
+    }
 }
 
 /// Rendering-realm waveform evidence independently rebound to live session facts.
@@ -1414,6 +1723,7 @@ struct MutableSupervisorView {
     lifecycle: SupervisorLifecycle,
     devices: BTreeMap<u64, DeviceSessionSnapshot>,
     capabilities: BTreeMap<u64, ConnectedCapabilityView>,
+    telemetry: BTreeMap<u64, ConnectedTelemetryView>,
     waveforms: BTreeMap<u64, ConnectedWaveformView>,
     diagnostics: VecDeque<String>,
 }
@@ -1424,6 +1734,7 @@ impl Default for MutableSupervisorView {
             lifecycle: SupervisorLifecycle::Starting,
             devices: BTreeMap::new(),
             capabilities: BTreeMap::new(),
+            telemetry: BTreeMap::new(),
             waveforms: BTreeMap::new(),
             diagnostics: VecDeque::new(),
         }
@@ -1436,6 +1747,123 @@ impl MutableSupervisorView {
             self.diagnostics.pop_front();
         }
         self.diagnostics.push_back(message);
+    }
+
+    fn validate_telemetry_transfer(
+        &self,
+        telemetry: &WorkerTelemetryDocument,
+    ) -> Result<(), &'static str> {
+        let snapshot = self
+            .devices
+            .get(&telemetry.connection_id)
+            .filter(|snapshot| snapshot.generation == telemetry.generation)
+            .ok_or("session generation is stale or absent")?;
+        let capability = self
+            .capabilities
+            .get(&telemetry.connection_id)
+            .filter(|capability| capability.generation == telemetry.generation)
+            .ok_or("matching complete board capability is absent")?;
+        let identity = snapshot
+            .device_identity
+            .as_ref()
+            .ok_or("public device identity is absent")?;
+        let device_id = identity
+            .validate()
+            .map_err(|_| "public device identity is invalid")?;
+        let subscription = decode_telemetry_subscribe(
+            telemetry.subscription(),
+            DiagnosticTransportLimits::native_control(),
+        )
+        .map_err(|_| "canonical telemetry subscription decoding failed")?;
+        let event = decode_telemetry_event(
+            telemetry.event(),
+            subscription,
+            DiagnosticLimits::interactive(),
+        )
+        .map_err(|_| "canonical telemetry event decoding failed")?;
+        let context = subscription.context();
+        if context.device_id != device_id
+            || context.capability != capability.board.identity()
+            || context.config_digest != Digest::ZERO
+            || snapshot.boot_id != Some(context.boot_id.as_bytes())
+            || identity.capability.identity().ok() != Some(context.capability)
+            || snapshot.telemetry_phase != Some(TelemetryPhaseSnapshot::Active)
+            || snapshot.telemetry_subscription_id != Some(subscription.subscription_id().get())
+            || snapshot.telemetry_subscription_digest != Some(subscription.digest().0)
+            || event.event_sequence() <= snapshot.telemetry_event_sequence
+            || event.dropped_events() < snapshot.telemetry_dropped_events
+        {
+            return Err("telemetry context or progress does not match live device authority");
+        }
+        if snapshot
+            .history
+            .last()
+            .is_none_or(|latest| latest.frequency_hz != context.clock_frequency_hz)
+        {
+            return Err("telemetry clock frequency does not match signed heartbeat evidence");
+        }
+        for sample in event.overview().samples() {
+            let resource = capability
+                .board
+                .resource(sample.resource)
+                .ok_or("telemetry names a resource absent from the board capability")?;
+            if !resource
+                .graph_accesses()
+                .iter()
+                .any(|access| access.access == GraphResourceAccess::StableBooleanInput)
+            {
+                return Err("telemetry resource lacks stable Boolean input authority");
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_telemetry_transfer(&mut self, telemetry: &WorkerTelemetryDocument) {
+        let connection_id = telemetry.connection_id;
+        let generation = telemetry.generation;
+        if let Err(error) = self.validate_telemetry_transfer(telemetry) {
+            self.push_diagnostic(format!(
+                "connection {connection_id}: telemetry transfer rejected: {error}"
+            ));
+            return;
+        }
+        let subscription = decode_telemetry_subscribe(
+            telemetry.subscription(),
+            DiagnosticTransportLimits::native_control(),
+        )
+        .expect("validated telemetry transfer retains its subscription");
+        let event = decode_telemetry_event(
+            telemetry.event(),
+            subscription,
+            DiagnosticLimits::interactive(),
+        )
+        .expect("validated telemetry transfer retains its event");
+        let entry = self
+            .telemetry
+            .entry(connection_id)
+            .or_insert_with(|| ConnectedTelemetryView {
+                connection_id,
+                generation,
+                subscription: telemetry.subscription().to_vec(),
+                events: VecDeque::with_capacity(MAXIMUM_CLOCK_HISTORY),
+            });
+        let compatible = entry.generation == generation
+            && entry.subscription == telemetry.subscription()
+            && entry.latest().is_none_or(|previous| {
+                event.event_sequence() > previous.event_sequence()
+                    && event.dropped_events() >= previous.dropped_events()
+                    && event.overview().snapshot_cycle().0 > previous.overview().snapshot_cycle().0
+            });
+        if !compatible {
+            self.push_diagnostic(format!(
+                "connection {connection_id}: telemetry history fork rejected"
+            ));
+            return;
+        }
+        if entry.events.len() == MAXIMUM_CLOCK_HISTORY {
+            entry.events.pop_front();
+        }
+        entry.events.push_back(telemetry.event().to_vec());
     }
 
     fn validate_waveform_transfer(
@@ -1536,6 +1964,27 @@ impl MutableSupervisorView {
             self.capabilities.remove(&snapshot.connection_id);
         }
         if self
+            .telemetry
+            .get(&snapshot.connection_id)
+            .is_some_and(|telemetry| {
+                let subscription = decode_telemetry_subscribe(
+                    &telemetry.subscription,
+                    DiagnosticTransportLimits::native_control(),
+                )
+                .ok();
+                telemetry.generation != snapshot.generation
+                    || snapshot.telemetry_phase != Some(TelemetryPhaseSnapshot::Active)
+                    || subscription.is_none_or(|subscription| {
+                        snapshot.telemetry_subscription_id
+                            != Some(subscription.subscription_id().get())
+                            || snapshot.telemetry_subscription_digest
+                                != Some(subscription.digest().0)
+                    })
+            })
+        {
+            self.telemetry.remove(&snapshot.connection_id);
+        }
+        if self
             .waveforms
             .get(&snapshot.connection_id)
             .is_some_and(|waveform| {
@@ -1606,9 +2055,13 @@ impl MutableSupervisorView {
             WorkerEvent::WaveformDocument { waveform } => {
                 self.apply_waveform_transfer(waveform.as_ref());
             }
+            WorkerEvent::TelemetryDocument { telemetry } => {
+                self.apply_telemetry_transfer(telemetry.as_ref());
+            }
             WorkerEvent::Removed { connection_id } => {
                 self.devices.remove(&connection_id);
                 self.capabilities.remove(&connection_id);
+                self.telemetry.remove(&connection_id);
                 self.waveforms.remove(&connection_id);
             }
             WorkerEvent::CommandRejected {
@@ -1632,6 +2085,7 @@ impl MutableSupervisorView {
             lifecycle: self.lifecycle.clone(),
             devices: self.devices.values().cloned().collect(),
             capabilities: self.capabilities.values().cloned().collect(),
+            telemetry: self.telemetry.values().cloned().collect(),
             waveforms: self.waveforms.values().cloned().collect(),
             diagnostics: self.diagnostics.iter().cloned().collect(),
         }

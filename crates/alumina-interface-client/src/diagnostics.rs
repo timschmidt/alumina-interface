@@ -5,10 +5,11 @@ use core::fmt;
 use alumina_diagnostics::DiagnosticLimits;
 use alumina_diagnostics::transport::{
     DiagnosticTransportError, DiagnosticTransportLimits, TelemetryEventView, TelemetryPhase,
-    TelemetrySessionRequest, TelemetrySubscribeView, TelemetrySubscriptionStatus,
-    WaveformChunkView, WaveformConfigureView, WaveformPhase, WaveformReadRequest,
-    WaveformSessionRequest, WaveformStatus, decode_telemetry_event, decode_telemetry_subscribe,
-    decode_waveform_chunk, decode_waveform_configure, validate_retained_capture,
+    TelemetryPollRequest, TelemetrySessionRequest, TelemetrySubscribeView,
+    TelemetrySubscriptionStatus, WaveformChunkView, WaveformConfigureView, WaveformPhase,
+    WaveformReadRequest, WaveformSessionRequest, WaveformStatus, decode_telemetry_event,
+    decode_telemetry_subscribe, decode_waveform_chunk, decode_waveform_configure,
+    validate_retained_capture,
 };
 use alumina_protocol::{Digest, Operation, StatusCode};
 
@@ -83,6 +84,7 @@ pub enum TelemetryClientPhase {
 enum TelemetryAction {
     Subscribe,
     PollSubscribe,
+    PollEvent,
     Unsubscribe,
     PollUnsubscribe,
 }
@@ -94,6 +96,8 @@ pub struct TelemetryEventProgress {
     pub event_sequence: u64,
     /// Cumulative device-side latest-only replacement count.
     pub dropped_events: u64,
+    /// Device cycle of the newest complete overview snapshot.
+    pub snapshot_cycle: alumina_protocol::DeviceCycle,
     /// Digest of the complete canonical overview for duplicate detection.
     pub overview_digest: Digest,
 }
@@ -159,6 +163,11 @@ impl TelemetrySubscriptionMachine {
         self.reference
     }
 
+    /// Complete immutable canonical subscribe request owned by this machine.
+    pub fn request_bytes(&self) -> &[u8] {
+        &self.request
+    }
+
     /// Current retry/reconciliation phase.
     pub const fn phase(&self) -> TelemetryClientPhase {
         self.phase
@@ -206,6 +215,31 @@ impl TelemetrySubscriptionMachine {
         Ok(Some(DiagnosticOperation { operation, body }))
     }
 
+    /// Emits one retry-safe event acknowledgement/fetch operation while active.
+    ///
+    /// The request carries only the newest event this machine has completely
+    /// validated. Repeating it after an ambiguous response cannot acknowledge
+    /// evidence the caller never received.
+    pub fn next_event_request(&mut self) -> Result<DiagnosticOperation, DiagnosticClientError> {
+        if self.pending.is_some() {
+            return Err(DiagnosticClientError::RequestPending);
+        }
+        if self.phase != TelemetryClientPhase::Active {
+            return Err(DiagnosticClientError::InvalidTransition);
+        }
+        let request = TelemetryPollRequest {
+            reference: self.reference,
+            accepted_event_sequence: self
+                .event_progress
+                .map_or(0, |progress| progress.event_sequence),
+        };
+        self.pending = Some(TelemetryAction::PollEvent);
+        Ok(DiagnosticOperation {
+            operation: Operation::TelemetryPoll,
+            body: request.encode()?.to_vec(),
+        })
+    }
+
     /// Requests removal after the active subscription is known exactly.
     pub fn request_unsubscribe(&mut self) -> Result<(), DiagnosticClientError> {
         if self.pending.is_some() {
@@ -223,6 +257,9 @@ impl TelemetrySubscriptionMachine {
 
     /// Applies one already authenticated and correlated response.
     pub fn accept_response(&mut self, response: &Response) -> Result<(), DiagnosticClientError> {
+        if self.pending == Some(TelemetryAction::PollEvent) {
+            return Err(DiagnosticClientError::InvalidTransition);
+        }
         let action = self
             .pending
             .take()
@@ -256,6 +293,7 @@ impl TelemetrySubscriptionMachine {
             TelemetryAction::Unsubscribe | TelemetryAction::PollUnsubscribe => {
                 TelemetryPhase::Unsubscribed
             }
+            TelemetryAction::PollEvent => unreachable!("event polls use accept_event_response"),
         };
         if status.phase != expected_phase {
             return Err(DiagnosticClientError::State);
@@ -266,6 +304,30 @@ impl TelemetrySubscriptionMachine {
             TelemetryPhase::Unsubscribed => TelemetryClientPhase::Unsubscribed,
         };
         Ok(())
+    }
+
+    /// Authenticates one correlated poll response and applies its optional
+    /// complete event. An empty successful body means no newer event is
+    /// retained. Event bytes remain borrowed from the response.
+    pub fn accept_event_response<'a>(
+        &mut self,
+        response: &'a Response,
+    ) -> Result<Option<TelemetryEventAcceptance<'a>>, DiagnosticClientError> {
+        if self.pending != Some(TelemetryAction::PollEvent) {
+            return Err(DiagnosticClientError::NoPendingRequest);
+        }
+        self.pending = None;
+        if response.status != StatusCode::Ok {
+            return if response.body.is_empty() {
+                Err(DiagnosticClientError::DeviceStatus(response.status))
+            } else {
+                Err(DiagnosticClientError::ResponseBody)
+            };
+        }
+        if response.body.is_empty() {
+            return Ok(None);
+        }
+        self.accept_event(&response.body).map(Some)
     }
 
     /// Converts an ambiguous I/O outcome into an exact status reconciliation.
@@ -280,6 +342,7 @@ impl TelemetrySubscriptionMachine {
             TelemetryAction::Unsubscribe | TelemetryAction::PollUnsubscribe => {
                 TelemetryClientPhase::ReconcilingUnsubscribe
             }
+            TelemetryAction::PollEvent => TelemetryClientPhase::Active,
         };
         true
     }
@@ -292,10 +355,12 @@ impl TelemetrySubscriptionMachine {
         if self.phase != TelemetryClientPhase::Active {
             return Err(DiagnosticClientError::State);
         }
-        let event = decode_telemetry_event(encoded, self.subscription()?, self.record_limits)?;
+        let subscription = self.subscription()?;
+        let event = decode_telemetry_event(encoded, subscription, self.record_limits)?;
         let progress = TelemetryEventProgress {
             event_sequence: event.event_sequence(),
             dropped_events: event.dropped_events(),
+            snapshot_cycle: event.overview().snapshot_cycle(),
             overview_digest: event.overview_digest(),
         };
         if let Some(previous) = self.event_progress {
@@ -307,6 +372,11 @@ impl TelemetrySubscriptionMachine {
             }
             if progress.event_sequence <= previous.event_sequence
                 || progress.dropped_events < previous.dropped_events
+                || progress
+                    .snapshot_cycle
+                    .0
+                    .checked_sub(previous.snapshot_cycle.0)
+                    .is_none_or(|elapsed| elapsed < subscription.minimum_period_cycles())
             {
                 return Err(DiagnosticClientError::EventOrder);
             }
@@ -771,8 +841,9 @@ mod tests {
 
     use alumina_board::ResourceId;
     use alumina_diagnostics::transport::{
-        SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest, WaveformConfigureFlags,
-        WaveformConfigureRequest, encode_telemetry_subscribe, encode_waveform_configure,
+        SubscriptionId, TelemetryEvent, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
+        WaveformConfigureFlags, WaveformConfigureRequest, decode_telemetry_subscribe,
+        encode_telemetry_event, encode_telemetry_subscribe, encode_waveform_configure,
     };
     use alumina_diagnostics::{CaptureId, DigitalTriggerCondition};
     use alumina_net::{AuthenticatedMedia, BootNonce, CORS_ORIGIN_HEADER, CorsOrigin, HttpMethod};
@@ -1046,6 +1117,96 @@ mod tests {
     }
 
     #[test]
+    fn event_poll_replays_lost_delivery_and_lost_ack_without_advancing_evidence() {
+        let fixture = tinybee_diagnostic_fixture().unwrap();
+        let context = fixture.overview().context();
+        let mut machine = TelemetrySubscriptionMachine::new(
+            subscription_bytes(context),
+            DiagnosticTransportLimits::native_control(),
+            DiagnosticLimits::interactive(),
+        )
+        .unwrap();
+        let mut client = ProtocolClient::new(
+            NativeDiagnosticTransport::new(context),
+            context.config_digest,
+        );
+
+        let subscribe = machine.next_request().unwrap().unwrap();
+        machine
+            .accept_response(&exchange(&mut client, subscribe).unwrap())
+            .unwrap();
+        client
+            .transport_mut()
+            .state
+            .publish_overview(fixture.overview_bytes())
+            .unwrap();
+
+        let first_poll = machine.next_event_request().unwrap();
+        let first_body = first_poll.body.clone();
+        let lost_event = exchange(&mut client, first_poll).unwrap();
+        assert_eq!(lost_event.status, StatusCode::Ok);
+        assert!(machine.abandon_pending());
+        let replay = machine.next_event_request().unwrap();
+        assert_eq!(replay.body, first_body);
+        let response = exchange(&mut client, replay).unwrap();
+        let accepted = machine.accept_event_response(&response).unwrap().unwrap();
+        assert!(accepted.advanced());
+        assert_eq!(accepted.event().event_sequence(), 1);
+
+        let acknowledge = machine.next_event_request().unwrap();
+        let acknowledge_body = acknowledge.body.clone();
+        let lost_empty = exchange(&mut client, acknowledge).unwrap();
+        assert_eq!(lost_empty.status, StatusCode::Ok);
+        assert!(lost_empty.body.is_empty());
+        assert!(machine.abandon_pending());
+        let repeated = machine.next_event_request().unwrap();
+        assert_eq!(repeated.body, acknowledge_body);
+        let response = exchange(&mut client, repeated).unwrap();
+        assert_eq!(machine.accept_event_response(&response).unwrap(), None);
+
+        let mut second = fixture.overview_bytes().to_vec();
+        second[128..136].copy_from_slice(&1_260_000_u64.to_le_bytes());
+        second[136..144].copy_from_slice(&2_u64.to_le_bytes());
+        client
+            .transport_mut()
+            .state
+            .publish_overview(&second)
+            .unwrap();
+        let response = exchange(&mut client, machine.next_event_request().unwrap()).unwrap();
+        let accepted = machine.accept_event_response(&response).unwrap().unwrap();
+        assert_eq!(accepted.event().event_sequence(), 2);
+        assert_eq!(accepted.event().dropped_events(), 0);
+
+        let mut too_early = fixture.overview_bytes().to_vec();
+        too_early[128..136].copy_from_slice(&1_265_000_u64.to_le_bytes());
+        too_early[136..144].copy_from_slice(&3_u64.to_le_bytes());
+        let subscription = decode_telemetry_subscribe(
+            machine.request_bytes(),
+            DiagnosticTransportLimits::native_control(),
+        )
+        .unwrap();
+        let event = TelemetryEvent {
+            subscription_id: subscription.subscription_id(),
+            subscription_digest: subscription.digest(),
+            event_sequence: 3,
+            dropped_events: 0,
+            overview: &too_early,
+        };
+        let mut encoded = vec![0_u8; 432];
+        let used = encode_telemetry_event(
+            &event,
+            subscription,
+            &mut encoded,
+            DiagnosticLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(
+            machine.accept_event(&encoded[..used]),
+            Err(DiagnosticClientError::EventOrder)
+        );
+    }
+
+    #[test]
     fn waveform_reconciles_configuration_and_range_retry_to_exact_record() {
         let fixture = tinybee_diagnostic_fixture().unwrap();
         let context = fixture.digital_capture().context();
@@ -1196,12 +1357,20 @@ mod tests {
             .diagnostics_mut()
             .publish_overview(evidence.overview_bytes())
             .unwrap();
-        let event = fixture
-            .diagnostics()
-            .pending_telemetry_event()
-            .unwrap()
-            .to_vec();
-        assert!(telemetry.accept_event(&event).unwrap().advanced());
+        let operation = telemetry.next_event_request().unwrap();
+        let response = authenticated_exchange(&mut fixture, &mut session, operation, counter);
+        counter += 1;
+        assert!(
+            telemetry
+                .accept_event_response(&response)
+                .unwrap()
+                .unwrap()
+                .advanced()
+        );
+        let operation = telemetry.next_event_request().unwrap();
+        let response = authenticated_exchange(&mut fixture, &mut session, operation, counter);
+        counter += 1;
+        assert_eq!(telemetry.accept_event_response(&response).unwrap(), None);
 
         let mut waveform = WaveformCaptureMachine::new(
             configuration_bytes(context),
@@ -1230,7 +1399,7 @@ mod tests {
             waveform.accept_response(&response).unwrap();
         }
         assert_eq!(waveform.record(), Some(evidence.digital_capture_bytes()));
-        assert_eq!(counter, 9);
+        assert_eq!(counter, 11);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

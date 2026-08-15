@@ -18,6 +18,7 @@
       let isolatedHealthFailureSnapshot;
       let isolatedCapabilityFailureSnapshot;
       let capabilityDocument;
+      const telemetryDocuments = [];
       let waveformDocument;
       const waveformDocuments = [];
       let waveformRequested = false;
@@ -39,7 +40,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 4,
+            schema_version: 5,
             command: {
               kind: "capture_waveform",
               request: {
@@ -71,7 +72,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 4) {
+        if (envelope.schema_version !== 5) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -92,13 +93,14 @@
               isolated_capability_failure_snapshot:
                 isolatedCapabilityFailureSnapshot,
               capability_document: capabilityDocument,
+              telemetry_documents: telemetryDocuments,
               waveform_document: waveformDocument,
               waveform_documents: waveformDocuments,
             });
           }, 30000);
           worker.postMessage(
             JSON.stringify({
-              schema_version: 4,
+              schema_version: 5,
               command: {
                 kind: "configure",
                 request: {
@@ -156,6 +158,57 @@
             return;
           }
           capabilityDocument = capability;
+          return;
+        }
+        if (event.kind === "telemetry_document") {
+          const telemetry = event.telemetry;
+          const subscription = Uint8Array.from(telemetry.subscription);
+          const record = Uint8Array.from(telemetry.event);
+          const subscriptionView = new DataView(subscription.buffer);
+          const recordView = new DataView(record.buffer);
+          const subscriptionMagic = new TextDecoder().decode(subscription.slice(0, 8));
+          const eventMagic = new TextDecoder().decode(record.slice(0, 8));
+          const eventSequence = Number(recordView.getBigUint64(56, true));
+          const droppedEvents = Number(recordView.getBigUint64(64, true));
+          const snapshotCycle = Number(recordView.getBigUint64(240, true));
+          const overviewSequence = Number(recordView.getBigUint64(248, true));
+          const sampleCount = recordView.getUint32(256, true);
+          const previous = telemetryDocuments.at(-1);
+          if (
+            telemetry.connection_id !== 1 ||
+            telemetry.generation < 1 ||
+            subscription.length !== 176 ||
+            record.length !== 432 ||
+            subscriptionMagic !== "ALMTLS01" ||
+            eventMagic !== "ALMTEV01" ||
+            subscriptionView.getUint32(12, true) !== subscription.length ||
+            recordView.getUint32(12, true) !== record.length ||
+            subscriptionView.getBigUint64(16, true) !==
+              recordView.getBigUint64(16, true) ||
+            eventSequence === 0 ||
+            overviewSequence !== eventSequence ||
+            sampleCount !== 4 ||
+            (previous !== undefined &&
+              (eventSequence <= previous.event_sequence ||
+                droppedEvents < previous.dropped_events ||
+                snapshotCycle <= previous.snapshot_cycle))
+          ) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "telemetry document event was malformed or regressed",
+              telemetry,
+              previous,
+            });
+            return;
+          }
+          telemetryDocuments.push({
+            generation: telemetry.generation,
+            event_sequence: eventSequence,
+            dropped_events: droppedEvents,
+            snapshot_cycle: snapshotCycle,
+            subscription_bytes: subscription.length,
+            event_bytes: record.length,
+          });
           return;
         }
         if (event.kind === "waveform_document") {
@@ -274,6 +327,19 @@
             waveformDocument.record.length === snapshot.waveform_total_bytes &&
             JSON.stringify(waveformDocument.record.slice(128, 144)) ===
               JSON.stringify(snapshot.waveform_capture_id);
+          const telemetryComplete =
+            snapshot.telemetry_phase === "active" &&
+            snapshot.telemetry_subscription_id !== null &&
+            snapshot.telemetry_subscription_digest !== null &&
+            snapshot.telemetry_subscription_digest.length === 32 &&
+            snapshot.telemetry_event_sequence >= 2 &&
+            snapshot.telemetry_dropped_events === 0 &&
+            snapshot.telemetry_consecutive_failures === 0 &&
+            snapshot.telemetry_last_error === null &&
+            telemetryDocuments.length >= 2 &&
+            telemetryDocuments.at(-1).generation === snapshot.generation &&
+            telemetryDocuments.at(-1).event_sequence ===
+              snapshot.telemetry_event_sequence;
           const conservativelyRejected =
             snapshot.rejected_samples >= 3 &&
             snapshot.accepted_samples === 0 &&
@@ -283,6 +349,18 @@
             finish("passed", {
               expectation,
               capability_document: capabilityDocument,
+              snapshot,
+            });
+          } else if (
+            expectation === "telemetry" &&
+            qualified &&
+            telemetryComplete
+          ) {
+            clearTimeout(timeout);
+            finish("passed", {
+              expectation,
+              capability_document: capabilityDocument,
+              telemetry_documents: telemetryDocuments,
               snapshot,
             });
           } else if (

@@ -17,7 +17,10 @@ use crate::capability::{
     CapabilityDownloadError, CapabilityDownloadMachine, CapabilityDownloadPhase,
 };
 use crate::clock::{BrowserTimeError, ClockProbeError, DeviceClockModel, MonotonicTimeBounds};
-use crate::diagnostics::{DiagnosticClientError, WaveformCaptureMachine, WaveformClientPhase};
+use crate::diagnostics::{
+    DiagnosticClientError, TelemetryClientPhase, TelemetrySubscriptionMachine,
+    WaveformCaptureMachine, WaveformClientPhase,
+};
 use crate::graph::{
     GraphInstallError, GraphInstallMachine, GraphInstallPhase, GraphRunError, GraphRunMachine,
     GraphRunPhase,
@@ -549,6 +552,90 @@ async fn drive_capability_step_inner(
     Ok(download.phase())
 }
 
+/// Result of one authenticated telemetry lifecycle or event-poll operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserTelemetryUpdate {
+    /// Subscription lifecycle after the operation.
+    pub phase: TelemetryClientPhase,
+    /// Complete newly admitted canonical event bytes, if progress advanced.
+    pub event: Option<Vec<u8>>,
+}
+
+/// Drives one retry-safe authenticated telemetry operation in the browser realm.
+pub async fn drive_telemetry_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    telemetry: &mut TelemetrySubscriptionMachine,
+    secret: &[u8],
+) -> Result<BrowserTelemetryUpdate, BrowserTelemetryError> {
+    drive_telemetry_step_inner(window, origin, session, telemetry, secret).await
+}
+
+/// Worker-scope variant of [`drive_telemetry_step`].
+pub async fn drive_telemetry_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    telemetry: &mut TelemetrySubscriptionMachine,
+    secret: &[u8],
+) -> Result<BrowserTelemetryUpdate, BrowserTelemetryError> {
+    drive_telemetry_step_inner(worker, origin, session, telemetry, secret).await
+}
+
+async fn drive_telemetry_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    telemetry: &mut TelemetrySubscriptionMachine,
+    secret: &[u8],
+) -> Result<BrowserTelemetryUpdate, BrowserTelemetryError> {
+    if !session.config_digest().is_zero() {
+        return Err(BrowserTelemetryError::ConfigurationIdentity);
+    }
+    let event_poll = telemetry.phase() == TelemetryClientPhase::Active;
+    let operation = if event_poll {
+        telemetry.next_event_request()?
+    } else {
+        let Some(operation) = telemetry.next_request()? else {
+            return Ok(BrowserTelemetryUpdate {
+                phase: telemetry.phase(),
+                event: None,
+            });
+        };
+        operation
+    };
+    let request = match session.begin_request(operation.operation, &operation.body, secret) {
+        Ok(request) => request,
+        Err(error) => {
+            telemetry.abandon_pending();
+            return Err(BrowserTelemetryError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            telemetry.abandon_pending();
+            return Err(BrowserTelemetryError::Fetch(error));
+        }
+    };
+    let event = if event_poll {
+        let advanced = telemetry
+            .accept_event_response(&response)?
+            .is_some_and(|acceptance| acceptance.advanced());
+        advanced.then_some(response.body)
+    } else {
+        telemetry.accept_response(&response)?;
+        None
+    };
+    Ok(BrowserTelemetryUpdate {
+        phase: telemetry.phase(),
+        event,
+    })
+}
+
 /// Drives one retry-safe authenticated waveform operation in the browser realm.
 pub async fn drive_waveform_step(
     window: &Window,
@@ -1064,6 +1151,42 @@ impl fmt::Display for BrowserCapabilityError {
 }
 
 impl std::error::Error for BrowserCapabilityError {}
+
+/// One authenticated browser telemetry-lifecycle failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserTelemetryError {
+    /// Diagnostic reads in this worker require the unconfigured device context.
+    ConfigurationIdentity,
+    /// Local subscription, poll, event, or ordering validation failed.
+    Diagnostic(DiagnosticClientError),
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+}
+
+impl From<DiagnosticClientError> for BrowserTelemetryError {
+    fn from(value: DiagnosticClientError) -> Self {
+        Self::Diagnostic(value)
+    }
+}
+
+impl fmt::Display for BrowserTelemetryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigurationIdentity => {
+                formatter.write_str("telemetry reads require a zero-configuration session")
+            }
+            Self::Diagnostic(error) => write!(formatter, "telemetry state rejected: {error}"),
+            Self::Session(error) => {
+                write!(formatter, "telemetry request construction failed: {error}")
+            }
+            Self::Fetch(error) => write!(formatter, "telemetry fetch failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserTelemetryError {}
 
 /// One authenticated browser waveform-lifecycle failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
