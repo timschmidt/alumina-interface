@@ -16,6 +16,7 @@ For each UI-local connection identity, the worker exclusively owns:
 - the boot-nonce-bound HTTP/native-protocol session;
 - the exact causal `DeviceClockModel`;
 - a separate monotonic `RuntimeHealthModel`;
+- a passive exact active-configuration observation model;
 - one bounded public device identity, retained only after strict schema decode;
 - a bounded contiguous `CapabilityDownloadMachine` and one-time publication
   state;
@@ -25,6 +26,12 @@ For each UI-local connection identity, the worker exclusively owns:
   configuration, and one-time retained-record publication state;
 - the explicit Wi-Fi sampling/error policy; and
 - at most 64 accepted causal heartbeat records.
+
+Across all connections, the worker also exclusively owns at most one bounded
+`LiveCachedJob`: immutable partition/manifest sources, retry-safe cache
+machines, exact compiled session bindings, the distributed schedule
+coordinator, pending start intent, and the latest terminal or recoverable
+failure state.
 
 Connection commands are bounded before I/O. Custom `Debug` output redacts the
 secret, every Rust-owned secret buffer is overwritten when its request or live
@@ -49,6 +56,9 @@ subscription reference, newest accepted sequence/drop progress, isolated
 failure state, and complete canonical telemetry-document events. The rendering
 realm reconstructs the native AHLT/ASWM, capability, identity, telemetry, and
 capture relationships and rejects an invalid snapshot before inserting it.
+Schema V6 adds passive canonical active-configuration status and the complete
+worker-owned cached-job lifecycle. It does not retain a compatibility decoder
+for prior schemas.
 
 ## Lifecycle and recovery
 
@@ -131,6 +141,39 @@ clock rollback or simultaneous-session collision. A later multi-controller
 browser qualification must either prove the deployment policy sufficient or
 replace it with a bounded server-issued session/counter lease.
 
+## Cached-job ownership and deterministic start
+
+The rendering realm may stage one strict `WorkerCachedJobRequest` produced by
+authoritative CAM. The worker independently decodes all manifest, descriptor,
+upload-plan, content, participant, boot, capability, and configuration
+relationships before retaining artifact bytes. Staging additionally requires
+each live connection generation and stable device identity to match, a
+clock-qualified session, an active job-authorized configuration, and an
+explicit simulation-versus-hardware authority match.
+
+Cache operations receive first choice on each 100 ms worker tick. Passive
+heartbeats, health, configuration, capability, and telemetry still run on an
+idle participant, but cannot starve the job. Partition publication always
+precedes publication of the identical global manifest on each MCU; all cache
+owners complete before preparation begins.
+
+A start command records intent rather than assuming every participant happens
+to be idle in that UI callback. Bound passive work pauses until all sessions are
+idle and freshly qualified. Only then does the worker choose the shared future
+UI epoch, map it through every exact affine clock model, bind distinct local
+commit identities, and begin all-install-before-any-confirm orchestration.
+Read-only status rounds carry the job through confirmation, abort-guard closure,
+priming, observed local start, and exact completion. A polling interval may
+legitimately observe `Primed` followed directly by `Complete`; the client admits
+that reachable later state while continuing to reject identity substitution,
+observation erasure, and true regression.
+
+The rendering realm receives complete replacement job snapshots only. It can
+request start, safe stop/abort/cancel, or terminal clear, but it cannot issue a
+raw native storage or schedule operation. Hardware mode remains fail-closed
+behind a non-simulated armable capability plus device-stored production
+credential; the committed browser fixture is simulation-only.
+
 ## Operator boundary
 
 The right-hand panel can add a labeled origin/passphrase, show worker readiness,
@@ -147,11 +190,14 @@ shows low-rate live lifecycle/reference/sequence/drop state, each sample's
 value/provenance/quality/captured cycle/age, and up to 64 sampled logic lanes.
 It can also request repeated 2 ms captures, show exact integer cycle/range
 progress, render an edge trace, and inspect each channel level at a hover cycle.
-All labels come from the same board capability used for authorization. There
-are no machine-arm, motion, output, process-energy, or safety-reset controls in
-this checkpoint. Neither a clock-qualified snapshot, stack watermark, immutable
-capability document, nor simulated trace proves safety-chain freshness, physical
-timing, transient stack depth, or sufficient production sizing.
+All labels come from the same board capability used for authorization. The
+machine workspace can now compile, stage, start, stop, and clear one cached job,
+with explicit simulation-only versus hardware authority and participant/cache/
+schedule progress. It still provides no direct pin write, process-energy,
+safety-reset, or bypass control. Neither a clock-qualified snapshot, stack
+watermark, immutable capability document, simulated job, nor simulated trace
+proves safety-chain freshness, physical timing, transient stack depth, or
+sufficient production sizing.
 
 ## Browser smoke evidence
 
@@ -176,7 +222,7 @@ seam. Served from the repository root, it creates the production worker without
 eframe,
 connects it to `alumina-sim-http` on localhost, and marks the DOM `passed` only
 after at least five authenticated observations yield a qualified exact interval,
-a schema-v5 health snapshot reports the exact expected queues, executor domains,
+a schema-V6 health snapshot reports the exact expected queues, executor domains,
 samples, and fresh RT witness, and exactly one complete capability-document
 event matches both public and signed identity. The extra post-completion
 heartbeat makes a duplicate document event observable. A waveform expectation
@@ -200,6 +246,17 @@ events 1 and 2 with zero drops/failures. A second browser worker against the
 same unchanged simulator boot first received the retained exact event 2 and
 then advanced to event 3. Complete hashes, commands, and closed claims are in
 the sibling `aluminafw/docs/evidence/M10-AUTHENTICATED-LIVE-TELEMETRY.md`.
+
+The `cached-job` expectation configures two standalone simulator processes with
+distinct stable device IDs. It waits for both exact capabilities, active
+job-authorized configurations, and qualified clocks; injects a request compiled
+through the production representative CAM path; and requires cache, prepare,
+install, confirm, prime, observed start, and completion on both participants.
+On 2026-08-15 the optimized bundle published 127,264 bytes per MCU and reached
+global `complete` after 432 validated job snapshots with zero failures. The
+shared UI epoch mapped to local cycles `80,884,539` and `79,719,862`. Complete
+authority facts and closed physical claims are recorded in sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -245,7 +302,7 @@ firmware `Unsupported` as an explicit observation rather than fabricated zero
 measurements.
 
 `ControlWorkerRuntime` now schedules this seam beside successful heartbeats,
-serializes it into strict schema-v5 `DeviceSessionSnapshot` values, and renders
+serializes it into strict schema-V6 `DeviceSessionSnapshot` values, and renders
 integer facts in the live-device explorer. The window-free client remains
 independently testable for native and `wasm32-unknown-unknown` without building
 the CAD/CAM application or moving Hyper dependencies. Localhost browser evidence
@@ -265,7 +322,7 @@ response-body/status rejection.
 
 The browser adapter uses the same zero-configuration authenticated session as
 clock and health. The worker publishes complete bytes once per generation only
-after validation. JSON transfer is deliberately treated as untrusted: schema v5
+after validation. JSON transfer is deliberately treated as untrusted: schema V6
 validates the document again, and the UI validates and decodes it once more into
 `BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
 the admitted explorer. The localhost capability-loss run and complete evidence
@@ -282,8 +339,9 @@ means no retained event. A lost response abandons both pending layers without
 advancing accepted evidence, making the next poll byte-identical.
 
 Complete newly advanced bytes cross the worker boundary in a credential-free
-`WorkerTelemetryDocument` alongside the exact subscription request. Schema v5
-decodes both. The worker selects resources, cadence, and encoded byte ceilings
+`WorkerTelemetryDocument` alongside the exact subscription request. Introduced
+in schema V5 and retained in current schema V6, the validator decodes both. The
+worker selects resources, cadence, and encoded byte ceilings
 from the authenticated `ALMDOV01` catalog rather than the graph palette. The
 rendering supervisor decodes the transfer again, binds every context and
 authority fact to the current live snapshot and board document, and admits only

@@ -42,8 +42,9 @@ The live application now places these sessions in a dedicated module worker.
 Its bounded commands, credential ownership, retry policy, and redacted clock
 snapshots are specified in
 [`LIVE-CONTROL-WORKER.md`](LIVE-CONTROL-WORKER.md). Cache-delivery and
-distributed-schedule machines are worker-capable but are not yet driven from
-the live panel.
+distributed-schedule machines are now driven by the same worker. The UI hands
+over one independently validated immutable request; it never receives the HMAC
+session or sends raw storage/job operations.
 
 ## Retry-safe storage protocol
 
@@ -70,16 +71,51 @@ independent device-local upload ID. `prepare_global_cache_delivery` validates
 every participant machine before returning any, so a malformed participant or
 storage policy cannot yield a partially constructed UI readiness table.
 
+## Live worker lifecycle
+
+Worker schema V6 adds one bounded cached-job owner. A staged request carries the
+complete canonical global manifest and each sorted participant's descriptor,
+partition upload plan/bytes, and independent manifest upload plan. Before any
+I/O, the worker reconstructs all content/publication identities, manifest
+records, participant order, network policy, boot bindings, capability digests,
+and active configuration digests.
+
+Each participant progresses through partition then global-manifest
+reconciliation. Only after every publication is authoritatively observed does
+the worker prepare all actors. A user start request is retained until every
+bound session is idle, still clock-qualified, and still matches its compiled
+device, boot, capability, and job-authorized configuration. The shared future
+browser epoch is selected only then. Exact affine clock models produce each
+local commit; all installs precede all confirmations. Status rounds retain the
+abort guard, priming, observed start, and completion evidence.
+
+Passive heartbeat, health, configuration, capability, and telemetry work can
+continue during cache transfer. Cached-job work receives first choice at each
+100 ms worker tick so coincident passive deadlines cannot starve it. While a
+start intent waits for a transiently busy session, passive work for its bound
+participants pauses; this guarantees progress without using a stale early
+start epoch.
+
+The worker exposes complete replacement snapshots with cache artifact/phase,
+accepted/total bytes, next missing chunk, participant schedule phase, local
+start cycle, global phase, shared epoch, and an isolated bounded failure. The
+rendering realm validates every snapshot again. Hardware mode additionally
+requires a non-simulated armable capability and device-stored production
+credential; the representative browser fixture deliberately requests
+simulation-only authority.
+
 ## Present evidence boundary
 
-Native tests exercise HMAC request/response interoperability, strict challenge
-decoding, counter loss, chunk/finalize loss, corrupted progress and chunks, and
-the partition-before-manifest sequence for every representative participant.
-The complete client and application compile under strict native and WASM
-Clippy. This is code-level browser transport evidence, not a claim that a real
-browser, radio, AP/STA network, SD card, or MCU has exchanged these requests.
+Native tests exercise HMAC interoperability, strict challenge decoding,
+counter loss, chunk/finalize loss, corrupt progress/chunks, schedule ambiguity,
+collapsed but monotone status polling, and terminal worker snapshot mutation.
+An optimized Chromium run against two independent loopback simulator processes
+uploaded 127,264 bytes per MCU, prepared, installed, confirmed, primed, observed
+both simulated latches, and reached completion with zero failures. The complete
+record is in sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
 
-Still open are hardened credential persistence, device discovery and identity
-binding, cache progress/error panels, browser integration tests against
-simulated HTTP firmware, live TinyBee/T-Deck Pro captures, live
-prepare/commit/confirm orchestration, and physical cached-start qualification.
+Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
+real SD media, background-tab qualification, live TinyBee/T-Deck Pro cached
+starts, electrical simultaneity measurement, and every physical motion/safety
+qualification claim.
