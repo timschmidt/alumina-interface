@@ -46,7 +46,8 @@
       const cachedJobExpectation =
         expectation === "cached-job" ||
         expectation === "cached-job-repeat" ||
-        expectation === "cached-job-recovery";
+        expectation === "cached-job-recovery" ||
+        expectation === "cached-job-confirm-recovery";
 
       window.installCachedJobRequest = (requestOrRequests) => {
         const requests = Array.isArray(requestOrRequests)
@@ -402,8 +403,32 @@
                   participant.local_start_cycle !== null,
               );
             const recoveryValid =
-              expectation !== "cached-job-recovery" ||
-              (cachedJobFailureObservations.length >= 2 && cachedJobRecovered);
+              (expectation !== "cached-job-recovery" ||
+                (cachedJobFailureObservations.length >= 2 &&
+                  cachedJobRecovered)) &&
+              (expectation !== "cached-job-confirm-recovery" ||
+                (cachedJobFailureObservations.length === 2 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.every(
+                    (observation, index) =>
+                      observation.phase === "confirming" &&
+                      observation.consecutive_failures === 1 &&
+                      observation.last_error?.includes("fetch failed") &&
+                      observation.participants.length === 2 &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          (participant.schedule_phase === "installed" ||
+                            participant.schedule_phase === "confirmed"),
+                      ) &&
+                      observation.participants.filter(
+                        (participant) =>
+                          participant.schedule_phase === "confirmed",
+                      ).length === index,
+                  )));
             if (!valid || !recoveryValid) {
               clearTimeout(timeout);
               finish("failed", {
