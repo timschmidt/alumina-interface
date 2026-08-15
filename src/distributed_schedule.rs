@@ -151,6 +151,8 @@ pub enum DistributedSchedulePhase {
     Aborting,
     /// Every potentially installed participant is safely aborted or expired.
     Aborted,
+    /// Some participants were safely stopped while others completed after the abort guard.
+    SplitAfterAbort,
     /// Prepared participant actors are being cancelled before commit binding.
     Cancelling,
     /// Every precommit participant is absent or fully cancelled.
@@ -399,6 +401,8 @@ impl DistributedScheduleCoordinator {
             CoordinationIntent::Abort => {
                 if self.participants.iter().all(participant_safe_after_abort) {
                     DistributedSchedulePhase::Aborted
+                } else if split_after_abort_is_terminal(&self.participants) {
+                    DistributedSchedulePhase::SplitAfterAbort
                 } else if self
                     .participants
                     .iter()
@@ -767,6 +771,7 @@ impl DistributedScheduleCoordinator {
             DistributedSchedulePhase::Irrevocable
                 | DistributedSchedulePhase::Complete
                 | DistributedSchedulePhase::Aborted
+                | DistributedSchedulePhase::SplitAfterAbort
         ) {
             return Err(DistributedScheduleError::PointOfNoReturn);
         }
@@ -838,6 +843,7 @@ impl DistributedScheduleCoordinator {
         if matches!(
             self.phase(),
             DistributedSchedulePhase::Aborted
+                | DistributedSchedulePhase::SplitAfterAbort
                 | DistributedSchedulePhase::Cancelled
                 | DistributedSchedulePhase::Complete
                 | DistributedSchedulePhase::Faulted
@@ -1045,6 +1051,21 @@ fn participant_safe_after_abort(participant: &ParticipantCoordinator) -> bool {
         participant.control.phase(),
         ParticipantSchedulePhase::Aborted | ParticipantSchedulePhase::Expired
     )
+}
+
+fn split_after_abort_is_terminal(participants: &[ParticipantCoordinator]) -> bool {
+    let mut stopped = false;
+    let mut completed = false;
+    for participant in participants {
+        match participant.control.phase() {
+            ParticipantSchedulePhase::Aborted | ParticipantSchedulePhase::Expired => {
+                stopped = true;
+            }
+            ParticipantSchedulePhase::Complete => completed = true,
+            _ => return false,
+        }
+    }
+    stopped && completed
 }
 
 /// Global cache, clock, timing, participant, or schedule-control rejection.
@@ -1388,7 +1409,7 @@ mod tests {
             .collect()
     }
 
-    fn install_confirm_and_complete(
+    fn install_and_confirm(
         coordinator: &mut DistributedScheduleCoordinator,
         authorities: &mut [Authority],
         inputs: &[ParticipantStartInput<'_>],
@@ -1430,34 +1451,47 @@ mod tests {
                 .accept_response(request.device_id, &response(&ready_status(authority)))
                 .unwrap();
         }
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
+    }
+
+    fn complete_authority(authority: &mut Authority, commit: JobCommitRequest, output_token: u32) {
+        assert!(matches!(
+            authority.schedule.advance(commit.abort_guard_cycle),
+            alumina_job::JobScheduleAction::PrimeHardware { .. }
+        ));
+        authority
+            .schedule
+            .mark_primed(commit.abort_guard_cycle)
+            .unwrap();
+        assert!(matches!(
+            authority.schedule.advance(commit.local_start_cycle),
+            alumina_job::JobScheduleAction::Start { .. }
+        ));
+        authority
+            .schedule
+            .record_start_observation(alumina_job::JobStartObservation {
+                source: JobStartObservationSource::SimulatedLatch,
+                output_token,
+                scheduled_cycle: commit.local_start_cycle,
+                earliest_cycle: commit.local_start_cycle,
+                latest_cycle: commit.local_start_cycle,
+            })
+            .unwrap();
+        authority
+            .schedule
+            .complete(DeviceCycle(commit.local_start_cycle.0 + 1))
+            .unwrap();
+    }
+
+    fn install_confirm_and_complete(
+        coordinator: &mut DistributedScheduleCoordinator,
+        authorities: &mut [Authority],
+        inputs: &[ParticipantStartInput<'_>],
+    ) {
+        install_and_confirm(coordinator, authorities, inputs);
         for authority in authorities {
             let commit = coordinator.participant_commit(authority.device_id).unwrap();
-            assert!(matches!(
-                authority.schedule.advance(commit.abort_guard_cycle),
-                alumina_job::JobScheduleAction::PrimeHardware { .. }
-            ));
-            authority
-                .schedule
-                .mark_primed(commit.abort_guard_cycle)
-                .unwrap();
-            assert!(matches!(
-                authority.schedule.advance(commit.local_start_cycle),
-                alumina_job::JobScheduleAction::Start { .. }
-            ));
-            authority
-                .schedule
-                .record_start_observation(alumina_job::JobStartObservation {
-                    source: JobStartObservationSource::SimulatedLatch,
-                    output_token: 17,
-                    scheduled_cycle: commit.local_start_cycle,
-                    earliest_cycle: commit.local_start_cycle,
-                    latest_cycle: commit.local_start_cycle,
-                })
-                .unwrap();
-            authority
-                .schedule
-                .complete(DeviceCycle(commit.local_start_cycle.0 + 1))
-                .unwrap();
+            complete_authority(authority, commit, 17);
         }
     }
 
@@ -1609,44 +1643,7 @@ mod tests {
             DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
         let mut authorities = prepare_all(&mut coordinator);
         let inputs = start_inputs(&job, &clocks);
-        coordinator
-            .bind_start(3_001_000_000, 5_000_000_000, &inputs)
-            .unwrap();
-        while let Some(request) = coordinator.next_request().unwrap() {
-            assert_eq!(request.request.operation, Operation::JobCommit);
-            let commit = JobCommitRequest::decode(&request.request.body).unwrap();
-            let authority = authorities
-                .iter_mut()
-                .find(|authority| authority.device_id == request.device_id)
-                .unwrap();
-            authority
-                .schedule
-                .install(commit, admission(&authority.descriptor))
-                .unwrap();
-            coordinator
-                .accept_response(request.device_id, &response(&ready_status(authority)))
-                .unwrap();
-        }
-        coordinator
-            .begin_confirmation(3_002_000_000, &inputs)
-            .unwrap();
-        while let Some(request) = coordinator.next_request().unwrap() {
-            assert_eq!(request.request.operation, Operation::JobConfirm);
-            let reference =
-                alumina_job::JobScheduleReference::decode(&request.request.body).unwrap();
-            let authority = authorities
-                .iter_mut()
-                .find(|authority| authority.device_id == request.device_id)
-                .unwrap();
-            authority
-                .schedule
-                .confirm(reference, DeviceCycle(4_000_000))
-                .unwrap();
-            coordinator
-                .accept_response(request.device_id, &response(&ready_status(authority)))
-                .unwrap();
-        }
-        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
+        install_and_confirm(&mut coordinator, &mut authorities, &inputs);
         coordinator.begin_abort().unwrap();
 
         let mut lost_requests = Vec::new();
@@ -1702,6 +1699,83 @@ mod tests {
         assert_eq!(reconciled_requests.len(), authorities.len());
         assert_eq!(applied_retries.len(), authorities.len());
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborted);
+    }
+
+    #[test]
+    fn partial_abort_then_remote_completion_is_an_exact_terminal_split() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut coordinator);
+        let inputs = start_inputs(&job, &clocks);
+        install_and_confirm(&mut coordinator, &mut authorities, &inputs);
+        coordinator.begin_abort().unwrap();
+
+        let stopped_request = coordinator.next_request().unwrap().unwrap();
+        assert_eq!(stopped_request.request.operation, Operation::JobAbort);
+        let stopped_reference =
+            alumina_job::JobScheduleReference::decode(&stopped_request.request.body).unwrap();
+        let stopped_commit = coordinator
+            .participant_commit(stopped_request.device_id)
+            .unwrap();
+        let stopped_authority = authorities
+            .iter_mut()
+            .find(|authority| authority.device_id == stopped_request.device_id)
+            .unwrap();
+        stopped_authority
+            .schedule
+            .abort(
+                stopped_reference,
+                DeviceCycle(stopped_commit.confirm_deadline_cycle.0 - 1),
+            )
+            .unwrap();
+        coordinator
+            .accept_response(
+                stopped_request.device_id,
+                &response(&ready_status(stopped_authority)),
+            )
+            .unwrap();
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborting);
+
+        let missed_request = coordinator.next_request().unwrap().unwrap();
+        assert_eq!(missed_request.request.operation, Operation::JobAbort);
+        assert_ne!(missed_request.device_id, stopped_request.device_id);
+        assert!(
+            coordinator
+                .abandon_pending(missed_request.device_id)
+                .unwrap()
+        );
+        let missed_commit = coordinator
+            .participant_commit(missed_request.device_id)
+            .unwrap();
+        let missed_authority = authorities
+            .iter_mut()
+            .find(|authority| authority.device_id == missed_request.device_id)
+            .unwrap();
+        complete_authority(missed_authority, missed_commit, 19);
+
+        let status_request = coordinator.next_request().unwrap().unwrap();
+        assert_eq!(status_request.device_id, missed_request.device_id);
+        assert_eq!(status_request.request.operation, Operation::JobStatus);
+        coordinator
+            .accept_response(
+                status_request.device_id,
+                &response(&ready_status(missed_authority)),
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator.phase(),
+            DistributedSchedulePhase::SplitAfterAbort
+        );
+        assert_eq!(coordinator.next_request().unwrap(), None);
+        assert_eq!(
+            coordinator.participant_phase(stopped_request.device_id),
+            Some(ParticipantSchedulePhase::Aborted)
+        );
+        assert_eq!(
+            coordinator.participant_phase(missed_request.device_id),
+            Some(ParticipantSchedulePhase::Complete)
+        );
     }
 
     #[test]

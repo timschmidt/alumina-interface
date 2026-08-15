@@ -14,11 +14,12 @@ if (
     "confirmed-abort-recovery",
     "confirmed-abort-request-recovery",
     "abort-guard-outage",
+    "abort-split-outage",
     "reattach",
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, or reattach",
+    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, or reattach",
   );
 }
 const repeat = mode === "repeat";
@@ -29,6 +30,7 @@ const confirmedAbortRecovery = mode === "confirmed-abort-recovery";
 const confirmedAbortRequestRecovery =
   mode === "confirmed-abort-request-recovery";
 const abortGuardOutage = mode === "abort-guard-outage";
+const abortSplitOutage = mode === "abort-split-outage";
 const reattach = mode === "reattach";
 const repository = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -85,6 +87,8 @@ const expectation = repeat
             ? "cached-job-confirmed-abort-request-recovery"
             : abortGuardOutage
               ? "cached-job-abort-guard-outage"
+              : abortSplitOutage
+                ? "cached-job-abort-split-outage"
               : recovery
                 ? "cached-job-recovery"
                 : "cached-job";

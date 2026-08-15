@@ -837,6 +837,7 @@ impl AluminaApp {
                         | WorkerCachedJobPhaseSnapshot::Cancelled
                         | WorkerCachedJobPhaseSnapshot::Complete
                         | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+                        | WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest
                         | WorkerCachedJobPhaseSnapshot::RetainedComplete
                         | WorkerCachedJobPhaseSnapshot::Faulted
                 );
@@ -854,6 +855,7 @@ impl AluminaApp {
                         | WorkerCachedJobPhaseSnapshot::Cancelled
                         | WorkerCachedJobPhaseSnapshot::Complete
                         | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+                        | WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest
                         | WorkerCachedJobPhaseSnapshot::RetainedComplete
                         | WorkerCachedJobPhaseSnapshot::Faulted
                 );
@@ -1084,6 +1086,12 @@ fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
         ui.colored_label(
             egui::Color32::RED,
             "The job completed after a stop request crossed the abort point of no return. Treat the stop as missed; Wi-Fi is not a safety chain.",
+        );
+    }
+    if job.phase == WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest {
+        ui.colored_label(
+            egui::Color32::RED,
+            "The stop split the job: some participants stopped while others crossed the point of no return and completed. Treat machine state as indeterminate; Wi-Fi is not a safety chain.",
         );
     }
     for participant in &job.participants {

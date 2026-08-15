@@ -297,6 +297,7 @@ impl LiveCachedJob {
                 | WorkerCachedJobPhaseSnapshot::Cancelled
                 | WorkerCachedJobPhaseSnapshot::Complete
                 | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+                | WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest
                 | WorkerCachedJobPhaseSnapshot::RetainedComplete
                 | WorkerCachedJobPhaseSnapshot::Faulted
         )
@@ -688,6 +689,9 @@ const fn distributed_phase(phase: DistributedSchedulePhase) -> WorkerCachedJobPh
         DistributedSchedulePhase::Irrevocable => WorkerCachedJobPhaseSnapshot::Irrevocable,
         DistributedSchedulePhase::Aborting => WorkerCachedJobPhaseSnapshot::Aborting,
         DistributedSchedulePhase::Aborted => WorkerCachedJobPhaseSnapshot::Aborted,
+        DistributedSchedulePhase::SplitAfterAbort => {
+            WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest
+        }
         DistributedSchedulePhase::Cancelling => WorkerCachedJobPhaseSnapshot::Cancelling,
         DistributedSchedulePhase::Cancelled => WorkerCachedJobPhaseSnapshot::Cancelled,
         DistributedSchedulePhase::Complete => WorkerCachedJobPhaseSnapshot::Complete,
@@ -953,6 +957,10 @@ mod tests {
         assert_eq!(
             project_distributed_phase(DistributedSchedulePhase::Complete, false, false),
             WorkerCachedJobPhaseSnapshot::RetainedComplete
+        );
+        assert_eq!(
+            project_distributed_phase(DistributedSchedulePhase::SplitAfterAbort, true, true),
+            WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest
         );
     }
 }

@@ -33,7 +33,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 8;
+pub const WORKER_SCHEMA_VERSION: u16 = 9;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -1372,6 +1372,8 @@ pub enum WorkerCachedJobPhaseSnapshot {
     Complete,
     /// Every participant completed after a requested pre-guard stop could not be established.
     CompletedAfterStopRequest,
+    /// Some participants stopped while others completed after the same stop request.
+    SplitAfterStopRequest,
     /// Every participant retained exact completion from this descriptor, but the new owner has no original UI epoch.
     RetainedComplete,
     /// Exact validation, transport reconciliation, or a participant fault stopped progress.
@@ -1565,9 +1567,8 @@ impl WorkerCachedJobSnapshot {
             | WorkerCachedJobPhaseSnapshot::Aborting
             | WorkerCachedJobPhaseSnapshot::Aborted
             | WorkerCachedJobPhaseSnapshot::Complete
-            | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest => {
-                self.target_ui_ns.is_some()
-            }
+            | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+            | WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest => self.target_ui_ns.is_some(),
             WorkerCachedJobPhaseSnapshot::Faulted => true,
         };
         if !target_relationship_valid {
@@ -1641,6 +1642,26 @@ impl WorkerCachedJobSnapshot {
                 || participant.schedule_phase != WorkerParticipantSchedulePhaseSnapshot::Complete
                 || participant.local_start_cycle.is_none())
             {
+                return Err(WorkerContractError::CachedJobSnapshot);
+            }
+        }
+        if self.phase == WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest {
+            let mut stopped = false;
+            let mut completed = false;
+            for participant in &self.participants {
+                if participant.cache_artifact != WorkerCacheArtifactSnapshot::Complete
+                    || participant.local_start_cycle.is_none()
+                {
+                    return Err(WorkerContractError::CachedJobSnapshot);
+                }
+                match participant.schedule_phase {
+                    WorkerParticipantSchedulePhaseSnapshot::Aborted
+                    | WorkerParticipantSchedulePhaseSnapshot::Expired => stopped = true,
+                    WorkerParticipantSchedulePhaseSnapshot::Complete => completed = true,
+                    _ => return Err(WorkerContractError::CachedJobSnapshot),
+                }
+            }
+            if !stopped || !completed {
                 return Err(WorkerContractError::CachedJobSnapshot);
             }
         }
@@ -2354,7 +2375,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 8);
+        assert_eq!(WORKER_SCHEMA_VERSION, 9);
     }
 
     #[test]
@@ -2428,6 +2449,32 @@ mod tests {
         stopped_too_late.target_ui_ns = None;
         assert_eq!(
             stopped_too_late.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+    }
+
+    #[test]
+    fn split_after_stop_request_requires_both_stopped_and_completed_participants() {
+        let mut split = complete_cached_job_snapshot();
+        split.phase = WorkerCachedJobPhaseSnapshot::SplitAfterStopRequest;
+        split.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Aborted;
+        assert_eq!(split.validate(), Ok(()));
+
+        split.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Complete;
+        assert_eq!(
+            split.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+        split.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Aborted;
+        split.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Running;
+        assert_eq!(
+            split.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+        split.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Complete;
+        split.participants[0].local_start_cycle = None;
+        assert_eq!(
+            split.validate(),
             Err(WorkerContractError::CachedJobSnapshot)
         );
     }
