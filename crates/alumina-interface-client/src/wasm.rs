@@ -803,6 +803,9 @@ async fn fetch_pending_request_inner(
         .map_err(javascript_error)?;
 
     let status = response.status();
+    if status != 200 {
+        return Err(BrowserFetchError::HttpStatus(status));
+    }
     let response_headers = response.headers();
     let content_type = response_headers
         .get("Content-Type")
