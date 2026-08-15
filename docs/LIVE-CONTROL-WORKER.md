@@ -319,6 +319,16 @@ ordinary run. Native request-level tests prove exact terminal discovery emits
 only `JobStatus` and mixed complete/empty actors fault before mutation. See
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
 
+The `cached-job-abort-recovery` expectation waits for both future commits to be
+globally `installed`, then sends one strict stop command before confirmation.
+Both simulator actors apply `JobAbort` and discard the successful response. The
+expectation requires exactly two one-failure `aborting` observations, locally
+aborted counts `0 -> 1`, status reconciliation before each next mutation, and a
+zero-failure all-participant `aborted` terminal. On 2026-08-15 it passed in 389
+snapshots with local cycles `102,654,525` and `102,579,983`; a fresh-actor
+ordinary completion regression passed in 419 snapshots. See
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first

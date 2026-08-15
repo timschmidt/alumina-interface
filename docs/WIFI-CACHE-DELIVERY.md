@@ -154,8 +154,16 @@ emitted and a complete/empty participant split faults before mutation. See
 sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
 
+The pre-confirm stop path was then qualified with both successful applied
+`JobAbort` responses discarded. Two exact one-failure observations retained
+locally aborted counts `0 -> 1`; read-only status preceded the next participant
+mutation, and the worker terminated with both actors `aborted` and no error. A
+fresh-actor ordinary completion regression also passed. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
-real SD media, background-tab qualification, lost abort, nonterminal/crash
-reattachment and durable browser job persistence, broader packet
-disorder/outage cases, live TinyBee/T-Deck Pro cached starts, electrical
-simultaneity measurement, and every physical motion/safety qualification claim.
+real SD media, background-tab qualification, initial abort-request non-delivery,
+abort after confirmation, nonterminal/crash reattachment and durable browser
+job persistence, broader packet disorder/outage cases, live TinyBee/T-Deck Pro
+cached starts, electrical simultaneity measurement, and every physical
+motion/safety qualification claim.
