@@ -50,7 +50,14 @@
         expectation === "cached-job-recovery" ||
         expectation === "cached-job-confirm-recovery" ||
         expectation === "cached-job-abort-recovery" ||
+        expectation === "cached-job-confirmed-abort-recovery" ||
         expectation === "cached-job-reattach";
+      const cachedJobStopPhase =
+        expectation === "cached-job-abort-recovery"
+          ? "installed"
+          : expectation === "cached-job-confirmed-abort-recovery"
+            ? "confirmed"
+            : undefined;
 
       window.installCachedJobRequest = (requestOrRequests) => {
         const requests = Array.isArray(requestOrRequests)
@@ -389,8 +396,7 @@
             return;
           }
           if (
-            snapshot.phase === "installed" &&
-            expectation === "cached-job-abort-recovery" &&
+            snapshot.phase === cachedJobStopPhase &&
             !cachedJobStopRequested
           ) {
             cachedJobStopRequested = true;
@@ -411,7 +417,7 @@
             snapshot.phase === "aborted"
           ) {
             const retained = expectation === "cached-job-reattach";
-            const aborted = expectation === "cached-job-abort-recovery";
+            const aborted = cachedJobStopPhase !== undefined;
             const valid =
               (retained
                 ? !cachedJobStarted && !cachedJobStopRequested
@@ -468,7 +474,7 @@
                           participant.schedule_phase === "confirmed",
                       ).length === index,
                   ))) &&
-              (expectation !== "cached-job-abort-recovery" ||
+              (cachedJobStopPhase === undefined ||
                 (cachedJobFailureObservations.length === 2 &&
                   cachedJobRecovered &&
                   cachedJobFailureObservations.every(
@@ -483,7 +489,7 @@
                           participant.cache_phase === "complete" &&
                           participant.accepted_bytes ===
                             participant.total_bytes &&
-                          (participant.schedule_phase === "installed" ||
+                          (participant.schedule_phase === cachedJobStopPhase ||
                             participant.schedule_phase === "aborted"),
                       ) &&
                       observation.participants.filter(
