@@ -25,6 +25,9 @@
       let cachedJobSnapshotCount = 0;
       let latestCachedJobSnapshot;
       const cachedJobTransitions = [];
+      const cachedJobFailureObservations = [];
+      let cachedJobRecovered = false;
+      let priorCachedJobFailureState;
       const completedCachedJobs = [];
       let priorCachedJobState;
       let isolatedHealthFailureSnapshot;
@@ -41,7 +44,9 @@
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
       const cachedJobExpectation =
-        expectation === "cached-job" || expectation === "cached-job-repeat";
+        expectation === "cached-job" ||
+        expectation === "cached-job-repeat" ||
+        expectation === "cached-job-recovery";
 
       window.installCachedJobRequest = (requestOrRequests) => {
         const requests = Array.isArray(requestOrRequests)
@@ -134,6 +139,22 @@
           cachedJobTransitions.push(latestCachedJobSnapshot);
           priorCachedJobState = state;
         }
+        if (latestCachedJobSnapshot.consecutive_failures > 0) {
+          const failureState = JSON.stringify([
+            latestCachedJobSnapshot.consecutive_failures,
+            latestCachedJobSnapshot.last_error,
+          ]);
+          if (
+            failureState !== priorCachedJobFailureState &&
+            cachedJobFailureObservations.length < 16
+          ) {
+            cachedJobFailureObservations.push(latestCachedJobSnapshot);
+            priorCachedJobFailureState = failureState;
+          }
+        } else if (cachedJobFailureObservations.length > 0) {
+          cachedJobRecovered = true;
+          priorCachedJobFailureState = undefined;
+        }
       };
 
       window.inspectCachedJobHarness = () => ({
@@ -145,6 +166,8 @@
         snapshot_count: cachedJobSnapshotCount,
         latest_cached_job_snapshot: latestCachedJobSnapshot,
         cached_job_transitions: cachedJobTransitions,
+        cached_job_failure_observations: cachedJobFailureObservations,
+        cached_job_recovered: cachedJobRecovered,
         completed_cached_jobs: completedCachedJobs,
       });
 
@@ -269,6 +292,8 @@
               cached_job_snapshot_count: cachedJobSnapshotCount,
               latest_cached_job_snapshot: latestCachedJobSnapshot,
               cached_job_transitions: cachedJobTransitions,
+              cached_job_failure_observations: cachedJobFailureObservations,
+              cached_job_recovered: cachedJobRecovered,
               completed_cached_jobs: completedCachedJobs,
               device_snapshots: compactDeviceSnapshots(),
             });
@@ -376,14 +401,22 @@
                   participant.schedule_phase === "complete" &&
                   participant.local_start_cycle !== null,
               );
-            if (!valid) {
+            const recoveryValid =
+              expectation !== "cached-job-recovery" ||
+              (cachedJobFailureObservations.length >= 2 && cachedJobRecovered);
+            if (!valid || !recoveryValid) {
               clearTimeout(timeout);
               finish("failed", {
                 expectation,
-                error: "terminal cached-job snapshot was invalid",
+                error: !valid
+                  ? "terminal cached-job snapshot was invalid"
+                  : "cached-job recovery evidence was not observed",
                 cached_job_snapshot_count: cachedJobSnapshotCount,
                 latest_cached_job_snapshot: latestCachedJobSnapshot,
                 cached_job_transitions: cachedJobTransitions,
+                cached_job_failure_observations:
+                  cachedJobFailureObservations,
+                cached_job_recovered: cachedJobRecovered,
                 completed_cached_jobs: completedCachedJobs,
                 device_snapshots: compactDeviceSnapshots(),
               });
@@ -394,6 +427,10 @@
               cached_job_snapshot_count: cachedJobSnapshotCount,
               latest_cached_job_snapshot: latestCachedJobSnapshot,
               cached_job_transitions: [...cachedJobTransitions],
+              cached_job_failure_observations: [
+                ...cachedJobFailureObservations,
+              ],
+              cached_job_recovered: cachedJobRecovered,
             });
             if (cachedJobRequestIndex + 1 < cachedJobRequests.length) {
               cachedJobClearing = true;
@@ -414,6 +451,8 @@
               cached_job_snapshot_count: cachedJobSnapshotCount,
               latest_cached_job_snapshot: latestCachedJobSnapshot,
               cached_job_transitions: cachedJobTransitions,
+              cached_job_failure_observations: cachedJobFailureObservations,
+              cached_job_recovered: cachedJobRecovered,
               completed_cached_jobs: completedCachedJobs,
               device_snapshots: compactDeviceSnapshots(),
             });
@@ -445,6 +484,9 @@
           cachedJobSnapshotCount = 0;
           latestCachedJobSnapshot = undefined;
           cachedJobTransitions.length = 0;
+          cachedJobFailureObservations.length = 0;
+          cachedJobRecovered = false;
+          priorCachedJobFailureState = undefined;
           priorCachedJobState = undefined;
           maybeStageCachedJob();
           return;

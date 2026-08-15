@@ -3,7 +3,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const cdpPort = process.argv[2] ?? "9224";
-const repeat = process.argv[3] === "repeat";
+const mode = process.argv[3] ?? "single";
+if (!["single", "repeat", "recovery"].includes(mode)) {
+  throw new Error("cached-job mode must be single, repeat, or recovery");
+}
+const repeat = mode === "repeat";
+const recovery = mode === "recovery";
 const repository = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
@@ -45,7 +50,11 @@ const cachedJobRequests = jobIds.map((jobId) => {
   return JSON.parse(requestText);
 });
 const cachedJobRequest = repeat ? cachedJobRequests : cachedJobRequests[0];
-const expectation = repeat ? "cached-job-repeat" : "cached-job";
+const expectation = repeat
+  ? "cached-job-repeat"
+  : recovery
+    ? "cached-job-recovery"
+    : "cached-job";
 
 const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) =>
   response.json(),
@@ -133,6 +142,7 @@ while (Date.now() < deadline) {
         lastInspection.request_index,
         latest?.job_id,
         latest?.phase,
+        latest?.consecutive_failures,
         latest?.participants.map((participant) => [
           participant.cache_artifact,
           participant.cache_phase,
@@ -146,6 +156,8 @@ while (Date.now() < deadline) {
             request_index: lastInspection.request_index,
             job_id: latest.job_id,
             phase: latest.phase,
+            consecutive_failures: latest.consecutive_failures,
+            last_error: latest.last_error,
             participants: latest.participants.map((participant) => ({
               connection_id: participant.connection_id,
               cache_artifact: participant.cache_artifact,
@@ -188,6 +200,9 @@ if (result.status === "passed") {
       cached_job_snapshot_count: run.cached_job_snapshot_count,
       phase_sequence: phaseSequence,
       latest_cached_job_snapshot: run.latest_cached_job_snapshot,
+      cached_job_failure_observations:
+        run.cached_job_failure_observations ?? [],
+      cached_job_recovered: run.cached_job_recovered ?? false,
     };
   };
   const completedCachedJobs = (detail.completed_cached_jobs ?? []).map(compactRun);
