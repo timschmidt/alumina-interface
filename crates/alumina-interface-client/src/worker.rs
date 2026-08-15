@@ -33,9 +33,6 @@ pub const MAXIMUM_WORKER_DIAGNOSTIC_BYTES: usize = 512;
 const MAXIMUM_LABEL_BYTES: usize = 64;
 const MAXIMUM_ORIGIN_BYTES: usize = 256;
 const MAXIMUM_SECRET_BYTES: usize = 256;
-const MAXIMUM_CAPTURE_CHANNELS: usize = 4;
-const MAXIMUM_CAPTURE_DURATION_CYCLES: u64 = 60_000_000_000;
-
 /// Bounded capability-selected one-shot digital-capture request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,9 +53,9 @@ impl WorkerWaveformRequest {
     pub fn validate(&self) -> Result<(), WorkerContractError> {
         if self.connection_id == 0
             || self.channels.is_empty()
-            || self.channels.len() > MAXIMUM_CAPTURE_CHANNELS
+            || self.channels.len()
+                > usize::from(DiagnosticTransportLimits::native_control().maximum_waveform_channels)
             || self.duration_cycles == 0
-            || self.duration_cycles > MAXIMUM_CAPTURE_DURATION_CYCLES
         {
             return Err(WorkerContractError::WaveformRequest);
         }
@@ -917,7 +914,7 @@ pub struct WorkerCapabilityDocument {
     pub generation: u64,
     /// Stable identity repeated separately for bounded preflight.
     pub identity: CapabilityIdentitySnapshot,
-    /// Complete canonical `ALMCAP03` bytes.
+    /// Complete canonical `ALMCAP04` bytes.
     document: Vec<u8>,
 }
 
@@ -1381,21 +1378,22 @@ mod tests {
         SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
         decode_telemetry_subscribe, encode_telemetry_subscribe, telemetry_subscribe_encoded_len,
     };
-    use alumina_service::diagnostics::{DiagnosticProviderPolicy, DiagnosticServiceState};
+    use alumina_service::diagnostics::DiagnosticServiceState;
     use alumina_sim::diagnostics::{
-        simulated_resource_overview, tinybee_diagnostic_fixture_for_context,
+        SIMULATED_DIAGNOSTIC_PROVIDERS, simulated_resource_overview,
+        tinybee_diagnostic_fixture_for_context,
     };
 
     use super::*;
 
     fn tinybee_document() -> (CapabilityIdentity, Vec<u8>) {
-        let identity = calculate_identity(&board_mks_tinybee::PACKAGE).unwrap();
+        let package = alumina_sim::capability::package();
+        let identity = calculate_identity(&package).unwrap();
         let mut document = vec![0_u8; usize::try_from(identity.byte_len).unwrap()];
         let mut offset = 0_u32;
         while offset < identity.byte_len {
             let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
-            let read =
-                read_verified_range(&board_mks_tinybee::PACKAGE, offset, &mut chunk).unwrap();
+            let read = read_verified_range(&package, offset, &mut chunk).unwrap();
             let start = usize::try_from(offset).unwrap();
             let count = usize::from(read.byte_len);
             document[start..start + count].copy_from_slice(&chunk[..count]);
@@ -1859,7 +1857,7 @@ mod tests {
                 .unwrap();
         let mut service = TestService::new(
             context,
-            DiagnosticProviderPolicy::SIMULATED,
+            SIMULATED_DIAGNOSTIC_PROVIDERS,
             DiagnosticTransportLimits::native_control(),
             DiagnosticLimits::interactive(),
         );

@@ -8,8 +8,9 @@
 use core::fmt;
 
 use alumina_board::{
-    Chip, DiagnosticResourceDescriptor, GraphResourceDescriptor, NormalizedPoint, OwnerDomain,
-    Qualification, ResourceDescriptor, ResourceId, SupportLevel,
+    Chip, DiagnosticResourceDescriptor, DigitalCaptureConfigureFlags,
+    DigitalCaptureResourceDescriptor, DigitalCaptureTriggerSet, GraphResourceDescriptor,
+    NormalizedPoint, OwnerDomain, Qualification, ResourceDescriptor, ResourceId, SupportLevel,
 };
 use alumina_capability::{
     BoardCapabilityLimits, CapabilityDocumentError, CapabilityIdentity, decode_board_capability,
@@ -24,6 +25,7 @@ pub struct BoardExplorerResource {
     aliases: Vec<String>,
     graph_accesses: Vec<GraphResourceDescriptor>,
     diagnostic_observations: Vec<DiagnosticResourceDescriptor>,
+    digital_capture: Option<DigitalCaptureResourceDescriptor>,
 }
 
 impl BoardExplorerResource {
@@ -56,6 +58,16 @@ impl BoardExplorerResource {
     pub fn is_diagnostic_observable(&self) -> bool {
         !self.diagnostic_observations.is_empty()
     }
+
+    /// Exact device-produced digital acquisition path for this resource.
+    pub const fn digital_capture(&self) -> Option<DigitalCaptureResourceDescriptor> {
+        self.digital_capture
+    }
+
+    /// Whether this exact image can acquire edge evidence for this resource.
+    pub const fn is_digitally_capturable(&self) -> bool {
+        self.digital_capture.is_some()
+    }
 }
 
 /// Fixed-memory passive diagnostic-overview facts owned by explorer state.
@@ -81,6 +93,47 @@ pub struct BoardExplorerDiagnosticOverview {
 
 impl BoardExplorerDiagnosticOverview {
     /// Whether the exact image has at least a compiling overview provider.
+    pub const fn is_implemented(self) -> bool {
+        matches!(
+            self.support,
+            Some(SupportLevel::Compiles | SupportLevel::Bench | SupportLevel::Qualified)
+        )
+    }
+}
+
+/// Fixed-memory digital edge-capture facts owned by explorer state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BoardExplorerDigitalCapture {
+    /// Exact `ALMDIG` schema, or zero when no provider is composed.
+    pub schema_version: u16,
+    /// Whole-provider evidence floor.
+    pub support: Option<SupportLevel>,
+    /// Configure flags admitted by this provider.
+    pub configure_flags: DigitalCaptureConfigureFlags,
+    /// Trigger predicates admitted by this provider.
+    pub trigger_kinds: DigitalCaptureTriggerSet,
+    /// Largest selected channel count.
+    pub maximum_channels: u16,
+    /// Largest retained transition capacity.
+    pub maximum_transitions: u32,
+    /// Permanently reserved configure bytes.
+    pub configure_bytes: u32,
+    /// Permanently reserved retained-record bytes.
+    pub record_bytes: u32,
+    /// Largest range payload per response.
+    pub maximum_chunk_bytes: u32,
+    /// Largest pretrigger interval in microseconds.
+    pub maximum_pretrigger_micros: u32,
+    /// Largest complete requested duration in microseconds.
+    pub maximum_duration_micros: u32,
+    /// Largest trigger-deadline window in microseconds.
+    pub arm_horizon_micros: u32,
+    /// Exact capture-resource palette length.
+    pub resource_count: usize,
+}
+
+impl BoardExplorerDigitalCapture {
+    /// Whether the exact image has at least a compiling capture provider.
     pub const fn is_implemented(self) -> bool {
         matches!(
             self.support,
@@ -190,6 +243,7 @@ pub struct BoardExplorerSnapshot {
     alias_count: usize,
     graph_resource_count: usize,
     diagnostic_overview: BoardExplorerDiagnosticOverview,
+    digital_capture: BoardExplorerDigitalCapture,
     bus_count: usize,
     device_count: usize,
     flash_region_count: usize,
@@ -267,6 +321,11 @@ impl BoardExplorerSnapshot {
         self.diagnostic_overview
     }
 
+    /// Digital edge-capture facts, distinct from graph and overview authority.
+    pub const fn digital_capture(&self) -> BoardExplorerDigitalCapture {
+        self.digital_capture
+    }
+
     /// Counts for buses, devices, flash regions, clocks, electrical
     /// constraints, interrupts, and shifted-output safe images.
     pub const fn supporting_section_counts(&self) -> [usize; 7] {
@@ -309,6 +368,7 @@ impl BoardExplorerSnapshot {
             summary.hazardous += usize::from(resource.descriptor.hazardous_output);
             summary.graph_addressable += usize::from(resource.is_graph_addressable());
             summary.diagnostic_observable += usize::from(resource.is_diagnostic_observable());
+            summary.digitally_capturable += usize::from(resource.is_digitally_capturable());
         }
         summary
     }
@@ -327,6 +387,8 @@ pub struct BoardExplorerResourceSummary {
     pub graph_addressable: usize,
     /// Resources with at least one passive diagnostic observation record.
     pub diagnostic_observable: usize,
+    /// Resources admitted by the explicit digital-capture provider.
+    pub digitally_capturable: usize,
 }
 
 /// Failure while deriving bounded owned board-explorer state.
@@ -394,6 +456,16 @@ pub fn build_board_explorer_snapshot(
     diagnostic_resources.extend(diagnostic_capability.resources().filter(|observation| {
         diagnostic_capability.admits(observation.resource, observation.observation)
     }));
+    let capture_capability = capability.digital_capture();
+    let mut capture_resources = Vec::new();
+    capture_resources
+        .try_reserve_exact(capture_capability.resource_count())
+        .map_err(|_| BoardExplorerError::Allocation)?;
+    capture_resources.extend(
+        capture_capability
+            .resources()
+            .filter(|capture| capture_capability.admits(capture.resource, capture.source)),
+    );
     let mut resources = Vec::new();
     resources
         .try_reserve_exact(capability.resource_count())
@@ -441,11 +513,16 @@ pub fn build_board_explorer_snapshot(
                 .filter(|observation| observation.resource == descriptor.id)
                 .copied(),
         );
+        let digital_capture = capture_resources
+            .iter()
+            .find(|capture| capture.resource == descriptor.id)
+            .copied();
         resources.push(BoardExplorerResource {
             descriptor,
             aliases: resource_aliases,
             graph_accesses,
             diagnostic_observations,
+            digital_capture,
         });
     }
 
@@ -509,6 +586,29 @@ pub fn build_board_explorer_snapshot(
             maximum_age_micros: diagnostic_capability.timing_micros().1,
             resource_count: diagnostic_capability.resource_count(),
         },
+        digital_capture: {
+            let (configure_flags, trigger_kinds) = capture_capability.configure_policy();
+            let (maximum_channels, maximum_transitions) = capture_capability.shape_limits();
+            let (configure_bytes, record_bytes, maximum_chunk_bytes) =
+                capture_capability.byte_limits();
+            let (maximum_pretrigger_micros, maximum_duration_micros, arm_horizon_micros) =
+                capture_capability.timing_micros();
+            BoardExplorerDigitalCapture {
+                schema_version: capture_capability.schema_version(),
+                support: capture_capability.support(),
+                configure_flags,
+                trigger_kinds,
+                maximum_channels,
+                maximum_transitions,
+                configure_bytes,
+                record_bytes,
+                maximum_chunk_bytes,
+                maximum_pretrigger_micros,
+                maximum_duration_micros,
+                arm_horizon_micros,
+                resource_count: capture_capability.resource_count(),
+            }
+        },
         bus_count: capability.bus_count(),
         device_count: capability.device_count(),
         flash_region_count: capability.flash_region_count(),
@@ -532,7 +632,10 @@ fn try_owned(value: &str) -> Result<String, BoardExplorerError> {
 
 #[cfg(test)]
 mod tests {
-    use alumina_board::{DiagnosticObservationKind, GraphResourceAccess, SafeValue};
+    use alumina_board::{
+        DiagnosticObservationKind, DigitalCaptureConfigureFlags, DigitalCaptureSourceKind,
+        DigitalCaptureTriggerSet, GraphResourceAccess, SafeValue,
+    };
     use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
 
     use super::*;
@@ -583,6 +686,24 @@ mod tests {
                 resource_count: 4,
             }
         );
+        assert_eq!(
+            snapshot.digital_capture(),
+            BoardExplorerDigitalCapture {
+                schema_version: 0,
+                support: None,
+                configure_flags: DigitalCaptureConfigureFlags(0),
+                trigger_kinds: DigitalCaptureTriggerSet(0),
+                maximum_channels: 0,
+                maximum_transitions: 0,
+                configure_bytes: 0,
+                record_bytes: 0,
+                maximum_chunk_bytes: 0,
+                maximum_pretrigger_micros: 0,
+                maximum_duration_micros: 0,
+                arm_horizon_micros: 0,
+                resource_count: 0,
+            }
+        );
         assert!(snapshot.visuals().is_empty());
         assert!(!snapshot.armable());
         let summary = snapshot.resource_summary();
@@ -594,6 +715,7 @@ mod tests {
                 hazardous: 21,
                 graph_addressable: 4,
                 diagnostic_observable: 4,
+                digitally_capturable: 0,
             }
         );
         assert_eq!(snapshot.supporting_section_counts(), [3, 1, 0, 2, 9, 4, 1]);
@@ -613,6 +735,7 @@ mod tests {
             GraphResourceAccess::StableBooleanInput
         );
         assert_eq!(limit_x.diagnostic_observations().len(), 1);
+        assert_eq!(limit_x.digital_capture(), None);
         assert_eq!(
             limit_x.diagnostic_observations()[0].observation,
             DiagnosticObservationKind::StableBooleanInput
@@ -627,6 +750,58 @@ mod tests {
         assert!(x_step.descriptor().hazardous_output);
         assert!(x_step.aliases().iter().any(|alias| alias == "axis.x.step"));
         assert!(!x_step.is_graph_addressable());
+    }
+
+    #[test]
+    fn simulator_snapshot_keeps_capture_authority_separate_from_graph_and_overview() {
+        let package = alumina_sim::capability::package();
+        let identity = calculate_identity(&package).unwrap();
+        let mut document = vec![0_u8; usize::try_from(identity.byte_len).unwrap()];
+        let mut offset = 0_u32;
+        while offset < identity.byte_len {
+            let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
+            let read = read_verified_range(&package, offset, &mut chunk).unwrap();
+            let start = usize::try_from(offset).unwrap();
+            let count = usize::from(read.byte_len);
+            document[start..start + count].copy_from_slice(&chunk[..count]);
+            offset += u32::from(read.byte_len);
+        }
+        let snapshot = build_board_explorer_snapshot(
+            &document,
+            identity,
+            BoardCapabilityLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.board_id(), alumina_sim::capability::BOARD_ID);
+        assert_eq!(
+            snapshot.digital_capture(),
+            BoardExplorerDigitalCapture {
+                schema_version: 1,
+                support: Some(SupportLevel::Compiles),
+                configure_flags: DigitalCaptureConfigureFlags(
+                    DigitalCaptureConfigureFlags::EDGE_TIMESTAMPS,
+                ),
+                trigger_kinds: DigitalCaptureTriggerSet(DigitalCaptureTriggerSet::IMMEDIATE),
+                maximum_channels: 4,
+                maximum_transitions: 64,
+                configure_bytes: 208,
+                record_bytes: 2_048,
+                maximum_chunk_bytes: 168,
+                maximum_pretrigger_micros: 0,
+                maximum_duration_micros: 2_000_000,
+                arm_horizon_micros: 30_000_000,
+                resource_count: 4,
+            }
+        );
+        let summary = snapshot.resource_summary();
+        assert_eq!(summary.graph_addressable, 4);
+        assert_eq!(summary.diagnostic_observable, 4);
+        assert_eq!(summary.digitally_capturable, 4);
+        let channel = snapshot.resource(ResourceId::Gpio(22)).unwrap();
+        assert_eq!(
+            channel.digital_capture().unwrap().source,
+            DigitalCaptureSourceKind::Simulated
+        );
     }
 
     #[test]

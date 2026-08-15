@@ -258,7 +258,7 @@ physical MCU, ESP radio, WLAN, motor, output, or safety claim is made here.
 for firmware's immutable `CapabilitiesGet` operation. It checks caller limits
 before allocation, enforces exact status/body rules, binds every response to the
 pending range and first accepted identity, retains only a contiguous prefix, and
-does not expose completion until the full `ALMCAP03` document independently
+does not expose completion until the full `ALMCAP04` document independently
 decodes and hashes to that identity. Tests cover exact TinyBee reassembly,
 identical ambiguous retry, identity substitution, preallocation limits, and
 response-body/status rejection.

@@ -164,6 +164,8 @@ enum BoardResourceFilter {
     All,
     DiagnosticObservable,
     DiagnosticClosed,
+    DigitallyCapturable,
+    CaptureClosed,
     GraphReadable,
     GraphClosed,
     Hazardous,
@@ -172,10 +174,12 @@ enum BoardResourceFilter {
 }
 
 impl BoardResourceFilter {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::All,
         Self::DiagnosticObservable,
         Self::DiagnosticClosed,
+        Self::DigitallyCapturable,
+        Self::CaptureClosed,
         Self::GraphReadable,
         Self::GraphClosed,
         Self::Hazardous,
@@ -188,6 +192,8 @@ impl BoardResourceFilter {
             Self::All => "all described",
             Self::DiagnosticObservable => "passively observable",
             Self::DiagnosticClosed => "diagnostic-closed",
+            Self::DigitallyCapturable => "digitally capturable",
+            Self::CaptureClosed => "capture-closed",
             Self::GraphReadable => "graph-readable",
             Self::GraphClosed => "graph-closed",
             Self::Hazardous => "hazardous",
@@ -271,7 +277,7 @@ impl BoardExplorerPanel {
             "Offline exact capability snapshot only — no board connection, live value, allocation, command, or output authority.",
         );
         ui.label(
-            "Descriptive resources state what is routed and its safe/hazard ownership. Passive diagnostic observations and graph operations are separately published authorities; every other operation remains closed.",
+            "Descriptive resources state what is routed and its safe/hazard ownership. Passive observations, digital acquisition, and graph operations are separately published authorities; every other operation remains closed.",
         );
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("{} resources", self.snapshot.resources().len()));
@@ -284,6 +290,10 @@ impl BoardExplorerPanel {
             ui.colored_label(
                 egui::Color32::from_rgb(103, 193, 232),
                 format!("{} passively observable", summary.diagnostic_observable),
+            );
+            ui.colored_label(
+                egui::Color32::from_rgb(177, 137, 242),
+                format!("{} digitally capturable", summary.digitally_capturable),
             );
             ui.colored_label(
                 egui::Color32::from_rgb(123, 214, 149),
@@ -305,6 +315,24 @@ impl BoardExplorerPanel {
             ));
         } else {
             ui.weak("This image composes no passive diagnostic-overview provider.");
+        }
+        let capture = self.snapshot.digital_capture();
+        if capture.is_implemented() {
+            ui.label(format!(
+                "Digital capture V{} · {} / {} channels · {} transitions · {} / {} / {} B configure/record/chunk · {} / {} / {} µs pretrigger/duration/arm horizon",
+                capture.schema_version,
+                capture.resource_count,
+                capture.maximum_channels,
+                capture.maximum_transitions,
+                capture.configure_bytes,
+                capture.record_bytes,
+                capture.maximum_chunk_bytes,
+                capture.maximum_pretrigger_micros,
+                capture.maximum_duration_micros,
+                capture.arm_horizon_micros,
+            ));
+        } else {
+            ui.weak("This image composes no device-produced digital-capture provider.");
         }
     }
 
@@ -357,6 +385,7 @@ impl BoardExplorerPanel {
                     };
                     let label = graph_resource_label(id);
                     let diagnostic_observable = resource.is_diagnostic_observable();
+                    let digital_capture = resource.digital_capture();
                     let graph_addressable = resource.is_graph_addressable();
                     let selected = self.selected == Some(id);
                     ui.horizontal_wrapped(|ui| {
@@ -374,6 +403,17 @@ impl BoardExplorerPanel {
                                 "hazardous output",
                             );
                         }
+                        ui.colored_label(
+                            if digital_capture.is_some() {
+                                egui::Color32::from_rgb(177, 137, 242)
+                            } else {
+                                egui::Color32::GRAY
+                            },
+                            digital_capture.map_or_else(
+                                || "no digital acquisition".to_owned(),
+                                |capture| format!("{:?} digital acquisition", capture.source),
+                            ),
+                        );
                         ui.colored_label(
                             if diagnostic_observable {
                                 egui::Color32::from_rgb(103, 193, 232)
@@ -882,6 +922,8 @@ fn resource_matches_filter(
         BoardResourceFilter::All => true,
         BoardResourceFilter::DiagnosticObservable => resource.is_diagnostic_observable(),
         BoardResourceFilter::DiagnosticClosed => !resource.is_diagnostic_observable(),
+        BoardResourceFilter::DigitallyCapturable => resource.is_digitally_capturable(),
+        BoardResourceFilter::CaptureClosed => !resource.is_digitally_capturable(),
         BoardResourceFilter::GraphReadable => resource.is_graph_addressable(),
         BoardResourceFilter::GraphClosed => !resource.is_graph_addressable(),
         BoardResourceFilter::Hazardous => descriptor.hazardous_output,
@@ -3092,9 +3134,30 @@ fn tinybee_capability_document() -> Result<Vec<u8>, String> {
 }
 
 fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
-    let document = tinybee_capability_document()?;
-    let expected_identity =
-        calculate_identity(&board_mks_tinybee::PACKAGE).map_err(|error| format!("{error:?}"))?;
+    let package = alumina_sim::capability::package();
+    let expected_identity = calculate_identity(&package).map_err(|error| format!("{error:?}"))?;
+    let mut document = vec![
+        0_u8;
+        usize::try_from(expected_identity.byte_len).map_err(|_| {
+            "simulator capability length exceeds host usize".to_owned()
+        })?
+    ];
+    let mut offset = 0_u32;
+    while offset < expected_identity.byte_len {
+        let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
+        let read = read_verified_range(&package, offset, &mut chunk)
+            .map_err(|error| format!("{error:?}"))?;
+        if read.byte_len == 0 {
+            return Err("simulator capability range encoder made no progress".to_owned());
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| "simulator capability offset exceeds host usize".to_owned())?;
+        let count = usize::from(read.byte_len);
+        document[start..start + count].copy_from_slice(&chunk[..count]);
+        offset = offset
+            .checked_add(u32::from(read.byte_len))
+            .ok_or_else(|| "simulator capability offset overflowed".to_owned())?;
+    }
     let snapshot = build_board_explorer_snapshot(
         &document,
         expected_identity,
@@ -4280,54 +4343,42 @@ mod tests {
     }
 
     #[test]
-    fn tinybee_board_explorer_keeps_description_observation_and_graph_filters_distinct() {
+    fn tinybee_simulator_explorer_keeps_all_three_diagnostic_authorities_distinct() {
         let panel = tinybee_board_explorer().unwrap();
         assert_eq!(
             panel.snapshot.identity(),
-            calculate_identity(&board_mks_tinybee::PACKAGE).unwrap()
+            calculate_identity(&alumina_sim::capability::package()).unwrap()
         );
         assert!(panel.snapshot.visuals().is_empty());
         assert_eq!(panel.selected, Some(ResourceId::Gpio(33)));
         let resources = panel.snapshot.resources();
-        assert_eq!(panel.snapshot.diagnostic_overview().resource_count, 4);
-        assert_eq!(
+        let matching_resources = |filter| {
             resources
                 .iter()
-                .filter(|resource| resource_matches_filter(
-                    resource,
-                    BoardResourceFilter::DiagnosticObservable
-                ))
-                .count(),
+                .filter(|resource| resource_matches_filter(resource, filter))
+                .count()
+        };
+        assert_eq!(panel.snapshot.diagnostic_overview().resource_count, 4);
+        assert_eq!(panel.snapshot.digital_capture().resource_count, 4);
+        assert_eq!(
+            matching_resources(BoardResourceFilter::DiagnosticObservable),
             4
         );
         assert_eq!(
-            resources
-                .iter()
-                .filter(|resource| resource_matches_filter(
-                    resource,
-                    BoardResourceFilter::DiagnosticClosed
-                ))
-                .count(),
+            matching_resources(BoardResourceFilter::DiagnosticClosed),
             resources.len() - 4
         );
         assert_eq!(
-            resources
-                .iter()
-                .filter(|resource| resource_matches_filter(
-                    resource,
-                    BoardResourceFilter::GraphReadable
-                ))
-                .count(),
+            matching_resources(BoardResourceFilter::DigitallyCapturable),
             4
         );
         assert_eq!(
-            resources
-                .iter()
-                .filter(|resource| resource_matches_filter(
-                    resource,
-                    BoardResourceFilter::GraphClosed
-                ))
-                .count(),
+            matching_resources(BoardResourceFilter::CaptureClosed),
+            resources.len() - 4
+        );
+        assert_eq!(matching_resources(BoardResourceFilter::GraphReadable), 4);
+        assert_eq!(
+            matching_resources(BoardResourceFilter::GraphClosed),
             resources.len() - 4
         );
         let x_step = resources
@@ -4336,6 +4387,7 @@ mod tests {
             .unwrap();
         assert!(x_step.descriptor().hazardous_output);
         assert!(!x_step.is_diagnostic_observable());
+        assert!(!x_step.is_digitally_capturable());
         assert!(!x_step.is_graph_addressable());
         assert_eq!(display_bytes(8 * 1_024 * 1_024), "8 MiB");
         assert_eq!(

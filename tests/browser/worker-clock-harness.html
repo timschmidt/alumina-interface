@@ -142,7 +142,7 @@
           const magic = capability.document.slice(0, 8);
           const validMagic =
             JSON.stringify(magic) ===
-            JSON.stringify(Array.from(new TextEncoder().encode("ALMCAP03")));
+            JSON.stringify(Array.from(new TextEncoder().encode("ALMCAP04")));
           if (
             capability.connection_id !== 1 ||
             capability.generation < 1 ||
@@ -306,7 +306,7 @@
             snapshot.capability_consecutive_failures === 0 &&
             snapshot.capability_last_error === null &&
             snapshot.device_identity !== null &&
-            snapshot.device_identity.board_id === "mks-tinybee-v1" &&
+            snapshot.device_identity.board_id === "sim-mks-tinybee-v1" &&
             snapshot.device_identity.device_id.length === 16 &&
             capabilityDocument !== undefined &&
             capabilityDocument.generation === snapshot.generation &&

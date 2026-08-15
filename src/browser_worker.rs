@@ -4,7 +4,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use alumina_board::{DiagnosticObservationKind, GraphResourceAccess, ResourceId, SupportLevel};
+use alumina_board::{
+    DiagnosticObservationKind, DigitalCaptureConfigureFlags, DigitalCaptureSourceKind,
+    DigitalCaptureTriggerSet, ResourceId, SupportLevel,
+};
 use alumina_capability::{
     BoardCapabilityLimits, DiagnosticOverviewCapability, decode_board_capability,
     decode_resource_id,
@@ -17,8 +20,10 @@ use alumina_diagnostics::transport::{
     telemetry_event_encoded_len, telemetry_subscribe_encoded_len, waveform_configure_encoded_len,
 };
 use alumina_diagnostics::{
-    CaptureId, DiagnosticContext, DiagnosticLimits, DigitalCaptureView, DigitalTriggerCondition,
-    RESOURCE_OVERVIEW_VERSION, decode_digital_capture, resource_overview_encoded_len,
+    CaptureId, DIGITAL_CAPTURE_VERSION, DiagnosticContext, DiagnosticLimits,
+    DigitalAcquisitionSource, DigitalCaptureView, DigitalTriggerCondition,
+    RESOURCE_OVERVIEW_VERSION, decode_digital_capture, digital_capture_encoded_len,
+    resource_overview_encoded_len,
 };
 use alumina_interface_client::capability::{CapabilityDownloadMachine, CapabilityDownloadPhase};
 use alumina_interface_client::clock::{ClockProbeError, DeviceClockModel};
@@ -61,9 +66,6 @@ const MAXIMUM_UI_DIAGNOSTICS: usize = 16;
 const MAXIMUM_RETRY_MS: u32 = 30_000;
 const CAPABILITY_RANGES_PER_HEARTBEAT: usize = 4;
 const WAVEFORM_OPERATIONS_PER_HEARTBEAT: usize = 8;
-const WAVEFORM_TRANSITION_CAPACITY: u32 = 64;
-const WAVEFORM_CHUNK_BYTES: u32 = 168;
-const WAVEFORM_ARM_HORIZON_SECONDS: u64 = 30;
 const TELEMETRY_RESOURCE_LIMIT: usize = 4;
 
 struct PassiveTelemetrySelection {
@@ -498,23 +500,56 @@ impl DeviceState {
             return Err("public board identity does not match capability bytes".to_owned());
         }
 
+        let capture_capability = capability.digital_capture();
+        if !capture_capability.is_implemented() {
+            return Err("this firmware image composes no digital-capture provider".to_owned());
+        }
+        if capture_capability.schema_version() != DIGITAL_CAPTURE_VERSION {
+            return Err("firmware digital-capture schema is not supported by this UI".to_owned());
+        }
+        let (capture_configure_flags, capture_trigger_kinds) =
+            capture_capability.configure_policy();
+        if !capture_configure_flags.contains(DigitalCaptureConfigureFlags::EDGE_TIMESTAMPS)
+            || !capture_trigger_kinds.contains(DigitalCaptureTriggerSet::IMMEDIATE)
+        {
+            return Err(
+                "firmware digital-capture policy does not admit immediate edge timestamps"
+                    .to_owned(),
+            );
+        }
+        let (maximum_channels, maximum_transitions) = capture_capability.shape_limits();
+        if request.channels.len() > usize::from(maximum_channels) {
+            return Err("waveform selection exceeds the firmware channel budget".to_owned());
+        }
+
         let mut channels = Vec::new();
         channels
             .try_reserve_exact(request.channels.len())
             .map_err(|_| "waveform channel allocation failed".to_owned())?;
+        let mut uses_software = false;
         for encoded in &request.channels {
             let resource = decode_resource_id(encoded)
                 .map_err(|_| "waveform resource selector is invalid".to_owned())?;
-            let readable = capability.graph().resources().any(|candidate| {
-                candidate.resource == resource
-                    && candidate.access == GraphResourceAccess::StableBooleanInput
-            });
-            if !readable {
+            let capture_source = capture_capability
+                .resources()
+                .find(|candidate| {
+                    candidate.resource == resource && candidate.support >= SupportLevel::Compiles
+                })
+                .map(|candidate| candidate.source);
+            let Some(capture_source) = capture_source else {
                 return Err(format!(
-                    "resource {resource:?} is not an admitted stable Boolean input"
+                    "resource {resource:?} is not admitted by the digital-capture provider"
                 ));
-            }
+            };
+            uses_software |= capture_source == DigitalCaptureSourceKind::Software;
             channels.push(resource);
+        }
+        let mut waveform_flags = DigitalCaptureConfigureFlags::EDGE_TIMESTAMPS;
+        if uses_software {
+            waveform_flags |= DigitalCaptureConfigureFlags::ALLOW_SOFTWARE;
+        }
+        if waveform_flags & !capture_configure_flags.0 != 0 {
+            return Err("waveform selection requires an unavailable acquisition path".to_owned());
         }
 
         let boot_id = self
@@ -525,21 +560,20 @@ impl DeviceState {
             .history
             .back()
             .ok_or_else(|| "authenticated clock evidence is unavailable".to_owned())?;
-        let maximum_duration = latest
-            .frequency_hz
-            .checked_mul(2)
-            .ok_or_else(|| "clock frequency cannot bound capture duration".to_owned())?;
+        let (_, record_budget, capability_chunk_bytes) = capture_capability.byte_limits();
+        let (_, maximum_duration_micros, arm_horizon_micros) = capture_capability.timing_micros();
+        let maximum_duration =
+            cycles_for_micros_floor(latest.frequency_hz, maximum_duration_micros)
+                .ok_or_else(|| "clock frequency cannot bound capture duration".to_owned())?;
         if request.duration_cycles > maximum_duration {
-            return Err("waveform duration exceeds the two-second interactive bound".to_owned());
+            return Err("waveform duration exceeds the firmware capability".to_owned());
         }
+        let arm_horizon_cycles =
+            cycles_for_micros_floor(latest.frequency_hz, arm_horizon_micros)
+                .ok_or_else(|| "waveform arm horizon does not fit device cycles".to_owned())?;
         let latest_trigger_cycle = latest
             .transmit_cycle
-            .checked_add(
-                latest
-                    .frequency_hz
-                    .checked_mul(WAVEFORM_ARM_HORIZON_SECONDS)
-                    .ok_or_else(|| "waveform arm horizon overflowed".to_owned())?,
-            )
+            .checked_add(arm_horizon_cycles)
             .ok_or_else(|| "waveform arm deadline overflowed".to_owned())?;
         let capture_sequence = self.next_capture_sequence;
         self.next_capture_sequence = capture_sequence
@@ -559,6 +593,34 @@ impl DeviceState {
         };
         let encoded_len = waveform_configure_encoded_len(channels.len())
             .map_err(|error| format!("waveform configure length rejected: {error}"))?;
+        let (configure_budget, _, _) = capture_capability.byte_limits();
+        if u32::try_from(encoded_len)
+            .ok()
+            .is_none_or(|bytes| bytes > configure_budget)
+        {
+            return Err("waveform configuration exceeds the firmware byte budget".to_owned());
+        }
+        let transport_limits = DiagnosticTransportLimits::native_control();
+        let transition_capacity =
+            maximum_transitions.min(transport_limits.maximum_waveform_transitions);
+        let maximum_chunk_bytes =
+            capability_chunk_bytes.min(transport_limits.maximum_waveform_chunk_bytes);
+        let maximum_record_bytes = digital_capture_encoded_len(
+            channels.len(),
+            usize::try_from(transition_capacity)
+                .map_err(|_| "waveform transition budget does not fit this UI".to_owned())?,
+        )
+        .map_err(|error| format!("waveform record budget rejected: {error}"))?;
+        if transition_capacity == 0
+            || maximum_chunk_bytes == 0
+            || u32::try_from(maximum_record_bytes)
+                .ok()
+                .is_none_or(|bytes| {
+                    bytes > record_budget || bytes > transport_limits.maximum_waveform_record_bytes
+                })
+        {
+            return Err("waveform record exceeds the shared fixed-memory budget".to_owned());
+        }
         let mut encoded = Vec::new();
         encoded
             .try_reserve_exact(encoded_len)
@@ -568,13 +630,13 @@ impl DeviceState {
             &WaveformConfigureRequest {
                 capture_id,
                 context,
-                flags: WaveformConfigureFlags(WaveformConfigureFlags::EDGE_TIMESTAMPS),
+                flags: WaveformConfigureFlags(waveform_flags),
                 requested_pretrigger_cycles: 0,
                 requested_posttrigger_cycles: request.duration_cycles,
                 earliest_trigger_cycle: DeviceCycle(latest.transmit_cycle),
                 latest_trigger_cycle: DeviceCycle(latest_trigger_cycle),
-                transition_capacity: WAVEFORM_TRANSITION_CAPACITY,
-                maximum_chunk_bytes: WAVEFORM_CHUNK_BYTES,
+                transition_capacity,
+                maximum_chunk_bytes,
                 trigger_channel_index: u16::MAX,
                 trigger_condition: DigitalTriggerCondition::Immediate,
                 channels: &channels,
@@ -718,6 +780,22 @@ fn cycles_for_micros_ceil(frequency_hz: u64, micros: u32) -> Option<u64> {
         .checked_mul(u128::from(micros))?
         .checked_add(999_999)?;
     u64::try_from(numerator / 1_000_000).ok()
+}
+
+fn cycles_for_micros_floor(frequency_hz: u64, micros: u32) -> Option<u64> {
+    let numerator = u128::from(frequency_hz).checked_mul(u128::from(micros))?;
+    u64::try_from(numerator / 1_000_000).ok()
+}
+
+const fn acquisition_source(source: DigitalAcquisitionSource) -> Option<DigitalCaptureSourceKind> {
+    match source {
+        DigitalAcquisitionSource::Simulated => Some(DigitalCaptureSourceKind::Simulated),
+        DigitalAcquisitionSource::Rmt => Some(DigitalCaptureSourceKind::Rmt),
+        DigitalAcquisitionSource::Pcnt => Some(DigitalCaptureSourceKind::Pcnt),
+        DigitalAcquisitionSource::Dma => Some(DigitalCaptureSourceKind::Dma),
+        DigitalAcquisitionSource::Software => Some(DigitalCaptureSourceKind::Software),
+        DigitalAcquisitionSource::ExternalAnalyzer => None,
+    }
 }
 
 impl Drop for DeviceState {
@@ -1961,17 +2039,55 @@ impl MutableSupervisorView {
         {
             return Err("capture clock frequency does not match signed heartbeat evidence");
         }
+        let provider = capability.board.digital_capture();
+        if !provider.is_implemented() || provider.schema_version != DIGITAL_CAPTURE_VERSION {
+            return Err("matching digital-capture capability is absent or unsupported");
+        }
+        if waveform.record().len()
+            > usize::try_from(provider.record_bytes)
+                .map_err(|_| "digital-capture record budget does not fit this UI")?
+            || capture.channel_count() > usize::from(provider.maximum_channels)
+            || capture.transition_count()
+                > usize::try_from(provider.maximum_transitions)
+                    .map_err(|_| "digital-capture transition budget does not fit this UI")?
+            || capture.retention().0 > provider.maximum_transitions
+        {
+            return Err("capture exceeds the immutable fixed-memory capability");
+        }
+        let (requested_pretrigger, requested_posttrigger) = capture.requested_window_cycles();
+        let requested_duration = requested_pretrigger
+            .checked_add(requested_posttrigger)
+            .ok_or("capture requested duration overflowed")?;
+        let maximum_pretrigger = cycles_for_micros_floor(
+            context.clock_frequency_hz,
+            provider.maximum_pretrigger_micros,
+        )
+        .ok_or("capture pretrigger capability does not fit device cycles")?;
+        let maximum_duration =
+            cycles_for_micros_floor(context.clock_frequency_hz, provider.maximum_duration_micros)
+                .ok_or("capture duration capability does not fit device cycles")?;
+        if requested_pretrigger > maximum_pretrigger || requested_duration > maximum_duration {
+            return Err("capture timing exceeds the immutable capability");
+        }
+        let trigger_bit = match capture.trigger().2 {
+            DigitalTriggerCondition::Immediate => DigitalCaptureTriggerSet::IMMEDIATE,
+            DigitalTriggerCondition::Rising => DigitalCaptureTriggerSet::RISING,
+            DigitalTriggerCondition::Falling => DigitalCaptureTriggerSet::FALLING,
+            DigitalTriggerCondition::Either => DigitalCaptureTriggerSet::EITHER,
+        };
+        if !provider.trigger_kinds.contains(trigger_bit) {
+            return Err("capture trigger is absent from the immutable capability");
+        }
         for channel in capture.channels() {
             let resource = capability
                 .board
                 .resource(channel.resource)
                 .ok_or("capture names a resource absent from the board capability")?;
-            if !resource
-                .graph_accesses()
-                .iter()
-                .any(|access| access.access == GraphResourceAccess::StableBooleanInput)
-            {
-                return Err("capture resource lacks stable Boolean input authority");
+            let expected = resource
+                .digital_capture()
+                .ok_or("capture resource lacks digital acquisition authority")?;
+            if acquisition_source(channel.source) != Some(expected.source) {
+                return Err("capture acquisition source contradicts the immutable capability");
             }
         }
         Ok(())

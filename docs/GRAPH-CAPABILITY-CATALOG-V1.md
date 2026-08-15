@@ -11,7 +11,7 @@ create an editor node alone.
 
 The caller supplies:
 
-- the complete bounded `ALMCAP03` document;
+- the complete bounded `ALMCAP04` document;
 - one nonzero device, capability, and active-configuration target tuple;
 - the reviewed semantic/deployment registry for the application version; and
 - explicit document-byte and derived-entry limits.

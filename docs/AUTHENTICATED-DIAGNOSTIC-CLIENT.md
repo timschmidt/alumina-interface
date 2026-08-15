@@ -45,7 +45,7 @@ evidence.
 
 ## Live target-context prerequisite
 
-The production worker now acquires the immutable `ALMCAP03` target document
+The production worker now acquires the immutable `ALMCAP04` target document
 before later live resource diagnostics can be admitted. Its separate
 `CapabilityDownloadMachine` requests only contiguous, at-most-240-byte ranges,
 uses a zero expected digest for discovery, freezes the returned identity, and
@@ -58,11 +58,12 @@ telemetry, and capture documents.
 The rendering realm revalidates the document and identity before constructing
 the board-name-independent explorer. This supplies immutable resource context.
 The worker selects passive telemetry only from the dedicated diagnostic
-overview palette. The simulator-only capture client still uses the narrower
-graph-readable input palette until a separate raw/capture capability exists;
-physical board images advertise capture unsupported. Descriptive resources do
-not become allowed operations, and neither path obtains a diagnostic lease or
-output authority.
+overview palette and digital acquisition only from the independent `ALMDCP01`
+capture palette. Channel source, schema, trigger, timing, transition, configure,
+record, and chunk facts all come from that catalog. The host fixture has a
+distinct `sim-mks-tinybee-v1` identity; physical board images advertise capture
+unsupported. Descriptive or graph-readable resources do not become acquisition
+authority, and neither path obtains an output authority.
 
 ## Live browser telemetry
 

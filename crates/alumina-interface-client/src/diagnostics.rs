@@ -848,10 +848,11 @@ mod tests {
     use alumina_diagnostics::{CaptureId, DigitalTriggerCondition};
     use alumina_net::{AuthenticatedMedia, BootNonce, CORS_ORIGIN_HEADER, CorsOrigin, HttpMethod};
     use alumina_protocol::DeviceCycle;
-    use alumina_service::diagnostics::{DiagnosticProviderPolicy, DiagnosticServiceState};
+    use alumina_service::diagnostics::DiagnosticServiceState;
     use alumina_service::{ServiceRequest, ServiceResponse};
     use alumina_sim::diagnostics::{
-        tinybee_diagnostic_fixture, tinybee_diagnostic_fixture_for_context,
+        SIMULATED_DIAGNOSTIC_PROVIDERS, tinybee_diagnostic_fixture,
+        tinybee_diagnostic_fixture_for_context,
     };
     use alumina_sim::http_fixture::{ClockFixturePolicy, ClockHttpFixture, FixtureHttpRequest};
 
@@ -880,7 +881,7 @@ mod tests {
             Self {
                 state: NativeState::new(
                     context,
-                    DiagnosticProviderPolicy::SIMULATED,
+                    SIMULATED_DIAGNOSTIC_PROVIDERS,
                     DiagnosticTransportLimits::native_control(),
                     DiagnosticLimits::interactive(),
                 ),
@@ -939,14 +940,14 @@ mod tests {
                 capture_id: CaptureId::new(*b"TINYBEE-SIM-0001").unwrap(),
                 context,
                 flags: WaveformConfigureFlags(WaveformConfigureFlags::EDGE_TIMESTAMPS),
-                requested_pretrigger_cycles: 500,
-                requested_posttrigger_cycles: 1_500,
-                earliest_trigger_cycle: DeviceCycle(2_000_400),
-                latest_trigger_cycle: DeviceCycle(2_000_600),
+                requested_pretrigger_cycles: 0,
+                requested_posttrigger_cycles: 2_000,
+                earliest_trigger_cycle: DeviceCycle(2_000_000),
+                latest_trigger_cycle: DeviceCycle(2_100_000),
                 transition_capacity: 64,
                 maximum_chunk_bytes: 168,
-                trigger_channel_index: 2,
-                trigger_condition: DigitalTriggerCondition::Rising,
+                trigger_channel_index: u16::MAX,
+                trigger_condition: DigitalTriggerCondition::Immediate,
                 channels: &RESOURCES,
             },
             &mut encoded,

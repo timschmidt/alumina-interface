@@ -17,8 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
-use alumina_board::GraphResourceAccess;
-#[cfg(target_arch = "wasm32")]
 use alumina_capability::encode_resource_id;
 #[cfg(target_arch = "wasm32")]
 use alumina_diagnostics::{
@@ -968,6 +966,25 @@ fn show_live_capability_snapshot(
 ) {
     ui.separator();
     ui.strong("Authenticated board capability");
+    show_capability_download_phase(ui, snapshot);
+    if let Some(capability) = capability {
+        show_admitted_board_capability(ui, capability);
+    } else if snapshot.capability_phase == CapabilityDownloadPhaseSnapshot::Complete {
+        ui.label("Validated one-time board transfer is awaiting UI admission.");
+    }
+    if snapshot.capability_consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive capability failures: {}",
+            snapshot.capability_consecutive_failures
+        ));
+    }
+    if let Some(error) = &snapshot.capability_last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_capability_download_phase(ui: &mut egui::Ui, snapshot: &DeviceSessionSnapshot) {
     match snapshot.capability_phase {
         CapabilityDownloadPhaseSnapshot::Discovering => {
             ui.label("Waiting for the first signed canonical capability range.");
@@ -997,74 +1014,84 @@ fn show_live_capability_snapshot(
             }
         }
     }
-    if let Some(capability) = capability {
-        let board = capability.board();
-        let summary = board.resource_summary();
-        let (flash, internal_sram, psram) = board.memory_bytes();
-        let (service_core, realtime_core) = board.core_assignment();
-        let hotspot_count = board
-            .visuals()
-            .iter()
-            .map(|visual| visual.hotspots().len())
-            .sum::<usize>();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_admitted_board_capability(ui: &mut egui::Ui, capability: &ConnectedCapabilityView) {
+    let board = capability.board();
+    let summary = board.resource_summary();
+    let (flash, internal_sram, psram) = board.memory_bytes();
+    let (service_core, realtime_core) = board.core_assignment();
+    let hotspot_count = board
+        .visuals()
+        .iter()
+        .map(|visual| visual.hotspots().len())
+        .sum::<usize>();
+    ui.label(format!(
+        "{} · {} · {:?} / {:?} · {} cores",
+        board.board_id(),
+        board.revision(),
+        board.chip(),
+        board.qualification(),
+        board.application_cores()
+    ));
+    ui.label(format!(
+        "service core {service_core}; real-time core {realtime_core}; flash {flash}; internal SRAM {internal_sram}; PSRAM {psram} bytes"
+    ));
+    ui.label(format!(
+        "{} resources ({} service, {} real-time, {} hazardous, {} graph-addressable, {} passively observable, {} digitally capturable); {} aliases",
+        board.resources().len(),
+        summary.service,
+        summary.realtime,
+        summary.hazardous,
+        summary.graph_addressable,
+        summary.diagnostic_observable,
+        summary.digitally_capturable,
+        board.alias_count()
+    ));
+    let diagnostics = board.diagnostic_overview();
+    if diagnostics.is_implemented() {
         ui.label(format!(
-            "{} · {} · {:?} / {:?} · {} cores",
-            board.board_id(),
-            board.revision(),
-            board.chip(),
-            board.qualification(),
-            board.application_cores()
+            "diagnostic overview V{}: {} / {} resources; {} / {} B request/event; {} µs cadence; {} µs freshness ceiling",
+            diagnostics.schema_version,
+            diagnostics.resource_count,
+            diagnostics.maximum_resources,
+            diagnostics.telemetry_request_bytes,
+            diagnostics.telemetry_event_bytes,
+            diagnostics.nominal_period_micros,
+            diagnostics.maximum_age_micros,
         ));
-        ui.label(format!(
-            "service core {service_core}; real-time core {realtime_core}; flash {flash}; internal SRAM {internal_sram}; PSRAM {psram} bytes"
-        ));
-        ui.label(format!(
-            "{} resources ({} service, {} real-time, {} hazardous, {} graph-addressable, {} passively observable); {} aliases",
-            board.resources().len(),
-            summary.service,
-            summary.realtime,
-            summary.hazardous,
-            summary.graph_addressable,
-            summary.diagnostic_observable,
-            board.alias_count()
-        ));
-        let diagnostics = board.diagnostic_overview();
-        if diagnostics.is_implemented() {
-            ui.label(format!(
-                "diagnostic overview V{}: {} / {} resources; {} / {} B request/event; {} µs cadence; {} µs freshness ceiling",
-                diagnostics.schema_version,
-                diagnostics.resource_count,
-                diagnostics.maximum_resources,
-                diagnostics.telemetry_request_bytes,
-                diagnostics.telemetry_event_bytes,
-                diagnostics.nominal_period_micros,
-                diagnostics.maximum_age_micros,
-            ));
-        } else {
-            ui.label("No passive diagnostic-overview provider is composed by this image.");
-        }
-        ui.label(format!(
-            "{} licensed visuals / {} reviewed hotspots; {} HIL requirements; armable claim: {}",
-            board.visuals().len(),
-            hotspot_count,
-            board.hil_requirement_count(),
-            board.armable()
-        ));
-        ui.small(
-            "These immutable facts label later diagnostic selection; they grant no resource lease, output command, arm transition, or physical-safety claim.",
-        );
-    } else if snapshot.capability_phase == CapabilityDownloadPhaseSnapshot::Complete {
-        ui.label("Validated one-time board transfer is awaiting UI admission.");
+    } else {
+        ui.label("No passive diagnostic-overview provider is composed by this image.");
     }
-    if snapshot.capability_consecutive_failures != 0 {
+    let capture = board.digital_capture();
+    if capture.is_implemented() {
         ui.label(format!(
-            "consecutive capability failures: {}",
-            snapshot.capability_consecutive_failures
+            "digital capture V{}: {} / {} channels; {} transitions; {} / {} / {} B configure/record/chunk; {} / {} / {} µs pretrigger/duration/arm horizon",
+            capture.schema_version,
+            capture.resource_count,
+            capture.maximum_channels,
+            capture.maximum_transitions,
+            capture.configure_bytes,
+            capture.record_bytes,
+            capture.maximum_chunk_bytes,
+            capture.maximum_pretrigger_micros,
+            capture.maximum_duration_micros,
+            capture.arm_horizon_micros,
         ));
+    } else {
+        ui.label("No device-produced digital-capture provider is composed by this image.");
     }
-    if let Some(error) = &snapshot.capability_last_error {
-        ui.colored_label(egui::Color32::LIGHT_RED, error);
-    }
+    ui.label(format!(
+        "{} licensed visuals / {} reviewed hotspots; {} HIL requirements; armable claim: {}",
+        board.visuals().len(),
+        hotspot_count,
+        board.hil_requirement_count(),
+        board.armable()
+    ));
+    ui.small(
+        "These immutable facts label later diagnostic selection; they grant no resource lease, output command, arm transition, or physical-safety claim.",
+    );
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1081,24 +1108,31 @@ fn default_live_waveform_request(
     {
         return None;
     }
+    let capture = capability.board().digital_capture();
+    if !capture.is_implemented() {
+        return None;
+    }
     let mut resources = capability
         .board()
         .resources()
         .iter()
-        .filter(|resource| {
-            resource
-                .graph_accesses()
-                .iter()
-                .any(|access| access.access == GraphResourceAccess::StableBooleanInput)
-        })
+        .filter(|resource| resource.is_digitally_capturable())
         .map(|resource| resource.descriptor().id)
         .collect::<Vec<_>>();
     resources.sort_unstable();
-    resources.truncate(4);
+    resources.truncate(usize::from(capture.maximum_channels));
     if resources.is_empty() {
         return None;
     }
-    let duration_cycles = latest.frequency_hz.saturating_add(499) / 500;
+    let preferred_duration_cycles = latest.frequency_hz.saturating_add(499) / 500;
+    let maximum_duration_cycles = u64::try_from(
+        u128::from(latest.frequency_hz) * u128::from(capture.maximum_duration_micros) / 1_000_000,
+    )
+    .ok()?;
+    if maximum_duration_cycles == 0 {
+        return None;
+    }
+    let duration_cycles = preferred_duration_cycles.min(maximum_duration_cycles);
     Some(WorkerWaveformRequest {
         connection_id: snapshot.connection_id,
         channels: resources.into_iter().map(encode_resource_id).collect(),

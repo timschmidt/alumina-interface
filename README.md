@@ -339,7 +339,7 @@ keeps health failures separate from clock qualification, and renders the last
 valid queue and executor-stack facts in the live-device panel. Its strict JSON
 projection is validated again in the rendering realm before insertion.
 
-The worker now also requests the selected MCU's canonical `ALMCAP03` document
+The worker now also requests the selected MCU's canonical `ALMCAP04` document
 through authenticated `CapabilitiesGet` ranges. It repeats the exact range
 after ambiguous loss, freezes the digest after discovery, bounds allocation,
 and independently decodes and hashes the complete document. Schema v3
@@ -352,6 +352,13 @@ hotspot, HIL, and armability facts. It separately exposes passive diagnostic
 observations—including fixed budgets, cadence, and freshness—and graph
 operations while granting no resource lease, raw acquisition, output, arm
 transition, or safety authority.
+
+Capability V4 adds a third independent digital-capture catalog. The worker now
+derives selected channels, exact acquisition sources, trigger support,
+transition capacity, configure/record/chunk bytes, duration, and arm horizon
+from that authenticated catalog. The browser revalidates retained sources and
+budgets before rendering. The host fixture identifies as
+`sim-mks-tinybee-v1`; the physical TinyBee package remains capture-absent.
 
 ## Value domains
 

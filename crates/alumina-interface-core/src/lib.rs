@@ -26,8 +26,9 @@ pub mod shared_timing_evidence;
 pub mod toolpath;
 
 pub use board_explorer::{
-    BoardExplorerError, BoardExplorerHotspot, BoardExplorerResource, BoardExplorerResourceSummary,
-    BoardExplorerSnapshot, BoardExplorerVisual, build_board_explorer_snapshot,
+    BoardExplorerDigitalCapture, BoardExplorerError, BoardExplorerHotspot, BoardExplorerResource,
+    BoardExplorerResourceSummary, BoardExplorerSnapshot, BoardExplorerVisual,
+    build_board_explorer_snapshot,
 };
 pub use boundary::{
     BoundaryError, BoundedMeasurement, CanonicalCycle, CanonicalStep, DisplayScalar, ExactValue,

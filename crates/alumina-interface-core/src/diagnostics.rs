@@ -6,13 +6,15 @@
 
 use core::fmt;
 
-use alumina_board::{DiagnosticObservationKind, ResourceId};
+use alumina_board::{
+    DiagnosticObservationKind, DigitalCaptureSourceKind, DigitalCaptureTriggerSet, ResourceId,
+};
 use alumina_capability::CapabilityIdentity;
 use alumina_diagnostics::{
-    CaptureId, CaptureQualityFlags, DiagnosticContext, DiagnosticError, DiagnosticLimits,
-    DigitalCaptureChannel, DigitalCaptureFlags, DigitalCaptureState, DigitalLevel,
-    DigitalTransition, DigitalTriggerCondition, OverviewFlags, ResourceOverviewSample,
-    decode_digital_capture, decode_resource_overview,
+    CaptureId, CaptureQualityFlags, DIGITAL_CAPTURE_VERSION, DiagnosticContext, DiagnosticError,
+    DiagnosticLimits, DigitalAcquisitionSource, DigitalCaptureChannel, DigitalCaptureFlags,
+    DigitalCaptureState, DigitalLevel, DigitalTransition, DigitalTriggerCondition, OverviewFlags,
+    ResourceOverviewSample, decode_digital_capture, decode_resource_overview,
 };
 use alumina_protocol::DeviceCycle;
 
@@ -199,6 +201,12 @@ pub enum DiagnosticExplorerError {
     UnknownResource(ResourceId),
     /// Overview evidence names a resource outside the passive observation palette.
     UnadmittedOverviewResource(ResourceId),
+    /// Capture shape, timing, trigger, or byte facts exceed the provider catalog.
+    CaptureCapability,
+    /// Capture evidence names a resource outside the acquisition palette.
+    UnadmittedCaptureResource(ResourceId),
+    /// Capture evidence reports a source other than the catalogued acquisition path.
+    CaptureSource(ResourceId),
     /// Bounded owned UI state could not be allocated.
     Allocation,
 }
@@ -242,6 +250,7 @@ pub fn build_diagnostic_explorer_snapshot(
     {
         return Err(DiagnosticExplorerError::ProvenanceMismatch);
     }
+    validate_capture_capability(board, capture, capture_bytes.len())?;
 
     let mut overview_samples = Vec::new();
     overview_samples
@@ -257,7 +266,7 @@ pub fn build_diagnostic_explorer_snapshot(
         .try_reserve_exact(capture.channel_count())
         .map_err(|_| DiagnosticExplorerError::Allocation)?;
     for channel in capture.channels() {
-        require_board_resource(board, channel.resource)?;
+        require_capture_resource(board, channel)?;
         capture_channels.push(channel);
     }
 
@@ -303,14 +312,84 @@ pub fn build_diagnostic_explorer_snapshot(
     })
 }
 
-fn require_board_resource(
+fn validate_capture_capability(
     board: &BoardExplorerSnapshot,
-    resource: ResourceId,
+    capture: alumina_diagnostics::DigitalCaptureView<'_>,
+    capture_bytes: usize,
 ) -> Result<(), DiagnosticExplorerError> {
-    if board.resource(resource).is_some() {
-        Ok(())
-    } else {
-        Err(DiagnosticExplorerError::UnknownResource(resource))
+    let provider = board.digital_capture();
+    let transition_capacity = capture.retention().0;
+    let (pretrigger, posttrigger) = capture.requested_window_cycles();
+    let duration = pretrigger
+        .checked_add(posttrigger)
+        .ok_or(DiagnosticExplorerError::CaptureCapability)?;
+    let maximum_pretrigger = cycles_for_micros_floor(
+        capture.context().clock_frequency_hz,
+        provider.maximum_pretrigger_micros,
+    )?;
+    let maximum_duration = cycles_for_micros_floor(
+        capture.context().clock_frequency_hz,
+        provider.maximum_duration_micros,
+    )?;
+    let maximum_record_bytes = usize::try_from(provider.record_bytes)
+        .map_err(|_| DiagnosticExplorerError::CaptureCapability)?;
+    let maximum_transitions = usize::try_from(provider.maximum_transitions)
+        .map_err(|_| DiagnosticExplorerError::CaptureCapability)?;
+    let trigger_bit = match capture.trigger().2 {
+        DigitalTriggerCondition::Immediate => DigitalCaptureTriggerSet::IMMEDIATE,
+        DigitalTriggerCondition::Rising => DigitalCaptureTriggerSet::RISING,
+        DigitalTriggerCondition::Falling => DigitalCaptureTriggerSet::FALLING,
+        DigitalTriggerCondition::Either => DigitalCaptureTriggerSet::EITHER,
+    };
+    if !provider.is_implemented()
+        || provider.schema_version != DIGITAL_CAPTURE_VERSION
+        || capture_bytes > maximum_record_bytes
+        || capture.channel_count() > usize::from(provider.maximum_channels)
+        || capture.transition_count() > maximum_transitions
+        || transition_capacity > provider.maximum_transitions
+        || pretrigger > maximum_pretrigger
+        || duration > maximum_duration
+        || !provider.trigger_kinds.contains(trigger_bit)
+    {
+        return Err(DiagnosticExplorerError::CaptureCapability);
+    }
+    Ok(())
+}
+
+fn require_capture_resource(
+    board: &BoardExplorerSnapshot,
+    channel: DigitalCaptureChannel,
+) -> Result<(), DiagnosticExplorerError> {
+    let Some(resource) = board.resource(channel.resource) else {
+        return Err(DiagnosticExplorerError::UnknownResource(channel.resource));
+    };
+    let Some(expected) = resource.digital_capture() else {
+        return Err(DiagnosticExplorerError::UnadmittedCaptureResource(
+            channel.resource,
+        ));
+    };
+    if acquisition_source(channel.source) != Some(expected.source) {
+        return Err(DiagnosticExplorerError::CaptureSource(channel.resource));
+    }
+    Ok(())
+}
+
+fn cycles_for_micros_floor(frequency_hz: u64, micros: u32) -> Result<u64, DiagnosticExplorerError> {
+    let cycles = u128::from(frequency_hz)
+        .checked_mul(u128::from(micros))
+        .ok_or(DiagnosticExplorerError::CaptureCapability)?
+        / 1_000_000;
+    u64::try_from(cycles).map_err(|_| DiagnosticExplorerError::CaptureCapability)
+}
+
+const fn acquisition_source(source: DigitalAcquisitionSource) -> Option<DigitalCaptureSourceKind> {
+    match source {
+        DigitalAcquisitionSource::Simulated => Some(DigitalCaptureSourceKind::Simulated),
+        DigitalAcquisitionSource::Rmt => Some(DigitalCaptureSourceKind::Rmt),
+        DigitalAcquisitionSource::Pcnt => Some(DigitalCaptureSourceKind::Pcnt),
+        DigitalAcquisitionSource::Dma => Some(DigitalCaptureSourceKind::Dma),
+        DigitalAcquisitionSource::Software => Some(DigitalCaptureSourceKind::Software),
+        DigitalAcquisitionSource::ExternalAnalyzer => None,
     }
 }
 
@@ -339,20 +418,24 @@ mod tests {
     use alumina_capability::{
         BoardCapabilityLimits, MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range,
     };
-    use alumina_diagnostics::{DigitalCaptureFlags, OverviewFlags, ResourceValue};
+    use alumina_diagnostics::{
+        DIGITAL_CAPTURE_CHANNEL_BYTES, DIGITAL_CAPTURE_HEADER_BYTES, DigitalAcquisitionSource,
+        DigitalCaptureFlags, OverviewFlags, RESOURCE_OVERVIEW_HEADER_BYTES,
+        RESOURCE_OVERVIEW_SAMPLE_BYTES, ResourceValue, SampleProvenance,
+    };
     use alumina_sim::diagnostics::tinybee_diagnostic_fixture;
 
     use super::*;
     use crate::build_board_explorer_snapshot;
 
     fn board() -> BoardExplorerSnapshot {
-        let package = &board_mks_tinybee::PACKAGE;
-        let identity = calculate_identity(package).unwrap();
+        let package = alumina_sim::capability::package();
+        let identity = calculate_identity(&package).unwrap();
         let mut document = vec![0_u8; usize::try_from(identity.byte_len).unwrap()];
         let mut offset = 0_u32;
         while offset < identity.byte_len {
             let mut chunk = [0_u8; MAX_CAPABILITY_CHUNK_BYTES];
-            let read = read_verified_range(package, offset, &mut chunk).unwrap();
+            let read = read_verified_range(&package, offset, &mut chunk).unwrap();
             let start = usize::try_from(offset).unwrap();
             let count = usize::from(read.byte_len);
             document[start..start + count].copy_from_slice(&chunk[..count]);
@@ -464,6 +547,30 @@ mod tests {
             Err(DiagnosticExplorerError::UnadmittedOverviewResource(
                 ResourceId::Gpio(34)
             ))
+        );
+
+        let mut wrong_source = fixture.digital_capture_bytes().to_vec();
+        wrong_source[10..12].copy_from_slice(&0_u16.to_le_bytes());
+        for channel in 0..4 {
+            wrong_source
+                [DIGITAL_CAPTURE_HEADER_BYTES + channel * DIGITAL_CAPTURE_CHANNEL_BYTES + 5] =
+                DigitalAcquisitionSource::Rmt as u8;
+        }
+        let mut measured_overview = fixture.overview_bytes().to_vec();
+        measured_overview[10..12].copy_from_slice(&0_u16.to_le_bytes());
+        for sample in 0..4 {
+            measured_overview
+                [RESOURCE_OVERVIEW_HEADER_BYTES + sample * RESOURCE_OVERVIEW_SAMPLE_BYTES + 4] =
+                SampleProvenance::Measured as u8;
+        }
+        assert_eq!(
+            build_diagnostic_explorer_snapshot(
+                &board,
+                &measured_overview,
+                &wrong_source,
+                DiagnosticLimits::interactive(),
+            ),
+            Err(DiagnosticExplorerError::CaptureSource(ResourceId::Gpio(22)))
         );
     }
 }
