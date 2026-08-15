@@ -336,6 +336,17 @@ must reconcile revoked-authority counts `0 -> 1 -> 2` before the guard. It
 passed in 391 snapshots at local cycles `123,253,557` and `123,219,326`, ending
 with both participants `aborted`, zero failure, and no error.
 
+The separate `cached-job-confirmed-abort-request-recovery` expectation exercises
+the other side of the transport ambiguity. Each simulator discards its first
+canonical `JobAbort` request before authentication or schedule application.
+The worker must reconcile an unchanged `confirmed` report, retry that same
+participant's abort, and finish the full sequence before advancing to the next
+participant. The browser run passed in 393 snapshots at local cycles
+`128,497,258` and `122,677,712`, with exactly two one-failure observations and
+an all-`aborted`, zero-failure terminal. A fresh-actor ordinary completion then
+passed in 432 snapshots. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first

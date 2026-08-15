@@ -162,9 +162,17 @@ the worker terminated with both actors `aborted` and no error. A fresh-actor
 ordinary completion regression also passed. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
 
+Initial one-shot abort-request non-delivery is now independently qualified from
+globally confirmed state. Each simulator discards the first request before
+authentication or application, so status must retain `confirmed`; only the
+subsequent exact retry may produce `aborted`. The two-participant browser run
+passed with the required `0 -> 1` locally aborted failure observations, and a
+fresh no-fault completion passed afterward. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
-real SD media, background-tab qualification, initial abort-request non-delivery,
-nonterminal/crash reattachment and durable browser job persistence, broader
-packet disorder/outage cases, live TinyBee/T-Deck Pro
+real SD media, background-tab qualification, nonterminal/crash reattachment and
+durable browser job persistence, broader packet disorder/outage cases, live
+TinyBee/T-Deck Pro
 cached starts, electrical simultaneity measurement, and every physical
 motion/safety qualification claim.
