@@ -291,6 +291,19 @@ failures. A fresh ordinary no-fault run passed afterward in 432 snapshots. The
 exact epochs, cycles, selector contract, and closed claims are in sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
 
+The stricter `cached-job-confirm-recovery` expectation requires exactly two
+`confirming`-phase transport failures after both caches and commits are
+installed. It accepts only locally confirmed-participant counts zero and one in
+that order, followed by zero-failure recovery and complete terminal facts. On
+2026-08-15 both simulator actors applied `JobConfirm` and discarded the
+successful response. The worker reconciled each through `JobStatus`, completed
+in 432 snapshots at a shared future epoch, and then passed a fresh-actor
+ordinary no-fault regression. A separate same-prepare-ID attempt from a fresh
+worker exposed that terminal reattachment is not implemented and currently
+retries an `unbound commit` rejection; it remains follow-on work. Exact results
+and closed claims are in sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first

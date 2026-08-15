@@ -137,7 +137,15 @@ valid two-participant terminal snapshot; a fresh no-fault regression also
 passed. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
 
+Both participants were then qualified with their first successful applied
+`JobConfirm` response discarded. A dedicated expectation required exactly two
+confirmation failures and local confirmed counts `0 -> 1` before recovery and
+terminal completion. Fresh-actor no-fault behavior also passed. Fresh-worker
+reattachment to the retained terminal same attempt remains open; see sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
-real SD media, background-tab qualification, lost confirm/abort and broader
-packet disorder/outage cases, live TinyBee/T-Deck Pro cached starts, electrical
-simultaneity measurement, and every physical motion/safety qualification claim.
+real SD media, background-tab qualification, lost abort, terminal same-attempt
+reattachment, and broader packet disorder/outage cases, live TinyBee/T-Deck Pro
+cached starts, electrical simultaneity measurement, and every physical
+motion/safety qualification claim.
