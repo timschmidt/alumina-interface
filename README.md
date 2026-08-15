@@ -406,7 +406,8 @@ assets suitable for later embedding in `aluminafw`.
 The next interface milestones add native/tighter broader-curve metric carriers,
 certified nonzero-radius blends, direction-aware and broader-axis kinematics,
 complete public device/security/machine-membership discovery,
-physical-browser/radio qualification, full worker-owned cached-job driving,
+physical-browser/radio qualification, crash-durable cached-job history and
+nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, nested component
 dependency/cycle handling, editable instance

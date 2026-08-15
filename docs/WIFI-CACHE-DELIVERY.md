@@ -73,7 +73,7 @@ storage policy cannot yield a partially constructed UI readiness table.
 
 ## Live worker lifecycle
 
-Worker schema V6 adds one bounded cached-job owner. A staged request carries the
+Worker schema V7 carries one bounded cached-job owner. A staged request carries the
 complete canonical global manifest and each sorted participant's descriptor,
 partition upload plan/bytes, and independent manifest upload plan. Before any
 I/O, the worker reconstructs all content/publication identities, manifest
@@ -140,12 +140,22 @@ passed. See sibling
 Both participants were then qualified with their first successful applied
 `JobConfirm` response discarded. A dedicated expectation required exactly two
 confirmation failures and local confirmed counts `0 -> 1` before recovery and
-terminal completion. Fresh-actor no-fault behavior also passed. Fresh-worker
-reattachment to the retained terminal same attempt remains open; see sibling
+terminal completion. Fresh-actor no-fault behavior also passed. That run exposed
+the then-open fresh-owner terminal identity seam; see sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
+A later schema-V7 qualification completed one ordinary attempt, replaced the
+browser worker without restarting either simulated MCU, and restaged the
+identical compiled request. An initial read-only status round matched each
+retained boot/descriptor token and returned `retained_complete` in seven
+snapshots with the original local cycles, no UI epoch, no failures, and no new
+start command. Native tests additionally prove only status operations are
+emitted and a complete/empty participant split faults before mutation. See
+sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
-real SD media, background-tab qualification, lost abort, terminal same-attempt
-reattachment, and broader packet disorder/outage cases, live TinyBee/T-Deck Pro
-cached starts, electrical simultaneity measurement, and every physical
-motion/safety qualification claim.
+real SD media, background-tab qualification, lost abort, nonterminal/crash
+reattachment and durable browser job persistence, broader packet
+disorder/outage cases, live TinyBee/T-Deck Pro cached starts, electrical
+simultaneity measurement, and every physical motion/safety qualification claim.

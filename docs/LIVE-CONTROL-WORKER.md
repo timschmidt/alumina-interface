@@ -57,7 +57,10 @@ failure state, and complete canonical telemetry-document events. The rendering
 realm reconstructs the native AHLT/ASWM, capability, identity, telemetry, and
 capture relationships and rejects an invalid snapshot before inserting it.
 Schema V6 adds passive canonical active-configuration status and the complete
-worker-owned cached-job lifecycle. It does not retain a compatibility decoder
+worker-owned cached-job lifecycle. Schema V7 retains that strict lifecycle and
+adds `retained_complete`: a replacement owner may expose exact all-participant
+terminal descriptor evidence and local start cycles only with no original UI
+epoch and no new start authority. It does not retain a compatibility decoder
 for prior schemas.
 
 ## Lifecycle and recovery
@@ -299,10 +302,22 @@ that order, followed by zero-failure recovery and complete terminal facts. On
 successful response. The worker reconciled each through `JobStatus`, completed
 in 432 snapshots at a shared future epoch, and then passed a fresh-actor
 ordinary no-fault regression. A separate same-prepare-ID attempt from a fresh
-worker exposed that terminal reattachment is not implemented and currently
-retries an `unbound commit` rejection; it remains follow-on work. Exact results
-and closed claims are in sibling
+worker exposed the then-missing terminal identity seam. Exact results and the
+original closed boundary are in sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
+
+The `cached-job-reattach` expectation replaces that unbounded boundary with a
+strict schema-V7 terminal result. After an ordinary two-participant completion,
+it installs the identical compiled request into a replacement worker while both
+simulator actors and boots remain unchanged. The fresh owner performs an
+all-participant read-only schedule-status round and may pass only as
+`retained_complete`, with exact descriptor-token matches, complete cache and
+schedule facts, retained local start cycles, `target_ui_ns = null`, no failures,
+and no worker start command. On 2026-08-15 it passed in seven snapshots and
+retained cycles `165,504,989` and `165,424,194` from the preceding 432-snapshot
+ordinary run. Native request-level tests prove exact terminal discovery emits
+only `JobStatus` and mixed complete/empty actors fault before mutation. See
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -370,7 +385,7 @@ response-body/status rejection.
 
 The browser adapter uses the same zero-configuration authenticated session as
 clock and health. The worker publishes complete bytes once per generation only
-after validation. JSON transfer is deliberately treated as untrusted: schema V6
+after validation. JSON transfer is deliberately treated as untrusted: schema V7
 validates the document again, and the UI validates and decodes it once more into
 `BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
 the admitted explorer. The localhost capability-loss run and complete evidence
@@ -388,7 +403,7 @@ advancing accepted evidence, making the next poll byte-identical.
 
 Complete newly advanced bytes cross the worker boundary in a credential-free
 `WorkerTelemetryDocument` alongside the exact subscription request. Introduced
-in schema V5 and retained in current schema V6, the validator decodes both. The
+in schema V5 and retained in current schema V7, the validator decodes both. The
 worker selects resources, cadence, and encoded byte ceilings
 from the authenticated `ALMDOV01` catalog rather than the graph palette. The
 rendering supervisor decodes the transfer again, binds every context and
