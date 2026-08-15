@@ -386,13 +386,29 @@ on the same connections and boots in 60 snapshots. Active foreign work and a
 same-ID descriptor-token mismatch remain hard errors. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
 
+The `cached-job-abort-duplicate` expectation exercises the authenticated
+replay boundary after mutation application. Each simulator actor applies its
+first canonical `JobAbort`, then handles the exact same request bytes again.
+The reused counter/proof is rejected with HTTP 401 before a second native
+dispatch, and that later error is returned in place of the first success. The
+worker must retain two one-failure `aborting` observations whose causes contain
+`HTTP status 401`, reconcile locally aborted counts `0 -> 1` through read-only
+status after spending each failed counter, and terminate with both actors
+exactly `aborted`, zero failures, and no error. On 2026-08-15 it passed in 391
+snapshots at epoch `45,850,900,002 ns` and local cycles `148,249,511` and
+`148,199,565`. Fresh actors then passed ordinary `complete` in 431 snapshots.
+See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first
 successful response for one named canonical storage or schedule operation only
-after the fixture has applied it. The harness has separate qualified and
-conservative-rejection expectations so an excessive causal interval must remain
-unusable instead of being mistaken for successful recovery.
+after the fixture has applied it, or replay one successful authenticated native
+request and require HTTP 401 before second dispatch. The harness has separate
+qualified and conservative-rejection expectations so an excessive causal
+interval must remain unusable instead of being mistaken for successful
+recovery.
 
 At `alumina-interface` commit `0e0a53e` and sibling `aluminafw` simulator commit
 `ba888db`, Chromium runs passed nominal, selected-response-loss, finite-outage,

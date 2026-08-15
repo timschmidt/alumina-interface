@@ -201,9 +201,22 @@ job then completes on the same sessions and MCU boots. The final production
 run passed in 386 and 60 snapshots, respectively. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
 
+The `abort-duplicate` qualification now covers one exact post-application
+duplicate. Each actor applies its first authenticated `JobAbort`, receives the
+same request bytes again with the consumed counter and proof, and rejects that
+replay with HTTP 401 before second native dispatch. The browser classifies the
+HTTP error before parsing success media, retains ambiguous delivery, opens a
+fresh authenticated request after spending the failed counter, and reconciles
+the already-applied mutation through read-only status in the same boot-scoped
+session. The production run passed in 391 snapshots with two one-failure 401
+observations, locally aborted counts `0 -> 1`, exact
+all-participant `aborted`, and zero terminal failure. Fresh actors then passed
+ordinary `complete` in 431 snapshots. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
-durable browser job persistence, full control/status outage, reordered or
-duplicated traffic, faulted or other terminal mixtures, live TinyBee/T-Deck Pro
-cached starts, electrical
+durable browser job persistence, full control/status outage, reordered traffic,
+duplication outside that exact one-shot replay, faulted or other terminal
+mixtures, live TinyBee/T-Deck Pro cached starts, electrical
 simultaneity measurement, and every physical motion/safety qualification claim.
