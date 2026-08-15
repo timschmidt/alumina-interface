@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const cdpPort = process.argv[2] ?? "9224";
+const repeat = process.argv[3] === "repeat";
 const repository = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
@@ -13,31 +14,38 @@ const deviceIds = [
   "414c554d2d53494d3a54494e59424546",
 ];
 
-const requestText = execFileSync(
-  "cargo",
-  [
-    "run",
-    "--quiet",
-    "--locked",
-    "--offline",
-    "-p",
-    "alumina-interface",
-    "--bin",
-    "alumina-cam-fixture",
-    "--",
-    "--device-id",
-    deviceIds[0],
-    "--device-id",
-    deviceIds[1],
-  ],
-  {
-    cwd: repository,
-    encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "false" },
-    stdio: ["ignore", "pipe", "inherit"],
-  },
-);
-const cachedJobRequest = JSON.parse(requestText);
+const jobIds = repeat ? ["2047934465", "2047934466"] : ["2047934465"];
+const cachedJobRequests = jobIds.map((jobId) => {
+  const requestText = execFileSync(
+    "cargo",
+    [
+      "run",
+      "--quiet",
+      "--locked",
+      "--offline",
+      "-p",
+      "alumina-interface",
+      "--bin",
+      "alumina-cam-fixture",
+      "--",
+      "--job-id",
+      jobId,
+      "--device-id",
+      deviceIds[0],
+      "--device-id",
+      deviceIds[1],
+    ],
+    {
+      cwd: repository,
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "false" },
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
+  return JSON.parse(requestText);
+});
+const cachedJobRequest = repeat ? cachedJobRequests : cachedJobRequests[0];
+const expectation = repeat ? "cached-job-repeat" : "cached-job";
 
 const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) =>
   response.json(),
@@ -75,7 +83,7 @@ const cdp = (method, params = {}) =>
   });
 
 await cdp("Page.navigate", {
-  url: `http://127.0.0.1:8097${harnessPath}?expect=cached-job`,
+  url: `http://127.0.0.1:8097${harnessPath}?expect=${expectation}`,
 });
 
 const installationDeadline = Date.now() + 30000;
@@ -122,6 +130,8 @@ while (Date.now() < deadline) {
       lastInspection = value.inspection;
       const latest = lastInspection.latest_cached_job_snapshot;
       const progressState = JSON.stringify([
+        lastInspection.request_index,
+        latest?.job_id,
         latest?.phase,
         latest?.participants.map((participant) => [
           participant.cache_artifact,
@@ -133,6 +143,8 @@ while (Date.now() < deadline) {
         console.error(
           `[cached-job] ${JSON.stringify({
             snapshot_count: lastInspection.snapshot_count,
+            request_index: lastInspection.request_index,
+            job_id: latest.job_id,
             phase: latest.phase,
             participants: latest.participants.map((participant) => ({
               connection_id: participant.connection_id,
@@ -164,19 +176,32 @@ if (!result) {
 }
 if (result.status === "passed") {
   const detail = result.detail;
-  const phaseSequence = [];
-  for (const transition of detail.cached_job_transitions ?? []) {
-    if (phaseSequence.at(-1) !== transition.phase) {
-      phaseSequence.push(transition.phase);
+  const compactRun = (run) => {
+    const phaseSequence = [];
+    for (const transition of run.cached_job_transitions ?? []) {
+      if (phaseSequence.at(-1) !== transition.phase) {
+        phaseSequence.push(transition.phase);
+      }
     }
-  }
-  result.detail = {
-    expectation: detail.expectation,
-    cached_job_snapshot_count: detail.cached_job_snapshot_count,
-    phase_sequence: phaseSequence,
-    latest_cached_job_snapshot: detail.latest_cached_job_snapshot,
-    device_snapshots: detail.device_snapshots,
+    return {
+      job_id: run.job_id ?? run.latest_cached_job_snapshot?.job_id,
+      cached_job_snapshot_count: run.cached_job_snapshot_count,
+      phase_sequence: phaseSequence,
+      latest_cached_job_snapshot: run.latest_cached_job_snapshot,
+    };
   };
+  const completedCachedJobs = (detail.completed_cached_jobs ?? []).map(compactRun);
+  result.detail = repeat
+    ? {
+        expectation: detail.expectation,
+        completed_cached_jobs: completedCachedJobs,
+        device_snapshots: detail.device_snapshots,
+      }
+    : {
+        expectation: detail.expectation,
+        ...compactRun(detail),
+        device_snapshots: detail.device_snapshots,
+      };
 }
 console.log(JSON.stringify(result, null, 2));
 if (result.status !== "passed") process.exitCode = 1;

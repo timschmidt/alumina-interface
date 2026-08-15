@@ -16,12 +16,16 @@
       let timeout;
       let latestSnapshot;
       const deviceSnapshots = new Map();
+      let cachedJobRequests = [];
       let cachedJobRequest;
+      let cachedJobRequestIndex = 0;
       let cachedJobStaged = false;
       let cachedJobStarted = false;
+      let cachedJobClearing = false;
       let cachedJobSnapshotCount = 0;
       let latestCachedJobSnapshot;
       const cachedJobTransitions = [];
+      const completedCachedJobs = [];
       let priorCachedJobState;
       let isolatedHealthFailureSnapshot;
       let isolatedCapabilityFailureSnapshot;
@@ -36,9 +40,23 @@
       const eventKinds = [];
       const expectation =
         new URLSearchParams(location.search).get("expect") ?? "qualified";
+      const cachedJobExpectation =
+        expectation === "cached-job" || expectation === "cached-job-repeat";
 
-      window.installCachedJobRequest = (request) => {
-        cachedJobRequest = request;
+      window.installCachedJobRequest = (requestOrRequests) => {
+        const requests = Array.isArray(requestOrRequests)
+          ? requestOrRequests
+          : [requestOrRequests];
+        const expectedCount = expectation === "cached-job-repeat" ? 2 : 1;
+        if (!cachedJobExpectation || requests.length !== expectedCount) {
+          finish("failed", {
+            error: `expected ${expectedCount} cached-job request(s) for ${expectation}`,
+          });
+          return;
+        }
+        cachedJobRequests = requests;
+        cachedJobRequestIndex = 0;
+        cachedJobRequest = requests[0];
         maybeStageCachedJob();
       };
 
@@ -121,16 +139,21 @@
       window.inspectCachedJobHarness = () => ({
         staged: cachedJobStaged,
         started: cachedJobStarted,
+        clearing: cachedJobClearing,
+        request_index: cachedJobRequestIndex,
+        request_count: cachedJobRequests.length,
         snapshot_count: cachedJobSnapshotCount,
         latest_cached_job_snapshot: latestCachedJobSnapshot,
         cached_job_transitions: cachedJobTransitions,
+        completed_cached_jobs: completedCachedJobs,
       });
 
       const maybeStageCachedJob = () => {
         if (
-          expectation !== "cached-job" ||
+          !cachedJobExpectation ||
           cachedJobRequest === undefined ||
-          cachedJobStaged
+          cachedJobStaged ||
+          cachedJobClearing
         ) {
           return;
         }
@@ -231,7 +254,7 @@
           timeout = setTimeout(() => {
             finish("failed", {
               error:
-                expectation === "cached-job"
+                cachedJobExpectation
                   ? "cached-job workflow timed out"
                   : "clock qualification timed out",
               event_kinds: eventKinds,
@@ -246,10 +269,11 @@
               cached_job_snapshot_count: cachedJobSnapshotCount,
               latest_cached_job_snapshot: latestCachedJobSnapshot,
               cached_job_transitions: cachedJobTransitions,
+              completed_cached_jobs: completedCachedJobs,
               device_snapshots: compactDeviceSnapshots(),
             });
-          }, expectation === "cached-job" ? 180000 : 30000);
-          const simulatorCount = expectation === "cached-job" ? 2 : 1;
+          }, cachedJobExpectation ? 180000 : 30000);
+          const simulatorCount = cachedJobExpectation ? 2 : 1;
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
@@ -285,8 +309,24 @@
         }
         if (event.kind === "job_snapshot") {
           const snapshot = event.snapshot;
+          if (cachedJobClearing) {
+            if (
+              cachedJobRequest !== undefined &&
+              snapshot.job_id === cachedJobRequest.job_id &&
+              snapshot.phase === "complete"
+            ) {
+              return;
+            }
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "cached-job state changed while awaiting terminal clear",
+              latest_cached_job_snapshot: snapshot,
+              completed_cached_jobs: completedCachedJobs,
+            });
+            return;
+          }
           recordCachedJobSnapshot(snapshot);
-          if (expectation !== "cached-job") {
+          if (!cachedJobExpectation) {
             clearTimeout(timeout);
             finish("failed", {
               error: "unexpected cached-job snapshot",
@@ -321,6 +361,8 @@
           if (snapshot.phase === "complete") {
             const valid =
               cachedJobStarted &&
+              cachedJobRequest !== undefined &&
+              snapshot.job_id === cachedJobRequest.job_id &&
               snapshot.execution_mode === "simulation_only" &&
               snapshot.target_ui_ns !== null &&
               snapshot.consecutive_failures === 0 &&
@@ -334,17 +376,77 @@
                   participant.schedule_phase === "complete" &&
                   participant.local_start_cycle !== null,
               );
+            if (!valid) {
+              clearTimeout(timeout);
+              finish("failed", {
+                expectation,
+                error: "terminal cached-job snapshot was invalid",
+                cached_job_snapshot_count: cachedJobSnapshotCount,
+                latest_cached_job_snapshot: latestCachedJobSnapshot,
+                cached_job_transitions: cachedJobTransitions,
+                completed_cached_jobs: completedCachedJobs,
+                device_snapshots: compactDeviceSnapshots(),
+              });
+              return;
+            }
+            completedCachedJobs.push({
+              job_id: snapshot.job_id,
+              cached_job_snapshot_count: cachedJobSnapshotCount,
+              latest_cached_job_snapshot: latestCachedJobSnapshot,
+              cached_job_transitions: [...cachedJobTransitions],
+            });
+            if (cachedJobRequestIndex + 1 < cachedJobRequests.length) {
+              cachedJobClearing = true;
+              worker.postMessage(
+                JSON.stringify({
+                  schema_version: 6,
+                  command: {
+                    kind: "clear_cached_job",
+                    job_id: snapshot.job_id,
+                  },
+                }),
+              );
+              return;
+            }
             clearTimeout(timeout);
-            finish(valid ? "passed" : "failed", {
+            finish("passed", {
               expectation,
-              error: valid ? undefined : "terminal cached-job snapshot was invalid",
               cached_job_snapshot_count: cachedJobSnapshotCount,
               latest_cached_job_snapshot: latestCachedJobSnapshot,
               cached_job_transitions: cachedJobTransitions,
+              completed_cached_jobs: completedCachedJobs,
               device_snapshots: compactDeviceSnapshots(),
             });
             return;
           }
+          return;
+        }
+        if (event.kind === "job_removed") {
+          const nextIndex = cachedJobRequestIndex + 1;
+          if (
+            !cachedJobClearing ||
+            cachedJobRequest === undefined ||
+            event.job_id !== cachedJobRequest.job_id ||
+            nextIndex >= cachedJobRequests.length
+          ) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "unexpected cached-job removal",
+              event,
+              completed_cached_jobs: completedCachedJobs,
+            });
+            return;
+          }
+          cachedJobRequestIndex = nextIndex;
+          cachedJobRequest = cachedJobRequests[cachedJobRequestIndex];
+          cachedJobStaged = false;
+          cachedJobStarted = false;
+          cachedJobClearing = false;
+          cachedJobSnapshotCount = 0;
+          latestCachedJobSnapshot = undefined;
+          cachedJobTransitions.length = 0;
+          priorCachedJobState = undefined;
+          maybeStageCachedJob();
           return;
         }
         if (event.kind === "capability_document") {
@@ -365,7 +467,7 @@
           if (
             capability.connection_id < 1 ||
             capability.connection_id >
-              (expectation === "cached-job" ? 2 : 1) ||
+              (cachedJobExpectation ? 2 : 1) ||
             capability.generation < 1 ||
             capability.identity.document_bytes !== capability.document.length ||
             capability.identity.digest.length !== 32 ||
@@ -383,7 +485,7 @@
           return;
         }
         if (event.kind === "telemetry_document") {
-          if (expectation === "cached-job") return;
+          if (cachedJobExpectation) return;
           const telemetry = event.telemetry;
           const subscription = Uint8Array.from(telemetry.subscription);
           const record = Uint8Array.from(telemetry.event);
