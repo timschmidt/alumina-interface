@@ -836,6 +836,8 @@ impl AluminaApp {
                     WorkerCachedJobPhaseSnapshot::Aborted
                         | WorkerCachedJobPhaseSnapshot::Cancelled
                         | WorkerCachedJobPhaseSnapshot::Complete
+                        | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+                        | WorkerCachedJobPhaseSnapshot::RetainedComplete
                         | WorkerCachedJobPhaseSnapshot::Faulted
                 );
                 if ui
@@ -851,6 +853,8 @@ impl AluminaApp {
                     WorkerCachedJobPhaseSnapshot::Aborted
                         | WorkerCachedJobPhaseSnapshot::Cancelled
                         | WorkerCachedJobPhaseSnapshot::Complete
+                        | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+                        | WorkerCachedJobPhaseSnapshot::RetainedComplete
                         | WorkerCachedJobPhaseSnapshot::Faulted
                 );
                 if ui
@@ -1074,6 +1078,12 @@ fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
         ui.colored_label(
             egui::Color32::YELLOW,
             "Hardware cache may be staged, but Start remains fail-closed unless every board and device-stored credential is production-armable.",
+        );
+    }
+    if job.phase == WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest {
+        ui.colored_label(
+            egui::Color32::RED,
+            "The job completed after a stop request crossed the abort point of no return. Treat the stop as missed; Wi-Fi is not a safety chain.",
         );
     }
     for participant in &job.participants {

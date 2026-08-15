@@ -163,6 +163,7 @@ pub struct LiveCachedJob {
     participants: Vec<LiveParticipant>,
     coordinator: Option<DistributedScheduleCoordinator>,
     status_queue: VecDeque<DistributedScheduleRequest>,
+    stop_requested: bool,
     terminal_override: Option<WorkerCachedJobPhaseSnapshot>,
     consecutive_failures: u32,
     last_error: Option<String>,
@@ -221,6 +222,7 @@ impl LiveCachedJob {
             participants,
             coordinator: None,
             status_queue: VecDeque::new(),
+            stop_requested: false,
             terminal_override: None,
             consecutive_failures: 0,
             last_error: None,
@@ -278,13 +280,11 @@ impl LiveCachedJob {
         self.coordinator
             .as_ref()
             .map_or(WorkerCachedJobPhaseSnapshot::Caching, |coordinator| {
-                if coordinator.phase() == DistributedSchedulePhase::Complete
-                    && coordinator.target_ui_ns().is_none()
-                {
-                    WorkerCachedJobPhaseSnapshot::RetainedComplete
-                } else {
-                    distributed_phase(coordinator.phase())
-                }
+                project_distributed_phase(
+                    coordinator.phase(),
+                    coordinator.target_ui_ns().is_some(),
+                    self.stop_requested,
+                )
             })
     }
 
@@ -296,6 +296,7 @@ impl LiveCachedJob {
             WorkerCachedJobPhaseSnapshot::Aborted
                 | WorkerCachedJobPhaseSnapshot::Cancelled
                 | WorkerCachedJobPhaseSnapshot::Complete
+                | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
                 | WorkerCachedJobPhaseSnapshot::RetainedComplete
                 | WorkerCachedJobPhaseSnapshot::Faulted
         )
@@ -476,6 +477,7 @@ impl LiveCachedJob {
         };
         if coordinator.target_ui_ns().is_some() {
             coordinator.begin_abort()?;
+            self.stop_requested = true;
         } else {
             coordinator.begin_cancel()?;
         }
@@ -691,6 +693,22 @@ const fn distributed_phase(phase: DistributedSchedulePhase) -> WorkerCachedJobPh
         DistributedSchedulePhase::Complete => WorkerCachedJobPhaseSnapshot::Complete,
         DistributedSchedulePhase::Faulted => WorkerCachedJobPhaseSnapshot::Faulted,
     }
+}
+
+const fn project_distributed_phase(
+    phase: DistributedSchedulePhase,
+    target_ui_bound: bool,
+    stop_requested: bool,
+) -> WorkerCachedJobPhaseSnapshot {
+    if matches!(phase, DistributedSchedulePhase::Complete) {
+        if !target_ui_bound {
+            return WorkerCachedJobPhaseSnapshot::RetainedComplete;
+        }
+        if stop_requested {
+            return WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest;
+        }
+    }
+    distributed_phase(phase)
 }
 
 fn bounded_job_diagnostic(error: &str) -> String {
@@ -920,5 +938,21 @@ mod tests {
         assert_eq!(job.phase(), WorkerCachedJobPhaseSnapshot::Cancelled);
         assert!(job.next_operation().unwrap().is_none());
         assert_eq!(job.snapshot().validate(), Ok(()));
+    }
+
+    #[test]
+    fn completed_schedule_retains_whether_a_bound_stop_request_was_missed() {
+        assert_eq!(
+            project_distributed_phase(DistributedSchedulePhase::Complete, true, false),
+            WorkerCachedJobPhaseSnapshot::Complete
+        );
+        assert_eq!(
+            project_distributed_phase(DistributedSchedulePhase::Complete, true, true),
+            WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
+        );
+        assert_eq!(
+            project_distributed_phase(DistributedSchedulePhase::Complete, false, false),
+            WorkerCachedJobPhaseSnapshot::RetainedComplete
+        );
     }
 }

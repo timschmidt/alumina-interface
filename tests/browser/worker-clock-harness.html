@@ -52,12 +52,16 @@
         expectation === "cached-job-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-request-recovery" ||
+        expectation === "cached-job-abort-guard-outage" ||
         expectation === "cached-job-reattach";
+      const cachedJobAbortGuardOutage =
+        expectation === "cached-job-abort-guard-outage";
       const cachedJobStopPhase =
         expectation === "cached-job-abort-recovery"
           ? "installed"
           : expectation === "cached-job-confirmed-abort-recovery" ||
-              expectation === "cached-job-confirmed-abort-request-recovery"
+              expectation === "cached-job-confirmed-abort-request-recovery" ||
+              cachedJobAbortGuardOutage
             ? "confirmed"
             : undefined;
 
@@ -159,7 +163,8 @@
           ]);
           if (
             failureState !== priorCachedJobFailureState &&
-            cachedJobFailureObservations.length < 16
+            cachedJobFailureObservations.length <
+              (cachedJobAbortGuardOutage ? 64 : 16)
           ) {
             cachedJobFailureObservations.push(latestCachedJobSnapshot);
             priorCachedJobFailureState = failureState;
@@ -226,7 +231,7 @@
         cachedJobStaged = true;
         worker.postMessage(
           JSON.stringify({
-            schema_version: 7,
+            schema_version: 8,
             command: { kind: "stage_cached_job", request: cachedJobRequest },
           }),
         );
@@ -244,7 +249,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 7,
+            schema_version: 8,
             command: {
               kind: "capture_waveform",
               request: {
@@ -276,7 +281,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 7) {
+        if (envelope.schema_version !== 8) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -316,7 +321,7 @@
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
-                schema_version: 7,
+                schema_version: 8,
                 command: {
                   kind: "configure",
                   request: {
@@ -388,7 +393,7 @@
             cachedJobStarted = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 7,
+                schema_version: 8,
                 command: {
                   kind: "start_cached_job",
                   job_id: snapshot.job_id,
@@ -404,7 +409,7 @@
             cachedJobStopRequested = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 7,
+                schema_version: 8,
                 command: {
                   kind: "stop_cached_job",
                   job_id: snapshot.job_id,
@@ -415,21 +420,26 @@
           }
           if (
             snapshot.phase === "complete" ||
+            snapshot.phase === "completed_after_stop_request" ||
             snapshot.phase === "retained_complete" ||
             snapshot.phase === "aborted"
           ) {
             const retained = expectation === "cached-job-reattach";
-            const aborted = cachedJobStopPhase !== undefined;
+            const stopMissed = cachedJobAbortGuardOutage;
+            const aborted =
+              cachedJobStopPhase !== undefined && !cachedJobAbortGuardOutage;
             const valid =
               (retained
                 ? !cachedJobStarted && !cachedJobStopRequested
                 : cachedJobStarted &&
-                  cachedJobStopRequested === aborted) &&
+                  cachedJobStopRequested === (aborted || stopMissed)) &&
               cachedJobRequest !== undefined &&
               snapshot.job_id === cachedJobRequest.job_id &&
               snapshot.phase ===
                 (retained
                   ? "retained_complete"
+                  : stopMissed
+                    ? "completed_after_stop_request"
                   : aborted
                     ? "aborted"
                     : "complete") &&
@@ -477,6 +487,7 @@
                       ).length === index,
                   ))) &&
               (cachedJobStopPhase === undefined ||
+                stopMissed ||
                 (cachedJobFailureObservations.length === 2 &&
                   cachedJobRecovered &&
                   cachedJobFailureObservations.every(
@@ -498,6 +509,41 @@
                         (participant) =>
                           participant.schedule_phase === "aborted",
                       ).length === index,
+                  ))) &&
+              (!stopMissed ||
+                (cachedJobFailureObservations.length >= 2 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.some(
+                    (observation) => observation.phase === "aborting",
+                  ) &&
+                  cachedJobFailureObservations.every(
+                    (observation) =>
+                      (observation.phase === "aborting" ||
+                        observation.phase === "irrevocable") &&
+                      observation.consecutive_failures === 1 &&
+                      observation.last_error?.includes("fetch failed") &&
+                      observation.participants.length === 2 &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          [
+                            "confirmed",
+                            "priming",
+                            "primed",
+                            "running",
+                            "complete",
+                          ].includes(participant.schedule_phase),
+                      ) &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.schedule_phase !== "aborted",
+                      ),
+                  ) &&
+                  cachedJobTransitions.some(
+                    (transition) => transition.phase === "irrevocable",
                   ))) &&
               (expectation !== "cached-job-reattach" ||
                 (cachedJobFailureObservations.length === 0 &&
@@ -534,7 +580,7 @@
               cachedJobClearing = true;
               worker.postMessage(
                 JSON.stringify({
-                  schema_version: 7,
+                  schema_version: 8,
                   command: {
                     kind: "clear_cached_job",
                     job_id: snapshot.job_id,

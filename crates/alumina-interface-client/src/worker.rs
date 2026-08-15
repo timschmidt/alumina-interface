@@ -33,7 +33,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 7;
+pub const WORKER_SCHEMA_VERSION: u16 = 8;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -1370,6 +1370,8 @@ pub enum WorkerCachedJobPhaseSnapshot {
     Cancelled,
     /// Every participant reported exact execution completion.
     Complete,
+    /// Every participant completed after a requested pre-guard stop could not be established.
+    CompletedAfterStopRequest,
     /// Every participant retained exact completion from this descriptor, but the new owner has no original UI epoch.
     RetainedComplete,
     /// Exact validation, transport reconciliation, or a participant fault stopped progress.
@@ -1562,7 +1564,10 @@ impl WorkerCachedJobSnapshot {
             | WorkerCachedJobPhaseSnapshot::Irrevocable
             | WorkerCachedJobPhaseSnapshot::Aborting
             | WorkerCachedJobPhaseSnapshot::Aborted
-            | WorkerCachedJobPhaseSnapshot::Complete => self.target_ui_ns.is_some(),
+            | WorkerCachedJobPhaseSnapshot::Complete
+            | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest => {
+                self.target_ui_ns.is_some()
+            }
             WorkerCachedJobPhaseSnapshot::Faulted => true,
         };
         if !target_relationship_valid {
@@ -1630,6 +1635,7 @@ impl WorkerCachedJobSnapshot {
             if matches!(
                 self.phase,
                 WorkerCachedJobPhaseSnapshot::Complete
+                    | WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest
                     | WorkerCachedJobPhaseSnapshot::RetainedComplete
             ) && (participant.cache_artifact != WorkerCacheArtifactSnapshot::Complete
                 || participant.schedule_phase != WorkerParticipantSchedulePhaseSnapshot::Complete
@@ -2348,7 +2354,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 7);
+        assert_eq!(WORKER_SCHEMA_VERSION, 8);
     }
 
     #[test]
@@ -2401,6 +2407,27 @@ mod tests {
         retained.target_ui_ns = Some(7);
         assert_eq!(
             retained.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+    }
+
+    #[test]
+    fn completed_after_stop_request_requires_exact_terminal_execution_facts() {
+        let mut stopped_too_late = complete_cached_job_snapshot();
+        stopped_too_late.phase = WorkerCachedJobPhaseSnapshot::CompletedAfterStopRequest;
+        assert_eq!(stopped_too_late.validate(), Ok(()));
+
+        stopped_too_late.participants[0].schedule_phase =
+            WorkerParticipantSchedulePhaseSnapshot::Primed;
+        assert_eq!(
+            stopped_too_late.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+        stopped_too_late.participants[0].schedule_phase =
+            WorkerParticipantSchedulePhaseSnapshot::Complete;
+        stopped_too_late.target_ui_ns = None;
+        assert_eq!(
+            stopped_too_late.validate(),
             Err(WorkerContractError::CachedJobSnapshot)
         );
     }
