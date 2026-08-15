@@ -329,6 +329,13 @@ snapshots with local cycles `102,654,525` and `102,579,983`; a fresh-actor
 ordinary completion regression passed in 419 snapshots. See
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
 
+The distinct `cached-job-confirmed-abort-recovery` expectation waits until both
+participants have granted future start authority and reported `confirmed`
+before requesting stop. The same two applied abort responses are discarded and
+must reconcile revoked-authority counts `0 -> 1 -> 2` before the guard. It
+passed in 391 snapshots at local cycles `123,253,557` and `123,219,326`, ending
+with both participants `aborted`, zero failure, and no error.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first
