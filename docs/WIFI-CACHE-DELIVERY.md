@@ -206,9 +206,9 @@ duplicate. Each actor applies its first authenticated `JobAbort`, receives the
 same request bytes again with the consumed counter and proof, and rejects that
 replay with HTTP 401 before second native dispatch. The browser classifies the
 HTTP error before parsing success media, retains ambiguous delivery, opens a
-fresh authenticated request after spending the failed counter, and reconciles
-the already-applied mutation through read-only status in the same boot-scoped
-session. The production run passed in 391 snapshots with two one-failure 401
+replacement authenticated session after spending the failed counter, and
+reconciles the already-applied mutation through read-only status. The
+production run passed in 391 snapshots with two one-failure 401
 observations, locally aborted counts `0 -> 1`, exact
 all-participant `aborted`, and zero terminal failure. Fresh actors then passed
 ordinary `complete` in 431 snapshots. See sibling

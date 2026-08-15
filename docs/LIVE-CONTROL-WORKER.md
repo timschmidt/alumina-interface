@@ -393,9 +393,10 @@ The reused counter/proof is rejected with HTTP 401 before a second native
 dispatch, and that later error is returned in place of the first success. The
 worker must retain two one-failure `aborting` observations whose causes contain
 `HTTP status 401`, reconcile locally aborted counts `0 -> 1` through read-only
-status after spending each failed counter, and terminate with both actors
-exactly `aborted`, zero failures, and no error. On 2026-08-15 it passed in 391
-snapshots at epoch `45,850,900,002 ns` and local cycles `148,249,511` and
+status after spending each failed counter and reopening its HTTP session, and
+terminate with both actors exactly `aborted`, zero failures, and no error. On
+2026-08-15 it passed in 391 snapshots at epoch `45,850,900,002 ns` and local
+cycles `148,249,511` and
 `148,199,565`. Fresh actors then passed ordinary `complete` in 431 snapshots.
 See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
