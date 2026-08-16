@@ -1800,6 +1800,70 @@ mod tests {
     }
 
     #[test]
+    fn full_abort_status_outage_retains_facts_until_exact_completion_is_observed() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut coordinator);
+        let inputs = start_inputs(&job, &clocks);
+        install_and_confirm(&mut coordinator, &mut authorities, &inputs);
+        coordinator.begin_abort().unwrap();
+
+        for completed in 0..authorities.len() {
+            let abort = coordinator.next_request().unwrap().unwrap();
+            assert_eq!(abort.request.operation, Operation::JobAbort);
+            assert!(coordinator.abandon_pending(abort.device_id).unwrap());
+
+            for _ in 0..3 {
+                let status = coordinator.next_request().unwrap().unwrap();
+                assert_eq!(status.device_id, abort.device_id);
+                assert_eq!(status.request.operation, Operation::JobStatus);
+                assert!(coordinator.abandon_pending(status.device_id).unwrap());
+                assert_eq!(
+                    coordinator.participant_phase(status.device_id),
+                    Some(ParticipantSchedulePhase::Confirmed)
+                );
+                assert_eq!(
+                    coordinator.phase(),
+                    if completed == 0 {
+                        DistributedSchedulePhase::Aborting
+                    } else {
+                        DistributedSchedulePhase::Irrevocable
+                    }
+                );
+            }
+
+            let commit = coordinator.participant_commit(abort.device_id).unwrap();
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == abort.device_id)
+                .unwrap();
+            complete_authority(authority, commit, 19);
+            let observed = ready_status(authority);
+            let status = coordinator.next_request().unwrap().unwrap();
+            assert_eq!(status.device_id, abort.device_id);
+            assert_eq!(status.request.operation, Operation::JobStatus);
+            coordinator
+                .accept_response(status.device_id, &response(&observed))
+                .unwrap();
+            assert_eq!(
+                coordinator.phase(),
+                if completed + 1 == authorities.len() {
+                    DistributedSchedulePhase::Complete
+                } else {
+                    DistributedSchedulePhase::Irrevocable
+                }
+            );
+        }
+
+        assert_eq!(coordinator.next_request().unwrap(), None);
+        assert!(authorities.iter().all(|authority| {
+            coordinator.participant_phase(authority.device_id)
+                == Some(ParticipantSchedulePhase::Complete)
+        }));
+    }
+
+    #[test]
     fn partial_abort_then_remote_completion_is_an_exact_terminal_split() {
         let (job, ready, preparations, clocks) = fixture();
         let mut coordinator =

@@ -163,6 +163,7 @@ pub struct LiveCachedJob {
     participants: Vec<LiveParticipant>,
     coordinator: Option<DistributedScheduleCoordinator>,
     status_queue: VecDeque<DistributedScheduleRequest>,
+    schedule_reconciliation_sweep_required: bool,
     stop_requested: bool,
     terminal_override: Option<WorkerCachedJobPhaseSnapshot>,
     consecutive_failures: u32,
@@ -222,6 +223,7 @@ impl LiveCachedJob {
             participants,
             coordinator: None,
             status_queue: VecDeque::new(),
+            schedule_reconciliation_sweep_required: false,
             stop_requested: false,
             terminal_override: None,
             consecutive_failures: 0,
@@ -313,6 +315,15 @@ impl LiveCachedJob {
         if self.terminal_override.is_some() {
             return Ok(None);
         }
+        if self.status_queue.is_empty() && self.schedule_reconciliation_sweep_required {
+            let requests = self
+                .coordinator
+                .as_mut()
+                .ok_or(LiveCachedJobError::State)?
+                .begin_status_round()?;
+            self.status_queue = requests.into();
+            self.schedule_reconciliation_sweep_required = false;
+        }
         if let Some(request) = self.status_queue.pop_front() {
             return self.schedule_operation(request).map(Some);
         }
@@ -375,19 +386,24 @@ impl LiveCachedJob {
         Ok(self.phase())
     }
 
-    /// Marks one ambiguous operation lost so its exact state is reconciled before mutation.
+    /// Marks one ambiguous operation lost and gates later mutation on a clean
+    /// all-participant schedule-status sweep.
     ///
     /// # Errors
     ///
     /// Returns an error if the connection does not belong to this job or the
-    /// scheduling machine rejects reconciliation in its current phase.
+    /// scheduling machine rejects reconciliation in its current phase. A
+    /// failure inside that sweep requires another complete sweep, so no peer's
+    /// stale pre-outage state can authorize a later mutation.
     pub fn abandon_pending(&mut self, connection_id: u64) -> Result<bool, LiveCachedJobError> {
         let device_id = self
             .binding(connection_id)
             .ok_or(LiveCachedJobError::Participant)?
             .device_id;
         if let Some(coordinator) = self.coordinator.as_mut() {
-            return coordinator.abandon_pending(device_id).map_err(Into::into);
+            let abandoned = coordinator.abandon_pending(device_id)?;
+            self.schedule_reconciliation_sweep_required |= abandoned;
+            return Ok(abandoned);
         }
         let participant = self
             .participants

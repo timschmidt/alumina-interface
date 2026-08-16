@@ -54,6 +54,7 @@
         expectation === "cached-job-confirmed-abort-request-recovery" ||
         expectation === "cached-job-abort-guard-outage" ||
         expectation === "cached-job-abort-split-outage" ||
+        expectation === "cached-job-abort-status-outage" ||
         expectation === "cached-job-abort-duplicate" ||
         expectation === "cached-job-installing-stop" ||
         expectation === "cached-job-reattach";
@@ -61,6 +62,8 @@
         expectation === "cached-job-abort-guard-outage";
       const cachedJobAbortSplitOutage =
         expectation === "cached-job-abort-split-outage";
+      const cachedJobAbortStatusOutage =
+        expectation === "cached-job-abort-status-outage";
       const cachedJobAbortDuplicate =
         expectation === "cached-job-abort-duplicate";
       const cachedJobInstallingStop =
@@ -74,6 +77,7 @@
               expectation === "cached-job-confirmed-abort-request-recovery" ||
               cachedJobAbortGuardOutage ||
               cachedJobAbortSplitOutage ||
+              cachedJobAbortStatusOutage ||
               cachedJobAbortDuplicate
             ? "confirmed"
             : undefined;
@@ -180,7 +184,9 @@
           if (
             failureState !== priorCachedJobFailureState &&
             cachedJobFailureObservations.length <
-              (cachedJobAbortGuardOutage || cachedJobAbortSplitOutage
+              (cachedJobAbortGuardOutage ||
+                cachedJobAbortSplitOutage ||
+                cachedJobAbortStatusOutage
                 ? 64
                 : 16)
           ) {
@@ -454,7 +460,8 @@
             snapshot.phase === "aborted"
           ) {
             const retained = expectation === "cached-job-reattach";
-            const stopMissed = cachedJobAbortGuardOutage;
+            const stopMissed =
+              cachedJobAbortGuardOutage || cachedJobAbortStatusOutage;
             const stopSplit = cachedJobAbortSplitOutage;
             const stopCleanup =
               cachedJobInstallingStop && cachedJobRequestIndex === 0;
@@ -577,7 +584,7 @@
                           participant.schedule_phase === "aborted",
                       ).length === index,
                   ))) &&
-              (!stopMissed ||
+              (!cachedJobAbortGuardOutage ||
                 (cachedJobFailureObservations.length >= 2 &&
                   cachedJobRecovered &&
                   cachedJobFailureObservations.some(
@@ -608,6 +615,41 @@
                         (participant) =>
                           participant.schedule_phase !== "aborted",
                       ),
+                  ) &&
+                  cachedJobTransitions.some(
+                    (transition) => transition.phase === "irrevocable",
+                  ))) &&
+              (!cachedJobAbortStatusOutage ||
+                (cachedJobFailureObservations.length === 48 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.every(
+                    (observation, index) => {
+                      const finalDroppedStatus = index === 47;
+                      return (
+                        observation.phase ===
+                          (finalDroppedStatus ? "irrevocable" : "aborting") &&
+                        observation.consecutive_failures ===
+                          (finalDroppedStatus ? 1 : index + 1) &&
+                        observation.last_error?.includes("fetch failed") &&
+                        observation.participants.length === 2 &&
+                        observation.participants.every(
+                          (participant) =>
+                            participant.cache_artifact === "complete" &&
+                            participant.cache_phase === "complete" &&
+                            participant.accepted_bytes ===
+                              participant.total_bytes &&
+                            participant.local_start_cycle !== null,
+                        ) &&
+                        observation.participants.filter(
+                          (participant) =>
+                            participant.schedule_phase === "confirmed",
+                        ).length === (finalDroppedStatus ? 1 : 2) &&
+                        observation.participants.filter(
+                          (participant) =>
+                            participant.schedule_phase === "complete",
+                        ).length === (finalDroppedStatus ? 1 : 0)
+                      );
+                    },
                   ) &&
                   cachedJobTransitions.some(
                     (transition) => transition.phase === "irrevocable",
