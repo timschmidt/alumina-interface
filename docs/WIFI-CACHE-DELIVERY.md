@@ -214,9 +214,24 @@ all-participant `aborted`, and zero terminal failure. Fresh actors then passed
 ordinary `complete` in 431 snapshots. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
 
+The `abort-status-outage` qualification now covers a bounded complete outage
+of the canonical job-schedule operation class after both participants confirm.
+Each simulator actor discards exactly 24 schedule requests before
+authentication or application while clock and diagnostic traffic remains
+available. Every ambiguous coordinator exchange requires a clean
+all-participant `JobStatus` sweep before any later mutation; a failure within
+that sweep requires another complete sweep. The production run retained both
+actors as `confirmed` through failures 1–47, observed one exact local
+`complete` fact before the final peer-status drop, then terminated as
+`completed_after_stop_request` only after both actors were exactly complete.
+It passed in 438 snapshots; fresh actors passed ordinary `complete` in 434
+snapshots. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
-durable browser job persistence, full control/status outage, reordered traffic,
-duplication outside that exact one-shot replay, faulted or other terminal
-mixtures, live TinyBee/T-Deck Pro cached starts, electrical
+durable browser job persistence, indefinite schedule or total endpoint outage,
+authentication/bootstrap loss, reordered traffic, duplication outside that
+exact one-shot replay, faulted or other terminal mixtures, live TinyBee/T-Deck
+Pro cached starts, electrical
 simultaneity measurement, and every physical motion/safety qualification claim.
