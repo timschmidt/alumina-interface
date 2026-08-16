@@ -17,12 +17,13 @@ if (
     "abort-split-outage",
     "abort-status-outage",
     "abort-duplicate",
+    "abort-stale-response",
     "installing-stop",
     "reattach",
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, installing-stop, or reattach",
+    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, installing-stop, or reattach",
   );
 }
 const repeat = mode === "repeat";
@@ -36,6 +37,7 @@ const abortGuardOutage = mode === "abort-guard-outage";
 const abortSplitOutage = mode === "abort-split-outage";
 const abortStatusOutage = mode === "abort-status-outage";
 const abortDuplicate = mode === "abort-duplicate";
+const abortStaleResponse = mode === "abort-stale-response";
 const installingStop = mode === "installing-stop";
 const multipleAttempts = repeat || installingStop;
 const reattach = mode === "reattach";
@@ -104,11 +106,13 @@ const expectation = repeat
                   ? "cached-job-abort-status-outage"
                   : abortDuplicate
                     ? "cached-job-abort-duplicate"
-                    : installingStop
-                      ? "cached-job-installing-stop"
-                      : recovery
-                        ? "cached-job-recovery"
-                        : "cached-job";
+                    : abortStaleResponse
+                      ? "cached-job-abort-stale-response"
+                      : installingStop
+                        ? "cached-job-installing-stop"
+                        : recovery
+                          ? "cached-job-recovery"
+                          : "cached-job";
 
 const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) =>
   response.json(),

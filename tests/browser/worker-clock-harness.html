@@ -56,6 +56,7 @@
         expectation === "cached-job-abort-split-outage" ||
         expectation === "cached-job-abort-status-outage" ||
         expectation === "cached-job-abort-duplicate" ||
+        expectation === "cached-job-abort-stale-response" ||
         expectation === "cached-job-installing-stop" ||
         expectation === "cached-job-reattach";
       const cachedJobAbortGuardOutage =
@@ -66,6 +67,8 @@
         expectation === "cached-job-abort-status-outage";
       const cachedJobAbortDuplicate =
         expectation === "cached-job-abort-duplicate";
+      const cachedJobAbortStaleResponse =
+        expectation === "cached-job-abort-stale-response";
       const cachedJobInstallingStop =
         expectation === "cached-job-installing-stop";
       const cachedJobStopPhase =
@@ -78,7 +81,8 @@
               cachedJobAbortGuardOutage ||
               cachedJobAbortSplitOutage ||
               cachedJobAbortStatusOutage ||
-              cachedJobAbortDuplicate
+              cachedJobAbortDuplicate ||
+              cachedJobAbortStaleResponse
             ? "confirmed"
             : undefined;
 
@@ -709,6 +713,16 @@
                 cachedJobFailureObservations.every(
                   (observation) =>
                     observation.last_error?.includes("HTTP status 401"),
+                )) &&
+              (!cachedJobAbortStaleResponse ||
+                cachedJobFailureObservations.every(
+                  (observation) =>
+                    observation.last_error?.includes(
+                      "HTTP response counter",
+                    ) &&
+                    observation.last_error?.includes(
+                      "does not match pending counter",
+                    ),
                 )) &&
               (expectation !== "cached-job-reattach" ||
                 (cachedJobFailureObservations.length === 0 &&

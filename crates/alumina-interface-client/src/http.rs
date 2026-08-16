@@ -944,6 +944,73 @@ mod tests {
     }
 
     #[test]
+    fn stale_authenticated_response_cannot_consume_later_pending_request() {
+        let boot = nonce(0x51);
+        let mut session = AuthenticatedHttpSession::new(boot, Digest([0x72; 32]), origin());
+        let first = session
+            .begin_request(Operation::JobConfirm, b"confirm", SECRET)
+            .unwrap();
+        let mut transport = SimulatorTransport::new(|operation, body: &[u8]| {
+            assert_eq!(operation, Operation::JobConfirm);
+            assert_eq!(body, b"confirm");
+            SimulatedResponse {
+                status: StatusCode::Ok,
+                body: b"confirmed".to_vec(),
+            }
+        });
+        let first_native = transport.exchange(first.body()).unwrap();
+        let first_counter_header = first.counter_header_value();
+        let first_tag = response_tag(
+            boot,
+            first.counter(),
+            200,
+            AuthenticatedMedia::NativeFrame,
+            &first_native,
+        );
+        session
+            .accept_response(
+                AuthenticatedProtocolResponse {
+                    http_status: 200,
+                    media: AuthenticatedMedia::NativeFrame,
+                    counter_header: &first_counter_header,
+                    authorization_header: &first_tag,
+                    body: &first_native,
+                },
+                SECRET,
+            )
+            .unwrap();
+
+        let second = session
+            .begin_request(Operation::JobAbort, b"abort", SECRET)
+            .unwrap();
+        assert_eq!(first.counter(), 1);
+        assert_eq!(second.counter(), 2);
+        assert_eq!(
+            session.accept_response(
+                AuthenticatedProtocolResponse {
+                    http_status: 200,
+                    media: AuthenticatedMedia::NativeFrame,
+                    counter_header: &first_counter_header,
+                    authorization_header: &first_tag,
+                    body: &first_native,
+                },
+                SECRET,
+            ),
+            Err(HttpSessionError::CounterMismatch {
+                received: first.counter(),
+                expected: second.counter(),
+            })
+        );
+        assert!(session.has_pending_request());
+        assert!(session.abandon_pending());
+
+        let third = session
+            .begin_request(Operation::JobStatus, b"status", SECRET)
+            .unwrap();
+        assert_eq!(third.counter(), second.counter() + 1);
+    }
+
+    #[test]
     fn explicit_counter_seed_advances_across_browser_worker_replacement() {
         let boot = nonce(0x71);
         assert!(matches!(
