@@ -422,17 +422,42 @@ epoch `45,288,300,001 ns` and local cycles `125,687,306` and `125,572,665`.
 Fresh actors passed ordinary `complete` in 434 snapshots. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
 
+The `cached-job-abort-stale-response` expectation covers one exact signed
+response substitution without pretending production job I/O has concurrent
+requests. Each simulator returns and retains its valid `JobConfirm` HTTP
+response, then applies the next canonical schedule request and returns the old
+response instead. The client compares the old response counter with the exact
+pending counter before proof or native-frame acceptance, leaves pending state
+unchanged on mismatch, and then explicitly abandons the spent request. The job
+owner reopens session authority and requires a clean all-participant status
+sweep before another mutation; failure within that sweep requires another full
+sweep.
+
+The final production-artifact run substituted actor one's retained response
+for an applied `JobAbort`, then substituted actor two's retained response for
+the applied `JobStatus` in the resulting reconciliation round. It required
+exactly two one-failure `aborting` observations with participant facts
+`confirmed/confirmed -> aborted/confirmed`, then reached zero-failure global
+`aborted`. On 2026-08-15 it passed in 393 snapshots at epoch
+`45,554,500,001 ns` and local cycles `108,672,059` and `108,662,753`. Fresh
+actors passed ordinary `complete` in 433 snapshots. The worker owns one global
+cached-job fetch and each session owns one pending request, so arbitrary
+concurrent response reordering remains outside this evidence. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first
 successful response for one named canonical storage or schedule operation only
 after the fixture has applied it, or replay one successful authenticated native
-request and require HTTP 401 before second dispatch. It can arm a bounded
-schedule-operation outage only after a selected successful response is written,
-then discard the exact next count before authentication or application. The
-harness has separate qualified and conservative-rejection expectations so an
-excessive causal interval must remain unusable instead of being mistaken for
-successful recovery.
+request and require HTTP 401 before second dispatch. It can retain one
+successful signed response after a selected operation and substitute it for the
+next successful schedule response, or arm a bounded schedule-operation outage
+only after a selected successful response is written and then discard the exact
+next count before authentication or application. The harness has separate
+qualified and conservative-rejection expectations so an excessive causal
+interval must remain unusable instead of being mistaken for successful
+recovery.
 
 At `alumina-interface` commit `0e0a53e` and sibling `aluminafw` simulator commit
 `ba888db`, Chromium runs passed nominal, selected-response-loss, finite-outage,

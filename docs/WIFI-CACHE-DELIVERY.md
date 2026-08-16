@@ -228,10 +228,27 @@ It passed in 438 snapshots; fresh actors passed ordinary `complete` in 434
 snapshots. See sibling
 `aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
 
+The `abort-stale-response` qualification covers a previously valid signed
+response substituted for a later schedule response. Each actor first returns
+and retains its successful `JobConfirm` envelope. Actor one then applies
+`JobAbort` but returns the retained confirmation response; actor two later
+applies the `JobStatus` from the required all-participant reconciliation round
+and does the same. Exact pending-counter comparison rejects both old responses
+before native acceptance. The worker spends each ambiguous request, reopens
+the boot-correlated session, preserves only prior authoritative facts, and
+requires another full status sweep before continuing. The final production run
+passed in 393 snapshots with two one-failure counter mismatches,
+`confirmed/confirmed -> aborted/confirmed` retained facts, exact global
+`aborted`, and zero terminal failure. Fresh actors passed ordinary `complete`
+in 433 snapshots. Production job fetches are serialized globally with only one
+pending request per session, so this is a bounded substitution test rather than
+an arbitrary concurrent-reordering claim. See sibling
+`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
 durable browser job persistence, indefinite schedule or total endpoint outage,
-authentication/bootstrap loss, reordered traffic, duplication outside that
-exact one-shot replay, faulted or other terminal mixtures, live TinyBee/T-Deck
-Pro cached starts, electrical
+authentication/bootstrap loss, arbitrary concurrent reordering or substitution
+beyond the exact one-shot cases, broader duplication, faulted or other terminal
+mixtures, live TinyBee/T-Deck Pro cached starts, electrical
 simultaneity measurement, and every physical motion/safety qualification claim.
