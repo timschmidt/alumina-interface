@@ -122,12 +122,12 @@ An optimized Chromium run against two independent loopback simulator processes
 uploaded 127,264 bytes per MCU, prepared, installed, confirmed, primed, observed
 both simulated latches, and reached completion with zero failures. The complete
 record is in sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
 
 A second qualification ran two distinct attempts without rebooting or
 reconnecting those participant sessions. The second attempt reused all cached
 bytes and completed the full lifecycle at a new synchronized epoch. See sibling
-`aluminafw/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
+`alumina-firmware/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
 
 An operation-specific fault qualification then discarded one successful
 applied chunk response and one successful applied schedule-commit response on
@@ -135,14 +135,14 @@ different participants. The live worker exposed both transient failures,
 reconciled them through storage inspection and schedule status, and reached a
 valid two-participant terminal snapshot; a fresh no-fault regression also
 passed. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
 
 Both participants were then qualified with their first successful applied
 `JobConfirm` response discarded. A dedicated expectation required exactly two
 confirmation failures and local confirmed counts `0 -> 1` before recovery and
 terminal completion. Fresh-actor no-fault behavior also passed. That run exposed
 the then-open fresh-owner terminal identity seam; see sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
 A later reattachment qualification, introduced with schema V7 and retained in
 schema V9, completed one ordinary attempt, replaced the browser worker without
@@ -153,7 +153,7 @@ snapshots with the original local cycles, no UI epoch, no failures, and no new
 start command. Native tests additionally prove only status operations are
 emitted and a complete/empty participant split faults before mutation. See
 sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
 
 The pre-guard stop path was then qualified from both globally installed and
 globally confirmed states, with both successful applied `JobAbort` responses
@@ -161,7 +161,7 @@ discarded in each run. Exact one-failure observations retained locally aborted
 counts `0 -> 1`; read-only status preceded the next participant mutation, and
 the worker terminated with both actors `aborted` and no error. A fresh-actor
 ordinary completion regression also passed. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
 
 Initial one-shot abort-request non-delivery is now independently qualified from
 globally confirmed state. Each simulator discards the first request before
@@ -169,7 +169,7 @@ authentication or application, so status must retain `confirmed`; only the
 subsequent exact retry may produce `aborted`. The two-participant browser run
 passed with the required `0 -> 1` locally aborted failure observations, and a
 fresh no-fault completion passed afterward. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
 
 Bounded repeated abort-mutation loss is now separately qualified through the
 point of no return while authenticated schedule status remains available. The
@@ -180,7 +180,7 @@ schema V9, only after both schedules are exactly complete. The loopback run
 passed in 432 snapshots while the actors discarded 18 and one unapplied abort
 requests; fresh actors then passed ordinary `complete` in 412 snapshots. See
 sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-GUARD-OUTAGE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-GUARD-OUTAGE.md`.
 
 The asymmetric mutation-outage case is now terminal rather than an unbounded
 `irrevocable` poll. One actor applies abort, the second loses 18 abort mutations
@@ -188,7 +188,7 @@ through its guard and completes, and schema V9 emits
 `split_after_stop_request` only with the exact one-`aborted`/one-`complete`
 participant set. That Chromium run passed in 434 snapshots; fresh actors then
 passed ordinary `complete` in 431 snapshots. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-SPLIT-OUTAGE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-SPLIT-OUTAGE.md`.
 
 The `installing-stop` qualification now covers the exact installed/ready split.
 The worker stops only after one participant has accepted `JobCommit` while the
@@ -199,7 +199,7 @@ recognizes each distinctly identified prior terminal as replaceable while
 still rejecting active foreign work and same-ID token substitution. A second
 job then completes on the same sessions and MCU boots. The final production
 run passed in 386 and 60 snapshots, respectively. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
 
 The `abort-duplicate` qualification now covers one exact post-application
 duplicate. Each actor applies its first authenticated `JobAbort`, receives the
@@ -212,7 +212,7 @@ production run passed in 391 snapshots with two one-failure 401
 observations, locally aborted counts `0 -> 1`, exact
 all-participant `aborted`, and zero terminal failure. Fresh actors then passed
 ordinary `complete` in 431 snapshots. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
 
 The `abort-status-outage` qualification now covers a bounded complete outage
 of the canonical job-schedule operation class after both participants confirm.
@@ -226,7 +226,7 @@ actors as `confirmed` through failures 1–47, observed one exact local
 `completed_after_stop_request` only after both actors were exactly complete.
 It passed in 438 snapshots; fresh actors passed ordinary `complete` in 434
 snapshots. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
 
 The `abort-stale-response` qualification covers a previously valid signed
 response substituted for a later schedule response. Each actor first returns
@@ -243,7 +243,7 @@ passed in 393 snapshots with two one-failure counter mismatches,
 in 433 snapshots. Production job fetches are serialized globally with only one
 pending request per session, so this is a bounded substitution test rather than
 an arbitrary concurrent-reordering claim. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
 
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and

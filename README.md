@@ -399,7 +399,7 @@ trunk serve --release --offline
 ```
 
 The production bundle is written to ignored `dist/` and includes compressed
-assets suitable for later embedding in `aluminafw`.
+assets suitable for later embedding in `alumina-firmware`.
 
 ## Scope after this checkpoint
 

@@ -61,18 +61,18 @@ for package in \
   alumina-storage; do
   cargo tree --target wasm32-unknown-unknown --offline -i "$package" \
     --prefix none >"$audit_path_inverse"
-  if ! rg -q "^${package} v[^ ]+ \(.*/aluminafw/crates/${package}\)$" \
+  if ! rg -q "^${package} v[^ ]+ \(.*/alumina-firmware/crates/${package}\)$" \
     "$audit_path_inverse"; then
-    echo "$package must resolve from the sibling aluminafw checkout" >&2
+    echo "$package must resolve from the sibling alumina-firmware checkout" >&2
     exit 1
   fi
 done
 
 cargo tree --target wasm32-unknown-unknown --offline -i alumina-shift-register \
   --prefix none >"$audit_path_inverse"
-if ! rg -q '^alumina-shift-register v[^ ]+ \(.*/aluminafw/drivers/alumina-shift-register\)$' \
+if ! rg -q '^alumina-shift-register v[^ ]+ \(.*/alumina-firmware/drivers/alumina-shift-register\)$' \
   "$audit_path_inverse"; then
-  echo "alumina-shift-register must resolve from the sibling aluminafw checkout" >&2
+  echo "alumina-shift-register must resolve from the sibling alumina-firmware checkout" >&2
   exit 1
 fi
 

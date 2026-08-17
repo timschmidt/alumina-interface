@@ -259,7 +259,7 @@ drop, and snapshot-cycle facts. On 2026-08-15, a fresh Chromium 147 run reached
 events 1 and 2 with zero drops/failures. A second browser worker against the
 same unchanged simulator boot first received the retained exact event 2 and
 then advanced to event 3. Complete hashes, commands, and closed claims are in
-the sibling `aluminafw/docs/evidence/M10-AUTHENTICATED-LIVE-TELEMETRY.md`.
+the sibling `alumina-firmware/docs/evidence/M10-AUTHENTICATED-LIVE-TELEMETRY.md`.
 
 The `cached-job` expectation configures two standalone simulator processes with
 distinct stable device IDs. It waits for both exact capabilities, active
@@ -270,7 +270,7 @@ On 2026-08-15 the optimized bundle published 127,264 bytes per MCU and reached
 global `complete` after 432 validated job snapshots with zero failures. The
 shared UI epoch mapped to local cycles `80,884,539` and `79,719,862`. Complete
 authority facts and closed physical claims are recorded in sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
 
 The `cached-job-repeat` expectation accepts exactly two strict requests. On
 2026-08-15 it ran job IDs `2047934465` and `2047934466` consecutively on the same
@@ -281,7 +281,7 @@ selected a fresh shared epoch, traversed every lifecycle phase, and completed in
 60 snapshots without a reload, reconnect, simulator restart, or failure. A
 following ordinary single-job run against the same simulator actors also passed
 in 60 snapshots. The exact cycles, commands, and closed claims are in sibling
-`aluminafw/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
+`alumina-firmware/docs/evidence/M10-REPEATED-CACHED-JOBS.md`.
 
 The `cached-job-recovery` expectation accepts one strict request and requires at
 least two independently observed transient failure states, later zero-failure
@@ -292,7 +292,7 @@ worker recovered through storage inspection and schedule status, respectively,
 then completed both participants after 434 snapshots with zero terminal
 failures. A fresh ordinary no-fault run passed afterward in 432 snapshots. The
 exact epochs, cycles, selector contract, and closed claims are in sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-RECOVERY.md`.
 
 The stricter `cached-job-confirm-recovery` expectation requires exactly two
 `confirming`-phase transport failures after both caches and commits are
@@ -304,7 +304,7 @@ in 432 snapshots at a shared future epoch, and then passed a fresh-actor
 ordinary no-fault regression. A separate same-prepare-ID attempt from a fresh
 worker exposed the then-missing terminal identity seam. Exact results and the
 original closed boundary are in sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
 The `cached-job-reattach` expectation replaces that unbounded boundary with a
 strict terminal result introduced in schema V7 and retained in schema V9.
@@ -318,7 +318,7 @@ and no worker start command. On 2026-08-15 it passed in seven snapshots and
 retained cycles `165,504,989` and `165,424,194` from the preceding 432-snapshot
 ordinary run. Native request-level tests prove exact terminal discovery emits
 only `JobStatus` and mixed complete/empty actors fault before mutation. See
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-REATTACHMENT.md`.
 
 The `cached-job-abort-recovery` expectation waits for both future commits to be
 globally `installed`, then sends one strict stop command before confirmation.
@@ -328,7 +328,7 @@ aborted counts `0 -> 1`, status reconciliation before each next mutation, and a
 zero-failure all-participant `aborted` terminal. On 2026-08-15 it passed in 389
 snapshots with local cycles `102,654,525` and `102,579,983`; a fresh-actor
 ordinary completion regression passed in 419 snapshots. See
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-RECOVERY.md`.
 
 The distinct `cached-job-confirmed-abort-recovery` expectation waits until both
 participants have granted future start authority and reported `confirmed`
@@ -346,7 +346,7 @@ participant. The browser run passed in 393 snapshots at local cycles
 `128,497,258` and `122,677,712`, with exactly two one-failure observations and
 an all-`aborted`, zero-failure terminal. A fresh-actor ordinary completion then
 passed in 432 snapshots. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-REQUEST-RECOVERY.md`.
 
 The `cached-job-abort-guard-outage` expectation extends that boundary with
 bounded repeated loss of the abort mutation while authenticated `JobStatus`
@@ -361,7 +361,7 @@ the missed-stop result. Fresh actors
 then passed ordinary `complete` in 412 snapshots. This is mutation-only
 localhost evidence, not a full network outage or a safety-chain claim. See
 sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-GUARD-OUTAGE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-GUARD-OUTAGE.md`.
 
 The `cached-job-abort-split-outage` expectation makes the asymmetric terminal
 explicit. Actor one applies abort; actor two repeatedly loses that mutation
@@ -372,7 +372,7 @@ retained local cycles/epoch, an `irrevocable` transition, repeated one-failure
 fetch observations, and zero terminal failure. The Chromium run passed in 434
 snapshots after actor two discarded 18 unapplied abort requests. Fresh actors
 then passed ordinary `complete` in 431 snapshots. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-SPLIT-OUTAGE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-SPLIT-OUTAGE.md`.
 
 The `cached-job-installing-stop` expectation exercises a bound job before all
 local commits exist. It requests stop only with one exact `installed` and one
@@ -384,7 +384,7 @@ and stages a distinct prepare ID; initial read-only status treats only a
 distinct terminal predecessor as replaceable, and a second attempt completes
 on the same connections and boots in 60 snapshots. Active foreign work and a
 same-ID descriptor-token mismatch remain hard errors. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-INSTALLING-STOP.md`.
 
 The `cached-job-abort-duplicate` expectation exercises the authenticated
 replay boundary after mutation application. Each simulator actor applies its
@@ -399,7 +399,7 @@ terminate with both actors exactly `aborted`, zero failures, and no error. On
 cycles `148,249,511` and
 `148,199,565`. Fresh actors then passed ordinary `complete` in 431 snapshots.
 See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-DUPLICATE.md`.
 
 The `cached-job-abort-status-outage` expectation covers the bounded full
 schedule-operation outage without pretending the whole device disappeared.
@@ -420,7 +420,7 @@ the final dropped peer status is retained as one-failure `irrevocable` with a
 failure. On 2026-08-15 the final production artifact passed in 438 snapshots at
 epoch `45,288,300,001 ns` and local cycles `125,687,306` and `125,572,665`.
 Fresh actors passed ordinary `complete` in 434 snapshots. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STATUS-OUTAGE.md`.
 
 The `cached-job-abort-stale-response` expectation covers one exact signed
 response substitution without pretending production job I/O has concurrent
@@ -443,7 +443,7 @@ exactly two one-failure `aborting` observations with participant facts
 actors passed ordinary `complete` in 433 snapshots. The worker owns one global
 cached-job fetch and each session owns one pending request, so arbitrary
 concurrent response reordering remains outside this evidence. See sibling
-`aluminafw/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
 
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
@@ -459,13 +459,13 @@ qualified and conservative-rejection expectations so an excessive causal
 interval must remain unusable instead of being mistaken for successful
 recovery.
 
-At `alumina-interface` commit `0e0a53e` and sibling `aluminafw` simulator commit
+At `alumina-interface` commit `0e0a53e` and sibling `alumina-firmware` simulator commit
 `ba888db`, Chromium runs passed nominal, selected-response-loss, finite-outage,
 reboot, and bounded-delay qualification cases. A deliberately excessive-delay
 case passed only by retaining zero accepted samples and no estimate after three
 round-trip rejections. The complete commands, observations, artifact hashes,
 and deliberately closed claims are recorded in the sibling
-`aluminafw/docs/evidence/M7-BROWSER-AUTH-HTTP-SIM.md` evidence file.
+`alumina-firmware/docs/evidence/M7-BROWSER-AUTH-HTTP-SIM.md` evidence file.
 
 On 2026-08-14 the finalized release bundle and standalone simulator passed the
 `expect=waveform-repeat` case in Chromium 147 over loopback only. The worker
@@ -475,7 +475,7 @@ captures with 2,000- then 3,000-cycle requested durations, 16 simulated
 transitions each, exact stop/release/reconfigure progress, and zero capture
 failures. Complete verification, artifact hashes, and closed physical claims
 are recorded in sibling
-`aluminafw/docs/evidence/M10-CAPABILITY-BOUND-WAVEFORM-WORKER-UI.md`.
+`alumina-firmware/docs/evidence/M10-CAPABILITY-BOUND-WAVEFORM-WORKER-UI.md`.
 
 ## Runtime-health client seam
 
@@ -522,7 +522,7 @@ validates the document again, and the UI validates and decodes it once more into
 `BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
 the admitted explorer. The localhost capability-loss run and complete evidence
 are recorded in sibling
-`aluminafw/docs/evidence/M10-AUTHENTICATED-CAPABILITY-WORKER-UI.md`.
+`alumina-firmware/docs/evidence/M10-AUTHENTICATED-CAPABILITY-WORKER-UI.md`.
 
 ## Capability-bound telemetry seam
 

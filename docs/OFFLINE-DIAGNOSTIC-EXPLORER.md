@@ -29,5 +29,5 @@ placement, or hotspot is drawn until a licensed revision-specific image and
 reviewed polygons exist in the capability package.
 
 Firmware wire details, tests, and open physical/network gates are recorded in
-[`../aluminafw/docs/DIAGNOSTICS.md`](../../aluminafw/docs/DIAGNOSTICS.md) and the
-[`M9 offline diagnostic evidence`](../../aluminafw/docs/evidence/M9-OFFLINE-DIAGNOSTIC-EXPLORER.md).
+[`../alumina-firmware/docs/DIAGNOSTICS.md`](../../alumina-firmware/docs/DIAGNOSTICS.md) and the
+[`M9 offline diagnostic evidence`](../../alumina-firmware/docs/evidence/M9-OFFLINE-DIAGNOSTIC-EXPLORER.md).

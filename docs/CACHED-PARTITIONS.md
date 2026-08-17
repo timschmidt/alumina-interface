@@ -1,7 +1,7 @@
 # Canonical cached-partition boundary
 
 The browser compiler packages canonical integer motion using the real sibling
-`aluminafw` schemas. It does not own a second block, storage, manifest, or
+`alumina-firmware` schemas. It does not own a second block, storage, manifest, or
 `JobPrepare` representation.
 
 The sibling machine boundary is `ALMBLK03`/schema V3 with separately bound

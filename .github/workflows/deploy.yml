@@ -27,8 +27,8 @@ jobs:
       - name: Check out Alumina firmware protocol sibling
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/aluminafw
-          path: aluminafw
+          repository: ${{ github.repository_owner }}/alumina-firmware
+          path: alumina-firmware
 
       - name: Check out CSGRS sibling
         uses: actions/checkout@v4

@@ -102,7 +102,7 @@ interface-core role. Those crates bring the mutually compatible local
 Hyperlattice, Hypermesh, Hyperphysics, and Hypertri packages transitively. The
 exact core also uses the sibling Alumina protocol, machine IR, job, storage,
 clock, and runtime crates. The source audit now requires all of those packages
-to resolve from the same `aluminafw` checkout, so block, cache, and `JobPrepare`
+to resolve from the same `alumina-firmware` checkout, so block, cache, and `JobPrepare`
 bytes cannot silently resolve to a registry or UI duplicate.
 
 Hypercurve owns the exact line/arc/Bezier source path and certified chord
