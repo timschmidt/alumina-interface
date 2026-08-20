@@ -7,6 +7,8 @@ const mode = process.argv[3] ?? "single";
 if (
   ![
     "single",
+    "autonomous",
+    "autonomous-outage",
     "repeat",
     "recovery",
     "confirm-recovery",
@@ -27,30 +29,13 @@ if (
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, confirmed-safety-propagation-request-recovery, installing-stop, or reattach",
+    "cached-job mode must be single, autonomous, autonomous-outage, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, confirmed-safety-propagation-request-recovery, installing-stop, or reattach",
   );
 }
 const repeat = mode === "repeat";
-const recovery = mode === "recovery";
-const confirmRecovery = mode === "confirm-recovery";
-const abortRecovery = mode === "abort-recovery";
-const confirmedAbortRecovery = mode === "confirmed-abort-recovery";
-const confirmedAbortRequestRecovery =
-  mode === "confirmed-abort-request-recovery";
-const abortGuardOutage = mode === "abort-guard-outage";
-const abortSplitOutage = mode === "abort-split-outage";
-const abortStatusOutage = mode === "abort-status-outage";
-const abortDuplicate = mode === "abort-duplicate";
-const abortStaleResponse = mode === "abort-stale-response";
-const confirmedSafetyFault = mode === "confirmed-safety-fault";
-const confirmedSafetyPropagation = mode === "confirmed-safety-propagation";
-const confirmedSafetyPropagationRecovery =
-  mode === "confirmed-safety-propagation-recovery";
-const confirmedSafetyPropagationRequestRecovery =
-  mode === "confirmed-safety-propagation-request-recovery";
+const autonomous = mode === "autonomous" || mode === "autonomous-outage";
 const installingStop = mode === "installing-stop";
 const multipleAttempts = repeat || installingStop;
-const reattach = mode === "reattach";
 const repository = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
@@ -83,6 +68,8 @@ const cachedJobRequests = jobIds.map((jobId) => {
       deviceIds[0],
       "--device-id",
       deviceIds[1],
+      "--network-policy",
+      autonomous ? "cached-autonomous" : "network-attended",
     ],
     {
       cwd: repository,
@@ -96,41 +83,7 @@ const cachedJobRequests = jobIds.map((jobId) => {
 const cachedJobRequest = multipleAttempts
   ? cachedJobRequests
   : cachedJobRequests[0];
-const expectation = repeat
-  ? "cached-job-repeat"
-  : reattach
-    ? "cached-job-reattach"
-    : confirmRecovery
-      ? "cached-job-confirm-recovery"
-      : abortRecovery
-        ? "cached-job-abort-recovery"
-        : confirmedAbortRecovery
-          ? "cached-job-confirmed-abort-recovery"
-          : confirmedAbortRequestRecovery
-            ? "cached-job-confirmed-abort-request-recovery"
-            : abortGuardOutage
-              ? "cached-job-abort-guard-outage"
-              : abortSplitOutage
-                ? "cached-job-abort-split-outage"
-                : abortStatusOutage
-                  ? "cached-job-abort-status-outage"
-                  : abortDuplicate
-                    ? "cached-job-abort-duplicate"
-                    : abortStaleResponse
-                      ? "cached-job-abort-stale-response"
-                      : confirmedSafetyFault
-                        ? "cached-job-confirmed-safety-fault"
-                        : confirmedSafetyPropagation
-                          ? "cached-job-confirmed-safety-propagation"
-                          : confirmedSafetyPropagationRecovery
-                            ? "cached-job-confirmed-safety-propagation-recovery"
-                            : confirmedSafetyPropagationRequestRecovery
-                              ? "cached-job-confirmed-safety-propagation-request-recovery"
-                              : installingStop
-                                ? "cached-job-installing-stop"
-                                : recovery
-                                  ? "cached-job-recovery"
-                                  : "cached-job";
+const expectation = mode === "single" ? "cached-job" : `cached-job-${mode}`;
 
 const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) =>
   response.json(),
@@ -218,6 +171,7 @@ while (Date.now() < deadline) {
         lastInspection.request_index,
         latest?.job_id,
         latest?.phase,
+        latest?.network_policy,
         latest?.consecutive_failures,
         latest?.participants.map((participant) => [
           participant.cache_artifact,
@@ -232,6 +186,7 @@ while (Date.now() < deadline) {
             request_index: lastInspection.request_index,
             job_id: latest.job_id,
             phase: latest.phase,
+            network_policy: latest.network_policy,
             consecutive_failures: latest.consecutive_failures,
             last_error: latest.last_error,
             participants: latest.participants.map((participant) => ({
@@ -271,13 +226,19 @@ if (result.status === "passed") {
         phaseSequence.push(transition.phase);
       }
     }
+    const failureObservations = run.cached_job_failure_observations ?? [];
     return {
       job_id: run.job_id ?? run.latest_cached_job_snapshot?.job_id,
       cached_job_snapshot_count: run.cached_job_snapshot_count,
       phase_sequence: phaseSequence,
       latest_cached_job_snapshot: run.latest_cached_job_snapshot,
-      cached_job_failure_observations:
-        run.cached_job_failure_observations ?? [],
+      cached_job_failure_observation_count: failureObservations.length,
+      cached_job_failure_phases: failureObservations.map(
+        (observation) => observation.phase,
+      ),
+      cached_job_failure_counts: failureObservations.map(
+        (observation) => observation.consecutive_failures,
+      ),
       cached_job_recovered: run.cached_job_recovered ?? false,
     };
   };

@@ -41,6 +41,10 @@ bytes it reconstructs:
 The default fixture declares its facts as declared—not measured—and includes
 the cached-autonomous policy bit. The board package remains non-armable because
 its physical visual, polarity, and timing HIL gates are still open.
+The live cached-job panel defaults to `network_attended` and exposes an explicit
+`cached_autonomous` selection before staging. Selection recompiles the shared
+manifest policy through this same exact CAM path and fails before artifact
+handoff if the exact configuration lacks that bit.
 
 Travel is checked twice: the complete native source envelope must fit before
 scheduling, and every rounded integer command must still fit after division by

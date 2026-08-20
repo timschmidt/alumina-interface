@@ -46,6 +46,8 @@
         new URLSearchParams(location.search).get("expect") ?? "qualified";
       const cachedJobExpectation =
         expectation === "cached-job" ||
+        expectation === "cached-job-autonomous" ||
+        expectation === "cached-job-autonomous-outage" ||
         expectation === "cached-job-repeat" ||
         expectation === "cached-job-recovery" ||
         expectation === "cached-job-confirm-recovery" ||
@@ -65,6 +67,11 @@
           "cached-job-confirmed-safety-propagation-request-recovery" ||
         expectation === "cached-job-installing-stop" ||
         expectation === "cached-job-reattach";
+      const cachedJobAutonomous =
+        expectation === "cached-job-autonomous" ||
+        expectation === "cached-job-autonomous-outage";
+      const cachedJobAutonomousOutage =
+        expectation === "cached-job-autonomous-outage";
       const cachedJobAbortGuardOutage =
         expectation === "cached-job-abort-guard-outage";
       const cachedJobAbortSplitOutage =
@@ -136,6 +143,7 @@
         job_id: snapshot.job_id,
         phase: snapshot.phase,
         execution_mode: snapshot.execution_mode,
+        network_policy: snapshot.network_policy,
         target_ui_ns: snapshot.target_ui_ns,
         consecutive_failures: snapshot.consecutive_failures,
         last_error: snapshot.last_error,
@@ -213,7 +221,8 @@
             cachedJobFailureObservations.length <
               (cachedJobAbortGuardOutage ||
                 cachedJobAbortSplitOutage ||
-                cachedJobAbortStatusOutage
+                cachedJobAbortStatusOutage ||
+                cachedJobAutonomousOutage
                 ? 64
                 : 16)
           ) {
@@ -282,7 +291,7 @@
         cachedJobStaged = true;
         worker.postMessage(
           JSON.stringify({
-            schema_version: 9,
+            schema_version: 10,
             command: { kind: "stage_cached_job", request: cachedJobRequest },
           }),
         );
@@ -300,7 +309,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 9,
+            schema_version: 10,
             command: {
               kind: "capture_waveform",
               request: {
@@ -332,7 +341,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 9) {
+        if (envelope.schema_version !== 10) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -372,7 +381,7 @@
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
-                schema_version: 9,
+                schema_version: 10,
                 command: {
                   kind: "configure",
                   request: {
@@ -449,7 +458,7 @@
             cachedJobStarted = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 9,
+                schema_version: 10,
                 command: {
                   kind: "start_cached_job",
                   job_id: snapshot.job_id,
@@ -473,7 +482,7 @@
             cachedJobStopRequested = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 9,
+                schema_version: 10,
                 command: {
                   kind: "stop_cached_job",
                   job_id: snapshot.job_id,
@@ -574,6 +583,10 @@
               snapshot.job_id === cachedJobRequest.job_id &&
               snapshot.phase === expectedTerminalPhase &&
               snapshot.execution_mode === "simulation_only" &&
+              snapshot.network_policy ===
+                (cachedJobAutonomous
+                  ? "cached_autonomous"
+                  : "network_attended") &&
               (retained
                 ? snapshot.target_ui_ns === null
                 : snapshot.target_ui_ns !== null) &&
@@ -585,6 +598,30 @@
               (expectation !== "cached-job-recovery" ||
                 (cachedJobFailureObservations.length >= 2 &&
                   cachedJobRecovered)) &&
+              (!cachedJobAutonomousOutage ||
+                (cachedJobFailureObservations.length === 48 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.every(
+                    (observation) =>
+                      observation.network_policy === "cached_autonomous" &&
+                      (observation.phase === "confirmed" ||
+                        observation.phase === "irrevocable") &&
+                      observation.last_error?.includes("fetch failed") &&
+                      observation.participants.length === 2 &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          participant.local_start_cycle !== null &&
+                          (participant.schedule_phase === "confirmed" ||
+                            participant.schedule_phase === "complete"),
+                      ),
+                  ) &&
+                  cachedJobTransitions.some(
+                    (transition) => transition.phase === "irrevocable",
+                  ))) &&
               (expectation !== "cached-job-confirm-recovery" ||
                 (cachedJobFailureObservations.length === 2 &&
                   cachedJobRecovered &&
@@ -911,7 +948,7 @@
               cachedJobClearing = true;
               worker.postMessage(
                 JSON.stringify({
-                  schema_version: 9,
+                  schema_version: 10,
                   command: {
                     kind: "clear_cached_job",
                     job_id: snapshot.job_id,

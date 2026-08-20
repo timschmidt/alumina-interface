@@ -272,6 +272,28 @@ shared UI epoch mapped to local cycles `80,884,539` and `79,719,862`. Complete
 authority facts and closed physical claims are recorded in sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
 
+The `cached-job-autonomous` expectation selects the policy explicitly in the
+authoritative CAM fixture. Schema V10 retains `cached_autonomous` in every
+replacement snapshot, and staging independently requires configuration flag
+`0x00000002` on every bound MCU before any cache I/O. On 2026-08-20 two fresh
+simulator actors carried exact configuration flags `0x00000003`, published
+127,264 bytes each, and reached global `complete` after 434 validated snapshots
+with zero failures. The shared epoch `43,732,400,002 ns` mapped to local cycles
+`79,558,509` and `79,557,537`. A fresh `network_attended` control also completed
+in 434 snapshots with policy-distinct snapshots and zero failures. Exact
+commands, artifact identity, and closed physical claims are in sibling
+`alumina-firmware/docs/evidence/M10-CACHED-AUTONOMOUS-JOB.md`.
+
+The `cached-job-autonomous-outage` expectation starts from the same exact
+policy and then has both actors discard 24 schedule requests after successful
+confirmation. On 2026-08-20 the production worker retained the job through all
+48 consecutive failed exchanges, recovered to zero failures, crossed
+`irrevocable` when one locally clocked actor completed first, and reached exact
+all-participant `complete` after 436 snapshots. Both complete 127,264-byte
+caches remained unchanged. This is bounded schedule-route fault evidence with
+the browser, actors, and unrelated loopback traffic still live, not physical
+AP/radio-loss or autonomous-output evidence.
+
 The `cached-job-repeat` expectation accepts exactly two strict requests. On
 2026-08-15 it ran job IDs `2047934465` and `2047934466` consecutively on the same
 two simulator boots and worker generations. The first attempt uploaded 127,264
@@ -307,7 +329,8 @@ original closed boundary are in sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
 The `cached-job-reattach` expectation replaces that unbounded boundary with a
-strict terminal result introduced in schema V7 and retained in schema V9.
+strict terminal result introduced in schema V7 and retained in current schema
+V10.
 After an ordinary two-participant completion, it installs the identical
 compiled request into a replacement worker while both
 simulator actors and boots remain unchanged. The fresh owner performs an
@@ -354,10 +377,10 @@ remains available. It accepts stop only after both participants are globally
 confirmed, requires repeated one-failure fetch observations, forbids any local
 `aborted` state, observes the guard transition to `irrevocable`, and accepts
 only the `completed_after_stop_request` terminal introduced in schema V8 and
-retained in schema V9, with both schedules exactly complete. On 2026-08-15 it
-passed in 432 snapshots while the two actors discarded 18 and one unapplied
-abort requests; terminal transport failure recovered to zero without erasing
-the missed-stop result. Fresh actors
+retained in current schema V10, with both schedules exactly complete. On
+2026-08-15 it passed in 432 snapshots while the two actors discarded 18 and one
+unapplied abort requests; terminal transport failure recovered to zero without
+erasing the missed-stop result. Fresh actors
 then passed ordinary `complete` in 412 snapshots. This is mutation-only
 localhost evidence, not a full network outage or a safety-chain claim. See
 sibling
@@ -377,10 +400,10 @@ then passed ordinary `complete` in 431 snapshots. See sibling
 The `cached-job-installing-stop` expectation exercises a bound job before all
 local commits exist. It requests stop only with one exact `installed` and one
 exact `ready` participant. The coordinator issues `JobAbort` to the former and
-`JobCancel` to the latter, and schema V9 accepts global `aborted` only with
-complete caches, an `aborted`/cycle fact, and a `cancelled`/no-cycle fact. The
-first attempt passed in 386 snapshots. The harness then clears that terminal
-and stages a distinct prepare ID; initial read-only status treats only a
+`JobCancel` to the latter, and current schema V10 accepts global `aborted` only
+with complete caches, an `aborted`/cycle fact, and a `cancelled`/no-cycle fact.
+The first attempt passed in 386 snapshots. The harness then clears that
+terminal and stages a distinct prepare ID; initial read-only status treats only a
 distinct terminal predecessor as replaceable, and a second attempt completes
 on the same connections and boots in 60 snapshots. Active foreign work and a
 same-ID descriptor-token mismatch remain hard errors. See sibling
@@ -571,10 +594,10 @@ response-body/status rejection.
 
 The browser adapter uses the same zero-configuration authenticated session as
 clock and health. The worker publishes complete bytes once per generation only
-after validation. JSON transfer is deliberately treated as untrusted: schema V9
-validates the document again, and the UI validates and decodes it once more into
-`BoardExplorerSnapshot`. Stale generations are rejected and disconnect removes
-the admitted explorer. The localhost capability-loss run and complete evidence
+after validation. JSON transfer is deliberately treated as untrusted: current
+schema V10 validates the document again, and the UI validates and decodes it
+once more into `BoardExplorerSnapshot`. Stale generations are rejected and
+disconnect removes the admitted explorer. The localhost capability-loss run and complete evidence
 are recorded in sibling
 `alumina-firmware/docs/evidence/M10-AUTHENTICATED-CAPABILITY-WORKER-UI.md`.
 
@@ -589,7 +612,7 @@ advancing accepted evidence, making the next poll byte-identical.
 
 Complete newly advanced bytes cross the worker boundary in a credential-free
 `WorkerTelemetryDocument` alongside the exact subscription request. Introduced
-in schema V5 and retained in current schema V9, the validator decodes both. The
+in schema V5 and retained in current schema V10, the validator decodes both. The
 worker selects resources, cadence, and encoded byte ceilings
 from the authenticated `ALMDOV01` catalog rather than the graph palette. The
 rendering supervisor decodes the transfer again, binds every context and

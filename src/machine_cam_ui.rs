@@ -7,7 +7,7 @@
 use alumina_board::BoardPackage;
 use alumina_config::{
     CONFIGURATION_HEADER_BYTES, CONFIGURATION_RECORD_BYTES, ConfigurationDocumentView,
-    ConfigurationIdentity, MAX_CONFIGURATION_RECORDS,
+    ConfigurationFlags, ConfigurationIdentity, MAX_CONFIGURATION_RECORDS,
 };
 use alumina_interface_client::worker::{
     MAXIMUM_CACHED_JOB_PARTICIPANTS, WorkerCachedJobParticipant, WorkerCachedJobRequest,
@@ -171,6 +171,7 @@ impl MachineCamArtifacts {
         source: MachineCamSource,
         shared_participants: &[MachineCamParticipantSpec],
         global_upload_id: UploadId,
+        network_policy: JobNetworkPolicy,
     ) -> Result<Self, String> {
         let configuration_digest = sha256(&configuration_bytes).digest;
         let view = ConfigurationDocumentView::decode::<MAX_CONFIGURATION_RECORDS>(
@@ -180,6 +181,7 @@ impl MachineCamArtifacts {
         )
         .map_err(|error| format!("ALMCFG06 validation rejected: {error:?}"))?;
         let configuration_identity = view.identity();
+        validate_network_policy(configuration_identity, network_policy)?;
         let profile = MachineDynamicsProfile2::from_configuration(view)
             .map_err(|error| format!("machine profile derivation rejected: {error}"))?;
         let resolution_budget = MachineResolutionBudget2::certify(
@@ -228,6 +230,7 @@ impl MachineCamArtifacts {
             &evidence,
             shared_participants,
             global_upload_id,
+            network_policy,
         )?;
         let direct = match compile_direct_machine_cam(&profile, &resolution_budget, &schedule) {
             Ok(artifacts) => DirectMachineCamState::Ready(Box::new(artifacts)),
@@ -301,12 +304,13 @@ fn compile_shared_machine_cam_job(
     evidence: &CanonicalScheduleEvidence3,
     participants: &[MachineCamParticipantSpec],
     global_upload_id: UploadId,
+    network_policy: JobNetworkPolicy,
 ) -> Result<CanonicalSharedScheduledGlobalJob2, String> {
     if participants.is_empty() || participants.len() > MAXIMUM_CACHED_JOB_PARTICIPANTS {
         return Err("shared cached job requires one through eight participants".to_owned());
     }
     let global_template = MachineJobGlobalFacts {
-        network_policy: JobNetworkPolicy::NetworkAttended,
+        network_policy,
         global_timebase_hz: 0,
         duration_ticks: 0,
         source_digest: evidence.source_digest(),
@@ -354,6 +358,23 @@ fn compile_shared_machine_cam_job(
     }
     compile_shared_scheduled_global_job(shared_policy, TimerDilationPolicy::INTERACTIVE, shared)
         .map_err(|error| format!("shared cached-job compilation rejected: {error}"))
+}
+
+fn validate_network_policy(
+    configuration: ConfigurationIdentity,
+    network_policy: JobNetworkPolicy,
+) -> Result<(), String> {
+    if network_policy == JobNetworkPolicy::CachedAutonomous
+        && !configuration
+            .summary
+            .flags
+            .contains(ConfigurationFlags::CACHED_AUTONOMOUS)
+    {
+        return Err(
+            "cached-autonomous jobs require the exact active configuration policy bit".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 const fn baseline_shared_participants() -> [MachineCamParticipantSpec; 2] {
@@ -454,6 +475,7 @@ impl MachineCamWorkspace {
                 source,
                 &baseline_shared_participants(),
                 UploadId(0x3344_5566_7788_9900),
+                JobNetworkPolicy::NetworkAttended,
             )?,
             selected_axis: 0,
             selected_point: 0,
@@ -477,6 +499,7 @@ impl MachineCamWorkspace {
         let (targets, capability_digest, config_digest) =
             validate_deployment_targets(job_id, targets)?;
         let package = deployment_board_package(capability_digest)?;
+        let network_policy = self.network_policy();
         let configuration_bytes = if self.artifacts.configuration_identity.capability_digest
             == capability_digest
             && self.artifacts.configuration_identity.digest == config_digest
@@ -507,6 +530,7 @@ impl MachineCamWorkspace {
             self.artifacts.source.clone(),
             &specs,
             deployment_upload_id(job_id, 0, 0xc100_0000_0000_0000),
+            network_policy,
         )?;
         let global = artifacts.shared_job.global_job();
         if global.participants().len() != targets.len() {
@@ -560,6 +584,36 @@ impl MachineCamWorkspace {
             .validate()
             .map_err(|error| format!("worker cached-job handoff rejected: {error}"))?;
         Ok(request)
+    }
+
+    pub(crate) fn network_policy(&self) -> JobNetworkPolicy {
+        self.artifacts
+            .shared_job
+            .global_job()
+            .policy()
+            .global()
+            .network_policy
+    }
+
+    pub(crate) fn select_network_policy(
+        &mut self,
+        network_policy: JobNetworkPolicy,
+    ) -> Result<(), String> {
+        if self.network_policy() == network_policy {
+            return Ok(());
+        }
+        validate_network_policy(self.artifacts.configuration_identity, network_policy)?;
+        let shared_job = compile_shared_machine_cam_job(
+            &self.artifacts.profile,
+            &self.artifacts.schedule,
+            &self.artifacts.program,
+            &self.artifacts.evidence,
+            &baseline_shared_participants(),
+            UploadId(0x3344_5566_7788_9900),
+            network_policy,
+        )?;
+        self.artifacts.shared_job = shared_job;
+        Ok(())
     }
 
     pub(crate) fn show_sidebar(&self, ui: &mut egui::Ui) {
@@ -622,12 +676,14 @@ impl MachineCamWorkspace {
 
     fn import_configuration_bytes(&mut self, bytes: Vec<u8>) -> Result<usize, String> {
         let byte_len = bytes.len();
+        let network_policy = self.network_policy();
         let artifacts = MachineCamArtifacts::compile(
             &self.artifacts.board_package,
             bytes,
             self.artifacts.source.clone(),
             &baseline_shared_participants(),
             UploadId(0x3344_5566_7788_9900),
+            network_policy,
         )?;
         self.artifacts = artifacts;
         self.selected_point = 0;
@@ -645,12 +701,14 @@ impl MachineCamWorkspace {
             raw_bytes: bytes,
             report,
         };
+        let network_policy = self.network_policy();
         let artifacts = MachineCamArtifacts::compile(
             &self.artifacts.board_package,
             self.artifacts.configuration_bytes.clone(),
             source,
             &baseline_shared_participants(),
             UploadId(0x3344_5566_7788_9900),
+            network_policy,
         )?;
         self.artifacts = artifacts;
         self.selected_point = 0;
@@ -660,12 +718,14 @@ impl MachineCamWorkspace {
 
     fn restore_exact_fixture(&mut self) -> Result<(), String> {
         let source = MachineCamSource::exact_fixture()?;
+        let network_policy = self.network_policy();
         let artifacts = MachineCamArtifacts::compile(
             &self.artifacts.board_package,
             self.artifacts.configuration_bytes.clone(),
             source,
             &baseline_shared_participants(),
             UploadId(0x3344_5566_7788_9900),
+            network_policy,
         )?;
         self.artifacts = artifacts;
         self.selected_point = 0;
@@ -1880,6 +1940,10 @@ mod tests {
         assert_eq!(artifacts.shared_job.retiming().participant_replays(), 2);
         assert_eq!(artifacts.shared_job.global_job().participants().len(), 2);
         assert_eq!(
+            workspace.network_policy(),
+            JobNetworkPolicy::NetworkAttended
+        );
+        assert_eq!(
             &artifacts.shared_job.timing_evidence().encoded()[..8],
             b"ALMSYN01"
         );
@@ -1910,7 +1974,7 @@ mod tests {
 
     #[test]
     fn live_handoff_recompiles_for_exact_physical_and_simulated_authority() {
-        let workspace = MachineCamWorkspace::try_new().unwrap();
+        let mut workspace = MachineCamWorkspace::try_new().unwrap();
         let physical_config = workspace.artifacts.configuration_identity.digest;
         let physical = workspace
             .build_cached_job_request(
@@ -1927,7 +1991,17 @@ mod tests {
             .unwrap();
         assert_eq!(physical.execution_mode, WorkerJobExecutionMode::Hardware);
         assert_eq!(physical.validate(), Ok(()));
+        assert_eq!(
+            alumina_job::DecodedMachineJobManifest::decode(&physical.manifest_bytes)
+                .unwrap()
+                .global()
+                .network_policy,
+            JobNetworkPolicy::NetworkAttended
+        );
 
+        workspace
+            .select_network_policy(JobNetworkPolicy::CachedAutonomous)
+            .unwrap();
         let simulated_config = sha256(
             &representative_configuration_bytes(alumina_sim::capability::CAPABILITY_DIGEST)
                 .unwrap(),
@@ -1951,6 +2025,39 @@ mod tests {
             WorkerJobExecutionMode::SimulationOnly
         );
         assert_eq!(simulated.validate(), Ok(()));
+        assert_eq!(
+            alumina_job::DecodedMachineJobManifest::decode(&simulated.manifest_bytes)
+                .unwrap()
+                .global()
+                .network_policy,
+            JobNetworkPolicy::CachedAutonomous
+        );
+    }
+
+    #[test]
+    fn cached_autonomous_requires_the_exact_configuration_policy_bit() {
+        let workspace = MachineCamWorkspace::try_new().unwrap();
+        let mut bytes = workspace.artifacts.configuration_bytes.clone();
+        let mut header =
+            alumina_config::ConfigurationHeader::decode(&bytes[..CONFIGURATION_HEADER_BYTES])
+                .unwrap();
+        header.flags = ConfigurationFlags(ConfigurationFlags::MOTION);
+        bytes[..CONFIGURATION_HEADER_BYTES].copy_from_slice(&header.encode().unwrap());
+        let result = MachineCamArtifacts::compile(
+            &workspace.artifacts.board_package,
+            bytes,
+            workspace.artifacts.source.clone(),
+            &baseline_shared_participants(),
+            UploadId(0x3344_5566_7788_9900),
+            JobNetworkPolicy::CachedAutonomous,
+        );
+        let Err(error) = result else {
+            panic!("cached-autonomous compilation unexpectedly ignored configuration policy")
+        };
+        assert_eq!(
+            error,
+            "cached-autonomous jobs require the exact active configuration policy bit"
+        );
     }
 
     #[test]
@@ -1965,6 +2072,7 @@ mod tests {
             workspace.artifacts.source.clone(),
             &baseline_shared_participants(),
             UploadId(0x3344_5566_7788_9900),
+            JobNetworkPolicy::NetworkAttended,
         );
         let Err(error) = result else {
             panic!("retired configuration unexpectedly compiled");

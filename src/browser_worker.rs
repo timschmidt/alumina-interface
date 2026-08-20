@@ -13,6 +13,7 @@ use alumina_capability::{
     decode_resource_id,
 };
 use alumina_clock::{ClockFlags, ClockObservation};
+use alumina_config::ConfigurationFlags;
 use alumina_diagnostics::transport::{
     DiagnosticTransportLimits, SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
     WaveformConfigureFlags, WaveformConfigureRequest, decode_telemetry_event,
@@ -54,7 +55,7 @@ use alumina_interface_client::worker::{
 use alumina_interface_core::board_explorer::{
     BoardExplorerSnapshot, build_board_explorer_snapshot,
 };
-use alumina_job::JobCommitId;
+use alumina_job::{JobCommitId, JobNetworkPolicy};
 use alumina_protocol::{DeviceCycle, Digest};
 use alumina_storage::sha256;
 use wasm_bindgen::closure::Closure;
@@ -1095,6 +1096,24 @@ fn validate_staged_job(runtime: &ControlWorkerRuntime, job: &LiveCachedJob) -> R
             .map(DeviceEntry::snapshot)
             .ok_or_else(|| format!("connection {} does not exist", binding.connection_id))?;
         validate_compiled_binding(&snapshot, binding)?;
+        if job.identity().network_policy == JobNetworkPolicy::CachedAutonomous {
+            let flags = snapshot
+                .configuration
+                .and_then(|configuration| configuration.summary)
+                .map(|summary| summary.flags)
+                .ok_or_else(|| {
+                    format!(
+                        "connection {} has no exact configuration policy summary",
+                        binding.connection_id
+                    )
+                })?;
+            if flags & ConfigurationFlags::CACHED_AUTONOMOUS == 0 {
+                return Err(format!(
+                    "connection {} configuration does not authorize cached-autonomous execution",
+                    binding.connection_id
+                ));
+            }
+        }
         let identity = snapshot.device_identity.as_ref().ok_or_else(|| {
             format!(
                 "connection {} has no stable identity",

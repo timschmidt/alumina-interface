@@ -84,8 +84,10 @@ pub struct CachedJobDeploymentTarget {
 pub fn compile_representative_cached_job_request(
     job_id: u64,
     targets: &[CachedJobDeploymentTarget],
+    network_policy: alumina_job::JobNetworkPolicy,
 ) -> Result<alumina_interface_client::worker::WorkerCachedJobRequest, String> {
-    let workspace = MachineCamWorkspace::try_new()?;
+    let mut workspace = MachineCamWorkspace::try_new()?;
+    workspace.select_network_policy(network_policy)?;
     let targets: Vec<_> = targets
         .iter()
         .map(|target| MachineCamDeploymentTarget {
@@ -798,6 +800,49 @@ impl AluminaApp {
     }
 
     #[cfg(target_arch = "wasm32")]
+    fn show_live_job_network_policy(&mut self, ui: &mut egui::Ui, locked: bool) {
+        let policy_change = {
+            let Some(workspace) = self.machine_cam.as_mut() else {
+                return;
+            };
+            let current = workspace.network_policy();
+            let mut selected = current;
+            ui.add_enabled_ui(!locked, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Network-loss policy:");
+                    ui.selectable_value(
+                        &mut selected,
+                        alumina_job::JobNetworkPolicy::NetworkAttended,
+                        "Network attended",
+                    );
+                    ui.selectable_value(
+                        &mut selected,
+                        alumina_job::JobNetworkPolicy::CachedAutonomous,
+                        "Cached autonomous",
+                    );
+                });
+            });
+            if current == alumina_job::JobNetworkPolicy::NetworkAttended {
+                ui.weak(
+                    "The finite local execution lease remains bound to browser-attended policy.",
+                );
+            } else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "The complete cached job may finish after Wi-Fi loss only under exact configuration and local safety policy; Wi-Fi stop is not a safety chain.",
+                );
+            }
+            (selected != current).then(|| workspace.select_network_policy(selected))
+        };
+        if let Some(result) = policy_change {
+            match result {
+                Ok(()) => self.live_job_error = None,
+                Err(error) => self.live_job_error = Some(error),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn show_live_job_control(
         &mut self,
         ui: &mut egui::Ui,
@@ -813,6 +858,8 @@ impl AluminaApp {
         ui.weak(
             "Stage recompiles the current exact CAM source for every selected live identity, then transfers only immutable manifest/partition artifacts to the worker.",
         );
+
+        self.show_live_job_network_policy(ui, view.job.is_some());
 
         if let Some(job) = &view.job {
             show_live_job_snapshot(ui, job);
@@ -1064,8 +1111,8 @@ fn display_cache_progress(accepted_bytes: u64, total_bytes: u64) -> f32 {
 fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
     ui.separator();
     ui.strong(format!(
-        "job {} · {:?} · {:?}",
-        job.job_id, job.execution_mode, job.phase
+        "job {} · {:?} · {:?} · {:?}",
+        job.job_id, job.execution_mode, job.network_policy, job.phase
     ));
     ui.monospace(format!(
         "manifest {}… / {} bytes · participants {}…",

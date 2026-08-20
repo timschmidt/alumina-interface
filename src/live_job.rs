@@ -556,6 +556,7 @@ impl LiveCachedJob {
         WorkerCachedJobSnapshot {
             job_id: self.job_id,
             execution_mode: self.execution_mode,
+            network_policy: self.identity.network_policy.into(),
             phase: self.phase(),
             global_job_digest: self.identity.global_job_digest.0,
             participant_set_digest: self.identity.participant_set_digest.0,

@@ -14,7 +14,9 @@ use alumina_diagnostics::transport::{
     DiagnosticTransportLimits, decode_telemetry_event, decode_telemetry_subscribe,
 };
 use alumina_diagnostics::{DiagnosticLimits, decode_digital_capture};
-use alumina_job::{DecodedMachineJobManifest, JOB_DESCRIPTOR_WIRE_BYTES, JobDescriptor};
+use alumina_job::{
+    DecodedMachineJobManifest, JOB_DESCRIPTOR_WIRE_BYTES, JobDescriptor, JobNetworkPolicy,
+};
 use alumina_machine_ir::MAX_EXECUTION_AXES;
 use alumina_protocol::{DeviceCycle, DeviceId, Digest};
 use alumina_runtime::health::{
@@ -33,7 +35,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 9;
+pub const WORKER_SCHEMA_VERSION: u16 = 10;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -101,6 +103,25 @@ pub enum WorkerJobExecutionMode {
     Hardware,
 }
 
+/// Manifest-bound network-loss policy projected into worker/UI snapshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerJobNetworkPolicySnapshot {
+    /// Execution remains bound to its finite attended lease.
+    NetworkAttended,
+    /// Complete locally admitted cached work may finish without the browser.
+    CachedAutonomous,
+}
+
+impl From<JobNetworkPolicy> for WorkerJobNetworkPolicySnapshot {
+    fn from(policy: JobNetworkPolicy) -> Self {
+        match policy {
+            JobNetworkPolicy::NetworkAttended => Self::NetworkAttended,
+            JobNetworkPolicy::CachedAutonomous => Self::CachedAutonomous,
+        }
+    }
+}
+
 /// One sorted MCU package transferred from authoritative CAM to the control worker.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,9 +187,7 @@ impl WorkerCachedJobRequest {
         }
         let manifest = DecodedMachineJobManifest::decode(&self.manifest_bytes)
             .map_err(|_| WorkerContractError::CachedJobRequest)?;
-        if manifest.participant_count() != self.participants.len()
-            || manifest.global().network_policy != alumina_job::JobNetworkPolicy::NetworkAttended
-        {
+        if manifest.participant_count() != self.participants.len() {
             return Err(WorkerContractError::CachedJobRequest);
         }
 
@@ -1515,6 +1534,8 @@ pub struct WorkerCachedJobSnapshot {
     pub job_id: u64,
     /// Explicit simulator versus physical execution boundary.
     pub execution_mode: WorkerJobExecutionMode,
+    /// Exact network-loss policy decoded from the retained canonical manifest.
+    pub network_policy: WorkerJobNetworkPolicySnapshot,
     /// Current global cache/schedule lifecycle.
     pub phase: WorkerCachedJobPhaseSnapshot,
     /// Exact global manifest content digest.
@@ -2236,6 +2257,7 @@ mod tests {
         WorkerCachedJobSnapshot {
             job_id: 0x7a11_0001,
             execution_mode: WorkerJobExecutionMode::SimulationOnly,
+            network_policy: WorkerJobNetworkPolicySnapshot::NetworkAttended,
             phase: WorkerCachedJobPhaseSnapshot::Complete,
             global_job_digest: [0x44; 32],
             participant_set_digest: [0x45; 32],
@@ -2390,7 +2412,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 9);
+        assert_eq!(WORKER_SCHEMA_VERSION, 10);
     }
 
     #[test]

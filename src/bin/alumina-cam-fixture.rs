@@ -1,6 +1,7 @@
 //! Emits a strict simulator-targeted cached-job request for browser transport testing.
 
 use alumina_interface::{CachedJobDeploymentTarget, compile_representative_cached_job_request};
+use alumina_job::JobNetworkPolicy;
 use alumina_protocol::DeviceId;
 use alumina_storage::sha256;
 
@@ -9,6 +10,7 @@ const DEFAULT_JOB_ID: u64 = 0x7a11_0001;
 fn main() -> Result<(), String> {
     let mut device_ids = Vec::new();
     let mut job_id = DEFAULT_JOB_ID;
+    let mut network_policy = JobNetworkPolicy::NetworkAttended;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         let value = arguments
@@ -22,6 +24,18 @@ fn main() -> Result<(), String> {
                     .ok()
                     .filter(|value| *value != 0)
                     .ok_or_else(|| "--job-id must be a nonzero u64".to_owned())?;
+            }
+            "--network-policy" => {
+                network_policy = match value.as_str() {
+                    "network-attended" => JobNetworkPolicy::NetworkAttended,
+                    "cached-autonomous" => JobNetworkPolicy::CachedAutonomous,
+                    _ => {
+                        return Err(
+                            "--network-policy must be network-attended or cached-autonomous"
+                                .to_owned(),
+                        );
+                    }
+                };
             }
             _ => return Err(format!("unknown argument {argument}")),
         }
@@ -58,7 +72,7 @@ fn main() -> Result<(), String> {
             })
         })
         .collect::<Result<_, String>>()?;
-    let request = compile_representative_cached_job_request(job_id, &targets)?;
+    let request = compile_representative_cached_job_request(job_id, &targets, network_policy)?;
     println!(
         "{}",
         serde_json::to_string(&request)
