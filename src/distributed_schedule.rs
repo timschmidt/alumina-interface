@@ -398,21 +398,7 @@ impl DistributedScheduleCoordinator {
                     DistributedSchedulePhase::Confirming
                 }
             }
-            CoordinationIntent::Abort => {
-                if self.participants.iter().all(participant_safe_after_abort) {
-                    DistributedSchedulePhase::Aborted
-                } else if split_after_abort_is_terminal(&self.participants) {
-                    DistributedSchedulePhase::SplitAfterAbort
-                } else if self
-                    .participants
-                    .iter()
-                    .any(|participant| post_guard(participant.control.phase()))
-                {
-                    DistributedSchedulePhase::Irrevocable
-                } else {
-                    DistributedSchedulePhase::Aborting
-                }
-            }
+            CoordinationIntent::Abort => abort_phase(&self.participants),
             CoordinationIntent::Cancel => {
                 if self.participants.iter().all(|participant| {
                     matches!(
@@ -1037,8 +1023,27 @@ fn participant_safe_after_abort(participant: &ParticipantCoordinator) -> bool {
     }
     matches!(
         participant.control.phase(),
-        ParticipantSchedulePhase::Aborted | ParticipantSchedulePhase::Expired
+        ParticipantSchedulePhase::Aborted
+            | ParticipantSchedulePhase::Expired
+            | ParticipantSchedulePhase::Faulted
     )
+}
+
+fn abort_phase(participants: &[ParticipantCoordinator]) -> DistributedSchedulePhase {
+    if fault_after_abort_is_terminal(participants) {
+        DistributedSchedulePhase::Faulted
+    } else if participants.iter().all(participant_safe_after_abort) {
+        DistributedSchedulePhase::Aborted
+    } else if split_after_abort_is_terminal(participants) {
+        DistributedSchedulePhase::SplitAfterAbort
+    } else if participants
+        .iter()
+        .any(|participant| post_guard(participant.control.phase()))
+    {
+        DistributedSchedulePhase::Irrevocable
+    } else {
+        DistributedSchedulePhase::Aborting
+    }
 }
 
 fn next_abort_operation(
@@ -1066,10 +1071,28 @@ fn next_abort_operation(
             .begin_abort()
             .map(Some)
             .map_err(Into::into),
-        ParticipantSchedulePhase::Aborted | ParticipantSchedulePhase::Expired => Ok(None),
+        ParticipantSchedulePhase::Aborted
+        | ParticipantSchedulePhase::Expired
+        | ParticipantSchedulePhase::Faulted => Ok(None),
         phase if post_guard(phase) => Ok(None),
         _ => Err(DistributedScheduleError::ParticipantState),
     }
+}
+
+fn fault_after_abort_is_terminal(participants: &[ParticipantCoordinator]) -> bool {
+    let mut faulted = false;
+    for participant in participants {
+        match participant.control.phase() {
+            ParticipantSchedulePhase::Faulted => faulted = true,
+            ParticipantSchedulePhase::Empty
+            | ParticipantSchedulePhase::Aborted
+            | ParticipantSchedulePhase::Cancelled
+            | ParticipantSchedulePhase::Expired
+            | ParticipantSchedulePhase::Complete => {}
+            _ => return false,
+        }
+    }
+    faulted
 }
 
 fn split_after_abort_is_terminal(participants: &[ParticipantCoordinator]) -> bool {
@@ -1937,6 +1960,76 @@ mod tests {
         assert_eq!(
             coordinator.participant_phase(missed_request.device_id),
             Some(ParticipantSchedulePhase::Complete)
+        );
+    }
+
+    #[test]
+    fn local_safety_fault_is_retained_while_remaining_participant_aborts() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut coordinator);
+        let inputs = start_inputs(&job, &clocks);
+        install_and_confirm(&mut coordinator, &mut authorities, &inputs);
+        coordinator.begin_abort().unwrap();
+
+        let faulted_request = coordinator.next_request().unwrap().unwrap();
+        assert_eq!(faulted_request.request.operation, Operation::JobAbort);
+        let faulted_authority = authorities
+            .iter_mut()
+            .find(|authority| authority.device_id == faulted_request.device_id)
+            .unwrap();
+        faulted_authority.schedule.fault_safety_stop().unwrap();
+        let faulted_report = ready_status(faulted_authority);
+        assert!(matches!(
+            coordinator.accept_response(
+                faulted_request.device_id,
+                &Response {
+                    status: StatusCode::Conflict,
+                    body: faulted_report.encode().unwrap().to_vec(),
+                },
+            ),
+            Err(DistributedScheduleError::Schedule(
+                ScheduleControlError::DeviceStatus(StatusCode::Conflict)
+            ))
+        ));
+        assert_eq!(
+            coordinator.participant_phase(faulted_request.device_id),
+            Some(ParticipantSchedulePhase::Faulted)
+        );
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborting);
+
+        let stopped_request = coordinator.next_request().unwrap().unwrap();
+        assert_ne!(stopped_request.device_id, faulted_request.device_id);
+        assert_eq!(stopped_request.request.operation, Operation::JobAbort);
+        let stopped_reference =
+            alumina_job::JobScheduleReference::decode(&stopped_request.request.body).unwrap();
+        let stopped_commit = coordinator
+            .participant_commit(stopped_request.device_id)
+            .unwrap();
+        let stopped_authority = authorities
+            .iter_mut()
+            .find(|authority| authority.device_id == stopped_request.device_id)
+            .unwrap();
+        stopped_authority
+            .schedule
+            .abort(
+                stopped_reference,
+                DeviceCycle(stopped_commit.confirm_deadline_cycle.0 - 1),
+            )
+            .unwrap();
+        coordinator
+            .accept_response(
+                stopped_request.device_id,
+                &response(&ready_status(stopped_authority)),
+            )
+            .unwrap();
+
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Faulted);
+        assert_eq!(coordinator.next_request().unwrap(), None);
+        assert_eq!(
+            coordinator.participant_phase(stopped_request.device_id),
+            Some(ParticipantSchedulePhase::Aborted)
         );
     }
 
