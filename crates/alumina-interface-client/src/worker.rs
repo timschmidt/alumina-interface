@@ -35,7 +35,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 10;
+pub const WORKER_SCHEMA_VERSION: u16 = 11;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -1524,6 +1524,10 @@ pub struct WorkerCachedJobParticipantSnapshot {
     pub schedule_phase: WorkerParticipantSchedulePhaseSnapshot,
     /// Bound local device start cycle, once a future commit exists.
     pub local_start_cycle: Option<u64>,
+    /// Latest authenticated device-reported absolute lease expiry.
+    pub lease_expiry_cycle: Option<u64>,
+    /// Greatest absolute lease expiry this browser worker requested.
+    pub authorized_lease_expiry_cycle: Option<u64>,
 }
 
 /// Complete replacement state for the one worker-owned cached job.
@@ -1546,6 +1550,8 @@ pub struct WorkerCachedJobSnapshot {
     pub manifest_byte_len: u32,
     /// Shared future browser-worker epoch after start binding.
     pub target_ui_ns: Option<u64>,
+    /// Number of complete attended-lease rounds opened by this worker.
+    pub lease_renewal_rounds: u32,
     /// Consecutive transport or reconciliation failures since latest progress.
     pub consecutive_failures: u32,
     /// Latest bounded failure text, independent from retained exact state.
@@ -1570,6 +1576,8 @@ impl WorkerCachedJobSnapshot {
             || self.participants.len() > MAXIMUM_CACHED_JOB_PARTICIPANTS
             || (self.consecutive_failures == 0) != self.last_error.is_none()
             || !diagnostic_is_valid(self.last_error.as_deref())
+            || (self.network_policy == WorkerJobNetworkPolicySnapshot::CachedAutonomous
+                && self.lease_renewal_rounds != 0)
         {
             return Err(WorkerContractError::CachedJobSnapshot);
         }
@@ -1651,6 +1659,30 @@ impl WorkerCachedJobSnapshot {
                             | WorkerParticipantSchedulePhaseSnapshot::Complete
                             | WorkerParticipantSchedulePhaseSnapshot::Faulted
                     ))
+            {
+                return Err(WorkerContractError::CachedJobSnapshot);
+            }
+            match (
+                participant.local_start_cycle,
+                participant.lease_expiry_cycle,
+                participant.authorized_lease_expiry_cycle,
+            ) {
+                (None, None, None) => {}
+                (Some(start), None, Some(authorized))
+                    if participant.schedule_phase
+                        == WorkerParticipantSchedulePhaseSnapshot::Installing
+                        && authorized > start => {}
+                (Some(start), Some(lease), authorized)
+                    if lease > start
+                        && authorized.is_none_or(|authorized| authorized >= lease)
+                        && (authorized.is_some()
+                            || self.phase == WorkerCachedJobPhaseSnapshot::RetainedComplete) => {}
+                _ => return Err(WorkerContractError::CachedJobSnapshot),
+            }
+            if self.network_policy == WorkerJobNetworkPolicySnapshot::CachedAutonomous
+                && participant
+                    .authorized_lease_expiry_cycle
+                    .is_some_and(|authorized| participant.lease_expiry_cycle != Some(authorized))
             {
                 return Err(WorkerContractError::CachedJobSnapshot);
             }
@@ -2253,6 +2285,8 @@ mod tests {
             next_chunk: 0,
             schedule_phase: WorkerParticipantSchedulePhaseSnapshot::Complete,
             local_start_cycle: Some(10_000_000 + connection_id),
+            lease_expiry_cycle: Some(20_000_000 + connection_id),
+            authorized_lease_expiry_cycle: Some(20_000_000 + connection_id),
         };
         WorkerCachedJobSnapshot {
             job_id: 0x7a11_0001,
@@ -2263,6 +2297,7 @@ mod tests {
             participant_set_digest: [0x45; 32],
             manifest_byte_len: 1_024,
             target_ui_ns: Some(20_000_000_000),
+            lease_renewal_rounds: 0,
             consecutive_failures: 0,
             last_error: None,
             participants: vec![
@@ -2412,7 +2447,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 10);
+        assert_eq!(WORKER_SCHEMA_VERSION, 11);
     }
 
     #[test]
@@ -2497,6 +2532,8 @@ mod tests {
         aborted.participants[0].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Aborted;
         aborted.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Cancelled;
         aborted.participants[1].local_start_cycle = None;
+        aborted.participants[1].lease_expiry_cycle = None;
+        aborted.participants[1].authorized_lease_expiry_cycle = None;
         assert_eq!(aborted.validate(), Ok(()));
 
         aborted.participants[1].schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Ready;

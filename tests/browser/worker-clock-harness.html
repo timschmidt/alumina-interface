@@ -51,6 +51,9 @@
         expectation === "cached-job-repeat" ||
         expectation === "cached-job-recovery" ||
         expectation === "cached-job-confirm-recovery" ||
+        expectation === "cached-job-lease-renew-recovery" ||
+        expectation === "cached-job-lease-renew-request-recovery" ||
+        expectation === "cached-job-lease-expiry" ||
         expectation === "cached-job-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-request-recovery" ||
@@ -72,6 +75,11 @@
         expectation === "cached-job-autonomous-outage";
       const cachedJobAutonomousOutage =
         expectation === "cached-job-autonomous-outage";
+      const cachedJobLeaseRenewRecovery =
+        expectation === "cached-job-lease-renew-recovery" ||
+        expectation === "cached-job-lease-renew-request-recovery";
+      const cachedJobExpectedLeaseExpiry =
+        expectation === "cached-job-lease-expiry";
       const cachedJobAbortGuardOutage =
         expectation === "cached-job-abort-guard-outage";
       const cachedJobAbortSplitOutage =
@@ -145,6 +153,7 @@
         execution_mode: snapshot.execution_mode,
         network_policy: snapshot.network_policy,
         target_ui_ns: snapshot.target_ui_ns,
+        lease_renewal_rounds: snapshot.lease_renewal_rounds,
         consecutive_failures: snapshot.consecutive_failures,
         last_error: snapshot.last_error,
         participants: snapshot.participants.map((participant) => ({
@@ -157,6 +166,9 @@
           next_chunk: participant.next_chunk,
           schedule_phase: participant.schedule_phase,
           local_start_cycle: participant.local_start_cycle,
+          lease_expiry_cycle: participant.lease_expiry_cycle,
+          authorized_lease_expiry_cycle:
+            participant.authorized_lease_expiry_cycle,
         })),
       });
 
@@ -222,7 +234,8 @@
               (cachedJobAbortGuardOutage ||
                 cachedJobAbortSplitOutage ||
                 cachedJobAbortStatusOutage ||
-                cachedJobAutonomousOutage
+                cachedJobAutonomousOutage ||
+                cachedJobExpectedLeaseExpiry
                 ? 64
                 : 16)
           ) {
@@ -291,7 +304,7 @@
         cachedJobStaged = true;
         worker.postMessage(
           JSON.stringify({
-            schema_version: 10,
+            schema_version: 11,
             command: { kind: "stage_cached_job", request: cachedJobRequest },
           }),
         );
@@ -309,7 +322,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 10,
+            schema_version: 11,
             command: {
               kind: "capture_waveform",
               request: {
@@ -341,7 +354,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 10) {
+        if (envelope.schema_version !== 11) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -381,7 +394,7 @@
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
-                schema_version: 10,
+                schema_version: 11,
                 command: {
                   kind: "configure",
                   request: {
@@ -442,7 +455,8 @@
           }
           if (
             snapshot.phase === "faulted" &&
-            !cachedJobExpectedSafetyFault
+            !cachedJobExpectedSafetyFault &&
+            !cachedJobExpectedLeaseExpiry
           ) {
             clearTimeout(timeout);
             finish("failed", {
@@ -458,7 +472,7 @@
             cachedJobStarted = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 10,
+                schema_version: 11,
                 command: {
                   kind: "start_cached_job",
                   job_id: snapshot.job_id,
@@ -482,7 +496,7 @@
             cachedJobStopRequested = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 10,
+                schema_version: 11,
                 command: {
                   kind: "stop_cached_job",
                   job_id: snapshot.job_id,
@@ -515,7 +529,7 @@
               !cachedJobExpectedSafetyFault;
             const expectedTerminalPhase = retained
               ? "retained_complete"
-              : cachedJobExpectedSafetyFault
+              : cachedJobExpectedSafetyFault || cachedJobExpectedLeaseExpiry
                 ? "faulted"
                 : stopMissed
                   ? "completed_after_stop_request"
@@ -542,6 +556,16 @@
                       participant.schedule_phase === "aborted" &&
                       participant.local_start_cycle !== null,
                   ).length === 1
+                : cachedJobExpectedLeaseExpiry
+                  ? snapshot.participants.every(
+                      (participant) =>
+                        participant.schedule_phase === "faulted" &&
+                        participant.local_start_cycle !== null &&
+                        participant.lease_expiry_cycle !== null &&
+                        participant.authorized_lease_expiry_cycle !== null &&
+                        participant.lease_expiry_cycle <
+                          participant.authorized_lease_expiry_cycle,
+                    )
                 : stopSplit
                 ? snapshot.participants.filter(
                     (participant) =>
@@ -592,6 +616,8 @@
                 : snapshot.target_ui_ns !== null) &&
               snapshot.consecutive_failures === 0 &&
               snapshot.last_error === null &&
+              (!cachedJobLeaseRenewRecovery ||
+                snapshot.lease_renewal_rounds >= 2) &&
               snapshot.participants.length === 2 &&
               participantFactsExact;
             const recoveryValid =
@@ -644,6 +670,64 @@
                         (participant) =>
                           participant.schedule_phase === "confirmed",
                       ).length === index,
+                  ))) &&
+              (!cachedJobLeaseRenewRecovery ||
+                (cachedJobFailureObservations.length === 2 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.every(
+                    (observation) =>
+                      observation.phase === "confirmed" &&
+                      observation.network_policy === "network_attended" &&
+                      observation.consecutive_failures === 1 &&
+                      observation.last_error?.includes("fetch failed") &&
+                      observation.participants.length === 2 &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          participant.schedule_phase === "confirmed" &&
+                          participant.lease_expiry_cycle !== null &&
+                          participant.authorized_lease_expiry_cycle !== null &&
+                          participant.lease_expiry_cycle <=
+                            participant.authorized_lease_expiry_cycle,
+                      ),
+                  ) &&
+                  snapshot.participants.every(
+                    (participant) =>
+                      participant.lease_expiry_cycle ===
+                      participant.authorized_lease_expiry_cycle,
+                  ))) &&
+              (!cachedJobExpectedLeaseExpiry ||
+                (cachedJobFailureObservations.length > 0 &&
+                  cachedJobRecovered &&
+                  cachedJobFailureObservations.every(
+                    (observation) =>
+                      (observation.phase === "confirmed" ||
+                        observation.phase === "irrevocable") &&
+                      observation.network_policy === "network_attended" &&
+                      observation.consecutive_failures === 1 &&
+                      observation.last_error?.includes("fetch failed") &&
+                      observation.participants.length === 2 &&
+                      observation.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          (participant.schedule_phase === "confirmed" ||
+                            participant.schedule_phase === "priming" ||
+                            participant.schedule_phase === "primed" ||
+                            participant.schedule_phase === "running"),
+                      ),
+                  ) &&
+                  cachedJobTransitions.some(
+                    (transition) =>
+                      transition.participants.every(
+                        (participant) =>
+                          participant.schedule_phase === "running",
+                      ),
                   ))) &&
               (!stopFlowActive ||
                 stopMissed ||
@@ -948,7 +1032,7 @@
               cachedJobClearing = true;
               worker.postMessage(
                 JSON.stringify({
-                  schema_version: 10,
+                  schema_version: 11,
                   command: {
                     kind: "clear_cached_job",
                     job_id: snapshot.job_id,

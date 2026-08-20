@@ -5,11 +5,11 @@ use std::fmt;
 use alumina_clock::BootId;
 use alumina_job::{
     JobCancelRequest, JobCancelWireError, JobCommitRequest, JobDescriptor, JobDescriptorWireError,
-    JobScheduleReference, JobScheduleReferenceAction, JobScheduleReport, JobScheduleState,
-    JobScheduleWireError, JobStatusReport, JobStatusReportWireError, PreparedJobToken,
-    RealtimeJobState, ServiceJobState,
+    JobLeaseRenewRequest, JobNetworkPolicy, JobScheduleReference, JobScheduleReferenceAction,
+    JobScheduleReport, JobScheduleState, JobScheduleWireError, JobStatusReport,
+    JobStatusReportWireError, PreparedJobToken, RealtimeJobState, ServiceJobState,
 };
-use alumina_protocol::{Operation, StatusCode};
+use alumina_protocol::{DeviceCycle, Operation, StatusCode};
 
 use crate::Response;
 
@@ -28,6 +28,7 @@ enum ScheduleAction {
     Status,
     Install,
     Confirm,
+    RenewLease,
     Abort,
     Cancel,
 }
@@ -78,6 +79,7 @@ pub struct ParticipantScheduleMachine<const AXES: usize> {
     boot_id: BootId,
     prepared_token: PreparedJobToken,
     commit: Option<JobCommitRequest>,
+    authorized_lease_expiry_cycle: Option<DeviceCycle>,
     report: Option<JobStatusReport>,
     pending: Option<ScheduleAction>,
     reconciliation_required: bool,
@@ -95,6 +97,7 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
             boot_id,
             prepared_token,
             commit: None,
+            authorized_lease_expiry_cycle: None,
             report: None,
             pending: None,
             reconciliation_required: false,
@@ -119,6 +122,11 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
     /// Bound exact commit, once selected by the global coordinator.
     pub const fn commit(&self) -> Option<JobCommitRequest> {
         self.commit
+    }
+
+    /// Greatest exact lease expiry this controller has ever requested.
+    pub const fn authorized_lease_expiry_cycle(&self) -> Option<DeviceCycle> {
+        self.authorized_lease_expiry_cycle
     }
 
     /// Latest fully validated combined device report.
@@ -238,6 +246,7 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
             return Err(ScheduleControlError::State);
         }
         self.commit = Some(commit);
+        self.authorized_lease_expiry_cycle = Some(commit.lease_expiry_cycle);
         self.pending = Some(ScheduleAction::Install);
         Ok(ScheduleOperation {
             operation: Operation::JobCommit,
@@ -258,6 +267,49 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
         self.pending = Some(ScheduleAction::Confirm);
         Ok(ScheduleOperation {
             operation: Operation::JobConfirm,
+            body,
+        })
+    }
+
+    /// Emits one exact absolute extension of a network-attended lease.
+    ///
+    /// The greatest requested expiry is retained before transport so a lost
+    /// response can be reconciled without trusting device-invented authority.
+    pub fn begin_lease_renew(
+        &mut self,
+        lease_expiry_cycle: DeviceCycle,
+    ) -> Result<ScheduleOperation, ScheduleControlError> {
+        self.ensure_mutation_allowed()?;
+        if !matches!(
+            self.phase(),
+            ParticipantSchedulePhase::Confirmed
+                | ParticipantSchedulePhase::Priming
+                | ParticipantSchedulePhase::Primed
+                | ParticipantSchedulePhase::Running
+        ) {
+            return Err(ScheduleControlError::State);
+        }
+        let commit = self.commit.ok_or(ScheduleControlError::State)?;
+        let current = self
+            .report
+            .and_then(|report| report.schedule)
+            .ok_or(ScheduleControlError::State)?
+            .lease_expiry_cycle;
+        if lease_expiry_cycle.0 <= current.0 {
+            return Err(ScheduleControlError::State);
+        }
+        if self
+            .authorized_lease_expiry_cycle
+            .is_some_and(|authorized| lease_expiry_cycle.0 < authorized.0)
+        {
+            return Err(ScheduleControlError::Conflict);
+        }
+        let request = JobLeaseRenewRequest::for_commit(commit, lease_expiry_cycle)?;
+        let body = request.encode()?.to_vec();
+        self.authorized_lease_expiry_cycle = Some(lease_expiry_cycle);
+        self.pending = Some(ScheduleAction::RenewLease);
+        Ok(ScheduleOperation {
+            operation: Operation::JobLeaseRenew,
             body,
         })
     }
@@ -423,10 +475,9 @@ impl<const AXES: usize> ParticipantScheduleMachine<AXES> {
             }
             return Ok(());
         }
-        if self
-            .commit
-            .is_some_and(|commit| !schedule_matches_commit(schedule, commit))
-        {
+        if self.commit.is_some_and(|commit| {
+            !schedule_matches_commit(schedule, commit, self.authorized_lease_expiry_cycle)
+        }) {
             return Err(ScheduleControlError::Identity);
         }
         Ok(())
@@ -455,13 +506,27 @@ fn replaceable_foreign_terminal(descriptor: JobDescriptor, report: JobStatusRepo
     }
 }
 
-fn schedule_matches_commit(schedule: JobScheduleReport, commit: JobCommitRequest) -> bool {
+fn schedule_matches_commit(
+    schedule: JobScheduleReport,
+    commit: JobCommitRequest,
+    authorized_lease_expiry_cycle: Option<DeviceCycle>,
+) -> bool {
+    let lease_matches = match commit.policy {
+        JobNetworkPolicy::NetworkAttended => authorized_lease_expiry_cycle.is_some_and(|expiry| {
+            schedule.lease_expiry_cycle.0 >= commit.lease_expiry_cycle.0
+                && schedule.lease_expiry_cycle.0 <= expiry.0
+        }),
+        JobNetworkPolicy::CachedAutonomous => {
+            schedule.lease_expiry_cycle == commit.lease_expiry_cycle
+                && authorized_lease_expiry_cycle == Some(commit.lease_expiry_cycle)
+        }
+    };
     schedule.policy == Some(commit.policy)
         && schedule.prepared_token.is_none()
         && schedule.local_start_cycle == commit.local_start_cycle
         && schedule.confirm_deadline_cycle == commit.confirm_deadline_cycle
         && schedule.abort_guard_cycle == commit.abort_guard_cycle
-        && schedule.lease_expiry_cycle == commit.lease_expiry_cycle
+        && lease_matches
         && schedule.commit_id == commit.commit_id.as_bytes()
 }
 
@@ -483,14 +548,27 @@ fn schedule_report_advances(previous: JobScheduleReport, next: JobScheduleReport
     if previous == next {
         return true;
     }
-    if previous.state == JobScheduleState::Running
-        && next.state == JobScheduleState::Running
-        && previous.start_observation.is_none()
-        && next.start_observation.is_some()
+    if previous.policy == Some(JobNetworkPolicy::NetworkAttended)
+        && next.lease_expiry_cycle.0 < previous.lease_expiry_cycle.0
     {
-        let mut without_observation = next;
-        without_observation.start_observation = None;
-        return without_observation == previous;
+        return false;
+    }
+    if previous.state == next.state {
+        let mut normalized = next;
+        if previous.policy == Some(JobNetworkPolicy::NetworkAttended)
+            && next.lease_expiry_cycle.0 > previous.lease_expiry_cycle.0
+        {
+            normalized.lease_expiry_cycle = previous.lease_expiry_cycle;
+        }
+        if previous.state == JobScheduleState::Running
+            && previous.start_observation.is_none()
+            && next.start_observation.is_some()
+        {
+            normalized.start_observation = None;
+        }
+        if normalized == previous {
+            return true;
+        }
     }
     match previous.state {
         JobScheduleState::Prepared => next.state != JobScheduleState::Prepared,
@@ -623,8 +701,8 @@ impl std::error::Error for ScheduleControlError {}
 #[cfg(test)]
 mod tests {
     use alumina_job::{
-        JOB_COMMIT_ID_BYTES, JobCommitId, JobNetworkPolicy, JobScheduleAdmission,
-        JobScheduleReferenceAction, JobScheduleState, JobStartObservation,
+        JOB_COMMIT_ID_BYTES, JobCommitId, JobLeaseRenewalAdmission, JobNetworkPolicy,
+        JobScheduleAdmission, JobScheduleReferenceAction, JobScheduleState, JobStartObservation,
         JobStartObservationSource, PreparedJobSchedule, RealtimeJobReport, ServiceJobReport,
     };
     use alumina_machine_ir::{
@@ -747,6 +825,15 @@ mod tests {
         }
     }
 
+    fn renewal_admission(now: u64) -> JobLeaseRenewalAdmission {
+        JobLeaseRenewalAdmission {
+            now: DeviceCycle(now),
+            maximum_extension_cycles: 10_000_000,
+            maximum_total_lease_cycles: 20_000_000,
+            safety_ready: true,
+        }
+    }
+
     #[test]
     fn prepare_install_and_confirm_require_exact_observed_transitions() {
         let descriptor = descriptor();
@@ -786,6 +873,113 @@ mod tests {
                 .accept_response(&response(StatusCode::Ok, status(authority.report())))
                 .unwrap(),
             ParticipantSchedulePhase::Confirmed
+        );
+    }
+
+    #[test]
+    fn attended_renewal_reconciles_a_lost_response_and_caps_device_authority() {
+        let descriptor = descriptor();
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+
+        machine.begin_prepare().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let commit = commit(&machine);
+        machine.begin_install(commit).unwrap();
+        authority.install(commit, admission()).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let confirm = machine.begin_confirm().unwrap();
+        authority
+            .confirm(
+                JobScheduleReference::decode(&confirm.body).unwrap(),
+                DeviceCycle(4_000_000),
+            )
+            .unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+
+        let renewed_expiry = DeviceCycle(12_000_000);
+        let renewal = machine.begin_lease_renew(renewed_expiry).unwrap();
+        assert_eq!(renewal.operation, Operation::JobLeaseRenew);
+        let request = JobLeaseRenewRequest::decode(&renewal.body).unwrap();
+        assert_eq!(request.lease_expiry_cycle, renewed_expiry);
+        authority
+            .renew_lease(request, renewal_admission(4_100_000))
+            .unwrap();
+        assert!(machine.abandon_pending());
+        assert_eq!(
+            machine.begin_lease_renew(renewed_expiry),
+            Err(ScheduleControlError::ReconciliationRequired)
+        );
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine
+                .accept_response(&response(StatusCode::Ok, status(authority.report())))
+                .unwrap(),
+            ParticipantSchedulePhase::Confirmed
+        );
+        assert_eq!(
+            machine.authorized_lease_expiry_cycle(),
+            Some(renewed_expiry)
+        );
+
+        let mut invented = authority.report();
+        invented.lease_expiry_cycle = DeviceCycle(renewed_expiry.0 + 1);
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine.accept_response(&response(StatusCode::Ok, status(invented))),
+            Err(ScheduleControlError::Identity)
+        );
+
+        let mut regressed_during_transition = authority.report();
+        regressed_during_transition.state = JobScheduleState::Priming;
+        regressed_during_transition.lease_expiry_cycle = commit.lease_expiry_cycle;
+        machine.begin_status().unwrap();
+        assert_eq!(
+            machine.accept_response(&response(
+                StatusCode::Ok,
+                status(regressed_during_transition),
+            )),
+            Err(ScheduleControlError::Regression)
+        );
+    }
+
+    #[test]
+    fn cached_autonomous_commit_cannot_open_a_rolling_lease() {
+        let descriptor = descriptor();
+        let mut authority = PreparedJobSchedule::prepare::<2>(boot(), descriptor).unwrap();
+        let mut machine = ParticipantScheduleMachine::<2>::new(descriptor, boot()).unwrap();
+        machine.begin_prepare().unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let mut commit = commit(&machine);
+        commit.policy = JobNetworkPolicy::CachedAutonomous;
+        machine.begin_install(commit).unwrap();
+        let mut autonomous_admission = admission();
+        autonomous_admission.autonomous_allowed = true;
+        authority.install(commit, autonomous_admission).unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        let confirm = machine.begin_confirm().unwrap();
+        authority
+            .confirm(
+                JobScheduleReference::decode(&confirm.body).unwrap(),
+                DeviceCycle(4_000_000),
+            )
+            .unwrap();
+        machine
+            .accept_response(&response(StatusCode::Ok, status(authority.report())))
+            .unwrap();
+        assert_eq!(
+            machine.begin_lease_renew(DeviceCycle(12_000_000)),
+            Err(ScheduleControlError::Schedule(JobScheduleWireError::Policy))
         );
     }
 

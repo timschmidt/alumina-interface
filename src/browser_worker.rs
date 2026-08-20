@@ -66,7 +66,9 @@ use web_sys::{
     WorkerType,
 };
 
-use crate::distributed_schedule::{ParticipantStartInput, ParticipantStartTiming};
+use crate::distributed_schedule::{
+    ParticipantLeaseRenewal, ParticipantStartInput, ParticipantStartTiming,
+};
 use crate::live_job::{LiveCachedJob, LiveJobOperation, LiveJobParticipantBinding};
 
 const CONTROL_WORKER_URL: &str = "alumina-worker.js";
@@ -80,7 +82,11 @@ const TELEMETRY_RESOURCE_LIMIT: usize = 4;
 const JOB_START_LEAD_NS: u64 = 5_000_000_000;
 const JOB_CONFIRMATION_LEAD_SECONDS: u64 = 3;
 const JOB_ABORT_GUARD_LEAD_SECONDS: u64 = 1;
-const JOB_LEASE_SLACK_SECONDS: u64 = 30;
+const JOB_AUTONOMOUS_LEASE_SLACK_SECONDS: u64 = 30;
+const JOB_ATTENDED_INITIAL_LEASE_SECONDS: u64 = 3;
+const JOB_ATTENDED_RENEWAL_HORIZON_SECONDS: u64 = 9;
+const JOB_ATTENDED_RENEWAL_THRESHOLD_SECONDS: u64 = 4;
+const JOB_ATTENDED_RETRY_GUARD_SECONDS: u64 = 1;
 
 struct PassiveTelemetrySelection {
     resources: Vec<ResourceId>,
@@ -1299,15 +1305,25 @@ fn participant_start_inputs<'a>(
             )
         })?;
         let frequency_hz = heartbeat.frequency_hz;
-        let duration_cycles = ceil_product_ratio(
-            job.identity().duration_ticks,
-            frequency_hz,
-            job.identity().global_timebase_hz,
-        )
-        .ok_or_else(|| "job duration does not fit the device clock".to_owned())?;
-        let lease_slack = frequency_hz
-            .checked_mul(JOB_LEASE_SLACK_SECONDS)
-            .ok_or_else(|| "job lease margin overflowed".to_owned())?;
+        let lease_cycles = match job.identity().network_policy {
+            JobNetworkPolicy::NetworkAttended => frequency_hz
+                .checked_mul(JOB_ATTENDED_INITIAL_LEASE_SECONDS)
+                .ok_or_else(|| "attended job lease overflowed".to_owned())?,
+            JobNetworkPolicy::CachedAutonomous => {
+                let duration_cycles = ceil_product_ratio(
+                    job.identity().duration_ticks,
+                    frequency_hz,
+                    job.identity().global_timebase_hz,
+                )
+                .ok_or_else(|| "job duration does not fit the device clock".to_owned())?;
+                let lease_slack = frequency_hz
+                    .checked_mul(JOB_AUTONOMOUS_LEASE_SLACK_SECONDS)
+                    .ok_or_else(|| "job lease margin overflowed".to_owned())?;
+                duration_cycles
+                    .checked_add(lease_slack)
+                    .ok_or_else(|| "job lease overflowed".to_owned())?
+            }
+        };
         let timing = ParticipantStartTiming {
             maximum_uncertainty_cycles: state.sampling.maximum_uncertainty_cycles,
             required_sync_tolerance_cycles: state.sampling.maximum_uncertainty_cycles,
@@ -1317,9 +1333,7 @@ fn participant_start_inputs<'a>(
             abort_guard_lead_cycles: frequency_hz
                 .checked_mul(JOB_ABORT_GUARD_LEAD_SECONDS)
                 .ok_or_else(|| "abort guard lead overflowed".to_owned())?,
-            lease_cycles: duration_cycles
-                .checked_add(lease_slack)
-                .ok_or_else(|| "job lease overflowed".to_owned())?,
+            lease_cycles,
             commit_id: job_commit_id(job.job_id(), binding, target_ui_ns)?,
         };
         inputs.push(ParticipantStartInput {
@@ -1715,12 +1729,180 @@ fn prepare_next_job_operation(
             job.begin_confirmation(now_ui_ns, &inputs)
                 .map_err(|error| error.to_string())?;
         }
-        WorkerCachedJobPhaseSnapshot::Confirmed | WorkerCachedJobPhaseSnapshot::Irrevocable => job
-            .begin_status_round()
-            .map_err(|error| error.to_string())?,
+        WorkerCachedJobPhaseSnapshot::Confirmed | WorkerCachedJobPhaseSnapshot::Irrevocable => {
+            if !begin_attended_lease_renewal_if_due(runtime, job)? {
+                job.begin_status_round()
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         _ => return Ok(None),
     }
     job.next_operation().map_err(|error| error.to_string())
+}
+
+fn begin_attended_lease_renewal_if_due(
+    runtime: &ControlWorkerRuntime,
+    job: &mut LiveCachedJob,
+) -> Result<bool, String> {
+    if job.identity().network_policy != JobNetworkPolicy::NetworkAttended {
+        return Ok(false);
+    }
+    let now_ui_ns = worker_monotonic_ns(&runtime.scope)
+        .ok_or_else(|| "worker monotonic clock is unavailable".to_owned())?;
+    let target_ui_ns = now_ui_ns
+        .checked_add(
+            JOB_ATTENDED_RENEWAL_HORIZON_SECONDS
+                .checked_mul(1_000_000_000)
+                .ok_or_else(|| "attended lease horizon overflowed".to_owned())?,
+        )
+        .ok_or_else(|| "attended lease target overflowed".to_owned())?;
+    let first_round = job.lease_renewal_rounds() == 0;
+    let mut due = first_round;
+    let mut renewals = Vec::new();
+    renewals
+        .try_reserve_exact(job.bindings().count())
+        .map_err(|_| "attended lease participant allocation failed".to_owned())?;
+
+    for binding in job.bindings() {
+        let state = attended_lease_device(runtime, binding)?;
+        validate_start_eligibility(state, binding, job.execution_mode())?;
+        let reported = job
+            .participant_lease_expiry_cycle(binding.device_id)
+            .ok_or_else(|| {
+                format!(
+                    "connection {} has no reported attended lease",
+                    binding.connection_id
+                )
+            })?;
+        let authorized = job
+            .participant_authorized_lease_expiry_cycle(binding.device_id)
+            .ok_or_else(|| {
+                format!(
+                    "connection {} has no browser-authorized attended lease",
+                    binding.connection_id
+                )
+            })?;
+        let Some((lease_expiry_cycle, participant_due)) = attended_lease_target(
+            state,
+            binding,
+            reported,
+            authorized,
+            now_ui_ns,
+            target_ui_ns,
+        )?
+        else {
+            // No longer claim that renewal is admissible. The following status
+            // round will retain the device's exact lease-expired fault.
+            return Ok(false);
+        };
+        due |= participant_due;
+        renewals.push(ParticipantLeaseRenewal {
+            device_id: binding.device_id,
+            lease_expiry_cycle: DeviceCycle(lease_expiry_cycle),
+        });
+    }
+
+    if !due {
+        return Ok(false);
+    }
+    job.begin_lease_renewal(&renewals)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn attended_lease_device(
+    runtime: &ControlWorkerRuntime,
+    binding: LiveJobParticipantBinding,
+) -> Result<&DeviceState, String> {
+    match runtime.devices.get(&binding.connection_id) {
+        Some(DeviceEntry::Idle(state)) => Ok(state.as_ref()),
+        Some(DeviceEntry::Busy { .. }) => Err(format!(
+            "connection {} is busy during attended lease renewal",
+            binding.connection_id
+        )),
+        None => Err(format!(
+            "connection {} disappeared during attended lease renewal",
+            binding.connection_id
+        )),
+    }
+}
+
+fn attended_lease_target(
+    state: &DeviceState,
+    binding: LiveJobParticipantBinding,
+    reported: u64,
+    authorized: u64,
+    now_ui_ns: u64,
+    target_ui_ns: u64,
+) -> Result<Option<(u64, bool)>, String> {
+    if reported > authorized {
+        return Err(format!(
+            "connection {} reported lease authority the browser did not grant",
+            binding.connection_id
+        ));
+    }
+    let heartbeat = state.clock.latest_response().ok_or_else(|| {
+        format!(
+            "connection {} has no accepted heartbeat for lease renewal",
+            binding.connection_id
+        )
+    })?;
+    let estimate = state
+        .clock
+        .estimate_at(now_ui_ns, state.sampling.maximum_uncertainty_cycles)
+        .map_err(|error| {
+            format!(
+                "connection {} lease clock estimate failed: {error}",
+                binding.connection_id
+            )
+        })?;
+    if estimate.boot_id != binding.boot_id {
+        return Err(format!(
+            "connection {} changed boot during lease renewal",
+            binding.connection_id
+        ));
+    }
+    if estimate.latest_cycle.0 >= reported {
+        return Ok(None);
+    }
+    let unapplied_request = reported < authorized;
+    let threshold = heartbeat
+        .frequency_hz
+        .checked_mul(JOB_ATTENDED_RENEWAL_THRESHOLD_SECONDS)
+        .ok_or_else(|| "attended lease threshold overflowed".to_owned())?;
+    let due = unapplied_request || reported - estimate.latest_cycle.0 <= threshold;
+    let prediction = state
+        .clock
+        .predict(
+            now_ui_ns,
+            target_ui_ns,
+            state.sampling.maximum_uncertainty_cycles,
+        )
+        .map_err(|error| {
+            format!(
+                "connection {} lease clock prediction failed: {error}",
+                binding.connection_id
+            )
+        })?;
+    if prediction.boot_id != binding.boot_id {
+        return Err(format!(
+            "connection {} changed boot during lease prediction",
+            binding.connection_id
+        ));
+    }
+    let retry_guard = heartbeat
+        .frequency_hz
+        .checked_mul(JOB_ATTENDED_RETRY_GUARD_SECONDS)
+        .ok_or_else(|| "attended lease retry guard overflowed".to_owned())?;
+    let retry_authorized =
+        unapplied_request && authorized.saturating_sub(estimate.latest_cycle.0) > retry_guard;
+    if retry_authorized {
+        return Ok(Some((authorized, due)));
+    }
+    let minimum_new = authorized
+        .checked_add(1)
+        .ok_or_else(|| "attended lease cycle overflowed".to_owned())?;
+    Ok(Some((prediction.scheduled_cycle.0.max(minimum_new), due)))
 }
 
 async fn perform_live_job_operation(

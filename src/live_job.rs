@@ -24,7 +24,7 @@ use crate::cache_delivery::{ParticipantCacheDeliveryError, ParticipantCacheReady
 use crate::distributed_schedule::{
     CachedParticipantSchedule, DistributedJobIdentity, DistributedScheduleCoordinator,
     DistributedScheduleError, DistributedSchedulePhase, DistributedScheduleRequest,
-    ParticipantStartInput,
+    ParticipantLeaseRenewal, ParticipantStartInput,
 };
 
 const JOB_AXES: usize = 2;
@@ -164,6 +164,7 @@ pub struct LiveCachedJob {
     coordinator: Option<DistributedScheduleCoordinator>,
     status_queue: VecDeque<DistributedScheduleRequest>,
     schedule_reconciliation_sweep_required: bool,
+    lease_renewal_rounds: u32,
     stop_requested: bool,
     terminal_override: Option<WorkerCachedJobPhaseSnapshot>,
     consecutive_failures: u32,
@@ -224,6 +225,7 @@ impl LiveCachedJob {
             coordinator: None,
             status_queue: VecDeque::new(),
             schedule_reconciliation_sweep_required: false,
+            lease_renewal_rounds: 0,
             stop_requested: false,
             terminal_override: None,
             consecutive_failures: 0,
@@ -247,6 +249,12 @@ impl LiveCachedJob {
     #[must_use]
     pub const fn identity(&self) -> DistributedJobIdentity {
         self.identity
+    }
+
+    /// Complete attended-lease rounds opened during this retained lifecycle.
+    #[must_use]
+    pub const fn lease_renewal_rounds(&self) -> u32 {
+        self.lease_renewal_rounds
     }
 
     /// Shared future browser epoch after a deterministic start was bound.
@@ -402,7 +410,15 @@ impl LiveCachedJob {
             .device_id;
         if let Some(coordinator) = self.coordinator.as_mut() {
             let abandoned = coordinator.abandon_pending(device_id)?;
-            self.schedule_reconciliation_sweep_required |= abandoned;
+            if abandoned {
+                // A batched renewal is one global authority decision. Once any
+                // result is ambiguous, no still-unissued peer mutation may run
+                // before a fresh all-participant status sweep.
+                while let Some(request) = self.status_queue.pop_front() {
+                    coordinator.abandon_pending(request.device_id)?;
+                }
+                self.schedule_reconciliation_sweep_required = true;
+            }
             return Ok(abandoned);
         }
         let participant = self
@@ -477,6 +493,55 @@ impl LiveCachedJob {
         Ok(())
     }
 
+    /// Queues one atomically validated rolling lease request for every MCU.
+    ///
+    /// Only network-attended jobs can enter this path; cached-autonomous jobs
+    /// retain their original full-duration commit lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects terminal, stopping, reconciling, or already-pending jobs and
+    /// propagates exact participant-set, phase, allocation, and lease errors.
+    pub fn begin_lease_renewal(
+        &mut self,
+        renewals: &[ParticipantLeaseRenewal],
+    ) -> Result<(), LiveCachedJobError> {
+        if self.terminal_override.is_some()
+            || !self.status_queue.is_empty()
+            || self.schedule_reconciliation_sweep_required
+            || self.stop_requested
+        {
+            return Err(LiveCachedJobError::State);
+        }
+        let requests = self
+            .coordinator
+            .as_mut()
+            .ok_or(LiveCachedJobError::State)?
+            .begin_lease_renewal(renewals)?;
+        self.status_queue = requests.into();
+        self.lease_renewal_rounds = self.lease_renewal_rounds.saturating_add(1);
+        self.clear_failure();
+        Ok(())
+    }
+
+    /// Latest reported lease for one exact participant.
+    #[must_use]
+    pub fn participant_lease_expiry_cycle(&self, device_id: DeviceId) -> Option<u64> {
+        self.coordinator
+            .as_ref()?
+            .participant_lease_expiry_cycle(device_id)
+            .map(|cycle| cycle.0)
+    }
+
+    /// Greatest lease expiry this worker has explicitly requested.
+    #[must_use]
+    pub fn participant_authorized_lease_expiry_cycle(&self, device_id: DeviceId) -> Option<u64> {
+        self.coordinator
+            .as_ref()?
+            .participant_authorized_lease_expiry_cycle(device_id)
+            .map(|cycle| cycle.0)
+    }
+
     /// Selects local cache cancellation, precommit actor cancellation, or pre-guard abort.
     ///
     /// # Errors
@@ -523,8 +588,18 @@ impl LiveCachedJob {
             .map(|participant| {
                 let (cache_artifact, cache_phase, accepted_bytes, total_bytes, next_chunk) =
                     participant.cache_snapshot();
-                let (schedule_phase, local_start_cycle) = self.coordinator.as_ref().map_or(
-                    (WorkerParticipantSchedulePhaseSnapshot::Empty, None),
+                let (
+                    schedule_phase,
+                    local_start_cycle,
+                    lease_expiry_cycle,
+                    authorized_lease_expiry_cycle,
+                ) = self.coordinator.as_ref().map_or(
+                    (
+                        WorkerParticipantSchedulePhaseSnapshot::Empty,
+                        None,
+                        None,
+                        None,
+                    ),
                     |coordinator| {
                         (
                             coordinator
@@ -532,6 +607,14 @@ impl LiveCachedJob {
                                 .map_or(WorkerParticipantSchedulePhaseSnapshot::Empty, Into::into),
                             coordinator
                                 .participant_local_start_cycle(participant.binding.device_id)
+                                .map(|cycle| cycle.0),
+                            coordinator
+                                .participant_lease_expiry_cycle(participant.binding.device_id)
+                                .map(|cycle| cycle.0),
+                            coordinator
+                                .participant_authorized_lease_expiry_cycle(
+                                    participant.binding.device_id,
+                                )
                                 .map(|cycle| cycle.0),
                         )
                     },
@@ -550,6 +633,8 @@ impl LiveCachedJob {
                     next_chunk,
                     schedule_phase,
                     local_start_cycle,
+                    lease_expiry_cycle,
+                    authorized_lease_expiry_cycle,
                 }
             })
             .collect();
@@ -562,6 +647,7 @@ impl LiveCachedJob {
             participant_set_digest: self.identity.participant_set_digest.0,
             manifest_byte_len: self.manifest_byte_len,
             target_ui_ns: self.target_ui_ns(),
+            lease_renewal_rounds: self.lease_renewal_rounds,
             consecutive_failures: self.consecutive_failures,
             last_error: self.last_error.clone(),
             participants,

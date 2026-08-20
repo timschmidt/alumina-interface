@@ -83,6 +83,15 @@ pub struct ParticipantStartInput<'a> {
     pub timing: ParticipantStartTiming,
 }
 
+/// One participant's next absolute network-attended lease expiry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParticipantLeaseRenewal {
+    /// Stable MCU identity used to align the complete participant set.
+    pub device_id: DeviceId,
+    /// Exact absolute expiry in that MCU's boot-local cycle domain.
+    pub lease_expiry_cycle: DeviceCycle,
+}
+
 /// One device-targeted canonical operation ready for its independent HMAC session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DistributedScheduleRequest {
@@ -429,6 +438,12 @@ impl DistributedScheduleCoordinator {
         self.target_ui_ns
     }
 
+    /// Manifest-bound network-loss policy for this global job.
+    #[must_use]
+    pub const fn network_policy(&self) -> alumina_job::JobNetworkPolicy {
+        self.network_policy
+    }
+
     /// Exact observed phase for one stable device identity.
     #[must_use]
     pub fn participant_phase(&self, device_id: DeviceId) -> Option<ParticipantSchedulePhase> {
@@ -458,6 +473,28 @@ impl DistributedScheduleCoordinator {
                     .filter(|schedule| schedule.policy.is_some())
                     .map(|schedule| schedule.local_start_cycle)
             })
+    }
+
+    /// Latest authenticated device-reported lease for one participant.
+    #[must_use]
+    pub fn participant_lease_expiry_cycle(&self, device_id: DeviceId) -> Option<DeviceCycle> {
+        self.participant(device_id)?
+            .control
+            .report()
+            .and_then(|report| report.schedule)
+            .filter(|schedule| schedule.policy.is_some())
+            .map(|schedule| schedule.lease_expiry_cycle)
+    }
+
+    /// Greatest exact lease expiry the browser has requested for one participant.
+    #[must_use]
+    pub fn participant_authorized_lease_expiry_cycle(
+        &self,
+        device_id: DeviceId,
+    ) -> Option<DeviceCycle> {
+        self.participant(device_id)?
+            .control
+            .authorized_lease_expiry_cycle()
     }
 
     /// Replays authenticated device-cycle start evidence into browser time.
@@ -689,7 +726,9 @@ impl DistributedScheduleCoordinator {
                 latest.frequency_hz,
                 self.global_timebase_hz,
             )?;
-            if timing.lease_cycles < required_job_cycles {
+            if self.network_policy == alumina_job::JobNetworkPolicy::CachedAutonomous
+                && timing.lease_cycles < required_job_cycles
+            {
                 return Err(DistributedScheduleError::LeaseTooShort {
                     supplied: timing.lease_cycles,
                     required: required_job_cycles,
@@ -823,6 +862,72 @@ impl DistributedScheduleCoordinator {
                 request: participant.control.begin_status()?,
             });
         }
+        Ok(requests)
+    }
+
+    /// Atomically opens one rolling attended-lease request on every participant.
+    ///
+    /// Operations are constructed against a cloned participant set and become
+    /// visible only when every device identity, phase, and absolute expiry is
+    /// valid. This prevents allocation or one late participant error from
+    /// granting a partial multi-MCU renewal.
+    ///
+    /// # Errors
+    ///
+    /// Rejects autonomous or non-running schedules, incomplete or substituted
+    /// participant sets, a pending participant operation, allocation failure,
+    /// or any renewal the participant control machine cannot admit exactly.
+    pub fn begin_lease_renewal(
+        &mut self,
+        renewals: &[ParticipantLeaseRenewal],
+    ) -> Result<Vec<DistributedScheduleRequest>, DistributedScheduleError> {
+        if self.network_policy != alumina_job::JobNetworkPolicy::NetworkAttended
+            || !matches!(
+                self.phase(),
+                DistributedSchedulePhase::Confirmed | DistributedSchedulePhase::Irrevocable
+            )
+            || renewals.len() != self.participants.len()
+            || self
+                .participants
+                .iter()
+                .any(|participant| participant.control.has_pending_request())
+        {
+            return Err(DistributedScheduleError::State);
+        }
+
+        let mut ordered = Vec::new();
+        ordered
+            .try_reserve_exact(renewals.len())
+            .map_err(|_| DistributedScheduleError::AllocationOverflow)?;
+        ordered.extend_from_slice(renewals);
+        ordered.sort_unstable_by_key(|renewal| renewal.device_id);
+        if self
+            .participants
+            .iter()
+            .zip(&ordered)
+            .any(|(participant, renewal)| participant.device_id != renewal.device_id)
+        {
+            return Err(DistributedScheduleError::ParticipantSet);
+        }
+
+        let mut staged = Vec::new();
+        staged
+            .try_reserve_exact(self.participants.len())
+            .map_err(|_| DistributedScheduleError::AllocationOverflow)?;
+        staged.extend_from_slice(&self.participants);
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(staged.len())
+            .map_err(|_| DistributedScheduleError::AllocationOverflow)?;
+        for (participant, renewal) in staged.iter_mut().zip(ordered) {
+            requests.push(DistributedScheduleRequest {
+                device_id: participant.device_id,
+                request: participant
+                    .control
+                    .begin_lease_renew(renewal.lease_expiry_cycle)?,
+            });
+        }
+        self.participants = staged;
         Ok(requests)
     }
 
@@ -1254,8 +1359,9 @@ mod tests {
         compile_representative_global_job, compile_representative_program,
     };
     use alumina_job::{
-        JOB_COMMIT_ID_BYTES, JobScheduleAdmission, JobStatusReport, PreparedJobSchedule,
-        RealtimeJobReport, RealtimeJobState, ServiceJobReport, ServiceJobState,
+        JOB_COMMIT_ID_BYTES, JobLeaseRenewRequest, JobLeaseRenewalAdmission, JobScheduleAdmission,
+        JobStatusReport, PreparedJobSchedule, RealtimeJobReport, RealtimeJobState,
+        ServiceJobReport, ServiceJobState,
     };
     use alumina_machine_ir::StreamTick;
     use alumina_protocol::{DeviceCycle, Digest, Operation, StatusCode};
@@ -1424,6 +1530,15 @@ mod tests {
             cache_ready: true,
             safety_ready: true,
             autonomous_allowed: false,
+        }
+    }
+
+    fn renewal_admission(now: u64) -> JobLeaseRenewalAdmission {
+        JobLeaseRenewalAdmission {
+            now: DeviceCycle(now),
+            maximum_extension_cycles: 10_000_000,
+            maximum_total_lease_cycles: 20_000_000,
+            safety_ready: true,
         }
     }
 
@@ -1663,6 +1778,99 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
+    }
+
+    #[test]
+    fn attended_renewal_is_atomic_and_lost_response_reconciles_by_status() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut coordinator);
+        let inputs = start_inputs(&job, &clocks);
+        install_and_confirm(&mut coordinator, &mut authorities, &inputs);
+
+        let mut renewals: Vec<_> = authorities
+            .iter()
+            .map(|authority| {
+                let commit = coordinator.participant_commit(authority.device_id).unwrap();
+                ParticipantLeaseRenewal {
+                    device_id: authority.device_id,
+                    lease_expiry_cycle: DeviceCycle(commit.lease_expiry_cycle.0 + 2_000_000),
+                }
+            })
+            .collect();
+        renewals.reverse();
+
+        let mut invalid = renewals.clone();
+        let invalid_device = authorities.last().unwrap().device_id;
+        let invalid_renewal = invalid
+            .iter_mut()
+            .find(|renewal| renewal.device_id == invalid_device)
+            .unwrap();
+        invalid_renewal.lease_expiry_cycle = coordinator
+            .participant_commit(invalid_device)
+            .unwrap()
+            .lease_expiry_cycle;
+        assert!(matches!(
+            coordinator.begin_lease_renewal(&invalid),
+            Err(DistributedScheduleError::Schedule(
+                ScheduleControlError::State
+            ))
+        ));
+        for authority in &authorities {
+            let commit = coordinator.participant_commit(authority.device_id).unwrap();
+            assert_eq!(
+                coordinator.participant_authorized_lease_expiry_cycle(authority.device_id),
+                Some(commit.lease_expiry_cycle)
+            );
+        }
+
+        let requests = coordinator.begin_lease_renewal(&renewals).unwrap();
+        assert_eq!(requests.len(), authorities.len());
+
+        let lost_device = requests[0].device_id;
+        for request in &requests {
+            assert_eq!(request.request.operation, Operation::JobLeaseRenew);
+            let renewal = JobLeaseRenewRequest::decode(&request.request.body).unwrap();
+            let authority = authorities
+                .iter_mut()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            authority
+                .schedule
+                .renew_lease(renewal, renewal_admission(4_100_000))
+                .unwrap();
+            if request.device_id == lost_device {
+                assert!(coordinator.abandon_pending(request.device_id).unwrap());
+            } else {
+                coordinator
+                    .accept_response(request.device_id, &response(&ready_status(authority)))
+                    .unwrap();
+            }
+        }
+
+        let reconcile = coordinator.next_request().unwrap().unwrap();
+        assert_eq!(reconcile.device_id, lost_device);
+        assert_eq!(reconcile.request.operation, Operation::JobStatus);
+        let authority = authorities
+            .iter()
+            .find(|authority| authority.device_id == lost_device)
+            .unwrap();
+        coordinator
+            .accept_response(lost_device, &response(&ready_status(authority)))
+            .unwrap();
+        assert_eq!(coordinator.next_request().unwrap(), None);
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
+        for renewal in renewals {
+            assert_eq!(
+                coordinator.participant_lease_expiry_cycle(renewal.device_id),
+                Some(renewal.lease_expiry_cycle)
+            );
+            assert_eq!(
+                coordinator.participant_authorized_lease_expiry_cycle(renewal.device_id),
+                Some(renewal.lease_expiry_cycle)
+            );
+        }
     }
 
     #[test]
@@ -2382,13 +2590,14 @@ mod tests {
     }
 
     #[test]
-    fn short_lease_and_changed_boot_fail_before_any_commit_is_bound() {
+    fn autonomous_short_lease_and_changed_boot_fail_before_any_commit_is_bound() {
         let (job, ready, preparations, mut clocks) = fixture();
         let mut coordinator =
             DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
         prepare_all(&mut coordinator);
         let mut inputs = start_inputs(&job, &clocks);
         inputs[0].timing.lease_cycles = 1;
+        coordinator.network_policy = alumina_job::JobNetworkPolicy::CachedAutonomous;
         assert!(matches!(
             coordinator.bind_start(3_001_000_000, 5_000_000_000, &inputs),
             Err(DistributedScheduleError::LeaseTooShort { .. })
@@ -2398,7 +2607,27 @@ mod tests {
                 .participant_commit(participant.device_id())
                 .is_none()
         }));
+        coordinator.network_policy = alumina_job::JobNetworkPolicy::NetworkAttended;
+        coordinator
+            .bind_start(3_001_000_000, 5_000_000_000, &inputs)
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .participant_commit(job.participants()[0].device_id())
+                .unwrap()
+                .lease_expiry_cycle
+                .0
+                - coordinator
+                    .participant_commit(job.participants()[0].device_id())
+                    .unwrap()
+                    .local_start_cycle
+                    .0,
+            1
+        );
 
+        let mut coordinator =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        prepare_all(&mut coordinator);
         clocks[0].reset().unwrap();
         let inputs = start_inputs(&job, &clocks);
         assert!(matches!(

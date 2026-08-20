@@ -73,7 +73,7 @@ storage policy cannot yield a partially constructed UI readiness table.
 
 ## Live worker lifecycle
 
-Worker schema V10 carries one bounded cached-job owner. A staged request carries
+Worker schema V11 carries one bounded cached-job owner. A staged request carries
 the complete canonical global manifest and each sorted participant's descriptor,
 partition upload plan/bytes, and independent manifest upload plan. Before any
 I/O, the worker reconstructs all content/publication identities, manifest
@@ -94,6 +94,17 @@ observes the `irrevocable` split while one actor has completed, and terminates
 only after both local schedules are exactly `complete`. This does not model
 browser-process loss, total endpoint loss, or a physical Wi-Fi outage.
 
+For `network_attended`, the commit grants only a short initial lease. After
+confirmation the worker periodically derives one later absolute device-cycle
+expiry from each participant's fresh clock model, then atomically opens the
+complete sorted renewal set. A lost request or response spends its pending
+authority and requires a clean all-participant `JobStatus` sweep before any
+later mutation. The worker may retry an already-authorized absolute expiry but
+never trusts a reported expiry beyond the greatest value it requested. When a
+conservative local-cycle bound reaches the reported lease, it sends no late
+renewal and retains the MCU's local expiry fault. Cached-autonomous jobs never
+enter this path and preserve their commit lease exactly.
+
 Each participant progresses through partition then global-manifest
 reconciliation. Only after every publication is authoritatively observed does
 the worker prepare all actors. A user start request is retained until every
@@ -112,7 +123,8 @@ start epoch.
 
 The worker exposes complete replacement snapshots with cache artifact/phase,
 accepted/total bytes, next missing chunk, participant schedule phase, local
-start cycle, global phase, shared epoch, and an isolated bounded failure. The
+start cycle, current reported lease, greatest browser-authorized lease, complete
+renewal-round count, global phase, shared epoch, and an isolated bounded failure. The
 rendering realm validates every snapshot again. Hardware mode additionally
 requires a non-simulated armable capability and device-stored production
 credential; the representative browser fixture deliberately requests
@@ -159,7 +171,7 @@ the then-open fresh-owner terminal identity seam; see sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRM-RECOVERY.md`.
 
 A later reattachment qualification, introduced with schema V7 and retained in
-current schema V10, completed one ordinary attempt, replaced the browser worker without
+current schema V11, completed one ordinary attempt, replaced the browser worker without
 restarting either simulated MCU, and restaged the identical compiled request.
 An initial read-only status round matched each
 retained boot/descriptor token and returned `retained_complete` in seven
@@ -190,7 +202,7 @@ point of no return while authenticated schedule status remains available. The
 worker accepts stop only after global confirmation, retains repeated fetch
 failures, observes no participant abort, crosses `irrevocable`, and terminates
 as `completed_after_stop_request`, introduced in schema V8 and retained in
-current schema V10, only after both schedules are exactly complete. The loopback run
+current schema V11, only after both schedules are exactly complete. The loopback run
 passed in 432 snapshots while the actors discarded 18 and one unapplied abort
 requests; fresh actors then passed ordinary `complete` in 412 snapshots. See
 sibling
@@ -198,7 +210,7 @@ sibling
 
 The asymmetric mutation-outage case is now terminal rather than an unbounded
 `irrevocable` poll. One actor applies abort, the second loses 18 abort mutations
-through its guard and completes, and current schema V10 emits
+through its guard and completes, and current schema V11 emits
 `split_after_stop_request` only with the exact one-`aborted`/one-`complete`
 participant set. That Chromium run passed in 434 snapshots; fresh actors then
 passed ordinary `complete` in 431 snapshots. See sibling

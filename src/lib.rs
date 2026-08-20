@@ -824,7 +824,7 @@ impl AluminaApp {
             });
             if current == alumina_job::JobNetworkPolicy::NetworkAttended {
                 ui.weak(
-                    "The finite local execution lease remains bound to browser-attended policy.",
+                    "The browser must continuously renew a short exact local lease; loss of renewal authority expires execution locally.",
                 );
             } else {
                 ui.colored_label(
@@ -1123,6 +1123,10 @@ fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
     if let Some(target_ui_ns) = job.target_ui_ns {
         ui.monospace(format!("shared future epoch: {target_ui_ns} ns"));
     }
+    ui.monospace(format!(
+        "attended lease renewal rounds: {}",
+        job.lease_renewal_rounds
+    ));
     if job.execution_mode == alumina_interface_client::worker::WorkerJobExecutionMode::Hardware {
         ui.colored_label(
             egui::Color32::YELLOW,
@@ -1172,6 +1176,12 @@ fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
                 ));
                 if let Some(cycle) = participant.local_start_cycle {
                     ui.monospace(format!("bound local start cycle: {cycle}"));
+                }
+                if let Some(cycle) = participant.lease_expiry_cycle {
+                    ui.monospace(format!("reported lease expiry cycle: {cycle}"));
+                }
+                if let Some(cycle) = participant.authorized_lease_expiry_cycle {
+                    ui.monospace(format!("browser-authorized lease ceiling: {cycle}"));
                 }
             },
         );

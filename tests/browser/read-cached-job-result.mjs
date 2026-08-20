@@ -12,6 +12,9 @@ if (
     "repeat",
     "recovery",
     "confirm-recovery",
+    "lease-renew-recovery",
+    "lease-renew-request-recovery",
+    "lease-expiry",
     "abort-recovery",
     "confirmed-abort-recovery",
     "confirmed-abort-request-recovery",
@@ -29,7 +32,7 @@ if (
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, autonomous, autonomous-outage, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, confirmed-safety-propagation-request-recovery, installing-stop, or reattach",
+    "cached-job mode must be single, autonomous, autonomous-outage, repeat, recovery, confirm-recovery, lease-renew-recovery, lease-renew-request-recovery, lease-expiry, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, confirmed-safety-propagation-request-recovery, installing-stop, or reattach",
   );
 }
 const repeat = mode === "repeat";

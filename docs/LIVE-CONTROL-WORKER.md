@@ -60,8 +60,11 @@ Schema V6 adds passive canonical active-configuration status and the complete
 worker-owned cached-job lifecycle. Schema V7 retains that strict lifecycle and
 adds `retained_complete`: a replacement owner may expose exact all-participant
 terminal descriptor evidence and local start cycles only with no original UI
-epoch and no new start authority. It does not retain a compatibility decoder
-for prior schemas.
+epoch and no new start authority. V8 and V9 add truthful completed-after-stop
+and split-after-stop terminals; V10 carries the explicit attended versus
+cached-autonomous policy. Current schema V11 adds each participant's reported
+lease, greatest browser-authorized lease, and the complete renewal-round count.
+It does not retain a compatibility decoder for prior schemas.
 
 ## Lifecycle and recovery
 
@@ -273,7 +276,7 @@ authority facts and closed physical claims are recorded in sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-E2E.md`.
 
 The `cached-job-autonomous` expectation selects the policy explicitly in the
-authoritative CAM fixture. Schema V10 retains `cached_autonomous` in every
+authoritative CAM fixture. Schema V11 retains `cached_autonomous` in every
 replacement snapshot, and staging independently requires configuration flag
 `0x00000002` on every bound MCU before any cache I/O. On 2026-08-20 two fresh
 simulator actors carried exact configuration flags `0x00000003`, published
@@ -293,6 +296,21 @@ all-participant `complete` after 436 snapshots. Both complete 127,264-byte
 caches remained unchanged. This is bounded schedule-route fault evidence with
 the browser, actors, and unrelated loopback traffic still live, not physical
 AP/radio-loss or autonomous-output evidence.
+
+The attended path now starts with a short three-second post-start lease and
+renews the complete participant set toward a nine-second browser-time horizon.
+The worker stages every absolute device-cycle expiry transactionally, uses a
+fresh clock bound per MCU, and exposes both the reported lease and greatest
+expiry it actually authorized. Applied-response ambiguity and pre-application
+request loss each force a clean all-participant status sweep before another
+mutation. On 2026-08-20 the exact 9.63928-second representative job passed in
+531 snapshots with three nominal renewal rounds. Applied-response loss passed
+with two one-failure observations and four rounds; request loss passed with two
+one-failure observations and five rounds. Sustained request loss produced 26
+attempts and then exact two-MCU `faulted` state at the unchanged initial leases,
+not fabricated completion. A fresh cached-autonomous control completed with
+zero renewal rounds and immutable commit leases. See sibling
+`alumina-firmware/docs/evidence/M10-ATTENDED-LEASE-RENEWAL.md`.
 
 The `cached-job-repeat` expectation accepts exactly two strict requests. On
 2026-08-15 it ran job IDs `2047934465` and `2047934466` consecutively on the same
@@ -377,7 +395,7 @@ remains available. It accepts stop only after both participants are globally
 confirmed, requires repeated one-failure fetch observations, forbids any local
 `aborted` state, observes the guard transition to `irrevocable`, and accepts
 only the `completed_after_stop_request` terminal introduced in schema V8 and
-retained in current schema V10, with both schedules exactly complete. On
+retained in current schema V11, with both schedules exactly complete. On
 2026-08-15 it passed in 432 snapshots while the two actors discarded 18 and one
 unapplied abort requests; terminal transport failure recovered to zero without
 erasing the missed-stop result. Fresh actors
@@ -400,7 +418,7 @@ then passed ordinary `complete` in 431 snapshots. See sibling
 The `cached-job-installing-stop` expectation exercises a bound job before all
 local commits exist. It requests stop only with one exact `installed` and one
 exact `ready` participant. The coordinator issues `JobAbort` to the former and
-`JobCancel` to the latter, and current schema V10 accepts global `aborted` only
+`JobCancel` to the latter, and current schema V11 accepts global `aborted` only
 with complete caches, an `aborted`/cycle fact, and a `cancelled`/no-cycle fact.
 The first attempt passed in 386 snapshots. The harness then clears that
 terminal and stages a distinct prepare ID; initial read-only status treats only a
@@ -595,7 +613,7 @@ response-body/status rejection.
 The browser adapter uses the same zero-configuration authenticated session as
 clock and health. The worker publishes complete bytes once per generation only
 after validation. JSON transfer is deliberately treated as untrusted: current
-schema V10 validates the document again, and the UI validates and decodes it
+schema V11 validates the document again, and the UI validates and decodes it
 once more into `BoardExplorerSnapshot`. Stale generations are rejected and
 disconnect removes the admitted explorer. The localhost capability-loss run and complete evidence
 are recorded in sibling
@@ -612,7 +630,7 @@ advancing accepted evidence, making the next poll byte-identical.
 
 Complete newly advanced bytes cross the worker boundary in a credential-free
 `WorkerTelemetryDocument` alongside the exact subscription request. Introduced
-in schema V5 and retained in current schema V10, the validator decodes both. The
+in schema V5 and retained in current schema V11, the validator decodes both. The
 worker selects resources, cadence, and encoded byte ceilings
 from the authenticated `ALMDOV01` catalog rather than the graph palette. The
 rendering supervisor decodes the transfer again, binds every context and
