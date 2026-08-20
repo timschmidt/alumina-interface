@@ -218,7 +218,12 @@ prototype.
   and monotonic ID cursors. Its 13-entry fixed-schema palette supports
   monotonic node creation, atomic node/incident-wire deletion, node moves,
   typed wire edits, and bounded schema-directed exact scalar/composite literal
-  editing. Deterministic quoted text, hexadecimal bytes, arrays, records,
+  editing. The node inspector also edits bounded canonical UTF-8 labels and
+  concrete execution placement: domain families come from the audited node
+  schema, while device identities come only from clocks or placements already
+  present in the graph. There is no raw device-ID field, and complete audited
+  analysis runs before commit. Deterministic quoted text, hexadecimal bytes,
+  arrays, records,
   options, and results round-trip through the window-free core; resource/job
   handles remain selector-bound rather than text-authorized. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
@@ -457,8 +462,7 @@ annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, nested component
 dependency/cycle handling, editable instance
 and library workflows, front-panel editing/execution, identity-bearing
-parameter selectors, label/domain editing, conflict-aware shared workspace
-persistence,
+parameter selectors, conflict-aware shared workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated
 Service/Realtime upload/core transfer and task
 composition, additional resource opcodes and capability-generated graph nodes,

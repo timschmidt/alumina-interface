@@ -244,14 +244,21 @@ acyclic rank, and routes those captures visibly as feedback. Its canonical
 identity cursors. A 13-entry palette derives kind/version and port/parameter
 shape from the fixed audited schemas and exact defaults from reviewed fixture
 instances. Monotonic node creation, atomic node/incident-wire deletion, node
-drags, typed wire connect/disconnect, and exact scalar/composite literal
-replacement mutate the draft only after complete candidate validation. Any
-embedded graph edit detaches the reference trace because its `ALGT` identity
-still binds the reviewed graph; placement-only edits preserve it.
+drags, typed wire connect/disconnect, bounded canonical label replacement,
+concrete execution-domain replacement, and exact scalar/composite literal
+replacement mutate the draft only after complete candidate validation. Labels
+are canonical human metadata rather than node-kind identity. The domain mutator
+is structural; the inspector exposes only families admitted by the reviewed
+schema and device identities already established by a graph clock or node
+placement, then reruns complete audited analysis before commit. It never
+accepts a raw device ID. Any embedded graph edit detaches the reference trace
+because its `ALGT` identity still binds the reviewed graph; placement-only edits
+preserve it.
 The initial 3,755-byte workspace has SHA-256
 `bf5135c39b67c46a3a5908d4d0d8a1d13d065b59231890e8fbdda818f064ae16`.
-Node selection exposes kind/version, typed ports, exact parameters, and explicit
-state facts. A public window-free formatter/parser now supplies deterministic
+Node selection exposes kind/version, an editable bounded label, audited concrete
+execution choices, typed ports, exact parameters, and explicit state facts. A
+public window-free formatter/parser now supplies deterministic
 schema-directed editor text: exact rationals retain Hyperreal notation, text is
 quoted and escaped, bytes use `hex"..."`, arrays use `[a,b]`, records use
 canonical `{field:value}` order, and options/results use explicit
@@ -497,8 +504,7 @@ Nested package dependencies, general cycle/depth rules, editable instance and
 panel workflows remain open. Multi-value state records, queue timeouts and
 additional policies, cases/loops/state machines, capability-generated nodes
 beyond stable Boolean inputs, cache-derived job-handle selectors and nested
-identity-bearing workflows, label/domain editors, workspace
-collaboration/conflict handling, broader
+identity-bearing workflows, workspace collaboration/conflict handling, broader
 resource claims, general host implementation admission, measured WCET/deadline
 analysis, physical HIL,
 output and motion opcodes, live capability/configuration discovery,

@@ -50,23 +50,31 @@ It embeds graph identity
 
 ## Transactional editing
 
-`GraphWorkspaceDocument` exposes six transactional edits:
+`GraphWorkspaceDocument` exposes eight transactional edits:
 
 - move one node, advancing only workspace revision;
 - create one complete node prototype and placement with the monotonic node ID;
 - delete one node, its placement, and every incident wire without rewinding
   either ID cursor;
 - connect one typed output to one unowned input with the monotonic wire ID;
-- disconnect one existing wire without rewinding the ID cursor; and
+- disconnect one existing wire without rewinding the ID cursor;
+- replace one bounded canonical UTF-8 node label while preserving kind, ports,
+  parameters, domain, placement, and stable identities;
+- replace one concrete execution domain while preserving every other node and
+  workspace fact; and
 - replace one exact parameter value while preserving its stable parameter ID,
   name, and registered root type.
 
 Each operation constructs and validates a complete candidate before replacing
 the prior document. Rejected coordinates, missing IDs, exhausted counters,
-wrong port direction/type, duplicate target ownership, parameter type drift, or
-revision overflow leave the workspace byte-for-byte unchanged. Node, wire, and
-parameter edits also advance the embedded graph revision and therefore change
-its canonical digest.
+wrong port direction/type, duplicate target ownership, invalid label/domain,
+parameter type drift, or revision overflow leave the workspace byte-for-byte
+unchanged. Node, wire, label, domain, and parameter edits also advance the
+embedded graph revision and therefore change its canonical digest. Labels are
+canonical human metadata, but are never matched as behavior identity. The core
+domain replacement is deliberately structural: allowed kind/domain families,
+clock relationships, wire crossings, implementations, target capabilities, and
+deployment remain separate audited obligations.
 
 The native/WASM control workspace initializes one canonical `ALGW` from the
 audited deterministic layout. Its 13-entry palette is derived from the fixed
@@ -79,6 +87,14 @@ or port.
 
 Nodes can be created, selected, deleted, and dragged; an output then input can
 be clicked to connect, and an input can be secondary-clicked to disconnect.
+The selected-node inspector edits the bounded canonical label and offers only
+execution-domain families admitted by that node's reviewed schema. Concrete
+device identities are collected from existing device-cycle clocks and node
+placements in the graph, sorted canonically, and never accepted as raw text.
+The complete candidate is rerun through the fixed semantic registry before it
+can commit. A graph with no reviewed device identity consequently cannot invent
+a Service or Realtime target.
+
 The shared parameter surface accepts bounded schema-directed Boolean,
 exact-rational, measurement-interval, canonical signed/unsigned lattice-count,
 text, byte, array, record, option, and result literals. Every current
@@ -96,10 +112,10 @@ combinational cycle that cannot be laid out is rejected without mutation. An
 empty draft remains renderable and can accept a new palette node.
 
 The existing `ALGT` reference trace remains visible after placement-only edits
-because its embedded `ALGR` digest is unchanged. Any node, wire, or parameter
-edit detaches and hides that trace: trace bytes are never relabeled as evidence
-for a graph they did not simulate. Reset reconstructs the reviewed reference
-graph and layout.
+because its embedded `ALGR` digest is unchanged. Any node, wire, label, domain,
+or parameter edit detaches and hides that trace: trace bytes are never relabeled
+as evidence for a graph they did not simulate. Reset reconstructs the reviewed
+reference graph and layout.
 
 ## Canonical history
 
@@ -167,9 +183,9 @@ control UI never claims it can safely interpret or edit them.
 
 ## Current exclusions
 
-Node label/domain editing, cache-derived job-handle selection, selection sets,
-groups/comments, collaborative diffs, and conflict-aware shared persistence
-remain later slices. The separate canonical
+Cache-derived job-handle selection, selection sets, groups/comments,
+collaborative diffs, and conflict-aware shared persistence remain later slices.
+The separate canonical
 [`ALGC` V1 component package](GRAPH-COMPONENT-V1.md) now embeds an unchanged
 `ALGW` and adds a connector pane plus exact front-panel bindings; those facts
 are deliberately not smuggled into this workspace format. `ALGW` grants no

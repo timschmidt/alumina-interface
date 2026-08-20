@@ -67,6 +67,25 @@ impl ExecutionDomainSet {
         self.0 & bit != 0
     }
 
+    /// Return whether exact host placement belongs to the set.
+    pub const fn allows_host_exact(self) -> bool {
+        self.0 & Self::HOST_BIT != 0
+    }
+
+    /// Return whether service-core placement belongs to the set.
+    ///
+    /// A concrete nonzero device identity remains independently required.
+    pub const fn allows_service(self) -> bool {
+        self.0 & Self::SERVICE_BIT != 0
+    }
+
+    /// Return whether real-time-core placement belongs to the set.
+    ///
+    /// A concrete nonzero device identity remains independently required.
+    pub const fn allows_realtime(self) -> bool {
+        self.0 & Self::REALTIME_BIT != 0
+    }
+
     /// Return the canonical Host/Service/Realtime membership bitset.
     pub const fn bits(self) -> u8 {
         self.0

@@ -1396,6 +1396,7 @@ pub(crate) struct ExactControlWorkspace {
     palette: Vec<NodePaletteEntry>,
     palette_index: usize,
     parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
+    node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     selected_node: Option<GraphNodeId>,
     pending_source: Option<WireEndpoint>,
@@ -1451,6 +1452,7 @@ impl ExactControlWorkspace {
             palette,
             palette_index: 0,
             parameter_drafts: BTreeMap::new(),
+            node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
             selected_node: None,
             pending_source: None,
@@ -1916,6 +1918,7 @@ impl ExactControlWorkspace {
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
+        self.node_label_drafts.clear();
         self.probe_drafts.clear();
         self.selected_node = self
             .selected_node
@@ -2622,6 +2625,7 @@ impl ExactControlWorkspace {
                     self.pending_source = None;
                     self.drag = None;
                     self.parameter_drafts.clear();
+                    self.node_label_drafts.clear();
                 }
             }
             Err(error) => {
@@ -2683,7 +2687,52 @@ impl ExactControlWorkspace {
             self.selected_node = None;
             self.pending_source = self.pending_source.filter(|source| source.node != id);
             self.parameter_drafts.retain(|(node, _), _| *node != id);
+            self.node_label_drafts.remove(&id);
         }
+    }
+
+    fn commit_node_label(&mut self, node_id: GraphNodeId, label: &str) {
+        if self.workspace.graph().node(node_id).is_none() {
+            self.edit_status = format!(
+                "node label edit rejected without mutation: node {} is unavailable",
+                node_id.get()
+            );
+            return;
+        }
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.set_node_label(node_id, label) {
+            self.edit_status = format!("node label edit rejected without mutation: {error}");
+            return;
+        }
+        if self.commit_candidate(
+            candidate,
+            &format!("set node {} label to exact UTF-8 {label:?}", node_id.get()),
+        ) {
+            self.node_label_drafts.insert(node_id, label.to_owned());
+        }
+    }
+
+    fn commit_node_domain(&mut self, node_id: GraphNodeId, domain: ExecutionDomain) {
+        if self.workspace.graph().node(node_id).is_none() {
+            self.edit_status = format!(
+                "node domain edit rejected without mutation: node {} is unavailable",
+                node_id.get()
+            );
+            return;
+        }
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.set_node_domain(node_id, domain) {
+            self.edit_status = format!("node domain edit rejected without mutation: {error}");
+            return;
+        }
+        self.commit_candidate(
+            candidate,
+            &format!(
+                "set node {} execution placement to {}",
+                node_id.get(),
+                domain_choice_label(domain)
+            ),
+        );
     }
 
     fn commit_parameter_text(&mut self, node_id: GraphNodeId, parameter_id: u32, text: &str) {
@@ -2874,6 +2923,8 @@ impl ExactControlWorkspace {
             .filter(|source| self.workspace.graph().node(source.node).is_some());
         self.parameter_drafts
             .retain(|(node, _), _| self.workspace.graph().node(*node).is_some());
+        self.node_label_drafts
+            .retain(|node, _| self.workspace.graph().node(*node).is_some());
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.refresh_component();
@@ -2942,6 +2993,7 @@ impl ExactControlWorkspace {
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
+        self.node_label_drafts.clear();
         self.probe_drafts.clear();
         self.refresh_component();
         self.replace_probe_package(probes);
@@ -3114,6 +3166,7 @@ impl ExactControlWorkspace {
             self.pending_source = None;
             self.drag = None;
             self.parameter_drafts.clear();
+            self.node_label_drafts.clear();
             self.reset_probe_drafts();
             Ok(())
         } else {
@@ -3149,13 +3202,24 @@ impl ExactControlWorkspace {
         };
         let document = self.workspace.graph().clone();
         let placement = self.workspace.placement(id);
-        let state = self
+        let schema = self
             .fixture
             .registry()
             .semantic_registry()
-            .schema(node.kind())
-            .and_then(alumina_interface_core::graph::NodeSchema::state);
+            .schema(node.kind());
+        let state = schema.and_then(alumina_interface_core::graph::NodeSchema::state);
+        let domain_choices = schema.map_or_else(Vec::new, |schema| {
+            audited_domain_choices(&document, schema.allowed_domains())
+        });
+        let maximum_label_bytes = document.schema().limits().maximum_label_bytes;
+        let mut label_text = self
+            .node_label_drafts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| node.label().to_owned());
         let mut delete_requested = false;
+        let mut label_request = None;
+        let mut domain_request = None;
         let mut parameter_request = None;
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3166,7 +3230,13 @@ impl ExactControlWorkspace {
                 }
                 delete_requested = ui.small_button("delete node + wires").clicked();
             });
-            ui.label(format!("Execution domain: {}", domain_label(node.domain())));
+            (label_request, domain_request) = show_node_identity_editors(
+                ui,
+                &node,
+                &domain_choices,
+                maximum_label_bytes,
+                &mut label_text,
+            );
             if let Some(placement) = placement {
                 ui.monospace(format!(
                     "canvas = ({}, {}) logical px · presentation only",
@@ -3182,41 +3252,8 @@ impl ExactControlWorkspace {
                     ui.monospace(port_description(&document, "out", port));
                 }
             });
-            if !node.parameters().is_empty() {
-                ui.weak(
-                    "Exact literal text: quoted strings · hex\"bytes\" · [arrays] · {field:value} · some/none · ok/error",
-                );
-            }
-            for parameter in node.parameters() {
-                let Some(initial) = parameter_edit_text(&document, parameter.value()) else {
-                    ui.monospace(format!(
-                        "{} = {} · read-only literal shape",
-                        parameter.name(),
-                        typed_value_text(&document, parameter.value())
-                    ));
-                    continue;
-                };
-                let maximum = parameter_text_limit(&document, parameter.value().value_type());
-                let draft = self
-                    .parameter_drafts
-                    .entry((id, parameter.id()))
-                    .or_insert(initial);
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(format!("{}:", parameter.name()));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(draft)
-                            .desired_width(180.0)
-                            .char_limit(maximum),
-                    );
-                    let apply = ui.small_button("apply exact").clicked()
-                        || (response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-                    ui.weak(typed_value_text(&document, parameter.value()));
-                    if apply {
-                        parameter_request = Some((parameter.id(), draft.clone()));
-                    }
-                });
-            }
+            parameter_request =
+                show_node_parameter_editors(ui, &document, &node, &mut self.parameter_drafts);
             if let Some(state) = state {
                 ui.label(format!(
                     "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
@@ -3226,8 +3263,13 @@ impl ExactControlWorkspace {
                 ));
             }
         });
+        self.node_label_drafts.insert(id, label_text);
         if delete_requested {
             self.delete_selected_node(id);
+        } else if let Some(label) = label_request {
+            self.commit_node_label(id, &label);
+        } else if let Some(domain) = domain_request {
+            self.commit_node_domain(id, domain);
         } else if let Some((parameter, text)) = parameter_request {
             self.commit_parameter_text(id, parameter, &text);
         }
@@ -6100,12 +6142,159 @@ fn short_kind(kind: &str) -> &str {
     kind.strip_prefix("control.").unwrap_or(kind)
 }
 
-const fn domain_label(domain: ExecutionDomain) -> &'static str {
-    match domain {
-        ExecutionDomain::HostExact => "HostExact",
-        ExecutionDomain::Service { .. } => "Service",
-        ExecutionDomain::Realtime { .. } => "Realtime",
+fn show_node_identity_editors(
+    ui: &mut egui::Ui,
+    node: &NodeDefinition,
+    domain_choices: &[ExecutionDomain],
+    maximum_label_bytes: usize,
+    label_text: &mut String,
+) -> (Option<String>, Option<ExecutionDomain>) {
+    let mut label_request = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.monospace("label:");
+        let response = ui.add(
+            egui::TextEdit::singleline(label_text)
+                .desired_width(260.0)
+                .char_limit(maximum_label_bytes),
+        );
+        let apply = ui.small_button("apply label").clicked()
+            || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+        if ui.small_button("reset label").clicked() {
+            node.label().clone_into(label_text);
+        }
+        ui.weak(format!(
+            "canonical metadata · {} / {maximum_label_bytes} UTF-8 bytes · never behavior identity",
+            label_text.len()
+        ));
+        if apply {
+            label_request = Some(label_text.clone());
+        }
+    });
+
+    let mut selected_domain = node.domain();
+    ui.horizontal_wrapped(|ui| {
+        ui.monospace("execution placement:");
+        egui::ComboBox::from_id_salt(("node_execution_domain", node.id().get()))
+            .selected_text(domain_choice_label(selected_domain))
+            .show_ui(ui, |ui| {
+                for choice in domain_choices {
+                    ui.selectable_value(
+                        &mut selected_domain,
+                        *choice,
+                        domain_choice_label(*choice),
+                    );
+                }
+            });
+        ui.weak(format!(
+            "{} audited concrete choice(s) · device identities come only from graph clocks/placements",
+            domain_choices.len()
+        ));
+    });
+    let domain_request = (selected_domain != node.domain()).then_some(selected_domain);
+    (label_request, domain_request)
+}
+
+fn show_node_parameter_editors(
+    ui: &mut egui::Ui,
+    document: &GraphDocument,
+    node: &NodeDefinition,
+    drafts: &mut BTreeMap<(GraphNodeId, u32), String>,
+) -> Option<(u32, String)> {
+    if !node.parameters().is_empty() {
+        ui.weak(
+            "Exact literal text: quoted strings · hex\"bytes\" · [arrays] · {field:value} · some/none · ok/error",
+        );
     }
+    let mut request = None;
+    for parameter in node.parameters() {
+        let Some(initial) = parameter_edit_text(document, parameter.value()) else {
+            ui.monospace(format!(
+                "{} = {} · read-only literal shape",
+                parameter.name(),
+                typed_value_text(document, parameter.value())
+            ));
+            continue;
+        };
+        let maximum = parameter_text_limit(document, parameter.value().value_type());
+        let draft = drafts.entry((node.id(), parameter.id())).or_insert(initial);
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(format!("{}:", parameter.name()));
+            let response = ui.add(
+                egui::TextEdit::singleline(draft)
+                    .desired_width(180.0)
+                    .char_limit(maximum),
+            );
+            let apply = ui.small_button("apply exact").clicked()
+                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            ui.weak(typed_value_text(document, parameter.value()));
+            if apply {
+                request = Some((parameter.id(), draft.clone()));
+            }
+        });
+    }
+    request
+}
+
+fn domain_choice_label(domain: ExecutionDomain) -> String {
+    match domain {
+        ExecutionDomain::HostExact => "HostExact".to_owned(),
+        ExecutionDomain::Service { device_id } => {
+            format!("Service · device {}…", digest_prefix16(device_id.0))
+        }
+        ExecutionDomain::Realtime { device_id } => {
+            format!("Realtime · device {}…", digest_prefix16(device_id.0))
+        }
+    }
+}
+
+fn audited_domain_choices(
+    document: &GraphDocument,
+    allowed: ExecutionDomainSet,
+) -> Vec<ExecutionDomain> {
+    let mut devices = Vec::new();
+    for clock in document.clocks() {
+        if let ClockKind::DeviceCycle { device_id, .. } = clock.kind()
+            && !devices.contains(&device_id)
+        {
+            devices.push(device_id);
+        }
+    }
+    for node in document.nodes() {
+        let device_id = match node.domain() {
+            ExecutionDomain::HostExact => None,
+            ExecutionDomain::Service { device_id } | ExecutionDomain::Realtime { device_id } => {
+                Some(device_id)
+            }
+        };
+        if let Some(device_id) = device_id
+            && !devices.contains(&device_id)
+        {
+            devices.push(device_id);
+        }
+    }
+    devices.sort_unstable_by_key(|device| device.0);
+
+    let mut choices = Vec::new();
+    if allowed.allows_host_exact() {
+        choices.push(ExecutionDomain::HostExact);
+    }
+    if allowed.allows_service() {
+        choices.extend(
+            devices
+                .iter()
+                .copied()
+                .map(|device_id| ExecutionDomain::Service { device_id }),
+        );
+    }
+    if allowed.allows_realtime() {
+        choices.extend(
+            devices
+                .iter()
+                .copied()
+                .map(|device_id| ExecutionDomain::Realtime { device_id }),
+        );
+    }
+    choices
 }
 
 fn digest_prefix(digest: [u8; 32]) -> String {
@@ -6829,6 +7018,171 @@ mod tests {
         );
         assert_eq!(workspace.history.redo_len(), 0);
         assert!(workspace.persistence_pending());
+    }
+
+    #[test]
+    fn node_label_edits_are_bounded_pair_historical_and_noop_aware() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let node = GraphNodeId::new(8);
+        let initial = workspace.workspace.clone();
+        let initial_encoding = workspace.workspace_encoding.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
+        let initial_placement = workspace.workspace.placement(node);
+        let initial_node_cursor = workspace.workspace.next_node_id();
+        let initial_wire_cursor = workspace.workspace.next_wire_id();
+
+        workspace.mark_persisted();
+        workspace.commit_node_label(node, "Exact gain stage α");
+        assert_eq!(
+            workspace.workspace.graph().node(node).unwrap().label(),
+            "Exact gain stage α"
+        );
+        assert_ne!(workspace.workspace_encoding, initial_encoding);
+        assert_ne!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert_eq!(workspace.workspace.placement(node), initial_placement);
+        assert_eq!(workspace.workspace.next_node_id(), initial_node_cursor);
+        assert_eq!(workspace.workspace.next_wire_id(), initial_wire_cursor);
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert_eq!(workspace.history.redo_len(), 0);
+        assert!(workspace.persistence_pending());
+        assert!(!workspace.reference_trace_is_current());
+        assert_eq!(
+            workspace.node_label_drafts.get(&node).map(String::as_str),
+            Some("Exact gain stage α")
+        );
+
+        workspace.mark_persisted();
+        let edited = workspace.workspace.clone();
+        let edited_encoding = workspace.workspace_encoding.clone();
+        let edited_probes = workspace.probes.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        workspace.commit_node_label(node, "Exact gain stage α");
+        assert_eq!(workspace.workspace, edited);
+        assert_eq!(workspace.workspace_encoding, edited_encoding);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.edit_status.contains("already matched"));
+
+        for invalid in [
+            String::new(),
+            "control\ncharacter".to_owned(),
+            "x".repeat(
+                workspace
+                    .workspace
+                    .graph()
+                    .schema()
+                    .limits()
+                    .maximum_label_bytes
+                    + 1,
+            ),
+        ] {
+            workspace.commit_node_label(node, &invalid);
+            assert_eq!(workspace.workspace, edited);
+            assert_eq!(workspace.workspace_encoding, edited_encoding);
+            assert_eq!(workspace.history, retained_history);
+            assert!(!workspace.persistence_pending());
+            assert!(workspace.edit_status.contains("rejected without mutation"));
+        }
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.workspace, initial);
+        assert_eq!(workspace.workspace_encoding, initial_encoding);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert!(workspace.node_label_drafts.is_empty());
+        workspace.navigate_history(true);
+        assert_eq!(workspace.workspace, edited);
+        assert_eq!(workspace.workspace_encoding, edited_encoding);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            edited_probes.encoding
+        );
+        assert!(workspace.node_label_drafts.is_empty());
+
+        let persisted = workspace.persisted_workspace_pair().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(restored.workspace, workspace.workspace);
+        assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
+        assert_eq!(
+            restored.probes.as_ref().unwrap().encoding,
+            workspace.probes.as_ref().unwrap().encoding
+        );
+    }
+
+    #[test]
+    fn execution_domain_choices_use_audited_families_and_known_device_identities() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let node = GraphNodeId::new(8);
+        let schema = workspace
+            .fixture
+            .registry()
+            .semantic_registry()
+            .schema(workspace.workspace.graph().node(node).unwrap().kind())
+            .unwrap();
+        assert_eq!(
+            audited_domain_choices(workspace.workspace.graph(), schema.allowed_domains()),
+            vec![ExecutionDomain::HostExact]
+        );
+
+        workspace.mark_persisted();
+        let retained_workspace = workspace.workspace.clone();
+        let retained_encoding = workspace.workspace_encoding.clone();
+        let retained_history = workspace.history.clone();
+        workspace.commit_node_domain(node, ExecutionDomain::HostExact);
+        assert_eq!(workspace.workspace, retained_workspace);
+        assert_eq!(workspace.workspace_encoding, retained_encoding);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.edit_status.contains("already matched"));
+
+        workspace.commit_node_domain(
+            node,
+            ExecutionDomain::Service {
+                device_id: DeviceId([0x42; 16]),
+            },
+        );
+        assert_eq!(workspace.workspace, retained_workspace);
+        assert_eq!(workspace.workspace_encoding, retained_encoding);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.edit_status.contains("audited semantics rejected"));
+
+        workspace.commit_node_domain(GraphNodeId::new(99), ExecutionDomain::HostExact);
+        assert_eq!(workspace.workspace, retained_workspace);
+        assert_eq!(workspace.history, retained_history);
+        assert!(workspace.edit_status.contains("node 99 is unavailable"));
+
+        let proof = tinybee_resource_proof().unwrap();
+        let known_device = DeviceId([0x54; 16]);
+        assert_eq!(
+            audited_domain_choices(proof.workspace.graph(), ExecutionDomainSet::ALL),
+            vec![
+                ExecutionDomain::HostExact,
+                ExecutionDomain::Service {
+                    device_id: known_device,
+                },
+                ExecutionDomain::Realtime {
+                    device_id: known_device,
+                },
+            ]
+        );
+        assert_eq!(
+            audited_domain_choices(proof.workspace.graph(), ExecutionDomainSet::REALTIME),
+            vec![ExecutionDomain::Realtime {
+                device_id: known_device,
+            }]
+        );
+        assert_eq!(
+            domain_choice_label(ExecutionDomain::Realtime {
+                device_id: known_device,
+            }),
+            "Realtime · device 5454545454545454…"
+        );
     }
 
     #[test]
@@ -8059,6 +8413,7 @@ mod tests {
     #[test]
     fn headless_exact_control_workspace_produces_a_complete_egui_frame() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.selected_node = Some(GraphNodeId::new(8));
         let context = egui::Context::default();
         let output = context.run(
             egui::RawInput {
@@ -8074,6 +8429,13 @@ mod tests {
         );
         assert!(!output.shapes.is_empty());
         assert!(!output.textures_delta.set.is_empty());
+        assert_eq!(
+            workspace
+                .node_label_drafts
+                .get(&GraphNodeId::new(8))
+                .map(String::as_str),
+            Some("Proportional term")
+        );
 
         for id in 1..=4 {
             workspace.remove_probe(GraphProbeId::new(id));
