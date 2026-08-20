@@ -265,14 +265,17 @@ certified finite `f64` enclosures; the shared cursor displays the retained exact
 rational or Boolean value. Headless core-edit and full-frame tests exercise the
 same native/browser paths.
 
-Bounded undo/redo stores complete canonical workspace encodings and replays a
-target before mutating navigation state. Browser origin-local storage preserves
-only the current document as versioned lowercase hex under a 2 MiB
-canonical-byte ceiling; history remains ephemeral. Browser `.algw` upload and
-download and the native explicit-path bridge exchange exact bytes under the
-20 MiB workspace ceiling. Imports additionally require layout admission and
-the fixed audited registry, allowing only a visible missing-required-input
-draft blocker rather than silently interpreting unknown behavior.
+Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
+including the sidecar's exact external-workspace binding, before mutating
+navigation state. Graph, probe, trigger, and ALGP-import changes share this
+history; exact no-ops do not consume a snapshot. Browser origin-local storage
+preserves only the current pair in one versioned lowercase-hex value, while
+history remains ephemeral. Browser `.algw`/`.algp` upload and download and the
+native explicit-path bridges exchange exact bytes under their independent
+20 MiB workspace and 2 MiB probe ceilings. ALGW imports additionally require
+layout admission and the fixed audited registry, allowing only a visible
+missing-required-input draft blocker rather than silently interpreting unknown
+behavior.
 
 The fixed host subset still does not model resource handles, physical side
 effects, Service/Realtime execution, deadlines, or firmware layout.

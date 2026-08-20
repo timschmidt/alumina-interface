@@ -27,7 +27,7 @@ use alumina_interface_core::graph::{
     GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument,
     GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeTrigger, GraphProbeTriggerResolution,
     GraphSchema, GraphSimulationRegistry, GraphTraceEntryKind, GraphTypeId, GraphValue,
-    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
+    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceLimits, GraphWorkspaceProbeHistory,
     NodeDefinition, NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema,
     PortDefinition, RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
     TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
@@ -1144,7 +1144,7 @@ pub(crate) struct ExactControlWorkspace {
     probe_status: String,
     board_explorer: BoardExplorerPanel,
     target_resources: TargetResourceProof,
-    history: GraphWorkspaceHistory,
+    history: GraphWorkspaceProbeHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
     palette: Vec<NodePaletteEntry>,
@@ -1203,7 +1203,7 @@ impl ExactControlWorkspace {
             probe_status: "canonical ALGP diagnostic probes attached".to_owned(),
             board_explorer,
             target_resources,
-            history: GraphWorkspaceHistory::default(),
+            history: GraphWorkspaceProbeHistory::default(),
             presentation,
             traces,
             palette,
@@ -1316,7 +1316,7 @@ impl ExactControlWorkspace {
         }
         self.show_probe_sidebar(ui);
         ui.label(format!(
-            "History: {} undo / {} redo · {} bytes",
+            "Pair history: {} undo / {} redo · {} bytes",
             self.history.undo_len(),
             self.history.redo_len(),
             self.history.retained_bytes()
@@ -1491,7 +1491,7 @@ impl ExactControlWorkspace {
                 navigate = Some(true);
             }
             ui.weak(format!(
-                "{} back / {} forward · {} retained bytes",
+                "{} back / {} forward · {} retained pair bytes",
                 self.history.undo_len(),
                 self.history.redo_len(),
                 self.history.retained_bytes()
@@ -1599,10 +1599,13 @@ impl ExactControlWorkspace {
     fn navigate_history(&mut self, redo: bool) {
         let admission = GraphWorkspaceLimits::interactive();
         let graph_admission = GraphLimits::interactive();
+        let probe_admission = GraphProbeLimits::interactive();
         let preview = if redo {
-            self.history.preview_redo(admission, graph_admission)
+            self.history
+                .preview_redo(admission, graph_admission, probe_admission)
         } else {
-            self.history.preview_undo(admission, graph_admission)
+            self.history
+                .preview_undo(admission, graph_admission, probe_admission)
         };
         let Some(preview) = (match preview {
             Ok(preview) => preview,
@@ -1612,13 +1615,13 @@ impl ExactControlWorkspace {
             }
         }) else {
             self.edit_status = if redo {
-                "no later canonical workspace is retained".to_owned()
+                "no later canonical workspace/probe pair is retained".to_owned()
             } else {
-                "no prior canonical workspace is retained".to_owned()
+                "no prior canonical workspace/probe pair is retained".to_owned()
             };
             return;
         };
-        let candidate = preview.document().clone();
+        let candidate = preview.workspace().clone();
         let (encoding, presentation, semantic) = match self.prepare_candidate(&candidate) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1626,12 +1629,27 @@ impl ExactControlWorkspace {
                 return;
             }
         };
+        let Some(current_probes) = self.probes.as_ref() else {
+            "history navigation rejected without mutation: no canonical ALGP sidecar is attached"
+                .clone_into(&mut self.edit_status);
+            return;
+        };
         let navigation = if redo {
-            self.history
-                .redo(&self.workspace, admission, graph_admission)
+            self.history.redo(
+                &self.workspace,
+                &current_probes.document,
+                admission,
+                graph_admission,
+                probe_admission,
+            )
         } else {
-            self.history
-                .undo(&self.workspace, admission, graph_admission)
+            self.history.undo(
+                &self.workspace,
+                &current_probes.document,
+                admission,
+                graph_admission,
+                probe_admission,
+            )
         };
         let replay = match navigation {
             Ok(Some(replay)) => replay,
@@ -1644,8 +1662,11 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        debug_assert_eq!(replay.encoding(), &encoding);
-        self.workspace = replay.into_document();
+        let (workspace_replay, probe_replay) = replay.into_parts();
+        debug_assert_eq!(workspace_replay.encoding(), &encoding);
+        debug_assert_eq!(probe_replay.encoding(), preview.probe_encoding());
+        let probe_encoding = probe_replay.encoding().clone();
+        self.workspace = workspace_replay.into_document();
         self.workspace_encoding = encoding;
         self.presentation = presentation;
         self.pending_source = None;
@@ -1657,9 +1678,14 @@ impl ExactControlWorkspace {
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.refresh_component();
-        self.refresh_probes();
+        self.replace_probe_package(ProbePackage {
+            document: probe_replay.into_document(),
+            encoding: probe_encoding,
+        });
+        "restored exact ALGW/ALGP pair from bounded history".clone_into(&mut self.probe_status);
+        self.reset_cursor_to_trigger();
         self.edit_status = format!(
-            "{} canonical workspace; {semantic}",
+            "{} canonical workspace/probe pair; {semantic}",
             if redo { "redid" } else { "undid to" }
         );
     }
@@ -2538,7 +2564,12 @@ impl ExactControlWorkspace {
                 return false;
             }
         };
-        if let Err(error) = self.history.record(self.workspace_encoding.clone()) {
+        let Some(probes) = self.probes.as_ref() else {
+            "edit history rejected without mutation: no canonical ALGP sidecar is attached"
+                .clone_into(&mut self.edit_status);
+            return false;
+        };
+        if let Err(error) = self.history.record(&self.workspace, &probes.document) {
             self.edit_status = format!("edit history rejected without mutation: {error}");
             return false;
         }
@@ -2623,16 +2654,20 @@ impl ExactControlWorkspace {
         self.parameter_drafts.clear();
         self.refresh_component();
         self.replace_probe_package(probes);
-        self.cursor_tick = match self.trigger_resolution() {
-            Ok(GraphProbeTriggerResolution::Matched(matched)) => matched.trigger_tick(),
-            Ok(GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_))
-            | Err(_) => 0,
-        };
+        self.reset_cursor_to_trigger();
         self.persistence_dirty = false;
         self.persistence_attempted = false;
         "restored canonical ALGP sidecar with exact ALGW binding"
             .clone_into(&mut self.probe_status);
         Ok(())
+    }
+
+    fn reset_cursor_to_trigger(&mut self) {
+        self.cursor_tick = match self.trigger_resolution() {
+            Ok(GraphProbeTriggerResolution::Matched(matched)) => matched.trigger_tick(),
+            Ok(GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_))
+            | Err(_) => 0,
+        };
     }
 
     fn refresh_component(&mut self) {
@@ -2706,6 +2741,24 @@ impl ExactControlWorkspace {
         changed
     }
 
+    fn commit_probe_package(&mut self, probes: ProbePackage) -> Result<bool, String> {
+        if self
+            .probes
+            .as_ref()
+            .is_some_and(|current| current.encoding == probes.encoding)
+        {
+            return Ok(false);
+        }
+        let current = self
+            .probes
+            .as_ref()
+            .ok_or_else(|| "no canonical ALGP sidecar is attached".to_owned())?;
+        self.history
+            .record(&self.workspace, &current.document)
+            .map_err(|error| format!("pair history rejected: {error}"))?;
+        Ok(self.replace_probe_package(probes))
+    }
+
     fn import_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         let replay = replay_graph_workspace(
             bytes,
@@ -2734,7 +2787,7 @@ impl ExactControlWorkspace {
             document: replay.document().clone(),
             encoding: replay.encoding().clone(),
         };
-        let changed = self.replace_probe_package(probes);
+        let changed = self.commit_probe_package(probes)?;
         if changed {
             "imported canonical ALGP after exact current-workspace replay"
                 .clone_into(&mut self.probe_status);
@@ -3009,7 +3062,10 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        self.replace_probe_package(ProbePackage { document, encoding });
+        if let Err(error) = self.commit_probe_package(ProbePackage { document, encoding }) {
+            self.probe_status = format!("probe history rejected without mutation: {error}");
+            return;
+        }
         self.probe_status = format!(
             "created bounded probe {} for #{}.{}; authoring only",
             id.get(),
@@ -3036,7 +3092,13 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let changed = self.replace_probe_package(ProbePackage { document, encoding });
+        let changed = match self.commit_probe_package(ProbePackage { document, encoding }) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.probe_status = format!("probe history rejected without mutation: {error}");
+                return;
+            }
+        };
         self.probe_status = format!(
             "{} probe {}; identity was not reused and any bound trigger was cleared",
             if changed { "removed" } else { "retained" },
@@ -3068,7 +3130,13 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let changed = self.replace_probe_package(ProbePackage { document, encoding });
+        let changed = match self.commit_probe_package(ProbePackage { document, encoding }) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.probe_status = format!("trigger history rejected without mutation: {error}");
+                return;
+            }
+        };
         self.probe_status = format!(
             "{} replay-only p{} {} trigger with {} pre / {} post samples",
             if changed { "set" } else { "retained" },
@@ -3097,7 +3165,13 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let changed = self.replace_probe_package(ProbePackage { document, encoding });
+        let changed = match self.commit_probe_package(ProbePackage { document, encoding }) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.probe_status = format!("trigger history rejected without mutation: {error}");
+                return;
+            }
+        };
         if changed {
             "cleared replay-only trigger; probe bindings are unchanged"
                 .clone_into(&mut self.probe_status);
@@ -5529,6 +5603,7 @@ mod tests {
     fn canonical_history_drives_ui_undo_redo_and_clears_abandoned_redo() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let initial = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
         let origin = workspace.workspace.placement(GraphNodeId::new(1)).unwrap();
         workspace.commit_node_drag(
             NodeDrag {
@@ -5538,15 +5613,25 @@ mod tests {
             egui::vec2(20.0, 30.0),
         );
         let moved = workspace.workspace.clone();
+        let moved_probes = workspace.probes.as_ref().unwrap().clone();
+        assert_ne!(moved_probes.encoding, initial_probes.encoding);
         assert_eq!(workspace.history.undo_len(), 1);
         assert_eq!(workspace.history.redo_len(), 0);
 
         workspace.navigate_history(false);
         assert_eq!(workspace.workspace, initial);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
         assert_eq!(workspace.history.undo_len(), 0);
         assert_eq!(workspace.history.redo_len(), 1);
         workspace.navigate_history(true);
         assert_eq!(workspace.workspace, moved);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            moved_probes.encoding
+        );
 
         workspace.navigate_history(false);
         let second_origin = workspace.workspace.placement(GraphNodeId::new(2)).unwrap();
@@ -5575,7 +5660,7 @@ mod tests {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
         workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
-        assert_eq!(workspace.history.undo_len(), 1);
+        assert_eq!(workspace.history.undo_len(), 2);
         let persisted = workspace.persisted_workspace_pair().unwrap();
         assert!(persisted.starts_with(PERSISTED_WORKSPACE_PAIR_PREFIX));
         let (workspace_hex, probe_hex) = persisted[PERSISTED_WORKSPACE_PAIR_PREFIX.len()..]
@@ -5637,15 +5722,28 @@ mod tests {
     #[test]
     fn probe_edits_dirty_pair_persistence_only_when_canonical_identity_changes() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
         workspace.mark_persisted();
         assert!(!workspace.persistence_pending());
 
         workspace.clear_probe_trigger();
         assert!(workspace.persistence_pending());
         let cleared = workspace.probes.as_ref().unwrap().encoding.clone();
+        assert_eq!(workspace.history.undo_len(), 1);
+        workspace.navigate_history(false);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        workspace.navigate_history(true);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, cleared);
         workspace.mark_persisted();
+        let retained_history = workspace.history.clone();
         workspace.clear_probe_trigger();
         assert_eq!(workspace.probes.as_ref().unwrap().encoding, cleared);
+        assert_eq!(workspace.history, retained_history);
         assert!(!workspace.persistence_pending());
 
         workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
@@ -5655,6 +5753,8 @@ mod tests {
     #[test]
     fn graph_edits_cannot_leave_an_unbound_probe_sidecar() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
         let observed_node = workspace.probes.as_ref().unwrap().document.probes()[0]
             .source()
             .node;
@@ -5667,14 +5767,75 @@ mod tests {
             workspace.workspace_encoding.digest()
         );
         assert!(workspace.probe_status.contains("empty canonical sidecar"));
+        let edited_workspace = workspace.workspace.clone();
+        let edited_probes = probes.clone();
+        workspace.navigate_history(false);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        workspace.navigate_history(true);
+        assert_eq!(workspace.workspace, edited_workspace);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            edited_probes.encoding
+        );
         let persisted = workspace.persisted_workspace_pair().unwrap();
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
-        assert_eq!(restored.probes.as_ref().unwrap().encoding, probes.encoding);
+        assert_eq!(
+            restored.probes.as_ref().unwrap().encoding,
+            edited_probes.encoding
+        );
     }
 
     #[test]
-    fn invalid_persistence_and_imports_fail_closed_without_losing_the_draft() {
+    fn algp_import_is_pair_historical_and_wrong_binding_fails_closed() {
+        let reference = ExactControlWorkspace::try_new().unwrap();
+        let mut source = ExactControlWorkspace::try_new().unwrap();
+        source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
+        source.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        let imported_bytes = source.workspace_encoding.bytes().to_vec();
+        let mut target = ExactControlWorkspace::try_new().unwrap();
+        target.import_workspace_bytes(&imported_bytes).unwrap();
+        assert_eq!(target.workspace, source.workspace);
+        assert_eq!(target.history.undo_len(), 1);
+
+        let rebound_probe = target.probes.as_ref().unwrap().clone();
+        let imported_probe_bytes = source.probes.as_ref().unwrap().encoding.bytes().to_vec();
+        assert!(target.import_probe_bytes(&imported_probe_bytes).unwrap());
+        assert_eq!(target.history.undo_len(), 2);
+        assert_eq!(
+            target.probes.as_ref().unwrap().encoding,
+            source.probes.as_ref().unwrap().encoding
+        );
+        target.navigate_history(false);
+        assert_eq!(target.workspace, source.workspace);
+        assert_eq!(
+            target.probes.as_ref().unwrap().encoding,
+            rebound_probe.encoding
+        );
+        target.navigate_history(true);
+        assert_eq!(target.workspace, source.workspace);
+        assert_eq!(
+            target.probes.as_ref().unwrap().encoding,
+            source.probes.as_ref().unwrap().encoding
+        );
+        let retained_probe = target.probes.as_ref().unwrap().clone();
+        let retained_history = target.history.clone();
+        let wrong_workspace_probe = reference.probes.as_ref().unwrap().encoding.bytes().to_vec();
+        assert!(target.import_probe_bytes(&wrong_workspace_probe).is_err());
+        assert_eq!(
+            target.probes.as_ref().unwrap().encoding,
+            retained_probe.encoding
+        );
+        assert_eq!(target.workspace, source.workspace);
+        assert_eq!(target.history, retained_history);
+    }
+
+    #[test]
+    fn invalid_persistence_and_workspace_imports_fail_closed_without_losing_the_draft() {
         let fallback = ExactControlWorkspace::try_new_with_persisted(Some("wrong:00")).unwrap();
         assert!(
             fallback
@@ -5687,7 +5848,6 @@ mod tests {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
-        source.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
         let mismatched_pair = encode_persisted_workspace_pair(
             &source.workspace_encoding,
             &reference.probes.as_ref().unwrap().encoding,
@@ -5707,21 +5867,6 @@ mod tests {
         target.import_workspace_bytes(&imported_bytes).unwrap();
         assert_eq!(target.workspace, source.workspace);
         assert_eq!(target.history.undo_len(), 1);
-
-        let imported_probe_bytes = source.probes.as_ref().unwrap().encoding.bytes().to_vec();
-        assert!(target.import_probe_bytes(&imported_probe_bytes).unwrap());
-        assert_eq!(
-            target.probes.as_ref().unwrap().encoding,
-            source.probes.as_ref().unwrap().encoding
-        );
-        let retained_probe = target.probes.as_ref().unwrap().clone();
-        let wrong_workspace_probe = reference.probes.as_ref().unwrap().encoding.bytes().to_vec();
-        assert!(target.import_probe_bytes(&wrong_workspace_probe).is_err());
-        assert_eq!(
-            target.probes.as_ref().unwrap().encoding,
-            retained_probe.encoding
-        );
-        assert_eq!(target.workspace, source.workspace);
 
         let retained_workspace = target.workspace.clone();
         let retained_history = target.history.clone();

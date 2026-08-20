@@ -83,7 +83,10 @@ identical bytes is an exact no-op. Probe and trigger identity changes mark the
 pair dirty; canonical no-op edits do not. If a graph edit removes or retypes an
 observed endpoint, the incompatible sidecar is visibly and atomically replaced
 with an empty sidecar bound to the revised workspace rather than persisting
-unbound probe intent.
+unbound probe intent. Ephemeral undo/redo retains complete canonical ALGW/ALGP
+pairs, so undo restores the exact prior probes, trigger, revisions, and graph
+binding even after such an invalidation; redo restores the exact revised pair.
+Probe/trigger edits and canonical ALGP imports are pair-history operations too.
 
 The reference sidecar binds error, integral-prior, clamped-controller,
 permit-gated-output, measurement-within-range, combined-permit, and independently

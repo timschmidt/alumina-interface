@@ -219,8 +219,9 @@ prototype.
   monotonic node creation, atomic node/incident-wire deletion, node moves,
   typed wire edits, and bounded exact scalar parameter editing. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
-  Canonical replay-backed undo/redo retains bounded complete snapshots. Browser
-  local storage atomically preserves the exact current `ALGW`/`ALGP` pair, and
+  Canonical replay-backed undo/redo retains bounded complete `ALGW`/`ALGP` pair
+  snapshots across graph, probe, trigger, and sidecar-import edits. Browser
+  local storage atomically preserves only the exact current pair, and
   native/browser `.algw` plus `.algp` exchange imports only after bounded full
   replay, exact sidecar binding, and audited UI admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged

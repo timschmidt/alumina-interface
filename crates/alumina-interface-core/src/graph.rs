@@ -25,6 +25,7 @@ mod storage;
 mod trace;
 mod wire;
 mod workspace;
+mod workspace_probe_history;
 
 pub use analysis::{
     ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
@@ -95,6 +96,10 @@ pub use workspace::{
     GraphNodePlacement, GraphNodePrototype, GraphWorkspaceDocument, GraphWorkspaceError,
     GraphWorkspaceHistory, GraphWorkspaceHistoryError, GraphWorkspaceHistoryLimits,
     GraphWorkspaceLimits, GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
+};
+pub use workspace_probe_history::{
+    GraphWorkspaceProbeHistory, GraphWorkspaceProbeHistoryError, GraphWorkspaceProbeHistoryLimits,
+    GraphWorkspaceProbeHistoryReplay,
 };
 
 /// Stable identifier for one registered physical unit.
