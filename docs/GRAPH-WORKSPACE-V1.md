@@ -124,23 +124,35 @@ undoable edit.
 
 ## Persistence and file exchange
 
-The browser stores the current canonical workspace directly in origin-local
-storage after a successful edit or history transition. The storage value is
-version-tagged `algw1:` followed by canonical lowercase hexadecimal. Decoding
-rejects the wrong tag, odd length, uppercase or non-hex text, and values over a
-2 MiB canonical-byte persistence ceiling before allocating. The lower ceiling
-leaves room for the two-character-per-byte representation under common browser
-quotas; explicit files retain the 20 MiB workspace admission ceiling. Invalid
-stored state never replaces the reviewed reference workspace and is overwritten
-with that reference if storage remains available.
+The browser stores the current canonical workspace and its exact graph-probe
+sidecar together in one origin-local storage value after a successful graph,
+history, probe, or trigger edit. The application envelope is version-tagged
+`algwp1:`, followed by lowercase hexadecimal `ALGW`, one `:`, and lowercase
+hexadecimal `ALGP`. One `setItem` replaces the complete pair; there is no
+two-key state in which a newly stored workspace can be mistaken for an older
+sidecar. Decoding rejects the wrong tag, missing separator, odd length,
+uppercase or non-hex text, and either artifact over its 2 MiB browser
+persistence ceiling before allocating its bytes.
 
-Browser download writes the byte-for-byte canonical `ALGW` encoding to an
-`.algw` Blob. Browser upload checks the advertised file size, bounds the
-materialized `ArrayBuffer`, and forwards only bytes within policy. The native
-shell exposes an explicit path with bounded reads and exact, synchronized
-writes. Neither platform bridge parses a workspace.
+Restore first replays and admits the candidate `ALGW`, then replays `ALGP`
+against that exact candidate identity. Only after both replays and byte-for-byte
+canonical checks succeed does either document replace the in-memory reference.
+A malformed sidecar, a valid sidecar for another workspace, or an invalid
+workspace therefore rejects the pair atomically. The old ALGW-only storage key
+and text representation are intentionally not compatibility inputs.
 
-All opened bytes first pass canonical replay, embedded-limit checks, exact
+Browser download writes the byte-for-byte canonical `ALGW` or currently bound
+`ALGP` encoding to a corresponding `.algw` or `.algp` Blob. Browser upload
+checks the advertised file size, bounds the materialized `ArrayBuffer`, and
+forwards only bytes within that artifact's policy. The native shell exposes
+independent explicit paths with bounded reads and exact, synchronized writes.
+Neither platform bridge parses an artifact. An opened `.algp` is replayed
+against the exact current workspace and cannot mutate the graph; an identity
+mismatch leaves both graph and prior sidecar unchanged. Explicit ALGW files
+retain the 20 MiB workspace admission ceiling; ALGP files use their canonical
+2 MiB document ceiling.
+
+All opened ALGW bytes first pass canonical replay, embedded-limit checks, exact
 re-encoding, UI layout admission, and the fixed audited semantic registry. A
 required input may remain disconnected as a visible editor draft blocker;
 other semantic failures, including unknown node kinds, reject without mutation.

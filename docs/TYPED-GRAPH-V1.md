@@ -401,6 +401,12 @@ filters immutable host trace series only; it grants no firmware read, telemetry,
 device-trigger, or deployment authority. See
 [`GRAPH-PROBE-V2.md`](GRAPH-PROBE-V2.md).
 
+The browser stores the exact current `ALGW` and `ALGP` in one versioned value
+and restores neither until both canonical replays and their identity binding
+succeed. Separate bounded `.algw` and `.algp` exchange is available in native
+and browser shells; an ALGP import can change only the sidecar bound to the
+current workspace.
+
 ## Canonical bytes and replay
 
 `ALGR` format V1 uses fixed-width little-endian integers, length-prefixed UTF-8

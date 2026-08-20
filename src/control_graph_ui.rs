@@ -34,7 +34,7 @@ use alumina_interface_core::graph::{
     compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
     encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
     flatten_graph_hierarchy, graph_component_instance_prototype, graph_resource_label,
-    replay_graph_workspace, resolve_graph_probe_trigger,
+    replay_graph_probes, replay_graph_workspace, resolve_graph_probe_trigger,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
@@ -60,9 +60,11 @@ const NEW_NODE_X_GAP: i32 = 300;
 const NEW_NODE_ORIGIN: i32 = 28;
 const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
-const PERSISTED_WORKSPACE_PREFIX: &str = "algw1:";
+const PERSISTED_WORKSPACE_PAIR_PREFIX: &str = "algwp1:";
 const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
+const MAXIMUM_PERSISTED_PROBE_BYTES: usize = 2 * 1024 * 1024;
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
+const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
 const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(96, 169, 232),
     egui::Color32::from_rgb(241, 178, 84),
@@ -72,7 +74,7 @@ const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(101, 205, 196),
 ];
 #[cfg(target_arch = "wasm32")]
-pub(crate) const WORKSPACE_STORAGE_KEY: &str = "alumina.graph-workspace.algw.v1";
+pub(crate) const WORKSPACE_PAIR_STORAGE_KEY: &str = "alumina.graph-workspace-pair.algwp.v1";
 const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
@@ -1155,7 +1157,8 @@ pub(crate) struct ExactControlWorkspace {
     persistence_dirty: bool,
     persistence_attempted: bool,
     file_status: String,
-    file_bridge: BoundedFileBridge,
+    workspace_file_bridge: BoundedFileBridge,
+    probe_file_bridge: BoundedFileBridge,
     trigger_pre_samples: u32,
     trigger_post_samples: u32,
     cursor_tick: u64,
@@ -1213,23 +1216,29 @@ impl ExactControlWorkspace {
             persistence_dirty: persisted.is_none(),
             persistence_attempted: false,
             file_status: "canonical workspace has not been exported this session".to_owned(),
-            file_bridge: BoundedFileBridge::default(),
+            workspace_file_bridge: BoundedFileBridge::default(),
+            probe_file_bridge: BoundedFileBridge::default(),
             trigger_pre_samples: trigger.pretrigger_samples(),
             trigger_post_samples: trigger.posttrigger_samples(),
             cursor_tick,
         };
         if let Some(persisted) = persisted {
-            match decode_persisted_workspace(persisted, result.workspace.limits())
-                .and_then(|bytes| result.restore_workspace_bytes(&bytes))
-            {
+            match decode_persisted_workspace_pair(
+                persisted,
+                result.workspace.limits(),
+                GraphProbeLimits::interactive(),
+            )
+            .and_then(|(workspace, probes)| {
+                result.restore_workspace_pair_bytes(&workspace, &probes)
+            }) {
                 Ok(()) => {
-                    "restored canonical ALGW from application storage"
+                    "restored exact canonical ALGW/ALGP pair from application storage"
                         .clone_into(&mut result.edit_status);
                 }
                 Err(error) => {
                     result.persistence_dirty = true;
                     result.edit_status = format!(
-                        "persisted ALGW rejected; canonical reference loaded instead: {error}"
+                        "persisted ALGW/ALGP pair rejected atomically; canonical reference loaded instead: {error}"
                     );
                 }
             }
@@ -1243,11 +1252,15 @@ impl ExactControlWorkspace {
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) fn persisted_workspace(&self) -> Result<String, String> {
-        encode_persisted_workspace(&self.workspace_encoding)
+    pub(crate) fn persisted_workspace_pair(&self) -> Result<String, String> {
+        let probes = self
+            .probes
+            .as_ref()
+            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
+        encode_persisted_workspace_pair(&self.workspace_encoding, &probes.encoding)
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn mark_persisted(&mut self) {
         self.persistence_dirty = false;
         self.persistence_attempted = false;
@@ -1314,7 +1327,7 @@ impl ExactControlWorkspace {
         } else if self.persistence_dirty {
             "Browser persistence: pending"
         } else {
-            "Browser persistence: canonical bytes saved"
+            "Browser persistence: exact ALGW/ALGP pair saved"
         });
         ui.label(format!(
             "Reference trace: {} entries / {} bytes",
@@ -1492,7 +1505,7 @@ impl ExactControlWorkspace {
             "alumina-{}.algw",
             digest_prefix(self.workspace_encoding.digest().0)
         );
-        let events = self.file_bridge.show(
+        let events = self.workspace_file_bridge.show(
             ui,
             self.workspace_encoding.bytes(),
             GraphWorkspaceLimits::interactive().maximum_workspace_bytes,
@@ -1524,7 +1537,63 @@ impl ExactControlWorkspace {
                 }
             }
         }
+
+        self.show_probe_file_controls(ui);
         ui.weak(&self.file_status);
+    }
+
+    fn show_probe_file_controls(&mut self, ui: &mut egui::Ui) {
+        if let Some(probes) = &self.probes {
+            let download_name =
+                format!("alumina-{}.algp", digest_prefix(probes.encoding.digest().0));
+            let events = self.probe_file_bridge.show(
+                ui,
+                probes.encoding.bytes(),
+                GraphProbeLimits::interactive().maximum_probe_document_bytes,
+                &download_name,
+                ALGP_FILE,
+            );
+            for event in events {
+                match event {
+                    BoundedFileEvent::Import(Ok(bytes)) => match self.import_probe_bytes(&bytes) {
+                        Ok(changed) => {
+                            self.file_status = if changed {
+                                format!(
+                                    "imported {} exact ALGP bytes bound to the current ALGW",
+                                    bytes.len()
+                                )
+                            } else {
+                                format!(
+                                    "replayed {} exact ALGP bytes; sidecar already matched",
+                                    bytes.len()
+                                )
+                            };
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "ALGP import rejected without graph or sidecar mutation: {error}"
+                            );
+                        }
+                    },
+                    BoundedFileEvent::Import(Err(error)) => {
+                        self.file_status = format!("ALGP file read rejected: {error}");
+                    }
+                    BoundedFileEvent::Export(Ok(bytes)) => {
+                        self.file_status = format!(
+                            "exported {bytes} exact canonical ALGP bytes bound to the current ALGW"
+                        );
+                    }
+                    BoundedFileEvent::Export(Err(error)) => {
+                        self.file_status = format!("ALGP export failed: {error}");
+                    }
+                }
+            }
+        } else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "ALGP file exchange unavailable because no canonical sidecar is attached",
+            );
+        }
     }
 
     fn navigate_history(&mut self, redo: bool) {
@@ -2518,18 +2587,32 @@ impl ExactControlWorkspace {
         Ok((encoding, presentation, semantic))
     }
 
-    fn restore_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let replay = replay_graph_workspace(
-            bytes,
+    fn restore_workspace_pair_bytes(
+        &mut self,
+        workspace_bytes: &[u8],
+        probe_bytes: &[u8],
+    ) -> Result<(), String> {
+        let workspace_replay = replay_graph_workspace(
+            workspace_bytes,
             GraphWorkspaceLimits::interactive(),
             GraphLimits::interactive(),
         )
         .map_err(|error| error.to_string())?;
-        let candidate = replay.document().clone();
+        let candidate = workspace_replay.document().clone();
         let (encoding, presentation, _) = self.prepare_candidate(&candidate)?;
-        if replay.encoding() != &encoding {
+        if workspace_replay.encoding() != &encoding {
             return Err("replayed ALGW identity changed during UI admission".to_owned());
         }
+        let probe_replay =
+            replay_graph_probes(probe_bytes, &candidate, GraphProbeLimits::interactive())
+                .map_err(|error| format!("bound ALGP replay failed: {error}"))?;
+        let probes = ProbePackage {
+            document: probe_replay.document().clone(),
+            encoding: probe_replay.encoding().clone(),
+        };
+
+        // Commit only after both artifacts have replayed canonically and the
+        // sidecar has proven its binding to the candidate workspace.
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
@@ -2538,10 +2621,17 @@ impl ExactControlWorkspace {
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
+        self.refresh_component();
+        self.replace_probe_package(probes);
+        self.cursor_tick = match self.trigger_resolution() {
+            Ok(GraphProbeTriggerResolution::Matched(matched)) => matched.trigger_tick(),
+            Ok(GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_))
+            | Err(_) => 0,
+        };
         self.persistence_dirty = false;
         self.persistence_attempted = false;
-        self.refresh_component();
-        self.refresh_probes();
+        "restored canonical ALGP sidecar with exact ALGW binding"
+            .clone_into(&mut self.probe_status);
         Ok(())
     }
 
@@ -2576,19 +2666,44 @@ impl ExactControlWorkspace {
         };
         match result {
             Ok(probes) => {
-                if let Some(trigger) = probes.document.trigger() {
-                    self.trigger_pre_samples = trigger.pretrigger_samples();
-                    self.trigger_post_samples = trigger.posttrigger_samples();
-                }
-                self.probes = Some(probes);
+                self.replace_probe_package(probes);
                 "canonical ALGP diagnostic probes attached".clone_into(&mut self.probe_status);
             }
-            Err(error) => {
-                self.probes = None;
-                self.probe_status =
-                    format!("ALGP probes detached from this draft without affecting ALGW: {error}");
-            }
+            Err(error) => match empty_probes(&self.workspace) {
+                Ok(probes) => {
+                    self.replace_probe_package(probes);
+                    self.probe_status = format!(
+                        "ALGP bindings incompatible with revised ALGW were atomically replaced by an empty canonical sidecar: {error}"
+                    );
+                }
+                Err(empty_error) => {
+                    self.probes = None;
+                    self.probe_status = format!(
+                        "ALGP probes detached from this draft without affecting ALGW: {error}; empty sidecar failed: {empty_error}"
+                    );
+                }
+            },
         }
+    }
+
+    fn replace_probe_package(&mut self, probes: ProbePackage) -> bool {
+        let changed = self
+            .probes
+            .as_ref()
+            .is_none_or(|current| current.encoding != probes.encoding);
+        if let Some(trigger) = probes.document.trigger() {
+            self.trigger_pre_samples = trigger.pretrigger_samples();
+            self.trigger_post_samples = trigger.posttrigger_samples();
+        }
+        self.probes = Some(probes);
+        if changed {
+            self.persistence_dirty = true;
+            self.persistence_attempted = false;
+        }
+        if let Ok(GraphProbeTriggerResolution::Matched(matched)) = self.trigger_resolution() {
+            self.cursor_tick = matched.trigger_tick();
+        }
+        changed
     }
 
     fn import_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -2610,6 +2725,23 @@ impl ExactControlWorkspace {
         } else {
             Err(self.edit_status.clone())
         }
+    }
+
+    fn import_probe_bytes(&mut self, bytes: &[u8]) -> Result<bool, String> {
+        let replay = replay_graph_probes(bytes, &self.workspace, GraphProbeLimits::interactive())
+            .map_err(|error| error.to_string())?;
+        let probes = ProbePackage {
+            document: replay.document().clone(),
+            encoding: replay.encoding().clone(),
+        };
+        let changed = self.replace_probe_package(probes);
+        if changed {
+            "imported canonical ALGP after exact current-workspace replay"
+                .clone_into(&mut self.probe_status);
+        } else {
+            "canonical ALGP import was an exact no-op".clone_into(&mut self.probe_status);
+        }
+        Ok(changed)
     }
 
     fn show_selected_node(&mut self, ui: &mut egui::Ui) {
@@ -2877,7 +3009,7 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        self.probes = Some(ProbePackage { document, encoding });
+        self.replace_probe_package(ProbePackage { document, encoding });
         self.probe_status = format!(
             "created bounded probe {} for #{}.{}; authoring only",
             id.get(),
@@ -2904,10 +3036,11 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        self.probes = Some(ProbePackage { document, encoding });
+        let changed = self.replace_probe_package(ProbePackage { document, encoding });
         self.probe_status = format!(
-            "removed probe {}; identity was not reused and any bound trigger was cleared",
-            id.get()
+            "{} probe {}; identity was not reused and any bound trigger was cleared",
+            if changed { "removed" } else { "retained" },
+            id.get(),
         );
     }
 
@@ -2935,12 +3068,10 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        self.probes = Some(ProbePackage { document, encoding });
-        if let Ok(GraphProbeTriggerResolution::Matched(matched)) = self.trigger_resolution() {
-            self.cursor_tick = matched.trigger_tick();
-        }
+        let changed = self.replace_probe_package(ProbePackage { document, encoding });
         self.probe_status = format!(
-            "set replay-only p{} {} trigger with {} pre / {} post samples",
+            "{} replay-only p{} {} trigger with {} pre / {} post samples",
+            if changed { "set" } else { "retained" },
             id.get(),
             probe_edge_label(edge),
             self.trigger_pre_samples,
@@ -2966,9 +3097,14 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        self.probes = Some(ProbePackage { document, encoding });
-        "cleared replay-only trigger; probe bindings are unchanged"
-            .clone_into(&mut self.probe_status);
+        let changed = self.replace_probe_package(ProbePackage { document, encoding });
+        if changed {
+            "cleared replay-only trigger; probe bindings are unchanged"
+                .clone_into(&mut self.probe_status);
+        } else {
+            "replay-only trigger was already clear; canonical ALGP is unchanged"
+                .clone_into(&mut self.probe_status);
+        }
     }
 
     fn trigger_resolution(&self) -> Result<GraphProbeTriggerResolution, String> {
@@ -3751,58 +3887,93 @@ fn parse_parameter_text(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn encode_persisted_workspace(
-    encoding: &CanonicalGraphWorkspaceEncoding,
+fn encode_persisted_workspace_pair(
+    workspace: &CanonicalGraphWorkspaceEncoding,
+    probes: &CanonicalGraphProbeEncoding,
 ) -> Result<String, String> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let bytes = encoding.bytes();
-    if bytes.len() > MAXIMUM_PERSISTED_WORKSPACE_BYTES {
+    let workspace_bytes = workspace.bytes();
+    let probe_bytes = probes.bytes();
+    if workspace_bytes.len() > MAXIMUM_PERSISTED_WORKSPACE_BYTES {
         return Err(format!(
             "canonical ALGW has {} bytes; browser persistence admits at most {}",
-            bytes.len(),
+            workspace_bytes.len(),
             MAXIMUM_PERSISTED_WORKSPACE_BYTES
         ));
     }
-    let encoded_bytes = bytes
+    if probe_bytes.len() > MAXIMUM_PERSISTED_PROBE_BYTES {
+        return Err(format!(
+            "canonical ALGP has {} bytes; browser persistence admits at most {}",
+            probe_bytes.len(),
+            MAXIMUM_PERSISTED_PROBE_BYTES
+        ));
+    }
+    let encoded_bytes = workspace_bytes
         .len()
         .checked_mul(2)
-        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_PREFIX.len()))
-        .ok_or_else(|| "persisted ALGW text length overflowed".to_owned())?;
+        .and_then(|length| length.checked_add(probe_bytes.len().checked_mul(2)?))
+        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_PAIR_PREFIX.len()))
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| "persisted ALGW/ALGP text length overflowed".to_owned())?;
     let mut result = String::with_capacity(encoded_bytes);
-    result.push_str(PERSISTED_WORKSPACE_PREFIX);
+    result.push_str(PERSISTED_WORKSPACE_PAIR_PREFIX);
+    append_lower_hex(&mut result, workspace_bytes);
+    result.push(':');
+    append_lower_hex(&mut result, probe_bytes);
+    Ok(result)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn append_lower_hex(result: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in bytes {
         result.push(char::from(HEX[usize::from(byte >> 4)]));
         result.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    Ok(result)
 }
 
-fn decode_persisted_workspace(
+fn decode_persisted_workspace_pair(
     value: &str,
     workspace_limits: GraphWorkspaceLimits,
-) -> Result<Vec<u8>, String> {
+    probe_limits: GraphProbeLimits,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     let encoded = value
-        .strip_prefix(PERSISTED_WORKSPACE_PREFIX)
-        .ok_or_else(|| "persisted ALGW prefix/version is unsupported".to_owned())?;
-    if !encoded.len().is_multiple_of(2) {
-        return Err("persisted ALGW hex length is odd".to_owned());
-    }
-    let maximum_bytes = workspace_limits
+        .strip_prefix(PERSISTED_WORKSPACE_PAIR_PREFIX)
+        .ok_or_else(|| "persisted ALGW/ALGP pair prefix/version is unsupported".to_owned())?;
+    let (workspace, probes) = encoded
+        .split_once(':')
+        .ok_or_else(|| "persisted ALGW/ALGP pair separator is missing".to_owned())?;
+    let workspace_maximum = workspace_limits
         .maximum_workspace_bytes
         .min(MAXIMUM_PERSISTED_WORKSPACE_BYTES);
+    let probe_maximum = probe_limits
+        .maximum_probe_document_bytes
+        .min(MAXIMUM_PERSISTED_PROBE_BYTES);
+    Ok((
+        decode_persisted_hex(workspace, workspace_maximum, "ALGW")?,
+        decode_persisted_hex(probes, probe_maximum, "ALGP")?,
+    ))
+}
+
+fn decode_persisted_hex(
+    encoded: &str,
+    maximum_bytes: usize,
+    artifact: &str,
+) -> Result<Vec<u8>, String> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err(format!("persisted {artifact} hex length is odd"));
+    }
     let byte_length = encoded.len() / 2;
     if byte_length > maximum_bytes {
         return Err(format!(
-            "persisted ALGW exceeds the {maximum_bytes}-byte admission limit"
+            "persisted {artifact} exceeds the {maximum_bytes}-byte admission limit"
         ));
     }
     let mut bytes = Vec::with_capacity(byte_length);
     for pair in encoded.as_bytes().chunks_exact(2) {
         let high = canonical_hex_nibble(pair[0])
-            .ok_or_else(|| "persisted ALGW is not canonical lowercase hex".to_owned())?;
+            .ok_or_else(|| format!("persisted {artifact} is not canonical lowercase hex"))?;
         let low = canonical_hex_nibble(pair[1])
-            .ok_or_else(|| "persisted ALGW is not canonical lowercase hex".to_owned())?;
+            .ok_or_else(|| format!("persisted {artifact} is not canonical lowercase hex"))?;
         bytes.push((high << 4) | low);
     }
     Ok(bytes)
@@ -3914,6 +4085,20 @@ fn representative_probes(workspace: &GraphWorkspaceDocument) -> Result<ProbePack
         )),
         workspace,
         probes,
+    )
+    .map_err(|error| error.to_string())?;
+    let encoding = encode_graph_probes(&document).map_err(|error| error.to_string())?;
+    Ok(ProbePackage { document, encoding })
+}
+
+fn empty_probes(workspace: &GraphWorkspaceDocument) -> Result<ProbePackage, String> {
+    let document = GraphProbeDocument::try_new(
+        GraphProbeLimits::interactive(),
+        0,
+        1,
+        None,
+        workspace,
+        Vec::new(),
     )
     .map_err(|error| error.to_string())?;
     let encoding = encode_graph_probes(&document).map_err(|error| error.to_string())?;
@@ -5377,9 +5562,9 @@ mod tests {
     }
 
     #[test]
-    fn persistence_round_trips_only_current_canonical_workspace() {
+    fn persistence_round_trips_the_exact_current_workspace_probe_pair() {
         let canonical = ExactControlWorkspace::try_new().unwrap();
-        let canonical_persisted = canonical.persisted_workspace().unwrap();
+        let canonical_persisted = canonical.persisted_workspace_pair().unwrap();
         let canonical_restored =
             ExactControlWorkspace::try_new_with_persisted(Some(&canonical_persisted)).unwrap();
         assert_eq!(
@@ -5389,45 +5574,60 @@ mod tests {
 
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
+        workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
         assert_eq!(workspace.history.undo_len(), 1);
-        let persisted = workspace.persisted_workspace().unwrap();
-        assert!(persisted.starts_with(PERSISTED_WORKSPACE_PREFIX));
-        assert!(
-            persisted[PERSISTED_WORKSPACE_PREFIX.len()..]
-                .bytes()
+        let persisted = workspace.persisted_workspace_pair().unwrap();
+        assert!(persisted.starts_with(PERSISTED_WORKSPACE_PAIR_PREFIX));
+        let (workspace_hex, probe_hex) = persisted[PERSISTED_WORKSPACE_PAIR_PREFIX.len()..]
+            .split_once(':')
+            .unwrap();
+        assert!([workspace_hex, probe_hex].into_iter().all(|hex| {
+            hex.bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        );
+        }));
 
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace, workspace.workspace);
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
+        assert_eq!(
+            restored.probes.as_ref().unwrap().document,
+            workspace.probes.as_ref().unwrap().document
+        );
+        assert_eq!(
+            restored.probes.as_ref().unwrap().encoding,
+            workspace.probes.as_ref().unwrap().encoding
+        );
         assert_eq!(restored.history.undo_len(), 0);
         assert_eq!(restored.history.redo_len(), 0);
         assert!(!restored.persistence_pending());
 
         let mut uppercase = persisted.clone();
-        let hex = &persisted[PERSISTED_WORKSPACE_PREFIX.len()..];
-        let offset = hex
+        let offset = workspace_hex
             .bytes()
             .position(|byte| (b'a'..=b'f').contains(&byte))
             .unwrap();
-        let persisted_offset = PERSISTED_WORKSPACE_PREFIX.len() + offset;
+        let persisted_offset = PERSISTED_WORKSPACE_PAIR_PREFIX.len() + offset;
         uppercase.replace_range(
             persisted_offset..=persisted_offset,
-            &hex[offset..=offset].to_ascii_uppercase(),
+            &workspace_hex[offset..=offset].to_ascii_uppercase(),
         );
         assert!(
-            decode_persisted_workspace(&uppercase, GraphWorkspaceLimits::interactive())
-                .unwrap_err()
-                .contains("lowercase hex")
+            decode_persisted_workspace_pair(
+                &uppercase,
+                GraphWorkspaceLimits::interactive(),
+                GraphProbeLimits::interactive(),
+            )
+            .unwrap_err()
+            .contains("lowercase hex")
         );
         assert!(
-            decode_persisted_workspace(
-                "algw1:0000",
+            decode_persisted_workspace_pair(
+                "algwp1:0000:00",
                 GraphWorkspaceLimits {
                     maximum_workspace_bytes: 1,
                     ..GraphWorkspaceLimits::interactive()
                 },
+                GraphProbeLimits::interactive(),
             )
             .unwrap_err()
             .contains("admission limit")
@@ -5435,19 +5635,93 @@ mod tests {
     }
 
     #[test]
+    fn probe_edits_dirty_pair_persistence_only_when_canonical_identity_changes() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        assert!(!workspace.persistence_pending());
+
+        workspace.clear_probe_trigger();
+        assert!(workspace.persistence_pending());
+        let cleared = workspace.probes.as_ref().unwrap().encoding.clone();
+        workspace.mark_persisted();
+        workspace.clear_probe_trigger();
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, cleared);
+        assert!(!workspace.persistence_pending());
+
+        workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        assert!(workspace.persistence_pending());
+    }
+
+    #[test]
+    fn graph_edits_cannot_leave_an_unbound_probe_sidecar() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let observed_node = workspace.probes.as_ref().unwrap().document.probes()[0]
+            .source()
+            .node;
+        workspace.delete_selected_node(observed_node);
+
+        let probes = workspace.probes.as_ref().unwrap();
+        assert!(probes.document.probes().is_empty());
+        assert_eq!(
+            probes.document.workspace_digest(),
+            workspace.workspace_encoding.digest()
+        );
+        assert!(workspace.probe_status.contains("empty canonical sidecar"));
+        let persisted = workspace.persisted_workspace_pair().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
+        assert_eq!(restored.probes.as_ref().unwrap().encoding, probes.encoding);
+    }
+
+    #[test]
     fn invalid_persistence_and_imports_fail_closed_without_losing_the_draft() {
         let fallback = ExactControlWorkspace::try_new_with_persisted(Some("wrong:00")).unwrap();
-        assert!(fallback.edit_status.contains("persisted ALGW rejected"));
+        assert!(
+            fallback
+                .edit_status
+                .contains("persisted ALGW/ALGP pair rejected")
+        );
         assert!(fallback.persistence_pending());
         assert!(fallback.reference_trace_is_current());
 
+        let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
+        source.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        let mismatched_pair = encode_persisted_workspace_pair(
+            &source.workspace_encoding,
+            &reference.probes.as_ref().unwrap().encoding,
+        )
+        .unwrap();
+        let pair_fallback =
+            ExactControlWorkspace::try_new_with_persisted(Some(&mismatched_pair)).unwrap();
+        assert_eq!(pair_fallback.workspace, reference.workspace);
+        assert_eq!(
+            pair_fallback.probes.as_ref().unwrap().encoding,
+            reference.probes.as_ref().unwrap().encoding
+        );
+        assert!(pair_fallback.edit_status.contains("rejected atomically"));
+
         let imported_bytes = source.workspace_encoding.bytes().to_vec();
         let mut target = ExactControlWorkspace::try_new().unwrap();
         target.import_workspace_bytes(&imported_bytes).unwrap();
         assert_eq!(target.workspace, source.workspace);
         assert_eq!(target.history.undo_len(), 1);
+
+        let imported_probe_bytes = source.probes.as_ref().unwrap().encoding.bytes().to_vec();
+        assert!(target.import_probe_bytes(&imported_probe_bytes).unwrap());
+        assert_eq!(
+            target.probes.as_ref().unwrap().encoding,
+            source.probes.as_ref().unwrap().encoding
+        );
+        let retained_probe = target.probes.as_ref().unwrap().clone();
+        let wrong_workspace_probe = reference.probes.as_ref().unwrap().encoding.bytes().to_vec();
+        assert!(target.import_probe_bytes(&wrong_workspace_probe).is_err());
+        assert_eq!(
+            target.probes.as_ref().unwrap().encoding,
+            retained_probe.encoding
+        );
+        assert_eq!(target.workspace, source.workspace);
 
         let retained_workspace = target.workspace.clone();
         let retained_history = target.history.clone();

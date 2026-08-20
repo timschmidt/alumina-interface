@@ -219,9 +219,10 @@ prototype.
   monotonic node creation, atomic node/incident-wire deletion, node moves,
   typed wire edits, and bounded exact scalar parameter editing. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
-  Canonical replay-backed undo/redo retains bounded complete snapshots, browser
-  local storage preserves the current document, and native/browser `.algw`
-  exchange imports only after full replay plus audited UI admission.
+  Canonical replay-backed undo/redo retains bounded complete snapshots. Browser
+  local storage atomically preserves the exact current `ALGW`/`ALGP` pair, and
+  native/browser `.algw` plus `.algp` exchange imports only after bounded full
+  replay, exact sidecar binding, and audited UI admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible
@@ -255,7 +256,9 @@ prototype.
   use certified analog enclosures, while Boolean series use aligned high/low
   logic-analyzer lanes; both share the trigger-selected exact-time window,
   trigger marker, and cursor. Plot coordinates come only from certified `f64`
-  enclosures, and cursor labels retain exact sample values.
+  enclosures, and cursor labels retain exact sample values. Stored or imported
+  sidecars for another workspace fail closed without partial graph/probe
+  mutation; exact no-op sidecar edits do not trigger redundant persistence.
   This remains editor state, not deployment or firmware authority. See
   [`docs/GRAPH-WORKSPACE-V1.md`](docs/GRAPH-WORKSPACE-V1.md).
   The component/front-panel boundary is in
