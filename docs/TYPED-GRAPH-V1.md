@@ -269,7 +269,9 @@ and keep the original count in the cursor label. Literal non-scalars use
 categorical state/event lanes instead of a numeric projection. Their exact
 schema-relative typed-value bytes are retained, repeated events are
 distinguished from byte-exact changes, and the cursor exposes a bounded preview
-plus full SHA-256 identity and canonical byte count. Text, byte, array, record,
+plus full SHA-256 identity, canonical byte count, and original sequence. Events
+at one exact root time are visibly counted without fabricating sub-tick time.
+Text, byte, array, record,
 option, result, resource-handle, and job-handle roots are supported under a
 64-lane and 16-MiB identity-byte display policy. Headless core-edit and
 full-frame tests exercise the same native/browser paths. Each probe row now

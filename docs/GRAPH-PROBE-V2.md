@@ -116,14 +116,16 @@ mismatches, missing unit metadata, and values without finite display
 enclosures fail before painting. Text, bytes, arrays, records, options,
 results, resource handles, and job handles are never implicitly converted into
 analog data. Instead each series receives a categorical state/event lane. Every
-retained sample has a marker, and a stronger change marker is selected only by
-byte-exact comparison of consecutive canonical typed-value encodings; no hash,
-debug string, or invented category number decides equality. The same
+retained event is represented; samples at the same exact root time share a
+marker annotated with their multiplicity rather than receiving invented
+sub-tick coordinates. A stronger change marker is selected only by byte-exact
+comparison of consecutive canonical typed-value encodings; no hash, debug
+string, or invented category number decides equality. The same
 schema-relative type-ID-plus-value encoding used inside `ALGR` and `ALGT` is
 retained with its full SHA-256 identity. Cursor text shows a bounded structural
 or escaped value preview, the complete digest, canonical byte count, and
-original clock/tick; every lane also names the canonical type and type ID. The
-display admits at most 64 state/event lanes and 16 MiB
+original clock/tick/sequence; every lane also names the canonical type and type
+ID. The display admits at most 64 state/event lanes and 16 MiB
 of retained canonical state identity bytes. Runtime-only Event/Stream wrappers,
 schema/value contradictions, byte-count overflow, and excess policy fail
 before painting without changing ALGP or replay authority.

@@ -274,9 +274,11 @@ prototype.
   literal non-scalars use categorical state/event lanes with a marker for every
   retained event and a stronger marker only for byte-exact canonical value
   changes. Bounded previews, full typed-value SHA-256 identities, canonical
-  byte counts, and original local clock/ticks remain visible without assigning
-  those values an analog ordering. All panes share the trigger-selected
-  exact-time window, trigger marker, and cursor. Plot coordinates come only
+  byte counts, and original local clock/tick/sequence remain visible without
+  assigning those values an analog ordering. Same-time events are counted on
+  one exact-time marker instead of being given invented sub-tick positions. All
+  panes share the trigger-selected exact-time window, trigger marker, and
+  cursor. Plot coordinates come only
   from certified `f64` enclosures, and cursor labels retain exact sample values.
   Stored or imported sidecars for
   another workspace fail closed without partial graph/probe mutation; exact

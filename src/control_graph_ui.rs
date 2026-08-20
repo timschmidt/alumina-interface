@@ -171,6 +171,7 @@ impl TraceSignal {
 struct TracePoint {
     clock: GraphClockId,
     tick: u64,
+    sequence: u64,
     root_tick: Rational,
     value: TracePointValue,
 }
@@ -2259,7 +2260,7 @@ impl ExactControlWorkspace {
         };
         match &point.value {
             TracePointValue::Analog { exact, .. } => format!(
-                "{exact}{} · c{}:t{} · root {}",
+                "{exact}{} · c{}:t{}:s{} · root {}",
                 series
                     .signal
                     .unit_symbol
@@ -2267,19 +2268,22 @@ impl ExactControlWorkspace {
                     .map_or_else(String::new, |unit| format!(" {unit}")),
                 point.clock.get(),
                 point.tick,
+                point.sequence,
                 point.root_tick
             ),
             TracePointValue::Boolean(value) => format!(
-                "{value} · c{}:t{} · root {}",
+                "{value} · c{}:t{}:s{} · root {}",
                 point.clock.get(),
                 point.tick,
+                point.sequence,
                 point.root_tick
             ),
             TracePointValue::State { summary, encoding } => format!(
-                "{} · c{}:t{} · root {}",
+                "{} · c{}:t{}:s{} · root {}",
                 state_identity_label(summary, encoding),
                 point.clock.get(),
                 point.tick,
+                point.sequence,
                 point.root_tick
             ),
         }
@@ -5177,6 +5181,7 @@ fn trace_point(
         TracePoint {
             clock: entry.clock(),
             tick: entry.clock_tick(),
+            sequence: entry.sequence(),
             root_tick: root_tick.clone(),
             value,
         },
@@ -5631,15 +5636,19 @@ fn paint_state_trace_series(
             ],
             egui::Stroke::new(1.0_f32, color.gamma_multiply(0.28)),
         );
-        for (index, point) in series.points.iter().enumerate() {
+        let mut index = 0_usize;
+        while let Some(point) = series.points.get(index) {
             let TracePointValue::State { .. } = &point.value else {
+                index += 1;
                 continue;
             };
+            let run_end = state_same_time_run_end(series, index);
             let Some(x) = time_axis.plot_x(rect, &point.root_tick) else {
+                index = run_end;
                 continue;
             };
             let position = egui::pos2(x, center);
-            if state_point_changed(series, index) {
+            if (index..run_end).any(|candidate| state_point_changed(series, candidate)) {
                 painter.line_segment(
                     [
                         egui::pos2(x, lane_top + 5.0),
@@ -5651,8 +5660,29 @@ fn paint_state_trace_series(
             } else {
                 painter.circle_stroke(position, 2.6, egui::Stroke::new(1.2_f32, color));
             }
+            let multiplicity = run_end - index;
+            if multiplicity > 1 {
+                painter.text(
+                    egui::pos2(x + 4.0, lane_top + 3.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("×{multiplicity}"),
+                    egui::FontId::monospace(8.0),
+                    color,
+                );
+            }
+            index = run_end;
         }
     }
+}
+
+fn state_same_time_run_end(series: &TraceSeries, start: usize) -> usize {
+    let Some(first) = series.points.get(start) else {
+        return start;
+    };
+    series.points[start + 1..]
+        .iter()
+        .position(|point| point.root_tick != first.root_tick)
+        .map_or(series.points.len(), |offset| start + 1 + offset)
 }
 
 fn state_point_changed(series: &TraceSeries, index: usize) -> bool {
@@ -5680,29 +5710,32 @@ fn state_point_changed(series: &TraceSeries, index: usize) -> bool {
 fn trace_cursor_label(signal: &TraceSignal, point: &TracePoint) -> String {
     match &point.value {
         TracePointValue::Analog { exact, .. } => format!(
-            "{} = {exact}{} @ c{}:t{}",
+            "{} = {exact}{} @ c{}:t{}:s{}",
             signal.label(),
             signal
                 .unit_symbol
                 .as_deref()
                 .map_or_else(String::new, |unit| format!(" {unit}")),
             point.clock.get(),
-            point.tick
+            point.tick,
+            point.sequence
         ),
         TracePointValue::Boolean(value) => format!(
-            "{} = {value} @ c{}:t{}",
+            "{} = {value} @ c{}:t{}:s{}",
             signal.label(),
             point.clock.get(),
-            point.tick
+            point.tick,
+            point.sequence
         ),
         TracePointValue::State { summary, encoding } => format!(
-            "{} · {} [t{}] = {} @ c{}:t{}",
+            "{} · {} [t{}] = {} @ c{}:t{}:s{}",
             signal.label(),
             signal.sample_type_name,
             signal.sample_type.get(),
             state_identity_label(summary, encoding),
             point.clock.get(),
-            point.tick
+            point.tick,
+            point.sequence
         ),
     }
 }
@@ -7043,12 +7076,14 @@ mod tests {
                     TracePoint {
                         clock: GraphClockId::new(2),
                         tick: 1,
+                        sequence: 11,
                         root_tick: one_third.clone(),
                         value: TracePointValue::Boolean(false),
                     },
                     TracePoint {
                         clock: GraphClockId::new(2),
                         tick: 2,
+                        sequence: 12,
                         root_tick: two_thirds.clone(),
                         value: TracePointValue::Boolean(true),
                     },
@@ -7068,6 +7103,7 @@ mod tests {
                 points: vec![TracePoint {
                     clock: GraphClockId::new(9),
                     tick: 7,
+                    sequence: 13,
                     root_tick: one_half.clone(),
                     value: TracePointValue::Boolean(true),
                 }],
@@ -7285,13 +7321,14 @@ mod tests {
         let point = TracePoint {
             clock: GraphClockId::new(6),
             tick: 19,
+            sequence: 23,
             root_tick: Rational::from(38),
             value: TracePointValue::Analog { exact, enclosure },
         };
         let signal = physical_trace_signal(PHYSICAL_UNSIGNED, "physical.unsigned-mm");
         assert_eq!(
             trace_cursor_label(&signal, &point),
-            "physical-sample = 1 3/4 [7 lattice counts] mm @ c6:t19"
+            "physical-sample = 1 3/4 [7 lattice counts] mm @ c6:t19:s23"
         );
     }
 
@@ -7558,18 +7595,28 @@ mod tests {
                 TracePoint {
                     clock: GraphClockId::new(3),
                     tick: 4,
+                    sequence: 40,
                     root_tick: Rational::from(8),
                     value: ready.clone(),
                 },
                 TracePoint {
                     clock: GraphClockId::new(3),
                     tick: 5,
+                    sequence: 50,
+                    root_tick: Rational::from(10),
+                    value: ready.clone(),
+                },
+                TracePoint {
+                    clock: GraphClockId::new(3),
+                    tick: 5,
+                    sequence: 51,
                     root_tick: Rational::from(10),
                     value: ready,
                 },
                 TracePoint {
                     clock: GraphClockId::new(3),
                     tick: 6,
+                    sequence: 60,
                     root_tick: Rational::from(12),
                     value: waiting,
                 },
@@ -7577,15 +7624,27 @@ mod tests {
         };
         assert!(state_point_changed(&series, 0));
         assert!(!state_point_changed(&series, 1));
-        assert!(state_point_changed(&series, 2));
-        let label = trace_cursor_label(&signal, &series.points[2]);
-        let TracePointValue::State { encoding, .. } = &series.points[2].value else {
+        assert!(!state_point_changed(&series, 2));
+        assert!(state_point_changed(&series, 3));
+        assert_eq!(state_same_time_run_end(&series, 0), 1);
+        assert_eq!(state_same_time_run_end(&series, 1), 3);
+        assert_eq!(state_same_time_run_end(&series, 2), 3);
+        assert_eq!(state_same_time_run_end(&series, 3), 4);
+        assert_eq!(state_same_time_run_end(&series, 4), 4);
+        assert_eq!(
+            trace_point_at_or_before(&series, &Rational::from(10))
+                .unwrap()
+                .sequence,
+            51
+        );
+        let label = trace_cursor_label(&signal, &series.points[3]);
+        let TracePointValue::State { encoding, .. } = &series.points[3].value else {
             unreachable!();
         };
         assert!(label.contains("text \"waiting\" [7 UTF-8 bytes]"));
         assert!(label.contains("state.text [t21]"));
         assert!(label.contains(&digest_hex(encoding.digest())));
-        assert!(label.contains("canonical bytes @ c3:t6"));
+        assert!(label.contains("canonical bytes @ c3:t6:s60"));
 
         let axis = TraceTimeAxis::try_new(core::slice::from_ref(&series), None)
             .unwrap()
