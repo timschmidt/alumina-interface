@@ -23,9 +23,9 @@ use alumina_interface_core::graph::{
     GraphDeploymentImplementation, GraphDeploymentNodeKind, GraphDeploymentRegistry,
     GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
     GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
-    GraphHierarchyLimits, GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype,
-    GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument,
-    GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
+    GraphHierarchyLimits, GraphLimits, GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement,
+    GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
+    GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
     GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphWireId,
     GraphWorkspaceDocument, GraphWorkspaceLimits, GraphWorkspaceProbeHistory, NodeDefinition,
@@ -34,8 +34,9 @@ use alumina_interface_core::graph::{
     TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
     compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
     encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
-    encode_typed_graph_value, flatten_graph_hierarchy, graph_component_instance_prototype,
-    graph_resource_label, project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
+    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
+    graph_component_instance_prototype, graph_resource_label, parse_graph_literal_text,
+    project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
@@ -1650,7 +1651,7 @@ impl ExactControlWorkspace {
             }
         });
         ui.label(
-            "Add audited node kinds, drag headers onto the integer canvas, edit exact parameters, and connect typed ports in the in-memory ALGW draft. Secondary-click an input to disconnect. Editing never arms or commands firmware.",
+            "Add audited node kinds, drag headers onto the integer canvas, edit schema-directed exact scalar/composite parameters, and connect typed ports in the in-memory ALGW draft. Resource/job identities require selectors. Secondary-click an input to disconnect. Editing never arms or commands firmware.",
         );
         self.show_workspace_controls(ui);
         self.show_palette(ui);
@@ -2156,13 +2157,14 @@ impl ExactControlWorkspace {
                             else {
                                 continue;
                             };
-                            let Some(initial) =
-                                parameter_edit_text(parameter_definition.value().value())
-                            else {
+                            let Some(initial) = parameter_edit_text(
+                                self.workspace.graph(),
+                                parameter_definition.value(),
+                            ) else {
                                 painter.text(
                                     rect.center_bottom() - egui::vec2(0.0, 7.0),
                                     egui::Align2::CENTER_BOTTOM,
-                                    "exact composite control is not rendered yet",
+                                    "selector-bound or oversized literal is read-only",
                                     egui::FontId::monospace(9.5),
                                     egui::Color32::YELLOW,
                                 );
@@ -2687,7 +2689,8 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let canonical = parameter_edit_text(value.value()).unwrap_or_else(|| text.to_owned());
+        let canonical =
+            parameter_edit_text(self.workspace.graph(), &value).unwrap_or_else(|| text.to_owned());
         let mut candidate = self.workspace.clone();
         if let Err(error) = candidate.set_parameter(node_id, parameter_id, value) {
             self.edit_status = format!("parameter edit rejected without mutation: {error}");
@@ -3153,8 +3156,13 @@ impl ExactControlWorkspace {
                     ui.monospace(port_description(&document, "out", port));
                 }
             });
+            if !node.parameters().is_empty() {
+                ui.weak(
+                    "Exact literal text: quoted strings · hex\"bytes\" · [arrays] · {field:value} · some/none · ok/error",
+                );
+            }
             for parameter in node.parameters() {
-                let Some(initial) = parameter_edit_text(parameter.value().value()) else {
+                let Some(initial) = parameter_edit_text(&document, parameter.value()) else {
                     ui.monospace(format!(
                         "{} = {} · read-only literal shape",
                         parameter.name(),
@@ -4342,28 +4350,18 @@ fn new_node_position(workspace: &GraphWorkspaceDocument) -> Result<(i32, i32), S
     Ok((x, y))
 }
 
-fn parameter_edit_text(value: &GraphValue) -> Option<String> {
-    match value {
-        GraphValue::Boolean(value) => Some(value.to_string()),
-        GraphValue::ExactRational(value) => Some(value.to_string()),
-        GraphValue::MeasurementInterval { lower, upper } => Some(format!("{lower}..{upper}")),
-        GraphValue::CanonicalI64(value) => Some(value.to_string()),
-        GraphValue::CanonicalU64(value) => Some(value.to_string()),
-        GraphValue::Text(value) => Some(value.clone()),
-        GraphValue::Bytes(_)
-        | GraphValue::Array(_)
-        | GraphValue::Record(_)
-        | GraphValue::OptionNone
-        | GraphValue::OptionSome(_)
-        | GraphValue::ResultOk(_)
-        | GraphValue::ResultError(_)
-        | GraphValue::ResourceHandle(_)
-        | GraphValue::JobHandle(_) => None,
-    }
+fn parameter_edit_text(document: &GraphDocument, value: &TypedGraphValue) -> Option<String> {
+    format_graph_literal_text(
+        document.schema(),
+        value,
+        GraphLiteralTextLimits::new(parameter_text_limit(document, value.value_type())),
+    )
+    .ok()
 }
 
 fn parameter_text_limit(document: &GraphDocument, value_type: GraphTypeId) -> usize {
     let rational_digits = document.schema().limits().maximum_rational_digits;
+    let interactive = GraphLiteralTextLimits::interactive().maximum_bytes();
     document
         .schema()
         .value_type(value_type)
@@ -4374,17 +4372,22 @@ fn parameter_text_limit(document: &GraphDocument, value_type: GraphTypeId) -> us
                 rational_digits.saturating_mul(4).saturating_add(10)
             }
             TypeKind::CanonicalI64 { .. } | TypeKind::CanonicalU64 { .. } => 20,
-            TypeKind::Text { maximum_bytes } => *maximum_bytes as usize,
-            TypeKind::Bytes { .. }
-            | TypeKind::Array { .. }
+            TypeKind::Text { maximum_bytes } => (*maximum_bytes as usize)
+                .saturating_mul(6)
+                .saturating_add(2),
+            TypeKind::Bytes { maximum_bytes } => (*maximum_bytes as usize)
+                .saturating_mul(2)
+                .saturating_add(6),
+            TypeKind::Array { .. }
             | TypeKind::Record { .. }
             | TypeKind::Option { .. }
-            | TypeKind::Result { .. }
-            | TypeKind::Event { .. }
+            | TypeKind::Result { .. } => interactive,
+            TypeKind::Event { .. }
             | TypeKind::Stream { .. }
             | TypeKind::ResourceHandle { .. }
             | TypeKind::JobHandle => 1,
         })
+        .min(interactive)
 }
 
 fn parse_parameter_text(
@@ -4393,71 +4396,13 @@ fn parse_parameter_text(
     source: &str,
 ) -> Result<TypedGraphValue, String> {
     let maximum = parameter_text_limit(document, value_type);
-    if source.len() > maximum {
-        return Err(format!(
-            "parameter text has {} bytes; this exact type admits at most {maximum}",
-            source.len()
-        ));
-    }
-    let definition = document
-        .schema()
-        .value_type(value_type)
-        .ok_or_else(|| format!("parameter type {} is not registered", value_type.get()))?;
-    let trimmed = source.trim();
-    let value = match definition.kind() {
-        TypeKind::Boolean => match trimmed {
-            "true" => GraphValue::Boolean(true),
-            "false" => GraphValue::Boolean(false),
-            _ => return Err("Boolean parameter must be exactly true or false".to_owned()),
-        },
-        TypeKind::ExactRational { .. } => GraphValue::ExactRational(
-            trimmed
-                .parse::<Rational>()
-                .map_err(|error| format!("exact rational parameter is invalid: {error}"))?,
-        ),
-        TypeKind::MeasurementInterval { .. } => {
-            let (lower, upper) = trimmed
-                .split_once("..")
-                .ok_or_else(|| "measurement interval must use lower..upper".to_owned())?;
-            GraphValue::MeasurementInterval {
-                lower: lower
-                    .trim()
-                    .parse::<Rational>()
-                    .map_err(|error| format!("measurement lower bound is invalid: {error}"))?,
-                upper: upper
-                    .trim()
-                    .parse::<Rational>()
-                    .map_err(|error| format!("measurement upper bound is invalid: {error}"))?,
-            }
-        }
-        TypeKind::CanonicalI64 { .. } => GraphValue::CanonicalI64(
-            trimmed
-                .parse::<i64>()
-                .map_err(|error| format!("canonical signed count is invalid: {error}"))?,
-        ),
-        TypeKind::CanonicalU64 { .. } => GraphValue::CanonicalU64(
-            trimmed
-                .parse::<u64>()
-                .map_err(|error| format!("canonical unsigned count is invalid: {error}"))?,
-        ),
-        TypeKind::Text { .. } => GraphValue::Text(source.to_owned()),
-        TypeKind::Bytes { .. }
-        | TypeKind::Array { .. }
-        | TypeKind::Record { .. }
-        | TypeKind::Option { .. }
-        | TypeKind::Result { .. }
-        | TypeKind::Event { .. }
-        | TypeKind::Stream { .. }
-        | TypeKind::ResourceHandle { .. }
-        | TypeKind::JobHandle => {
-            return Err(format!(
-                "parameter type {} is not editable in this scalar palette slice",
-                definition.name()
-            ));
-        }
-    };
-    TypedGraphValue::try_new(document.schema(), value_type, value)
-        .map_err(|error| format!("exact parameter failed schema validation: {error}"))
+    parse_graph_literal_text(
+        document.schema(),
+        value_type,
+        source,
+        GraphLiteralTextLimits::new(maximum),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -7449,6 +7394,71 @@ mod tests {
         let (kind, point) = trace_sample_value(&signal, schema, &typed).unwrap();
         assert_eq!(kind, TraceSeriesKind::State);
         point
+    }
+
+    #[test]
+    fn composite_parameter_notation_is_bounded_and_handles_require_selectors() {
+        let schema = state_trace_schema();
+        let document = GraphDocument::try_new(
+            1,
+            schema,
+            vec![ClockDefinition::new(
+                GraphClockId::new(1),
+                "host",
+                ClockKind::HostMonotonic {
+                    ticks_per_second: 1_000,
+                },
+            )],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let value = TypedGraphValue::try_new(
+            document.schema(),
+            STATE_RECORD,
+            GraphValue::Record(vec![
+                RecordValueField {
+                    field: RecordFieldId::new(1),
+                    value: GraphValue::Boolean(true),
+                },
+                RecordValueField {
+                    field: RecordFieldId::new(2),
+                    value: GraphValue::Text("ready\nμ".to_owned()),
+                },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            parameter_edit_text(&document, &value).as_deref(),
+            Some("{ready:true,message:\"ready\\nμ\"}")
+        );
+        assert_eq!(
+            parse_parameter_text(
+                &document,
+                STATE_RECORD,
+                " { ready : true , message : \"ready\\nμ\" } ",
+            )
+            .unwrap(),
+            value
+        );
+
+        let resource = TypedGraphValue::try_new(
+            document.schema(),
+            STATE_RESOURCE,
+            GraphValue::ResourceHandle(ResourceGraphHandle {
+                device_id: DeviceId([1; 16]),
+                board_package_digest: Digest([2; 32]),
+                class: ResourceClassId::new(7),
+                resource_selector: 33,
+            }),
+        )
+        .unwrap();
+        assert_eq!(parameter_edit_text(&document, &resource), None);
+        assert!(
+            parse_parameter_text(&document, STATE_RESOURCE, "anything")
+                .unwrap_err()
+                .contains("requires an authenticated selector")
+        );
     }
 
     #[test]

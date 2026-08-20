@@ -244,18 +244,26 @@ acyclic rank, and routes those captures visibly as feedback. Its canonical
 identity cursors. A 13-entry palette derives kind/version and port/parameter
 shape from the fixed audited schemas and exact defaults from reviewed fixture
 instances. Monotonic node creation, atomic node/incident-wire deletion, node
-drags, typed wire connect/disconnect, and exact scalar parameter replacement
-replace the draft only after complete candidate validation. Any embedded graph
-edit detaches the reference trace because its `ALGT` identity still binds the
-reviewed graph; placement-only edits preserve it.
+drags, typed wire connect/disconnect, and exact scalar/composite literal
+replacement mutate the draft only after complete candidate validation. Any
+embedded graph edit detaches the reference trace because its `ALGT` identity
+still binds the reviewed graph; placement-only edits preserve it.
 The initial 3,755-byte workspace has SHA-256
 `bf5135c39b67c46a3a5908d4d0d8a1d13d065b59231890e8fbdda818f064ae16`.
 Node selection exposes kind/version, typed ports, exact parameters, and explicit
-state facts. Current exact-rational parameters can be entered as bounded
-Hyperreal text and are normalized into the canonical graph with no floating
-conversion; Boolean, measurement-interval, canonical integer, and text scalar
-shapes share that editor boundary, while composite and identity-bearing values
-remain read-only. Seven mixed-signal traces show error, integral prior state,
+state facts. A public window-free formatter/parser now supplies deterministic
+schema-directed editor text: exact rationals retain Hyperreal notation, text is
+quoted and escaped, bytes use `hex"..."`, arrays use `[a,b]`, records use
+canonical `{field:value}` order, and options/results use explicit
+`some`/`none` and `ok`/`error` branches. Boolean, measurement-interval, and
+canonical integer shapes share the same boundary without floating conversion.
+Whitespace and uppercase input hex normalize on commit; malformed, oversized,
+misordered, schema-contradicting, and trailing input cannot mutate the draft.
+One interactive field admits at most 2,097,158 UTF-8 bytes, enough for the
+complete one-MiB byte-literal ceiling. Resource/job handles, including ones
+nested in composites, remain read-only until an authenticated capability/cache
+selector supplies identity; Event/Stream types still have no literal. Seven
+mixed-signal traces show error, integral prior state,
 clamped controller, permit-gated output, external permit,
 measurement-within-range, and combined permit. The first four render as
 certified analog enclosures and the final three as aligned Boolean
@@ -484,9 +492,10 @@ flattens connector wiring to an ordinary workspace using fresh monotonic IDs.
 Nested package dependencies, general cycle/depth rules, editable instance and
 panel workflows remain open. Multi-value state records, queue timeouts and
 additional policies, cases/loops/state machines, capability-generated nodes
-beyond stable Boolean inputs, composite/identity-bearing parameter and
-label/domain editors, workspace collaboration/conflict handling, broader resource claims, general host
-implementation admission, measured WCET/deadline analysis, physical HIL,
+beyond stable Boolean inputs, identity-bearing parameter selectors and
+label/domain editors, workspace collaboration/conflict handling, broader
+resource claims, general host implementation admission, measured WCET/deadline
+analysis, physical HIL,
 output and motion opcodes, live capability/configuration discovery,
 capability-negotiated telemetry/trigger capture, and protocol-resource nodes
 remain later M9 slices.

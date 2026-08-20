@@ -19,6 +19,7 @@ mod control_fixture;
 mod deployment;
 mod document;
 mod hierarchy;
+mod literal_text;
 mod probe;
 mod simulation;
 mod storage;
@@ -69,6 +70,10 @@ pub use hierarchy::{
     GraphHierarchyReplay, encode_graph_hierarchy, flatten_graph_hierarchy,
     graph_component_instance_input_port, graph_component_instance_output_port,
     graph_component_instance_prototype, replay_graph_hierarchy,
+};
+pub use literal_text::{
+    GraphLiteralTextError, GraphLiteralTextLimits, INTERACTIVE_GRAPH_LITERAL_TEXT_BYTES,
+    format_graph_literal_text, parse_graph_literal_text,
 };
 pub use probe::{
     CanonicalGraphProbeEncoding, GRAPH_PROBE_MAGIC, GRAPH_PROBE_NAME_BYTES, GRAPH_PROBE_VERSION,
