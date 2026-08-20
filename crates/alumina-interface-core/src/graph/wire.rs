@@ -57,6 +57,36 @@ impl CanonicalGraphEncoding {
     }
 }
 
+/// Schema-relative canonical bytes for one validated typed graph value.
+///
+/// The bytes begin with the stable graph type ID and use the same exact value
+/// encoding carried inside canonical graph documents and traces. They are
+/// suitable for byte-exact comparison while the supplying [`GraphSchema`] is
+/// authoritative. They are deliberately not a self-describing document and
+/// must not be replayed under an unrelated schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CanonicalTypedGraphValueEncoding {
+    bytes: Vec<u8>,
+    digest: Digest,
+}
+
+impl CanonicalTypedGraphValueEncoding {
+    /// Borrow the complete schema-relative canonical typed-value bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Return SHA-256 over exactly [`Self::bytes`].
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+
+    /// Consume the carrier and return its canonical bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 /// Successfully replayed document and its verified canonical identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphReplay {
@@ -235,6 +265,20 @@ pub fn replay_graph_document(
         return Err(GraphWireError::NonCanonical);
     }
     Ok(GraphReplay { document, encoding })
+}
+
+/// Validate and canonically encode one typed value relative to `schema`.
+///
+/// This is the public identity boundary for exact state/event comparison in a
+/// graph or trace that already binds the supplying schema. Callers requiring a
+/// portable object must retain the containing graph/trace identity as well.
+pub fn encode_typed_graph_value(
+    schema: &GraphSchema,
+    value: &TypedGraphValue,
+) -> Result<CanonicalTypedGraphValueEncoding, GraphWireError> {
+    let bytes = encode_typed_value_bytes(schema, value)?;
+    let digest = sha256(&bytes).digest;
+    Ok(CanonicalTypedGraphValueEncoding { bytes, digest })
 }
 
 pub(super) fn encode_typed_value_bytes(
@@ -1517,6 +1561,46 @@ mod tests {
         let next = encode_graph_document(&fixture(42)).unwrap();
         assert_ne!(next.digest(), encoded.digest());
         assert_ne!(next.bytes(), encoded.bytes());
+    }
+
+    #[test]
+    fn typed_value_identity_reuses_exact_trace_encoding_and_binds_type() {
+        let schema = schema();
+        let ready =
+            TypedGraphValue::try_new(&schema, TEXT, GraphValue::Text("ready".to_owned())).unwrap();
+        let encoded = encode_typed_graph_value(&schema, &ready).unwrap();
+        assert_eq!(
+            encoded.bytes(),
+            &[6, 0, 0, 0, 5, 0, 0, 0, b'r', b'e', b'a', b'd', b'y']
+        );
+        assert_eq!(encoded.digest(), sha256(encoded.bytes()).digest);
+        assert_eq!(
+            encode_typed_value_bytes(&schema, &ready).unwrap(),
+            encoded.bytes()
+        );
+        assert_eq!(encode_typed_graph_value(&schema, &ready).unwrap(), encoded);
+
+        let waiting =
+            TypedGraphValue::try_new(&schema, TEXT, GraphValue::Text("waiting".to_owned()))
+                .unwrap();
+        let changed = encode_typed_graph_value(&schema, &waiting).unwrap();
+        assert_ne!(changed.bytes(), encoded.bytes());
+        assert_ne!(changed.digest(), encoded.digest());
+
+        let foreign_schema = GraphSchema::try_new(
+            GraphLimits::interactive(),
+            Vec::new(),
+            vec![TypeDefinition::new(TEXT, "foreign.bool", TypeKind::Boolean)],
+        )
+        .unwrap();
+        let foreign =
+            TypedGraphValue::try_new(&foreign_schema, TEXT, GraphValue::Boolean(true)).unwrap();
+        assert!(matches!(
+            encode_typed_graph_value(&schema, &foreign),
+            Err(GraphWireError::Schema(
+                GraphSchemaError::TypeMismatch { .. }
+            ))
+        ));
     }
 
     #[test]

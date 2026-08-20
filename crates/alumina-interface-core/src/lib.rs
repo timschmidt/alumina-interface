@@ -66,13 +66,13 @@ pub use global_job::{
 };
 pub use graph::{
     BaseDimensions, CanonicalGraphEncoding, CanonicalGraphProbeEncoding, CanonicalGraphTrace,
-    ChannelFullPolicy, ClockDefinition, ClockKind, CombinationalCycle, DependencyLink,
-    ExecutionDomain, ExecutionDomainSet, ExternalStreamSample, GRAPH_CHANNEL_ENVELOPE_BYTES,
-    GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GRAPH_PROBE_MAGIC, GRAPH_PROBE_VERSION,
-    GRAPH_TRACE_MAGIC, GRAPH_TRACE_VERSION, GraphAnalysis, GraphAnalysisError, GraphAnalysisLimits,
-    GraphCapabilityCatalogError, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
-    GraphCapabilityNodeEntry, GraphChannelAllocation, GraphClockId, GraphClockRate,
-    GraphDeploymentError, GraphDeploymentImplementation, GraphDeploymentLimits,
+    CanonicalTypedGraphValueEncoding, ChannelFullPolicy, ClockDefinition, ClockKind,
+    CombinationalCycle, DependencyLink, ExecutionDomain, ExecutionDomainSet, ExternalStreamSample,
+    GRAPH_CHANNEL_ENVELOPE_BYTES, GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GRAPH_PROBE_MAGIC,
+    GRAPH_PROBE_VERSION, GRAPH_TRACE_MAGIC, GRAPH_TRACE_VERSION, GraphAnalysis, GraphAnalysisError,
+    GraphAnalysisLimits, GraphCapabilityCatalogError, GraphCapabilityCatalogLimits,
+    GraphCapabilityNodeCatalog, GraphCapabilityNodeEntry, GraphChannelAllocation, GraphClockId,
+    GraphClockRate, GraphDeploymentError, GraphDeploymentImplementation, GraphDeploymentLimits,
     GraphDeploymentNodeKind, GraphDeploymentRegistry, GraphDeploymentReport, GraphDeploymentTarget,
     GraphDocument, GraphDocumentError, GraphLimits, GraphNodeId, GraphNodeRegistry, GraphPortId,
     GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeError,
@@ -89,8 +89,9 @@ pub use graph::{
     RecordFieldId, RecordValueField, ResourceClassId, ResourceGraphHandle, TypeDefinition,
     TypeKind, TypedGraphValue, UnitDefinition, UnitId, WireDefinition, WireEndpoint, analyze_graph,
     derive_graph_capability_node_catalog, encode_graph_document, encode_graph_probes,
-    encode_graph_trace, graph_resource_label, lower_graph_deployment, replay_graph_document,
-    replay_graph_probes, replay_graph_trace, resolve_graph_probe_trigger, simulate_graph,
+    encode_graph_trace, encode_typed_graph_value, graph_resource_label, lower_graph_deployment,
+    replay_graph_document, replay_graph_probes, replay_graph_trace, resolve_graph_probe_trigger,
+    simulate_graph,
 };
 pub use machine_profile::{
     ExactInterval, MachineDynamicsProfile2, MachineProfileError, MachineProfileResult,

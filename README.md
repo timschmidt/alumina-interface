@@ -271,9 +271,14 @@ prototype.
   measured intervals retain both exact endpoints, and canonical counts are
   multiplied by their registered exact quantum while retaining the count in the
   cursor label. Boolean series use aligned high/low logic-analyzer lanes. All
-  panes share the trigger-selected exact-time window, trigger marker, and
-  cursor. Plot coordinates come only from certified `f64` enclosures, and
-  cursor labels retain exact sample values. Stored or imported sidecars for
+  literal non-scalars use categorical state/event lanes with a marker for every
+  retained event and a stronger marker only for byte-exact canonical value
+  changes. Bounded previews, full typed-value SHA-256 identities, canonical
+  byte counts, and original local clock/ticks remain visible without assigning
+  those values an analog ordering. All panes share the trigger-selected
+  exact-time window, trigger marker, and cursor. Plot coordinates come only
+  from certified `f64` enclosures, and cursor labels retain exact sample values.
+  Stored or imported sidecars for
   another workspace fail closed without partial graph/probe mutation; exact
   no-op sidecar edits do not trigger redundant persistence.
   This remains editor state, not deployment or firmware authority. See

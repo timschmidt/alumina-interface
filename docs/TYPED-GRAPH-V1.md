@@ -265,7 +265,13 @@ certified finite `f64` enclosures; the shared cursor displays the retained exact
 physical scalar or Boolean value. Measurement intervals and signed/unsigned
 canonical lattice counts use the same analog boundary: intervals retain exact
 closed endpoints, while counts are multiplied by the registered exact quantum
-and keep the original count in the cursor label. Headless core-edit and
+and keep the original count in the cursor label. Literal non-scalars use
+categorical state/event lanes instead of a numeric projection. Their exact
+schema-relative typed-value bytes are retained, repeated events are
+distinguished from byte-exact changes, and the cursor exposes a bounded preview
+plus full SHA-256 identity and canonical byte count. Text, byte, array, record,
+option, result, resource-handle, and job-handle roots are supported under a
+64-lane and 16-MiB identity-byte display policy. Headless core-edit and
 full-frame tests exercise the same native/browser paths. Each probe row now
 exposes bounded canonical name, retained-sample, and event-stride fields.
 Applying them transactionally retains
@@ -305,7 +311,11 @@ canonical graph digest, the semantic/implementation registry digest, and the
 inclusive root horizon. Every entry retains origin, endpoint, clock, tick,
 sequence, and the canonical typed value. Untrusted replay bounds and decodes the
 trace, extracts only external inputs, independently reruns simulation,
-re-encodes the entire result, and requires byte-for-byte equality. The
+re-encodes the entire result, and requires byte-for-byte equality. The public
+`encode_typed_graph_value` boundary exposes those same schema-relative
+type-ID-plus-value bytes and their SHA-256 identity for exact in-context state
+comparison. It is deliberately not a self-describing value document: portable
+use must retain the containing graph/trace identity that binds the schema. The
 representative 1,000 Hz to 600 Hz trace is 658 bytes with SHA-256 identity
 `99677284550e7465541096c675ddd360416a3f3655653af3c96e6c6d96ffa2f4`.
 

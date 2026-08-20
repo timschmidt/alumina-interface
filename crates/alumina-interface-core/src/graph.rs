@@ -89,8 +89,9 @@ pub use trace::{
     encode_graph_trace, replay_graph_trace,
 };
 pub use wire::{
-    CanonicalGraphEncoding, GRAPH_DOCUMENT_MAGIC, GRAPH_DOCUMENT_VERSION, GraphReplay,
-    GraphWireError, encode_graph_document, replay_graph_document,
+    CanonicalGraphEncoding, CanonicalTypedGraphValueEncoding, GRAPH_DOCUMENT_MAGIC,
+    GRAPH_DOCUMENT_VERSION, GraphReplay, GraphWireError, encode_graph_document,
+    encode_typed_graph_value, replay_graph_document,
 };
 pub use workspace::{
     CanonicalGraphWorkspaceEncoding, GRAPH_WORKSPACE_MAGIC, GRAPH_WORKSPACE_VERSION,

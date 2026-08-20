@@ -93,19 +93,19 @@ root-time window and uses every retained sample's exact rational root tick as
 its horizontal coordinate. Probes on different local rates within the shared
 root can therefore coexist without conflating equal-looking local tick
 integers. Local clock/tick identity remains visible in cursor labels. Every
-nonempty projected Boolean or supported physical-scalar probe, including an
-external-source output, is keyed by its canonical probe name and endpoint
-rather than a fixed reference-series whitelist. The analog families are exact
-rationals, exact closed measurement intervals, and signed or unsigned canonical
-integer counts carrying a registered exact lattice quantum. They are grouped
-in stable sample-type-ID order. Series with the identical registered type share
-one certified-enclosure Y scale, while every distinct exact type receives its
-own pane labeled with the schema's canonical type name, type ID, and unit
-symbol. This prevents incompatible units or meanings from being overlaid while
-retaining one exact root-time axis, trigger marker, and cursor across every
-analog pane and the Boolean lanes. The display admits at most 32 distinct
-analog type panes and fails explicitly above that bound; the ALGP sidecar and
-replay remain unchanged.
+nonempty projected Boolean, supported physical-scalar, or literal non-scalar
+probe, including an external-source output, is keyed by its canonical probe
+name and endpoint rather than a fixed reference-series whitelist. The analog
+families are exact rationals, exact closed measurement intervals, and signed or
+unsigned canonical integer counts carrying a registered exact lattice quantum.
+They are grouped in stable sample-type-ID order. Series with the identical
+registered type share one certified-enclosure Y scale, while every distinct
+exact type receives its own pane labeled with the schema's canonical type name,
+type ID, and unit symbol. This prevents incompatible units or meanings from
+being overlaid while retaining one exact root-time axis, trigger marker, and
+cursor across every analog pane, Boolean lane, and state/event lane. The display
+admits at most 32 distinct analog type panes and fails explicitly above that
+bound; the ALGP sidecar and replay remain unchanged.
 
 An exact rational produces an outward binary64 enclosure only for display. A
 measurement interval retains both exact endpoints and projects the lower
@@ -113,8 +113,20 @@ endpoint downward and upper endpoint upward. A canonical integer is multiplied
 by its registered exact quantum before projection, while its original signed or
 unsigned count remains in the cursor label. Reversed intervals, type/value
 mismatches, missing unit metadata, and values without finite display
-enclosures fail before painting. Text, structured, identity-bearing, and other
-non-scalar values are not implicitly converted into analog data.
+enclosures fail before painting. Text, bytes, arrays, records, options,
+results, resource handles, and job handles are never implicitly converted into
+analog data. Instead each series receives a categorical state/event lane. Every
+retained sample has a marker, and a stronger change marker is selected only by
+byte-exact comparison of consecutive canonical typed-value encodings; no hash,
+debug string, or invented category number decides equality. The same
+schema-relative type-ID-plus-value encoding used inside `ALGR` and `ALGT` is
+retained with its full SHA-256 identity. Cursor text shows a bounded structural
+or escaped value preview, the complete digest, canonical byte count, and
+original clock/tick; every lane also names the canonical type and type ID. The
+display admits at most 64 state/event lanes and 16 MiB
+of retained canonical state identity bytes. Runtime-only Event/Stream wrappers,
+schema/value contradictions, byte-count overflow, and excess policy fail
+before painting without changing ALGP or replay authority.
 
 Only a named one-way enclosure maps exact root time into egui coordinates.
 Pointer motion chooses the nearest displayed candidate but retains that

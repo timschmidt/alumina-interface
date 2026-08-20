@@ -16,10 +16,10 @@ use alumina_diagnostics::{
 };
 use alumina_interface_core::graph::{
     CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
-    CanonicalGraphWorkspaceEncoding, ClockDefinition, ClockKind, ExecutionDomain,
-    ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits, GraphCapabilityCatalogLimits,
-    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInstance,
-    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ClockDefinition, ClockKind,
+    ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
+    GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument,
+    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentNodeKind, GraphDeploymentRegistry,
     GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
     GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
@@ -34,8 +34,8 @@ use alumina_interface_core::graph::{
     TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
     compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
     encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
-    flatten_graph_hierarchy, graph_component_instance_prototype, graph_resource_label,
-    project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
+    encode_typed_graph_value, flatten_graph_hierarchy, graph_component_instance_prototype,
+    graph_resource_label, project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
@@ -52,7 +52,11 @@ const MAXIMUM_VISIBLE_NODES: usize = 256;
 const MAXIMUM_VISIBLE_WIRES: usize = 1_024;
 const MAXIMUM_POINTS_PER_SERIES: usize = 4_096;
 const MAXIMUM_ANALOG_TRACE_GROUPS: usize = 32;
+const MAXIMUM_STATE_TRACE_LANES: usize = 64;
+const MAXIMUM_STATE_IDENTITY_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_STATE_TEXT_PREVIEW_CHARS: usize = 32;
 const ANALOG_TRACE_GROUP_HEIGHT: f32 = 144.0;
+const STATE_TRACE_LANE_HEIGHT: f32 = 40.0;
 const TRACE_SECTION_GAP: f32 = 10.0;
 const NODE_WIDTH: f32 = 218.0;
 const COLUMN_GAP: f32 = 82.0;
@@ -128,14 +132,22 @@ enum PortEdit {
 
 #[derive(Clone, Debug)]
 enum TracePointValue {
-    Analog { exact: String, enclosure: [f64; 2] },
+    Analog {
+        exact: String,
+        enclosure: [f64; 2],
+    },
     Boolean(bool),
+    State {
+        summary: String,
+        encoding: CanonicalTypedGraphValueEncoding,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TraceSeriesKind {
     Analog,
     Boolean,
+    State,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2263,6 +2275,13 @@ impl ExactControlWorkspace {
                 point.tick,
                 point.root_tick
             ),
+            TracePointValue::State { summary, encoding } => format!(
+                "{} · c{}:t{} · root {}",
+                state_identity_label(summary, encoding),
+                point.clock.get(),
+                point.tick,
+                point.root_tick
+            ),
         }
     }
 
@@ -3632,13 +3651,13 @@ impl ExactControlWorkspace {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "mixed analog/digital layout, shared cursor interaction, and legend rendering remain one egui frame operation"
+        reason = "mixed analog/logic/state layout, shared cursor interaction, and legend rendering remain one egui frame operation"
     )]
     fn show_trace(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.strong("Exact mixed-signal control trace");
             ui.label(
-                "ALGP-projected series/window · certified analog enclosures and exact Boolean lanes",
+                "ALGP-projected series/window · certified analog enclosures, exact Boolean lanes, and canonical state events",
             );
         });
         let trace_projection = match self.trace_projection() {
@@ -3733,12 +3752,22 @@ impl ExactControlWorkspace {
             .filter(|series| series.kind == TraceSeriesKind::Boolean)
             .collect::<Vec<_>>();
         digital.sort_by_key(|series| trace_digital_order(&series.signal));
+        let state = match state_trace_lanes(&traces) {
+            Ok(state) => state,
+            Err(error) => {
+                ui.colored_label(egui::Color32::YELLOW, error);
+                return;
+            }
+        };
         let digital_height = display_index(digital.len()) * 36.0;
-        let section_count = analog_groups.len() + usize::from(!digital.is_empty());
+        let state_height = display_index(state.len()) * STATE_TRACE_LANE_HEIGHT;
+        let section_count =
+            analog_groups.len() + usize::from(!digital.is_empty()) + usize::from(!state.is_empty());
         let section_gaps = display_index(section_count.saturating_sub(1)) * TRACE_SECTION_GAP;
         let surface_height = 14.0
             + display_index(analog_groups.len()) * ANALOG_TRACE_GROUP_HEIGHT
             + digital_height
+            + state_height
             + section_gaps
             + 31.0;
         let width = ui.available_width().max(164.0);
@@ -3758,12 +3787,24 @@ impl ExactControlWorkspace {
             analog_plots.push(rect);
             section_top = rect.bottom() + TRACE_SECTION_GAP;
         }
-        let digital_plot = (!digital.is_empty()).then(|| {
-            egui::Rect::from_min_max(
+        let digital_plot = if digital.is_empty() {
+            None
+        } else {
+            let rect = egui::Rect::from_min_max(
                 egui::pos2(plot_left, section_top),
                 egui::pos2(plot_right, section_top + digital_height),
-            )
-        });
+            );
+            section_top = rect.bottom() + TRACE_SECTION_GAP;
+            Some(rect)
+        };
+        let state_plot = if state.is_empty() {
+            None
+        } else {
+            Some(egui::Rect::from_min_max(
+                egui::pos2(plot_left, section_top),
+                egui::pos2(plot_right, section_top + state_height),
+            ))
+        };
 
         for (index, (group, plot)) in analog_groups.iter().zip(&analog_plots).enumerate() {
             painter.rect_filled(*plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
@@ -3774,7 +3815,7 @@ impl ExactControlWorkspace {
                 &time_axis,
                 minimum_value,
                 maximum_value,
-                digital_plot.is_none() && index + 1 == analog_groups.len(),
+                digital_plot.is_none() && state_plot.is_none() && index + 1 == analog_groups.len(),
             );
             for series in &group.series {
                 paint_analog_trace_series(
@@ -3796,7 +3837,7 @@ impl ExactControlWorkspace {
         }
         if let Some(plot) = digital_plot {
             painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
-            paint_trace_time_grid(&painter, plot, &time_axis, true);
+            paint_trace_time_grid(&painter, plot, &time_axis, state_plot.is_none());
             paint_digital_trace_series(&painter, plot, &digital, &time_axis);
             painter.text(
                 egui::pos2(response.rect.left() + 6.0, plot.top()),
@@ -3806,26 +3847,30 @@ impl ExactControlWorkspace {
                 egui::Color32::GRAY,
             );
         }
+        if let Some(plot) = state_plot {
+            painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+            paint_trace_time_grid(&painter, plot, &time_axis, true);
+            paint_state_trace_series(&painter, plot, &state, &time_axis);
+            painter.text(
+                egui::pos2(response.rect.left() + 6.0, plot.top()),
+                egui::Align2::LEFT_TOP,
+                "state / events",
+                egui::FontId::proportional(10.0),
+                egui::Color32::GRAY,
+            );
+        }
 
         let time_plot = analog_plots
             .first()
             .copied()
             .or(digital_plot)
+            .or(state_plot)
             .expect("one trace section exists");
-        let interaction = if let Some(digital) = digital_plot {
-            analog_plots
-                .first()
-                .map_or(digital, |analog| analog.union(digital))
-        } else {
-            analog_plots
-                .first()
-                .expect("one analog trace section exists")
-                .union(
-                    *analog_plots
-                        .last()
-                        .expect("one analog trace section exists"),
-                )
-        };
+        let last_plot = state_plot
+            .or(digital_plot)
+            .or_else(|| analog_plots.last().copied())
+            .expect("one trace section exists");
+        let interaction = time_plot.union(last_plot);
         if let Some(pointer) = response
             .hover_pos()
             .filter(|position| interaction.contains(*position))
@@ -3876,6 +3921,7 @@ impl ExactControlWorkspace {
                 .iter()
                 .flat_map(|group| group.series.iter().copied())
                 .chain(digital.iter().copied())
+                .chain(state.iter().copied())
             {
                 if let Some(point) = trace_point_at_or_before(series, &self.cursor_root_tick) {
                     ui.colored_label(
@@ -5020,6 +5066,7 @@ fn projected_trace_series(
     workspace: &GraphWorkspaceDocument,
 ) -> Result<Vec<TraceSeries>, String> {
     let mut result = Vec::with_capacity(projection.series().len());
+    let mut state_identity_bytes = 0_usize;
     for projected in projection.series() {
         let Some(first) = projected.samples().first() else {
             continue;
@@ -5052,6 +5099,7 @@ fn projected_trace_series(
             if kind.is_some_and(|retained| retained != point_kind) {
                 return Err(format!("{} trace changes value kind", signal.label()));
             }
+            retain_state_identity_bytes(&mut state_identity_bytes, &point.value)?;
             kind = Some(point_kind);
             points.push(point);
         }
@@ -5123,14 +5171,7 @@ fn trace_point(
             signal.label()
         ));
     }
-    let type_definition = schema.value_type(signal.sample_type).ok_or_else(|| {
-        format!(
-            "{} trace sample type t{} is unavailable",
-            signal.label(),
-            signal.sample_type.get()
-        )
-    })?;
-    let (kind, value) = trace_sample_value(signal, type_definition.kind(), entry.value().value())?;
+    let (kind, value) = trace_sample_value(signal, schema, entry.value())?;
     Ok((
         kind,
         TracePoint {
@@ -5144,9 +5185,28 @@ fn trace_point(
 
 fn trace_sample_value(
     signal: &TraceSignal,
-    sample_kind: &TypeKind,
-    value: &GraphValue,
+    schema: &GraphSchema,
+    typed_value: &TypedGraphValue,
 ) -> Result<(TraceSeriesKind, TracePointValue), String> {
+    if typed_value.value_type() != signal.sample_type {
+        return Err(format!(
+            "{} trace changed its exact sample type from t{} to t{}",
+            signal.label(),
+            signal.sample_type.get(),
+            typed_value.value_type().get()
+        ));
+    }
+    let sample_kind = schema
+        .value_type(signal.sample_type)
+        .ok_or_else(|| {
+            format!(
+                "{} trace sample type t{} is unavailable",
+                signal.label(),
+                signal.sample_type.get()
+            )
+        })?
+        .kind();
+    let value = typed_value.value();
     match (sample_kind, value) {
         (TypeKind::Boolean, GraphValue::Boolean(value)) => {
             Ok((TraceSeriesKind::Boolean, TracePointValue::Boolean(*value)))
@@ -5176,14 +5236,133 @@ fn trace_sample_value(
                 &exact,
             )
         }
+        (TypeKind::Text { .. }, GraphValue::Text(_))
+        | (TypeKind::Bytes { .. }, GraphValue::Bytes(_))
+        | (TypeKind::Array { .. }, GraphValue::Array(_))
+        | (TypeKind::Record { .. }, GraphValue::Record(_))
+        | (TypeKind::Option { .. }, GraphValue::OptionNone | GraphValue::OptionSome(_))
+        | (TypeKind::Result { .. }, GraphValue::ResultOk(_) | GraphValue::ResultError(_))
+        | (TypeKind::ResourceHandle { .. }, GraphValue::ResourceHandle(_))
+        | (TypeKind::JobHandle, GraphValue::JobHandle(_)) => {
+            state_trace_point_value(signal, schema, typed_value)
+        }
         _ => Err(format!(
-            "{} trace type {} [t{}] does not admit a plotted {:?} value",
+            "{} trace type {} [t{}] does not admit a {:?} value",
             signal.label(),
             signal.sample_type_name,
             signal.sample_type.get(),
             value.kind()
         )),
     }
+}
+
+fn state_trace_point_value(
+    signal: &TraceSignal,
+    schema: &GraphSchema,
+    value: &TypedGraphValue,
+) -> Result<(TraceSeriesKind, TracePointValue), String> {
+    let encoding = encode_typed_graph_value(schema, value).map_err(|error| {
+        format!(
+            "{} state trace failed canonical typed-value encoding: {error}",
+            signal.label()
+        )
+    })?;
+    Ok((
+        TraceSeriesKind::State,
+        TracePointValue::State {
+            summary: state_value_summary(value.value()),
+            encoding,
+        },
+    ))
+}
+
+fn retain_state_identity_bytes(total: &mut usize, value: &TracePointValue) -> Result<(), String> {
+    let TracePointValue::State { encoding, .. } = value else {
+        return Ok(());
+    };
+    *total = total
+        .checked_add(encoding.bytes().len())
+        .ok_or_else(|| "state trace identity byte count overflowed".to_owned())?;
+    if *total > MAXIMUM_STATE_IDENTITY_BYTES {
+        return Err(format!(
+            "state traces exceed the bounded {MAXIMUM_STATE_IDENTITY_BYTES}-byte canonical identity display policy"
+        ));
+    }
+    Ok(())
+}
+
+fn state_value_summary(value: &GraphValue) -> String {
+    match value {
+        GraphValue::Text(value) => {
+            let character_count = value.chars().count();
+            let mut preview = String::new();
+            for character in value.chars().take(MAXIMUM_STATE_TEXT_PREVIEW_CHARS) {
+                preview.extend(character.escape_default());
+            }
+            if character_count > MAXIMUM_STATE_TEXT_PREVIEW_CHARS {
+                preview.push('…');
+            }
+            format!("text \"{preview}\" [{} UTF-8 bytes]", value.len())
+        }
+        GraphValue::Bytes(value) => {
+            format!("bytes {} [{} bytes]", state_byte_prefix(value), value.len())
+        }
+        GraphValue::Array(values) => format!("array [{} items]", values.len()),
+        GraphValue::Record(fields) => format!("record [{} fields]", fields.len()),
+        GraphValue::OptionNone => "none".to_owned(),
+        GraphValue::OptionSome(value) => format!("some({})", state_value_shape(value)),
+        GraphValue::ResultOk(value) => format!("ok({})", state_value_shape(value)),
+        GraphValue::ResultError(value) => format!("error({})", state_value_shape(value)),
+        GraphValue::ResourceHandle(handle) => format!(
+            "resource device {}… · board {}… · class {} · selector {}",
+            digest_prefix16(handle.device_id.0),
+            digest_prefix(handle.board_package_digest.0),
+            handle.class.get(),
+            handle.resource_selector
+        ),
+        GraphValue::JobHandle(handle) => format!(
+            "job device {}… · global {}… · partition {}…",
+            digest_prefix16(handle.device_id.0),
+            digest_prefix(handle.global_job_digest.0),
+            digest_prefix(handle.partition_digest.0)
+        ),
+        GraphValue::Boolean(_)
+        | GraphValue::ExactRational(_)
+        | GraphValue::MeasurementInterval { .. }
+        | GraphValue::CanonicalI64(_)
+        | GraphValue::CanonicalU64(_) => state_value_shape(value).to_owned(),
+    }
+}
+
+fn state_value_shape(value: &GraphValue) -> &'static str {
+    match value {
+        GraphValue::Boolean(_) => "Boolean",
+        GraphValue::ExactRational(_) => "exact rational",
+        GraphValue::MeasurementInterval { .. } => "measurement interval",
+        GraphValue::CanonicalI64(_) => "signed lattice count",
+        GraphValue::CanonicalU64(_) => "unsigned lattice count",
+        GraphValue::Text(_) => "text",
+        GraphValue::Bytes(_) => "bytes",
+        GraphValue::Array(_) => "array",
+        GraphValue::Record(_) => "record",
+        GraphValue::OptionNone | GraphValue::OptionSome(_) => "option",
+        GraphValue::ResultOk(_) | GraphValue::ResultError(_) => "result",
+        GraphValue::ResourceHandle(_) => "resource handle",
+        GraphValue::JobHandle(_) => "job handle",
+    }
+}
+
+fn state_byte_prefix(value: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut result = String::with_capacity(17);
+    for byte in value.iter().take(8) {
+        write!(&mut result, "{byte:02x}").expect("writing to String is infallible");
+    }
+    if value.len() > 8 {
+        result.push('…');
+    }
+    result
 }
 
 fn analog_trace_point_value(
@@ -5415,6 +5594,89 @@ fn paint_digital_trace_series(
     }
 }
 
+fn paint_state_trace_series(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    series: &[&TraceSeries],
+    time_axis: &TraceTimeAxis,
+) {
+    let lane_height = rect.height() / display_index(series.len()).max(1.0);
+    let separator = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(35));
+    for (lane, series) in series.iter().copied().enumerate() {
+        debug_assert_eq!(series.kind, TraceSeriesKind::State);
+        let lane_top = rect.top() + display_index(lane) * lane_height;
+        let lane_bottom = lane_top + lane_height;
+        let center = (lane_top + lane_bottom) * 0.5;
+        if lane > 0 {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), lane_top),
+                    egui::pos2(rect.right(), lane_top),
+                ],
+                separator,
+            );
+        }
+        let color = trace_signal_color(&series.signal);
+        painter.text(
+            egui::pos2(rect.left() - 6.0, center),
+            egui::Align2::RIGHT_CENTER,
+            state_signal_label(&series.signal),
+            egui::FontId::monospace(9.0),
+            color,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), center),
+                egui::pos2(rect.right(), center),
+            ],
+            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.28)),
+        );
+        for (index, point) in series.points.iter().enumerate() {
+            let TracePointValue::State { .. } = &point.value else {
+                continue;
+            };
+            let Some(x) = time_axis.plot_x(rect, &point.root_tick) else {
+                continue;
+            };
+            let position = egui::pos2(x, center);
+            if state_point_changed(series, index) {
+                painter.line_segment(
+                    [
+                        egui::pos2(x, lane_top + 5.0),
+                        egui::pos2(x, lane_bottom - 5.0),
+                    ],
+                    egui::Stroke::new(2.0_f32, color),
+                );
+                painter.circle_filled(position, 3.2, color);
+            } else {
+                painter.circle_stroke(position, 2.6, egui::Stroke::new(1.2_f32, color));
+            }
+        }
+    }
+}
+
+fn state_point_changed(series: &TraceSeries, index: usize) -> bool {
+    let Some(TracePoint {
+        value: TracePointValue::State { encoding, .. },
+        ..
+    }) = series.points.get(index)
+    else {
+        return false;
+    };
+    let Some(TracePoint {
+        value: TracePointValue::State {
+            encoding: previous, ..
+        },
+        ..
+    }) = index
+        .checked_sub(1)
+        .and_then(|prior| series.points.get(prior))
+    else {
+        return true;
+    };
+    encoding.bytes() != previous.bytes()
+}
+
 fn trace_cursor_label(signal: &TraceSignal, point: &TracePoint) -> String {
     match &point.value {
         TracePointValue::Analog { exact, .. } => format!(
@@ -5433,7 +5695,33 @@ fn trace_cursor_label(signal: &TraceSignal, point: &TracePoint) -> String {
             point.clock.get(),
             point.tick
         ),
+        TracePointValue::State { summary, encoding } => format!(
+            "{} · {} [t{}] = {} @ c{}:t{}",
+            signal.label(),
+            signal.sample_type_name,
+            signal.sample_type.get(),
+            state_identity_label(summary, encoding),
+            point.clock.get(),
+            point.tick
+        ),
     }
+}
+
+fn state_signal_label(signal: &TraceSignal) -> String {
+    format!(
+        "{}\n{} [t{}]",
+        signal.label(),
+        signal.sample_type_name,
+        signal.sample_type.get()
+    )
+}
+
+fn state_identity_label(summary: &str, encoding: &CanonicalTypedGraphValueEncoding) -> String {
+    format!(
+        "{summary} · sha256 {} · {} canonical bytes",
+        digest_hex(encoding.digest()),
+        encoding.bytes().len()
+    )
 }
 
 fn trace_point_at_or_before<'a>(
@@ -5592,6 +5880,22 @@ fn analog_trace_groups(traces: &[TraceSeries]) -> Result<Vec<AnalogTraceGroup<'_
         .collect()
 }
 
+fn state_trace_lanes(traces: &[TraceSeries]) -> Result<Vec<&TraceSeries>, String> {
+    let mut state = traces
+        .iter()
+        .filter(|series| series.kind == TraceSeriesKind::State)
+        .collect::<Vec<_>>();
+    if state.len() > MAXIMUM_STATE_TRACE_LANES {
+        return Err(format!(
+            "{} state/event series exceed the bounded {}-lane trace display policy",
+            state.len(),
+            MAXIMUM_STATE_TRACE_LANES
+        ));
+    }
+    state.sort_by_key(|series| series.signal.probe);
+    Ok(state)
+}
+
 fn trace_value_bounds(series: &[&TraceSeries]) -> (f64, f64) {
     let mut minimum = 0.0_f64;
     let mut maximum = 0.0_f64;
@@ -5721,6 +6025,16 @@ fn digest_prefix(digest: [u8; 32]) -> String {
     result
 }
 
+fn digest_hex(digest: Digest) -> String {
+    use std::fmt::Write as _;
+
+    let mut result = String::with_capacity(64);
+    for byte in digest.0 {
+        write!(&mut result, "{byte:02x}").expect("writing to String is infallible");
+    }
+    result
+}
+
 fn digest_prefix16(identity: [u8; 16]) -> String {
     use std::fmt::Write as _;
 
@@ -5735,8 +6049,10 @@ fn digest_prefix16(identity: [u8; 16]) -> String {
 mod tests {
     use super::*;
     use alumina_interface_core::graph::{
-        GraphLimits, GraphPortId, NodeKind, replay_graph_component, replay_graph_hierarchy,
-        replay_graph_probes, replay_graph_workspace,
+        BaseDimensions, GraphLimits, GraphPortId, JobGraphHandle, NodeKind, RecordField,
+        RecordFieldId, RecordValueField, ResourceGraphHandle, TypeDefinition, UnitDefinition,
+        UnitId, replay_graph_component, replay_graph_hierarchy, replay_graph_probes,
+        replay_graph_workspace,
     };
 
     #[test]
@@ -5871,7 +6187,7 @@ mod tests {
                 .iter()
                 .map(|point| match &point.value {
                     TracePointValue::Boolean(value) => *value,
-                    TracePointValue::Analog { .. } => {
+                    TracePointValue::Analog { .. } | TracePointValue::State { .. } => {
                         panic!("external permit trace changed value kind")
                     }
                 })
@@ -5892,7 +6208,7 @@ mod tests {
                 .iter()
                 .map(|point| match &point.value {
                     TracePointValue::Boolean(value) => *value,
-                    TracePointValue::Analog { .. } => {
+                    TracePointValue::Analog { .. } | TracePointValue::State { .. } => {
                         panic!("range interlock trace changed value kind")
                     }
                 })
@@ -6848,24 +7164,73 @@ mod tests {
         );
     }
 
-    fn physical_trace_signal() -> TraceSignal {
+    const PHYSICAL_EXACT: GraphTypeId = GraphTypeId::new(9);
+    const PHYSICAL_INTERVAL: GraphTypeId = GraphTypeId::new(10);
+    const PHYSICAL_SIGNED: GraphTypeId = GraphTypeId::new(11);
+    const PHYSICAL_UNSIGNED: GraphTypeId = GraphTypeId::new(12);
+
+    fn physical_trace_schema() -> GraphSchema {
+        let unit = UnitId::new(1);
+        GraphSchema::try_new(
+            GraphLimits::interactive(),
+            vec![UnitDefinition::new(
+                unit,
+                "mm",
+                BaseDimensions::LENGTH,
+                Rational::from(1),
+            )],
+            vec![
+                TypeDefinition::new(
+                    PHYSICAL_EXACT,
+                    "physical.exact-mm",
+                    TypeKind::ExactRational { unit },
+                ),
+                TypeDefinition::new(
+                    PHYSICAL_INTERVAL,
+                    "physical.interval-mm",
+                    TypeKind::MeasurementInterval { unit },
+                ),
+                TypeDefinition::new(
+                    PHYSICAL_SIGNED,
+                    "physical.signed-mm",
+                    TypeKind::CanonicalI64 {
+                        unit,
+                        quantum: Rational::from(1) / Rational::from(8),
+                    },
+                ),
+                TypeDefinition::new(
+                    PHYSICAL_UNSIGNED,
+                    "physical.unsigned-mm",
+                    TypeKind::CanonicalU64 {
+                        unit,
+                        quantum: Rational::from(1) / Rational::from(4),
+                    },
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn physical_trace_signal(sample_type: GraphTypeId, name: &str) -> TraceSignal {
         TraceSignal {
             probe: GraphProbeId::new(41),
             name: "physical-sample".to_owned(),
             source: RepresentativeControlSignal::Error.endpoint(),
             representative: None,
-            sample_type: GraphTypeId::new(9),
-            sample_type_name: "physical.mm".to_owned(),
+            sample_type,
+            sample_type_name: name.to_owned(),
             unit_symbol: Some("mm".to_owned()),
         }
     }
 
     #[test]
     fn physical_scalar_trace_values_retain_exact_intervals_counts_and_units() {
-        let unit = alumina_interface_core::graph::UnitId::new(1);
-        let signal = physical_trace_signal();
-        let analog = |sample_kind: &TypeKind, value: &GraphValue| {
-            let (kind, point) = trace_sample_value(&signal, sample_kind, value).unwrap();
+        let schema = physical_trace_schema();
+        let analog = |sample_type: GraphTypeId, value: GraphValue| {
+            let definition = schema.value_type(sample_type).unwrap();
+            let signal = physical_trace_signal(sample_type, definition.name());
+            let value = TypedGraphValue::try_new(&schema, sample_type, value).unwrap();
+            let (kind, point) = trace_sample_value(&signal, &schema, &value).unwrap();
             assert_eq!(kind, TraceSeriesKind::Analog);
             let TracePointValue::Analog { exact, enclosure } = point else {
                 panic!("physical scalar did not produce an analog point");
@@ -6874,10 +7239,8 @@ mod tests {
         };
 
         let one_third = Rational::from(1) / Rational::from(3);
-        let (exact, enclosure) = analog(
-            &TypeKind::ExactRational { unit },
-            &GraphValue::ExactRational(one_third.clone()),
-        );
+        let (exact, enclosure) =
+            analog(PHYSICAL_EXACT, GraphValue::ExactRational(one_third.clone()));
         assert_eq!(exact, "1/3");
         assert_eq!(
             enclosure.map(f64::to_bits),
@@ -6887,8 +7250,8 @@ mod tests {
         let lower = -one_third;
         let upper = Rational::from(2) / Rational::from(3);
         let (exact, enclosure) = analog(
-            &TypeKind::MeasurementInterval { unit },
-            &GraphValue::MeasurementInterval {
+            PHYSICAL_INTERVAL,
+            GraphValue::MeasurementInterval {
                 lower: lower.clone(),
                 upper: upper.clone(),
             },
@@ -6903,11 +7266,7 @@ mod tests {
             upper.to_f64_enclosure().unwrap()[1].to_bits()
         );
 
-        let signed_kind = TypeKind::CanonicalI64 {
-            unit,
-            quantum: Rational::from(1) / Rational::from(8),
-        };
-        let (exact, enclosure) = analog(&signed_kind, &GraphValue::CanonicalI64(-3));
+        let (exact, enclosure) = analog(PHYSICAL_SIGNED, GraphValue::CanonicalI64(-3));
         let signed_exact = -Rational::from(3) / Rational::from(8);
         assert_eq!(exact, "-3/8 [-3 lattice counts]");
         assert_eq!(
@@ -6915,11 +7274,7 @@ mod tests {
             signed_exact.to_f64_enclosure().unwrap().map(f64::to_bits)
         );
 
-        let unsigned_kind = TypeKind::CanonicalU64 {
-            unit,
-            quantum: Rational::from(1) / Rational::from(4),
-        };
-        let (exact, enclosure) = analog(&unsigned_kind, &GraphValue::CanonicalU64(7));
+        let (exact, enclosure) = analog(PHYSICAL_UNSIGNED, GraphValue::CanonicalU64(7));
         let unsigned_exact = Rational::from(7) / Rational::from(4);
         assert_eq!(exact, "1 3/4 [7 lattice counts]");
         assert_eq!(
@@ -6933,6 +7288,7 @@ mod tests {
             root_tick: Rational::from(38),
             value: TracePointValue::Analog { exact, enclosure },
         };
+        let signal = physical_trace_signal(PHYSICAL_UNSIGNED, "physical.unsigned-mm");
         assert_eq!(
             trace_cursor_label(&signal, &point),
             "physical-sample = 1 3/4 [7 lattice counts] mm @ c6:t19"
@@ -6940,38 +7296,348 @@ mod tests {
     }
 
     #[test]
-    fn physical_scalar_trace_values_reject_mismatch_reversal_and_nonscalar_data() {
-        let unit = alumina_interface_core::graph::UnitId::new(1);
-        let signal = physical_trace_signal();
-        let unsigned_kind = TypeKind::CanonicalU64 {
-            unit,
-            quantum: Rational::from(1) / Rational::from(4),
-        };
+    fn physical_scalar_trace_values_reject_type_substitution_and_reversal() {
+        let schema = physical_trace_schema();
+        let signal = physical_trace_signal(PHYSICAL_UNSIGNED, "physical.unsigned-mm");
+        let signed =
+            TypedGraphValue::try_new(&schema, PHYSICAL_SIGNED, GraphValue::CanonicalI64(7))
+                .unwrap();
         assert!(
-            trace_sample_value(&signal, &unsigned_kind, &GraphValue::CanonicalI64(7),)
+            trace_sample_value(&signal, &schema, &signed)
                 .unwrap_err()
-                .contains("does not admit a plotted CanonicalI64 value")
+                .contains("changed its exact sample type from t12 to t11")
         );
         assert!(
-            trace_sample_value(
+            analog_trace_point_value(
                 &signal,
-                &TypeKind::Text { maximum_bytes: 8 },
-                &GraphValue::Text("7/4".to_owned()),
-            )
-            .unwrap_err()
-            .contains("does not admit a plotted Text value")
-        );
-        assert!(
-            trace_sample_value(
-                &signal,
-                &TypeKind::MeasurementInterval { unit },
-                &GraphValue::MeasurementInterval {
-                    lower: Rational::from(2),
-                    upper: Rational::from(1),
-                },
+                "2..1".to_owned(),
+                &Rational::from(2),
+                &Rational::from(1),
             )
             .unwrap_err()
             .contains("reversed exact analog interval")
+        );
+    }
+
+    const STATE_BOOL: GraphTypeId = GraphTypeId::new(20);
+    const STATE_TEXT: GraphTypeId = GraphTypeId::new(21);
+    const STATE_BYTES: GraphTypeId = GraphTypeId::new(22);
+    const STATE_ARRAY: GraphTypeId = GraphTypeId::new(23);
+    const STATE_RECORD: GraphTypeId = GraphTypeId::new(24);
+    const STATE_OPTION: GraphTypeId = GraphTypeId::new(25);
+    const STATE_RESULT: GraphTypeId = GraphTypeId::new(26);
+    const STATE_RESOURCE: GraphTypeId = GraphTypeId::new(27);
+    const STATE_JOB: GraphTypeId = GraphTypeId::new(28);
+
+    fn state_trace_schema() -> GraphSchema {
+        GraphSchema::try_new(
+            GraphLimits::interactive(),
+            Vec::new(),
+            vec![
+                TypeDefinition::new(STATE_BOOL, "state.bool", TypeKind::Boolean),
+                TypeDefinition::new(
+                    STATE_TEXT,
+                    "state.text",
+                    TypeKind::Text { maximum_bytes: 256 },
+                ),
+                TypeDefinition::new(
+                    STATE_BYTES,
+                    "state.bytes",
+                    TypeKind::Bytes { maximum_bytes: 64 },
+                ),
+                TypeDefinition::new(
+                    STATE_ARRAY,
+                    "state.text-array",
+                    TypeKind::Array {
+                        element: STATE_TEXT,
+                        maximum_items: 8,
+                    },
+                ),
+                TypeDefinition::new(
+                    STATE_RECORD,
+                    "state.record",
+                    TypeKind::Record {
+                        fields: vec![
+                            RecordField::new(RecordFieldId::new(1), "ready", STATE_BOOL),
+                            RecordField::new(RecordFieldId::new(2), "message", STATE_TEXT),
+                        ],
+                    },
+                ),
+                TypeDefinition::new(
+                    STATE_OPTION,
+                    "state.optional-text",
+                    TypeKind::Option { value: STATE_TEXT },
+                ),
+                TypeDefinition::new(
+                    STATE_RESULT,
+                    "state.text-or-bytes",
+                    TypeKind::Result {
+                        ok: STATE_TEXT,
+                        error: STATE_BYTES,
+                    },
+                ),
+                TypeDefinition::new(
+                    STATE_RESOURCE,
+                    "state.resource",
+                    TypeKind::ResourceHandle {
+                        class: ResourceClassId::new(7),
+                    },
+                ),
+                TypeDefinition::new(STATE_JOB, "state.job", TypeKind::JobHandle),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn state_trace_signal(sample_type: GraphTypeId, name: &str, probe: u32) -> TraceSignal {
+        TraceSignal {
+            probe: GraphProbeId::new(probe),
+            name: format!("state-{probe}"),
+            source: RepresentativeControlSignal::Error.endpoint(),
+            representative: None,
+            sample_type,
+            sample_type_name: name.to_owned(),
+            unit_symbol: None,
+        }
+    }
+
+    fn state_trace_value(
+        schema: &GraphSchema,
+        sample_type: GraphTypeId,
+        value: GraphValue,
+    ) -> TracePointValue {
+        let definition = schema.value_type(sample_type).unwrap();
+        let signal = state_trace_signal(sample_type, definition.name(), sample_type.get());
+        let typed = TypedGraphValue::try_new(schema, sample_type, value).unwrap();
+        let (kind, point) = trace_sample_value(&signal, schema, &typed).unwrap();
+        assert_eq!(kind, TraceSeriesKind::State);
+        point
+    }
+
+    #[test]
+    fn non_scalar_trace_values_become_bounded_canonical_state_events() {
+        let schema = state_trace_schema();
+        let text = state_trace_value(
+            &schema,
+            STATE_TEXT,
+            GraphValue::Text("ready\nμ-stage".to_owned()),
+        );
+        let TracePointValue::State { summary, encoding } = &text else {
+            panic!("text did not produce a state point");
+        };
+        assert_eq!(summary, "text \"ready\\n\\u{3bc}-stage\" [14 UTF-8 bytes]");
+        assert_eq!(
+            encoding.digest(),
+            alumina_storage::sha256(encoding.bytes()).digest
+        );
+        assert_eq!(&encoding.bytes()[..4], &STATE_TEXT.get().to_le_bytes());
+        let mut exact_budget = MAXIMUM_STATE_IDENTITY_BYTES - encoding.bytes().len();
+        retain_state_identity_bytes(&mut exact_budget, &text).unwrap();
+        assert_eq!(exact_budget, MAXIMUM_STATE_IDENTITY_BYTES);
+        assert!(
+            retain_state_identity_bytes(&mut exact_budget, &text)
+                .unwrap_err()
+                .contains("canonical identity display policy")
+        );
+        let mut overflow = usize::MAX;
+        assert_eq!(
+            retain_state_identity_bytes(&mut overflow, &text),
+            Err("state trace identity byte count overflowed".to_owned())
+        );
+        let long_text = state_trace_value(
+            &schema,
+            STATE_TEXT,
+            GraphValue::Text("a".repeat(MAXIMUM_STATE_TEXT_PREVIEW_CHARS + 1)),
+        );
+        let TracePointValue::State { summary, .. } = long_text else {
+            unreachable!();
+        };
+        assert_eq!(
+            summary,
+            format!(
+                "text \"{}…\" [{} UTF-8 bytes]",
+                "a".repeat(MAXIMUM_STATE_TEXT_PREVIEW_CHARS),
+                MAXIMUM_STATE_TEXT_PREVIEW_CHARS + 1
+            )
+        );
+
+        let cases = [
+            (
+                STATE_BYTES,
+                GraphValue::Bytes(vec![0, 1, 2, 3, 4, 5, 6, 7, 8]),
+                "bytes 0001020304050607… [9 bytes]",
+            ),
+            (
+                STATE_ARRAY,
+                GraphValue::Array(vec![
+                    GraphValue::Text("a".to_owned()),
+                    GraphValue::Text("b".to_owned()),
+                ]),
+                "array [2 items]",
+            ),
+            (
+                STATE_RECORD,
+                GraphValue::Record(vec![
+                    RecordValueField {
+                        field: RecordFieldId::new(1),
+                        value: GraphValue::Boolean(true),
+                    },
+                    RecordValueField {
+                        field: RecordFieldId::new(2),
+                        value: GraphValue::Text("ready".to_owned()),
+                    },
+                ]),
+                "record [2 fields]",
+            ),
+            (STATE_OPTION, GraphValue::OptionNone, "none"),
+            (
+                STATE_OPTION,
+                GraphValue::OptionSome(Box::new(GraphValue::Text("ready".to_owned()))),
+                "some(text)",
+            ),
+            (
+                STATE_RESULT,
+                GraphValue::ResultOk(Box::new(GraphValue::Text("ready".to_owned()))),
+                "ok(text)",
+            ),
+            (
+                STATE_RESULT,
+                GraphValue::ResultError(Box::new(GraphValue::Bytes(vec![0xee]))),
+                "error(bytes)",
+            ),
+        ];
+        for (sample_type, value, expected) in cases {
+            let point = state_trace_value(&schema, sample_type, value);
+            let TracePointValue::State { summary, encoding } = point else {
+                panic!("non-scalar value did not produce a state point");
+            };
+            assert_eq!(summary, expected);
+            assert_eq!(&encoding.bytes()[..4], &sample_type.get().to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn identity_bearing_trace_values_become_canonical_state_events() {
+        let schema = state_trace_schema();
+        let resource = state_trace_value(
+            &schema,
+            STATE_RESOURCE,
+            GraphValue::ResourceHandle(ResourceGraphHandle {
+                device_id: DeviceId([1; 16]),
+                board_package_digest: Digest([2; 32]),
+                class: ResourceClassId::new(7),
+                resource_selector: 33,
+            }),
+        );
+        let job = state_trace_value(
+            &schema,
+            STATE_JOB,
+            GraphValue::JobHandle(JobGraphHandle {
+                device_id: DeviceId([3; 16]),
+                global_job_digest: Digest([4; 32]),
+                partition_digest: Digest([5; 32]),
+            }),
+        );
+        assert!(matches!(resource, TracePointValue::State { .. }));
+        assert!(matches!(job, TracePointValue::State { .. }));
+    }
+
+    #[test]
+    fn state_lanes_mark_byte_exact_changes_and_retain_exact_cursor_identity() {
+        let schema = state_trace_schema();
+        let definition = schema.value_type(STATE_TEXT).unwrap();
+        let signal = state_trace_signal(STATE_TEXT, definition.name(), 9);
+        assert_eq!(state_signal_label(&signal), "state-9\nstate.text [t21]");
+        let ready = state_trace_value(&schema, STATE_TEXT, GraphValue::Text("ready".to_owned()));
+        let waiting =
+            state_trace_value(&schema, STATE_TEXT, GraphValue::Text("waiting".to_owned()));
+        let series = TraceSeries {
+            signal: signal.clone(),
+            kind: TraceSeriesKind::State,
+            points: vec![
+                TracePoint {
+                    clock: GraphClockId::new(3),
+                    tick: 4,
+                    root_tick: Rational::from(8),
+                    value: ready.clone(),
+                },
+                TracePoint {
+                    clock: GraphClockId::new(3),
+                    tick: 5,
+                    root_tick: Rational::from(10),
+                    value: ready,
+                },
+                TracePoint {
+                    clock: GraphClockId::new(3),
+                    tick: 6,
+                    root_tick: Rational::from(12),
+                    value: waiting,
+                },
+            ],
+        };
+        assert!(state_point_changed(&series, 0));
+        assert!(!state_point_changed(&series, 1));
+        assert!(state_point_changed(&series, 2));
+        let label = trace_cursor_label(&signal, &series.points[2]);
+        let TracePointValue::State { encoding, .. } = &series.points[2].value else {
+            unreachable!();
+        };
+        assert!(label.contains("text \"waiting\" [7 UTF-8 bytes]"));
+        assert!(label.contains("state.text [t21]"));
+        assert!(label.contains(&digest_hex(encoding.digest())));
+        assert!(label.contains("canonical bytes @ c3:t6"));
+
+        let axis = TraceTimeAxis::try_new(core::slice::from_ref(&series), None)
+            .unwrap()
+            .unwrap();
+        let context = egui::Context::default();
+        let painted = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(480.0, 90.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let (_, painter) = ui.allocate_painter(
+                        egui::vec2(400.0, STATE_TRACE_LANE_HEIGHT),
+                        egui::Sense::hover(),
+                    );
+                    paint_state_trace_series(&painter, painter.clip_rect(), &[&series], &axis);
+                });
+            },
+        );
+        assert!(!painted.shapes.is_empty());
+
+        let mut unordered = vec![
+            TraceSeries {
+                signal: state_trace_signal(STATE_TEXT, definition.name(), 12),
+                kind: TraceSeriesKind::State,
+                points: Vec::new(),
+            },
+            TraceSeries {
+                signal: state_trace_signal(STATE_TEXT, definition.name(), 2),
+                kind: TraceSeriesKind::State,
+                points: Vec::new(),
+            },
+        ];
+        let lanes = state_trace_lanes(&unordered).unwrap();
+        assert_eq!(lanes[0].signal.probe, GraphProbeId::new(2));
+        assert_eq!(lanes[1].signal.probe, GraphProbeId::new(12));
+
+        unordered = (1..=u32::try_from(MAXIMUM_STATE_TRACE_LANES).unwrap() + 1)
+            .map(|probe| TraceSeries {
+                signal: state_trace_signal(STATE_TEXT, definition.name(), probe),
+                kind: TraceSeriesKind::State,
+                points: Vec::new(),
+            })
+            .collect();
+        assert!(
+            state_trace_lanes(&unordered)
+                .unwrap_err()
+                .contains("bounded 64-lane trace display policy")
         );
     }
 
