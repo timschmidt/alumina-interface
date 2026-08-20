@@ -58,6 +58,7 @@
         expectation === "cached-job-abort-duplicate" ||
         expectation === "cached-job-abort-stale-response" ||
         expectation === "cached-job-confirmed-safety-fault" ||
+        expectation === "cached-job-confirmed-safety-propagation" ||
         expectation === "cached-job-installing-stop" ||
         expectation === "cached-job-reattach";
       const cachedJobAbortGuardOutage =
@@ -72,6 +73,10 @@
         expectation === "cached-job-abort-stale-response";
       const cachedJobConfirmedSafetyFault =
         expectation === "cached-job-confirmed-safety-fault";
+      const cachedJobConfirmedSafetyPropagation =
+        expectation === "cached-job-confirmed-safety-propagation";
+      const cachedJobExpectedSafetyFault =
+        cachedJobConfirmedSafetyFault || cachedJobConfirmedSafetyPropagation;
       const cachedJobInstallingStop =
         expectation === "cached-job-installing-stop";
       const cachedJobStopPhase =
@@ -414,7 +419,7 @@
           }
           if (
             snapshot.phase === "faulted" &&
-            !cachedJobConfirmedSafetyFault
+            !cachedJobExpectedSafetyFault
           ) {
             clearTimeout(timeout);
             finish("failed", {
@@ -484,10 +489,10 @@
               stopFlowActive &&
               !stopMissed &&
               !stopSplit &&
-              !cachedJobConfirmedSafetyFault;
+              !cachedJobExpectedSafetyFault;
             const expectedTerminalPhase = retained
               ? "retained_complete"
-              : cachedJobConfirmedSafetyFault
+              : cachedJobExpectedSafetyFault
                 ? "faulted"
                 : stopMissed
                   ? "completed_after_stop_request"
@@ -503,7 +508,7 @@
                   participant.cache_phase === "complete" &&
                   participant.accepted_bytes === participant.total_bytes,
               ) &&
-              (cachedJobConfirmedSafetyFault
+              (cachedJobExpectedSafetyFault
                 ? snapshot.participants.filter(
                     (participant) =>
                       participant.schedule_phase === "faulted" &&
@@ -776,6 +781,33 @@
                           participant.schedule_phase === "faulted",
                       ).length === 1 &&
                       observation.participants.filter(
+                        (participant) =>
+                          participant.schedule_phase === "confirmed",
+                      ).length === 1,
+                  ))) &&
+              (!cachedJobConfirmedSafetyPropagation ||
+                (cachedJobFailureObservations.length === 0 &&
+                  !cachedJobRecovered &&
+                  !cachedJobStopRequested &&
+                  cachedJobTransitions.some(
+                    (transition) =>
+                      transition.phase === "aborting" &&
+                      transition.consecutive_failures === 0 &&
+                      transition.last_error === null &&
+                      transition.participants.length === 2 &&
+                      transition.participants.every(
+                        (participant) =>
+                          participant.cache_artifact === "complete" &&
+                          participant.cache_phase === "complete" &&
+                          participant.accepted_bytes ===
+                            participant.total_bytes &&
+                          participant.local_start_cycle !== null,
+                      ) &&
+                      transition.participants.filter(
+                        (participant) =>
+                          participant.schedule_phase === "faulted",
+                      ).length === 1 &&
+                      transition.participants.filter(
                         (participant) =>
                           participant.schedule_phase === "confirmed",
                       ).length === 1,
