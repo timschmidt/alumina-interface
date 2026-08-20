@@ -2074,7 +2074,19 @@ mod tests {
         );
     }
 
-    fn assert_observed_safety_fault_cleanup(lost_abort_response: bool) {
+    #[derive(Clone, Copy)]
+    enum FaultCleanupAbortDelivery {
+        ResponseReceived,
+        AppliedResponseLost,
+        RequestLost,
+    }
+
+    fn coordinator_with_observed_safety_fault() -> (
+        DistributedScheduleCoordinator,
+        Vec<Authority>,
+        DeviceId,
+        DeviceId,
+    ) {
         let (job, ready, preparations, clocks) = fixture();
         let mut coordinator =
             DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
@@ -2084,39 +2096,55 @@ mod tests {
 
         let status_round = coordinator.begin_status_round().unwrap();
         assert_eq!(status_round.len(), authorities.len());
-        let faulted_status = &status_round[0];
+        let faulted_device = status_round[0].device_id;
         let faulted_authority = authorities
             .iter_mut()
-            .find(|authority| authority.device_id == faulted_status.device_id)
+            .find(|authority| authority.device_id == faulted_device)
             .unwrap();
         faulted_authority.schedule.fault_safety_stop().unwrap();
         assert_eq!(
             coordinator
-                .accept_response(
-                    faulted_status.device_id,
-                    &response(&ready_status(faulted_authority)),
-                )
+                .accept_response(faulted_device, &response(&ready_status(faulted_authority)))
                 .unwrap(),
             DistributedSchedulePhase::Aborting
         );
 
-        let peer_status = &status_round[1];
+        let peer_device = status_round[1].device_id;
         let peer_authority = authorities
             .iter()
-            .find(|authority| authority.device_id == peer_status.device_id)
+            .find(|authority| authority.device_id == peer_device)
             .unwrap();
         assert_eq!(
             coordinator
-                .accept_response(
-                    peer_status.device_id,
-                    &response(&ready_status(peer_authority)),
-                )
+                .accept_response(peer_device, &response(&ready_status(peer_authority)))
                 .unwrap(),
             DistributedSchedulePhase::Aborting
         );
+        (coordinator, authorities, faulted_device, peer_device)
+    }
+
+    fn assert_fault_cleanup_ambiguous(
+        coordinator: &DistributedScheduleCoordinator,
+        faulted_device: DeviceId,
+        peer_device: DeviceId,
+    ) {
+        assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborting);
+        assert_eq!(
+            coordinator.participant_phase(faulted_device),
+            Some(ParticipantSchedulePhase::Faulted)
+        );
+        assert_eq!(
+            coordinator.participant_phase(peer_device),
+            Some(ParticipantSchedulePhase::Confirmed)
+        );
+    }
+
+    fn assert_observed_safety_fault_cleanup(delivery: FaultCleanupAbortDelivery) {
+        let (mut coordinator, mut authorities, faulted_device, peer_device) =
+            coordinator_with_observed_safety_fault();
 
         let stopped_request = coordinator.next_request().unwrap().unwrap();
-        assert_eq!(stopped_request.device_id, peer_status.device_id);
+        assert_eq!(stopped_request.device_id, peer_device);
         assert_eq!(stopped_request.request.operation, Operation::JobAbort);
         let stopped_commit = coordinator
             .participant_commit(stopped_request.device_id)
@@ -2125,64 +2153,90 @@ mod tests {
             .iter_mut()
             .find(|authority| authority.device_id == stopped_request.device_id)
             .unwrap();
-        apply_abort(stopped_authority, &stopped_request, stopped_commit);
-        if lost_abort_response {
-            assert!(
-                coordinator
-                    .abandon_pending(stopped_request.device_id)
-                    .unwrap()
-            );
-            assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborting);
-            assert_eq!(
-                coordinator.participant_phase(faulted_status.device_id),
-                Some(ParticipantSchedulePhase::Faulted)
-            );
-            assert_eq!(
-                coordinator.participant_phase(stopped_request.device_id),
-                Some(ParticipantSchedulePhase::Confirmed)
-            );
-            let reconciliation = coordinator.next_request().unwrap().unwrap();
-            assert_eq!(reconciliation.device_id, stopped_request.device_id);
-            assert_eq!(reconciliation.request.operation, Operation::JobStatus);
-            assert_eq!(
-                coordinator
-                    .accept_response(
-                        reconciliation.device_id,
-                        &response(&ready_status(stopped_authority)),
-                    )
-                    .unwrap(),
-                DistributedSchedulePhase::Faulted
-            );
-        } else {
-            assert_eq!(
-                coordinator
-                    .accept_response(
-                        stopped_request.device_id,
-                        &response(&ready_status(stopped_authority)),
-                    )
-                    .unwrap(),
-                DistributedSchedulePhase::Faulted
-            );
+        match delivery {
+            FaultCleanupAbortDelivery::ResponseReceived => {
+                apply_abort(stopped_authority, &stopped_request, stopped_commit);
+                assert_eq!(
+                    coordinator
+                        .accept_response(
+                            stopped_request.device_id,
+                            &response(&ready_status(stopped_authority)),
+                        )
+                        .unwrap(),
+                    DistributedSchedulePhase::Faulted
+                );
+            }
+            FaultCleanupAbortDelivery::AppliedResponseLost => {
+                apply_abort(stopped_authority, &stopped_request, stopped_commit);
+                assert!(coordinator.abandon_pending(peer_device).unwrap());
+                assert_fault_cleanup_ambiguous(&coordinator, faulted_device, peer_device);
+                let reconciliation = coordinator.next_request().unwrap().unwrap();
+                assert_eq!(reconciliation.device_id, peer_device);
+                assert_eq!(reconciliation.request.operation, Operation::JobStatus);
+                assert_eq!(
+                    coordinator
+                        .accept_response(
+                            reconciliation.device_id,
+                            &response(&ready_status(stopped_authority)),
+                        )
+                        .unwrap(),
+                    DistributedSchedulePhase::Faulted
+                );
+            }
+            FaultCleanupAbortDelivery::RequestLost => {
+                assert!(coordinator.abandon_pending(peer_device).unwrap());
+                assert_fault_cleanup_ambiguous(&coordinator, faulted_device, peer_device);
+                let reconciliation = coordinator.next_request().unwrap().unwrap();
+                assert_eq!(reconciliation.device_id, peer_device);
+                assert_eq!(reconciliation.request.operation, Operation::JobStatus);
+                assert_eq!(
+                    coordinator
+                        .accept_response(
+                            reconciliation.device_id,
+                            &response(&ready_status(stopped_authority)),
+                        )
+                        .unwrap(),
+                    DistributedSchedulePhase::Aborting
+                );
+                assert_fault_cleanup_ambiguous(&coordinator, faulted_device, peer_device);
+                let retry = coordinator.next_request().unwrap().unwrap();
+                assert_eq!(retry, stopped_request);
+                apply_abort(stopped_authority, &retry, stopped_commit);
+                assert_eq!(
+                    coordinator
+                        .accept_response(
+                            retry.device_id,
+                            &response(&ready_status(stopped_authority)),
+                        )
+                        .unwrap(),
+                    DistributedSchedulePhase::Faulted
+                );
+            }
         }
         assert_eq!(coordinator.next_request().unwrap(), None);
         assert_eq!(
-            coordinator.participant_phase(faulted_status.device_id),
+            coordinator.participant_phase(faulted_device),
             Some(ParticipantSchedulePhase::Faulted)
         );
         assert_eq!(
-            coordinator.participant_phase(stopped_request.device_id),
+            coordinator.participant_phase(peer_device),
             Some(ParticipantSchedulePhase::Aborted)
         );
     }
 
     #[test]
     fn observed_safety_fault_automatically_aborts_remaining_participant() {
-        assert_observed_safety_fault_cleanup(false);
+        assert_observed_safety_fault_cleanup(FaultCleanupAbortDelivery::ResponseReceived);
     }
 
     #[test]
     fn observed_safety_fault_recovers_lost_peer_abort_response() {
-        assert_observed_safety_fault_cleanup(true);
+        assert_observed_safety_fault_cleanup(FaultCleanupAbortDelivery::AppliedResponseLost);
+    }
+
+    #[test]
+    fn observed_safety_fault_reconciles_then_retries_lost_peer_abort_request() {
+        assert_observed_safety_fault_cleanup(FaultCleanupAbortDelivery::RequestLost);
     }
 
     #[test]
