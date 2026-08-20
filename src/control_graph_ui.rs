@@ -25,15 +25,16 @@ use alumina_interface_core::graph::{
     GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
     GraphHierarchyLimits, GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype,
     GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument,
-    GraphProbeId, GraphProbeLimits, GraphSchema, GraphSimulationRegistry, GraphTraceEntryKind,
-    GraphTypeId, GraphValue, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory,
-    GraphWorkspaceLimits, NodeDefinition, NodeOutputDependency, NodeParameter,
-    NodeParameterContract, NodeSchema, PortDefinition, RepresentativeControlSignal,
-    RepresentativeExactControlGraph, ResourceClassId, TypeDefinition, TypeKind, TypedGraphValue,
-    WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
-    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
-    encode_graph_probes, encode_graph_workspace, flatten_graph_hierarchy,
-    graph_component_instance_prototype, graph_resource_label, replay_graph_workspace,
+    GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeTrigger, GraphProbeTriggerResolution,
+    GraphSchema, GraphSimulationRegistry, GraphTraceEntryKind, GraphTypeId, GraphValue,
+    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
+    NodeDefinition, NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema,
+    PortDefinition, RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
+    TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
+    compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
+    encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
+    flatten_graph_hierarchy, graph_component_instance_prototype, graph_resource_label,
+    replay_graph_workspace, resolve_graph_probe_trigger,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
@@ -1155,6 +1156,8 @@ pub(crate) struct ExactControlWorkspace {
     persistence_attempted: bool,
     file_status: String,
     file_bridge: BoundedFileBridge,
+    trigger_pre_samples: u32,
+    trigger_post_samples: u32,
     cursor_tick: u64,
 }
 
@@ -1174,6 +1177,19 @@ impl ExactControlWorkspace {
         let target_resources = tinybee_resource_proof()?;
         let traces = trace_series(&fixture)?;
         let palette = control_palette(&fixture)?;
+        let trigger = probes
+            .document
+            .trigger()
+            .ok_or_else(|| "reference ALGP has no edge trigger".to_owned())?;
+        let cursor_tick =
+            match resolve_graph_probe_trigger(&probes.document, &workspace, fixture.simulation())
+                .map_err(|error| error.to_string())?
+            {
+                GraphProbeTriggerResolution::Matched(matched) => matched.trigger_tick(),
+                GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_) => {
+                    0
+                }
+            };
         let mut result = Self {
             fixture,
             workspace,
@@ -1198,7 +1214,9 @@ impl ExactControlWorkspace {
             persistence_attempted: false,
             file_status: "canonical workspace has not been exported this session".to_owned(),
             file_bridge: BoundedFileBridge::default(),
-            cursor_tick: 0,
+            trigger_pre_samples: trigger.pretrigger_samples(),
+            trigger_post_samples: trigger.posttrigger_samples(),
+            cursor_tick,
         };
         if let Some(persisted) = persisted {
             match decode_persisted_workspace(persisted, result.workspace.limits())
@@ -1283,19 +1301,7 @@ impl ExactControlWorkspace {
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
             ));
         }
-        if let Some(probes) = &self.probes {
-            ui.label(format!(
-                "Diagnostic probes: {} bindings / {} canonical bytes",
-                probes.document.probes().len(),
-                probes.encoding.bytes().len()
-            ));
-            ui.monospace(format!(
-                "probe sidecar {}…",
-                digest_prefix(probes.encoding.digest().0)
-            ));
-        } else {
-            ui.colored_label(egui::Color32::YELLOW, &self.probe_status);
-        }
+        self.show_probe_sidebar(ui);
         ui.label(format!(
             "History: {} undo / {} redo · {} bytes",
             self.history.undo_len(),
@@ -1338,6 +1344,31 @@ impl ExactControlWorkspace {
             ui.strong("Selected node");
             ui.label(format!("#{} {}", selected.get(), node.label()));
             ui.monospace(format!("{} v{}", node.kind().name(), node.kind().version()));
+        }
+    }
+
+    fn show_probe_sidebar(&self, ui: &mut egui::Ui) {
+        let Some(probes) = &self.probes else {
+            ui.colored_label(egui::Color32::YELLOW, &self.probe_status);
+            return;
+        };
+        ui.label(format!(
+            "Diagnostic probes: {} bindings / {} canonical bytes",
+            probes.document.probes().len(),
+            probes.encoding.bytes().len()
+        ));
+        ui.monospace(format!(
+            "probe sidecar {}…",
+            digest_prefix(probes.encoding.digest().0)
+        ));
+        if let Some(trigger) = probes.document.trigger() {
+            ui.label(format!(
+                "Replay trigger: p{} {} · {} pre / {} post",
+                trigger.probe().get(),
+                probe_edge_label(trigger.edge()),
+                trigger.pretrigger_samples(),
+                trigger.posttrigger_samples()
+            ));
         }
     }
 
@@ -2545,6 +2576,10 @@ impl ExactControlWorkspace {
         };
         match result {
             Ok(probes) => {
+                if let Some(trigger) = probes.document.trigger() {
+                    self.trigger_pre_samples = trigger.pretrigger_samples();
+                    self.trigger_post_samples = trigger.posttrigger_samples();
+                }
                 self.probes = Some(probes);
                 "canonical ALGP diagnostic probes attached".clone_into(&mut self.probe_status);
             }
@@ -2679,10 +2714,12 @@ impl ExactControlWorkspace {
             }
         });
         ui.label(
-            "These saved bindings select exact graph outputs and bound host retention only. They do not grant GPIO access, telemetry bandwidth, triggers, or firmware execution authority.",
+            "These saved bindings select exact graph outputs, bounded host retention, and one replay-only Boolean edge trigger. They do not grant GPIO access, telemetry bandwidth, device-trigger configuration, or firmware execution authority.",
         );
 
         let mut remove = None;
+        let mut set_trigger = None;
+        let clear_trigger = self.show_probe_trigger_controls(ui);
         if let Some(probes) = &self.probes {
             for probe in probes.document.probes() {
                 ui.horizontal_wrapped(|ui| {
@@ -2698,6 +2735,21 @@ impl ExactControlWorkspace {
                     ));
                     if ui.small_button("remove").clicked() {
                         remove = Some(probe.id());
+                    }
+                    if probes
+                        .document
+                        .supports_edge_trigger(&self.workspace, probe.id())
+                        .unwrap_or(false)
+                    {
+                        if ui.small_button("rise trigger").clicked() {
+                            set_trigger = Some((probe.id(), GraphProbeEdge::Rising));
+                        }
+                        if ui.small_button("fall trigger").clicked() {
+                            set_trigger = Some((probe.id(), GraphProbeEdge::Falling));
+                        }
+                        if ui.small_button("either trigger").clicked() {
+                            set_trigger = Some((probe.id(), GraphProbeEdge::Either));
+                        }
                     }
                 });
             }
@@ -2731,9 +2783,55 @@ impl ExactControlWorkspace {
         ui.label(&self.probe_status);
         if let Some(id) = remove {
             self.remove_probe(id);
+        } else if clear_trigger {
+            self.clear_probe_trigger();
+        } else if let Some((id, edge)) = set_trigger {
+            self.set_probe_trigger(id, edge);
         } else if let Some(source) = add {
             self.add_probe(source);
         }
+    }
+
+    fn show_probe_trigger_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Trigger window");
+            ui.label("pre");
+            ui.add(
+                egui::DragValue::new(&mut self.trigger_pre_samples)
+                    .range(0..=1_000_000_u32)
+                    .speed(1),
+            );
+            ui.label("post");
+            ui.add(
+                egui::DragValue::new(&mut self.trigger_post_samples)
+                    .range(0..=1_000_000_u32)
+                    .speed(1),
+            );
+            ui.weak("retained samples; apply with an edge button");
+        });
+        let Some(trigger) = self
+            .probes
+            .as_ref()
+            .and_then(|probes| probes.document.trigger())
+        else {
+            ui.weak("No replay trigger is configured.");
+            return false;
+        };
+        let mut clear = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(249, 153, 82),
+                format!(
+                    "active: p{} {} · {} pre / {} post",
+                    trigger.probe().get(),
+                    probe_edge_label(trigger.edge()),
+                    trigger.pretrigger_samples(),
+                    trigger.posttrigger_samples()
+                ),
+            );
+            clear = ui.small_button("clear trigger").clicked();
+        });
+        clear
     }
 
     fn add_probe(&mut self, source: WireEndpoint) {
@@ -2743,6 +2841,7 @@ impl ExactControlWorkspace {
                 GraphProbeLimits::interactive(),
                 0,
                 1,
+                None,
                 &self.workspace,
                 Vec::new(),
             ) {
@@ -2806,7 +2905,79 @@ impl ExactControlWorkspace {
             }
         };
         self.probes = Some(ProbePackage { document, encoding });
-        self.probe_status = format!("removed probe {}; identity was not reused", id.get());
+        self.probe_status = format!(
+            "removed probe {}; identity was not reused and any bound trigger was cleared",
+            id.get()
+        );
+    }
+
+    fn set_probe_trigger(&mut self, id: GraphProbeId, edge: GraphProbeEdge) {
+        let Some(current) = &self.probes else {
+            "trigger edit rejected without mutation: no sidecar is attached"
+                .clone_into(&mut self.probe_status);
+            return;
+        };
+        let trigger = GraphProbeTrigger::new(
+            id,
+            edge,
+            self.trigger_pre_samples,
+            self.trigger_post_samples,
+        );
+        let mut document = current.document.clone();
+        if let Err(error) = document.set_trigger(&self.workspace, trigger) {
+            self.probe_status = format!("trigger edit rejected without mutation: {error}");
+            return;
+        }
+        let encoding = match encode_graph_probes(&document) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.probe_status = format!("trigger encoding rejected without mutation: {error}");
+                return;
+            }
+        };
+        self.probes = Some(ProbePackage { document, encoding });
+        if let Ok(GraphProbeTriggerResolution::Matched(matched)) = self.trigger_resolution() {
+            self.cursor_tick = matched.trigger_tick();
+        }
+        self.probe_status = format!(
+            "set replay-only p{} {} trigger with {} pre / {} post samples",
+            id.get(),
+            probe_edge_label(edge),
+            self.trigger_pre_samples,
+            self.trigger_post_samples
+        );
+    }
+
+    fn clear_probe_trigger(&mut self) {
+        let Some(current) = &self.probes else {
+            "trigger clear rejected without mutation: no sidecar is attached"
+                .clone_into(&mut self.probe_status);
+            return;
+        };
+        let mut document = current.document.clone();
+        if let Err(error) = document.clear_trigger(&self.workspace) {
+            self.probe_status = format!("trigger clear rejected without mutation: {error}");
+            return;
+        }
+        let encoding = match encode_graph_probes(&document) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.probe_status = format!("trigger encoding rejected without mutation: {error}");
+                return;
+            }
+        };
+        self.probes = Some(ProbePackage { document, encoding });
+        "cleared replay-only trigger; probe bindings are unchanged"
+            .clone_into(&mut self.probe_status);
+    }
+
+    fn trigger_resolution(&self) -> Result<GraphProbeTriggerResolution, String> {
+        let probes = self
+            .probes
+            .as_ref()
+            .ok_or_else(|| "no canonical ALGP sidecar is attached".to_owned())?;
+        resolve_graph_probe_trigger(&probes.document, &self.workspace, self.fixture.simulation())
+            .map_err(|error| error.to_string())
     }
 
     #[allow(
@@ -2817,10 +2988,53 @@ impl ExactControlWorkspace {
         ui.horizontal_wrapped(|ui| {
             ui.strong("Exact mixed-signal control trace");
             ui.label(
-                "10 Hz clock · ALGP-selected series · certified analog enclosures and exact Boolean lanes",
+                "10 Hz clock · ALGP-selected series/window · certified analog enclosures and exact Boolean lanes",
             );
         });
-        let traces = self
+        let trigger_resolution = match self.trigger_resolution() {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("replay trigger unavailable: {error}"),
+                );
+                GraphProbeTriggerResolution::Disabled
+            }
+        };
+        match trigger_resolution {
+            GraphProbeTriggerResolution::Disabled => {
+                ui.weak("Trigger disabled; the complete retained reference trace is visible.");
+            }
+            GraphProbeTriggerResolution::Waiting(trigger) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "p{} {} trigger has no match in this finite replay; complete trace shown",
+                        trigger.probe().get(),
+                        probe_edge_label(trigger.edge())
+                    ),
+                );
+            }
+            GraphProbeTriggerResolution::Matched(matched) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(249, 153, 82),
+                    format!(
+                        "p{} {} matched tick {} / sequence {} · exact window {}…{} · {} pre / {} post{}{}",
+                        matched.trigger().probe().get(),
+                        probe_edge_label(matched.trigger().edge()),
+                        matched.trigger_tick(),
+                        matched.trigger_sequence(),
+                        matched.first_tick(),
+                        matched.last_tick(),
+                        matched.retained_pretrigger_samples(),
+                        matched.retained_posttrigger_samples(),
+                        if matched.pretrigger_complete() { "" } else { " · truncated pre" },
+                        if matched.posttrigger_complete() { "" } else { " · truncated post" }
+                    ),
+                );
+            }
+        }
+        let mut traces = self
             .traces
             .iter()
             .filter(|series| {
@@ -2836,6 +3050,33 @@ impl ExactControlWorkspace {
             );
             return;
         }
+        let complete_minimum_tick = traces
+            .iter()
+            .flat_map(|series| series.points.iter().map(|point| point.tick))
+            .min()
+            .unwrap_or(0);
+        let complete_maximum_tick = traces
+            .iter()
+            .flat_map(|series| series.points.iter().map(|point| point.tick))
+            .max()
+            .unwrap_or(complete_minimum_tick);
+        let (minimum_tick, maximum_tick, trigger_tick) = match trigger_resolution {
+            GraphProbeTriggerResolution::Matched(matched) => (
+                matched.first_tick(),
+                matched.last_tick(),
+                Some(matched.trigger_tick()),
+            ),
+            GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_) => {
+                (complete_minimum_tick, complete_maximum_tick, None)
+            }
+        };
+        for series in &mut traces {
+            series
+                .points
+                .retain(|point| (minimum_tick..=maximum_tick).contains(&point.tick));
+        }
+        traces.retain(|series| !series.points.is_empty());
+        self.cursor_tick = self.cursor_tick.clamp(minimum_tick, maximum_tick);
         let analog = traces
             .iter()
             .filter(|series| series.kind == TraceSeriesKind::ExactRational)
@@ -2876,18 +3117,13 @@ impl ExactControlWorkspace {
             )
         });
 
-        let maximum_tick = traces
-            .iter()
-            .flat_map(|series| series.points.iter().map(|point| point.tick))
-            .max()
-            .unwrap_or(1)
-            .max(1);
         if let Some(plot) = analog_plot {
             painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
             let (minimum_value, maximum_value) = trace_value_bounds(&analog);
             paint_trace_grid(
                 &painter,
                 plot,
+                minimum_tick,
                 maximum_tick,
                 minimum_value,
                 maximum_value,
@@ -2898,6 +3134,7 @@ impl ExactControlWorkspace {
                     &painter,
                     plot,
                     series,
+                    minimum_tick,
                     maximum_tick,
                     minimum_value,
                     maximum_value,
@@ -2913,8 +3150,8 @@ impl ExactControlWorkspace {
         }
         if let Some(plot) = digital_plot {
             painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
-            paint_trace_time_grid(&painter, plot, maximum_tick, true);
-            paint_digital_trace_series(&painter, plot, &digital, maximum_tick);
+            paint_trace_time_grid(&painter, plot, minimum_tick, maximum_tick, true);
+            paint_digital_trace_series(&painter, plot, &digital, minimum_tick, maximum_tick);
             painter.text(
                 egui::pos2(response.rect.left() + 6.0, plot.top()),
                 egui::Align2::LEFT_TOP,
@@ -2937,9 +3174,26 @@ impl ExactControlWorkspace {
             .hover_pos()
             .filter(|position| interaction.contains(*position))
         {
-            self.cursor_tick = cursor_tick(time_plot, pointer.x, maximum_tick);
+            self.cursor_tick = cursor_tick(time_plot, pointer.x, minimum_tick, maximum_tick);
         }
-        let cursor_x = plot_x(time_plot, self.cursor_tick, maximum_tick);
+        if let Some(trigger_tick) = trigger_tick {
+            let trigger_x = plot_x(time_plot, trigger_tick, minimum_tick, maximum_tick);
+            painter.line_segment(
+                [
+                    egui::pos2(trigger_x, interaction.top()),
+                    egui::pos2(trigger_x, interaction.bottom()),
+                ],
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(249, 153, 82)),
+            );
+            painter.text(
+                egui::pos2(trigger_x + 4.0, interaction.top() + 4.0),
+                egui::Align2::LEFT_TOP,
+                "TRIGGER",
+                egui::FontId::monospace(9.0),
+                egui::Color32::from_rgb(249, 153, 82),
+            );
+        }
+        let cursor_x = plot_x(time_plot, self.cursor_tick, minimum_tick, maximum_tick);
         painter.line_segment(
             [
                 egui::pos2(cursor_x, interaction.top()),
@@ -3642,10 +3896,22 @@ fn representative_probes(workspace: &GraphWorkspaceDocument) -> Result<ProbePack
             )
         })
         .collect();
+    let trigger_probe = SIGNALS
+        .iter()
+        .position(|signal| *signal == RepresentativeControlSignal::MeasurementWithinRange)
+        .and_then(|index| u32::try_from(index + 1).ok())
+        .map(GraphProbeId::new)
+        .ok_or_else(|| "reference interlock trigger probe is unavailable".to_owned())?;
     let document = GraphProbeDocument::try_new(
         GraphProbeLimits::interactive(),
         1,
         u64::try_from(SIGNALS.len() + 1).expect("reference probe count fits canonical u64"),
+        Some(GraphProbeTrigger::new(
+            trigger_probe,
+            GraphProbeEdge::Falling,
+            2,
+            2,
+        )),
         workspace,
         probes,
     )
@@ -4171,6 +4437,7 @@ fn paint_analog_trace_series(
     painter: &egui::Painter,
     rect: egui::Rect,
     series: &TraceSeries,
+    minimum_tick: u64,
     maximum_tick: u64,
     minimum_value: f64,
     maximum_value: f64,
@@ -4182,7 +4449,7 @@ fn paint_analog_trace_series(
         let TracePointValue::ExactRational { enclosure, .. } = &point.value else {
             continue;
         };
-        let x = plot_x(rect, point.tick, maximum_tick);
+        let x = plot_x(rect, point.tick, minimum_tick, maximum_tick);
         let lower = plot_y(rect, enclosure[0], minimum_value, maximum_value);
         let upper = plot_y(rect, enclosure[1], minimum_value, maximum_value);
         let middle = (lower + upper) * 0.5;
@@ -4203,6 +4470,7 @@ fn paint_digital_trace_series(
     painter: &egui::Painter,
     rect: egui::Rect,
     series: &[&TraceSeries],
+    minimum_tick: u64,
     maximum_tick: u64,
 ) {
     let lane_height = rect.height() / display_index(series.len()).max(1.0);
@@ -4236,7 +4504,7 @@ fn paint_digital_trace_series(
                 continue;
             };
             let position = egui::pos2(
-                plot_x(rect, point.tick, maximum_tick),
+                plot_x(rect, point.tick, minimum_tick, maximum_tick),
                 if *value { high } else { low },
             );
             if let Some(previous) = line.last().copied() {
@@ -4273,15 +4541,24 @@ const fn digital_signal_order(signal: RepresentativeControlSignal) -> u8 {
     }
 }
 
+const fn probe_edge_label(edge: GraphProbeEdge) -> &'static str {
+    match edge {
+        GraphProbeEdge::Rising => "rising-edge",
+        GraphProbeEdge::Falling => "falling-edge",
+        GraphProbeEdge::Either => "either-edge",
+    }
+}
+
 fn paint_trace_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
+    minimum_tick: u64,
     maximum_tick: u64,
     minimum_value: f64,
     maximum_value: f64,
     label_ticks: bool,
 ) {
-    paint_trace_time_grid(painter, rect, maximum_tick, label_ticks);
+    paint_trace_time_grid(painter, rect, minimum_tick, maximum_tick, label_ticks);
     let grid = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28));
     for index in 0..=4 {
         let fraction = f64::from(index) / 4.0;
@@ -4304,12 +4581,17 @@ fn paint_trace_grid(
 fn paint_trace_time_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
+    minimum_tick: u64,
     maximum_tick: u64,
     label_ticks: bool,
 ) {
     let grid = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28));
-    for tick in 0..=maximum_tick {
-        let x = plot_x(rect, tick, maximum_tick);
+    let span = maximum_tick.saturating_sub(minimum_tick);
+    let divisions = span.clamp(1, 5);
+    let final_index = if span == 0 { 0 } else { divisions };
+    for index in 0..=final_index {
+        let tick = minimum_tick + span.saturating_mul(index) / divisions;
+        let x = plot_x(rect, tick, minimum_tick, maximum_tick);
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             grid,
@@ -4400,8 +4682,10 @@ fn display_index(value: usize) -> f32 {
     clippy::cast_precision_loss,
     reason = "bounded trace ticks are projected only into non-authoritative egui coordinates"
 )]
-fn plot_x(rect: egui::Rect, tick: u64, maximum_tick: u64) -> f32 {
-    rect.left() + rect.width() * (tick as f32 / maximum_tick as f32)
+fn plot_x(rect: egui::Rect, tick: u64, minimum_tick: u64, maximum_tick: u64) -> f32 {
+    let span = maximum_tick.saturating_sub(minimum_tick).max(1);
+    let offset = tick.saturating_sub(minimum_tick).min(span);
+    rect.left() + rect.width() * (offset as f32 / span as f32)
 }
 
 #[allow(
@@ -4419,9 +4703,10 @@ fn plot_y(rect: egui::Rect, value: f64, minimum: f64, maximum: f64) -> f32 {
     clippy::cast_sign_loss,
     reason = "a clamped hover coordinate selects one bounded display tick"
 )]
-fn cursor_tick(rect: egui::Rect, x: f32, maximum_tick: u64) -> u64 {
+fn cursor_tick(rect: egui::Rect, x: f32, minimum_tick: u64, maximum_tick: u64) -> u64 {
     let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-    (fraction * maximum_tick as f32).round() as u64
+    let span = maximum_tick.saturating_sub(minimum_tick);
+    minimum_tick + (fraction * span as f32).round() as u64
 }
 
 const fn signal_color(signal: RepresentativeControlSignal) -> egui::Color32 {
@@ -4519,13 +4804,13 @@ mod tests {
         assert!(workspace.reference_trace_is_current());
         let probes = workspace.probes.as_ref().unwrap();
         assert_eq!(probes.document.probes().len(), 7);
-        assert_eq!(probes.encoding.bytes().len(), 391);
+        assert_eq!(probes.encoding.bytes().len(), 407);
         assert_eq!(
             probes.encoding.digest().0,
             [
-                0xc2, 0xe2, 0xe4, 0x1c, 0xfd, 0x3e, 0xf8, 0xd8, 0x96, 0x05, 0xd1, 0x88, 0xa8, 0x84,
-                0x26, 0x3e, 0xba, 0xc5, 0x7d, 0x08, 0x90, 0x7c, 0xfa, 0x5f, 0x38, 0x81, 0x5d, 0x63,
-                0xcf, 0x32, 0x3d, 0x46,
+                0x50, 0x95, 0x5d, 0xa7, 0xb4, 0x46, 0x4a, 0x02, 0xf6, 0xe3, 0xea, 0xce, 0x1d, 0x51,
+                0xa3, 0xe9, 0xd0, 0x8f, 0x56, 0xcd, 0xfa, 0x9c, 0x66, 0x12, 0x59, 0xc3, 0x31, 0x95,
+                0xb1, 0x5e, 0xf2, 0x23,
             ]
         );
         let probe_replay = replay_graph_probes(
@@ -4536,6 +4821,15 @@ mod tests {
         .unwrap();
         assert_eq!(probe_replay.document(), &probes.document);
         assert_eq!(probe_replay.encoding(), &probes.encoding);
+        let GraphProbeTriggerResolution::Matched(trigger) = workspace.trigger_resolution().unwrap()
+        else {
+            panic!("canonical interlock trigger did not match");
+        };
+        assert_eq!(trigger.trigger().probe(), GraphProbeId::new(5));
+        assert_eq!(trigger.trigger().edge(), GraphProbeEdge::Falling);
+        assert_eq!(trigger.trigger_tick(), 3);
+        assert_eq!((trigger.first_tick(), trigger.last_tick()), (1, 5));
+        assert_eq!(workspace.cursor_tick, 3);
         assert_eq!(workspace.palette.len(), 13);
         assert!(workspace.palette.iter().all(|entry| {
             workspace
@@ -4743,6 +5037,37 @@ mod tests {
     fn probe_ui_mutations_retain_canonical_sidecar_and_never_touch_graph() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let graph = workspace.workspace.clone();
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().document.trigger(),
+            Some(GraphProbeTrigger::new(
+                GraphProbeId::new(5),
+                GraphProbeEdge::Falling,
+                2,
+                2,
+            ))
+        );
+        workspace.trigger_pre_samples = 1;
+        workspace.trigger_post_samples = 1;
+        workspace.set_probe_trigger(GraphProbeId::new(7), GraphProbeEdge::Falling);
+        let GraphProbeTriggerResolution::Matched(trigger) = workspace.trigger_resolution().unwrap()
+        else {
+            panic!("external-permit falling edge did not match");
+        };
+        assert_eq!(trigger.trigger_tick(), 4);
+        assert_eq!((trigger.first_tick(), trigger.last_tick()), (3, 5));
+        assert_eq!(workspace.cursor_tick, 4);
+        assert_eq!(workspace.workspace, graph);
+
+        let canonical = workspace.probes.as_ref().unwrap().encoding.clone();
+        workspace.trigger_pre_samples = 4_096;
+        workspace.trigger_post_samples = 0;
+        workspace.set_probe_trigger(GraphProbeId::new(7), GraphProbeEdge::Either);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, canonical);
+        assert!(workspace.probe_status.contains("rejected without mutation"));
+        workspace.clear_probe_trigger();
+        assert_eq!(workspace.probes.as_ref().unwrap().document.trigger(), None);
+        assert_eq!(workspace.workspace, graph);
+
         let source = WireEndpoint {
             node: GraphNodeId::new(16),
             port: GraphPortId::new(3),

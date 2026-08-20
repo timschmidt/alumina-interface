@@ -385,17 +385,21 @@ identities. ADC, UART, timer, shifted-output, storage, other GPIO, and raw pin
 access remain closed even though the broader board descriptor knows about them.
 See [`GRAPH-CAPABILITY-CATALOG-V1.md`](GRAPH-CAPABILITY-CATALOG-V1.md).
 
-Canonical `ALGP` V1 is a bounded presentation sidecar. It binds stable probe
+Canonical `ALGP` V2 is a bounded presentation sidecar. It binds stable probe
 IDs/names and capture-retention ceilings to exact output endpoints and one
-canonical `ALGW` digest. Replay resolves output direction and exact value type,
-enforces caller and embedded limits, and requires byte-for-byte canonical
-re-encoding. Probe add/remove/rebind operations are transactional, never reuse
-IDs, and never mutate the graph. The 391-byte seven-series reference sidecar has
-SHA-256
-`c2e2e41cfd3ef8d89605d188a884263ebac57d08907cfa5f38815d63cf323d46`.
-It filters immutable host trace series only; it grants no firmware read,
-telemetry, trigger, or deployment authority. See
-[`GRAPH-PROBE-V1.md`](GRAPH-PROBE-V1.md).
+canonical `ALGW` digest. One optional Boolean-stream rising, falling, or either
+edge trigger names a stable probe and bounded pre/post retained-sample counts.
+Replay resolves output direction and exact value type, enforces caller and
+embedded limits, and requires byte-for-byte canonical re-encoding. Exact host
+resolution separately verifies the simulation graph identity and reports the
+first matching clock/tick/sequence and available window using bounded waiting
+state. Probe/trigger edits are transactional, never reuse IDs, and never mutate
+the graph. The 407-byte seven-series reference sidecar has SHA-256
+`50955da7b4464a02f6e3eace1d51a3e9d08f56cdfa9c661259c33195b15ef223`.
+Its probe-5 falling edge matches control tick 3 and selects exact ticks 1–5. It
+filters immutable host trace series only; it grants no firmware read, telemetry,
+device-trigger, or deployment authority. See
+[`GRAPH-PROBE-V2.md`](GRAPH-PROBE-V2.md).
 
 ## Canonical bytes and replay
 

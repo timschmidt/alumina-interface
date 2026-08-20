@@ -71,8 +71,10 @@ pub use hierarchy::{
 };
 pub use probe::{
     CanonicalGraphProbeEncoding, GRAPH_PROBE_MAGIC, GRAPH_PROBE_VERSION, GraphProbeCapture,
-    GraphProbeDefinition, GraphProbeDocument, GraphProbeError, GraphProbeId, GraphProbeLimits,
-    GraphProbeReplay, encode_graph_probes, replay_graph_probes,
+    GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeError, GraphProbeId,
+    GraphProbeLimits, GraphProbeReplay, GraphProbeTrigger, GraphProbeTriggerMatch,
+    GraphProbeTriggerResolution, encode_graph_probes, replay_graph_probes,
+    resolve_graph_probe_trigger,
 };
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,

@@ -1,28 +1,31 @@
 //! Canonical, bounded diagnostic-probe authoring sidecar.
 //!
 //! `ALGP` binds named presentation probes to exact output endpoints in one
-//! canonical `ALGW`. It grants no firmware read access, telemetry bandwidth,
-//! trigger implementation, or deployment authority. Runtime capture remains a
-//! separate capability-checked protocol operation; this document says only
-//! what an editor intends to observe and how much host memory it may retain.
+//! canonical `ALGW`. It also retains one optional Boolean-stream edge trigger
+//! and bounded host-side pre/post window. It grants no firmware read access,
+//! telemetry bandwidth, device trigger implementation, or deployment authority.
+//! Runtime capture remains a separate capability-checked protocol operation;
+//! this document says only what an editor intends to observe and how much host
+//! memory it may retain.
 
 use core::fmt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::str;
 
 use alumina_protocol::Digest;
 use alumina_storage::sha256;
 
 use super::{
-    GraphNodeId, GraphPortId, GraphTypeId, GraphWorkspaceDocument, GraphWorkspaceError,
-    WireEndpoint, encode_graph_workspace,
+    GraphClockId, GraphNodeId, GraphPortId, GraphSimulation, GraphTraceEntryKind, GraphTypeId,
+    GraphValue, GraphWorkspaceDocument, GraphWorkspaceError, TypeKind, WireEndpoint,
+    encode_graph_workspace,
 };
 
 /// Magic bytes at the beginning of each canonical graph-probe sidecar.
 pub const GRAPH_PROBE_MAGIC: [u8; 4] = *b"ALGP";
 
 /// Exact canonical graph-probe format implemented by this source tree.
-pub const GRAPH_PROBE_VERSION: u16 = 1;
+pub const GRAPH_PROBE_VERSION: u16 = 2;
 
 const GRAPH_PROBE_FLAGS: u16 = 0;
 const PROBE_LIMIT_FIELD_COUNT: usize = 4;
@@ -94,6 +97,167 @@ impl GraphProbeId {
 pub struct GraphProbeCapture {
     maximum_samples: u32,
     sample_stride: u32,
+}
+
+/// Edge transition selected on consecutive retained Boolean-stream samples.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphProbeEdge {
+    /// The previous retained sample was false and the current sample is true.
+    Rising,
+    /// The previous retained sample was true and the current sample is false.
+    Falling,
+    /// Either logical transition.
+    Either,
+}
+
+impl GraphProbeEdge {
+    const fn code(self) -> u32 {
+        match self {
+            Self::Rising => 1,
+            Self::Falling => 2,
+            Self::Either => 3,
+        }
+    }
+
+    const fn from_code(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Rising),
+            2 => Some(Self::Falling),
+            3 => Some(Self::Either),
+            _ => None,
+        }
+    }
+
+    const fn matches(self, previous: bool, current: bool) -> bool {
+        match self {
+            Self::Rising => !previous && current,
+            Self::Falling => previous && !current,
+            Self::Either => previous != current,
+        }
+    }
+}
+
+/// One replay-only edge-trigger request bound to a stable probe identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphProbeTrigger {
+    probe: GraphProbeId,
+    edge: GraphProbeEdge,
+    pretrigger_samples: u32,
+    posttrigger_samples: u32,
+}
+
+impl GraphProbeTrigger {
+    /// Select one Boolean probe and the retained sample counts on each side of
+    /// its first matching edge. The trigger sample itself is retained once.
+    pub const fn new(
+        probe: GraphProbeId,
+        edge: GraphProbeEdge,
+        pretrigger_samples: u32,
+        posttrigger_samples: u32,
+    ) -> Self {
+        Self {
+            probe,
+            edge,
+            pretrigger_samples,
+            posttrigger_samples,
+        }
+    }
+
+    /// Return the stable trigger-source probe.
+    pub const fn probe(self) -> GraphProbeId {
+        self.probe
+    }
+
+    /// Return the exact retained-sample transition condition.
+    pub const fn edge(self) -> GraphProbeEdge {
+        self.edge
+    }
+
+    /// Requested retained samples before the matching sample.
+    pub const fn pretrigger_samples(self) -> u32 {
+        self.pretrigger_samples
+    }
+
+    /// Requested retained samples after the matching sample.
+    pub const fn posttrigger_samples(self) -> u32 {
+        self.posttrigger_samples
+    }
+}
+
+/// Exact match and available retained window derived from a canonical replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphProbeTriggerMatch {
+    trigger: GraphProbeTrigger,
+    clock: GraphClockId,
+    trigger_tick: u64,
+    trigger_sequence: u64,
+    first_tick: u64,
+    last_tick: u64,
+    retained_pretrigger_samples: u32,
+    retained_posttrigger_samples: u32,
+}
+
+impl GraphProbeTriggerMatch {
+    /// Return the canonical request that produced this match.
+    pub const fn trigger(self) -> GraphProbeTrigger {
+        self.trigger
+    }
+
+    /// Return the graph clock carried by every retained trigger-source sample.
+    pub const fn clock(self) -> GraphClockId {
+        self.clock
+    }
+
+    /// Exact tick of the first matching retained sample.
+    pub const fn trigger_tick(self) -> u64 {
+        self.trigger_tick
+    }
+
+    /// Monotonic source sequence of the matching retained sample.
+    pub const fn trigger_sequence(self) -> u64 {
+        self.trigger_sequence
+    }
+
+    /// Exact first tick available in the bounded replay window.
+    pub const fn first_tick(self) -> u64 {
+        self.first_tick
+    }
+
+    /// Exact last tick available in the bounded replay window.
+    pub const fn last_tick(self) -> u64 {
+        self.last_tick
+    }
+
+    /// Number of pretrigger samples actually available.
+    pub const fn retained_pretrigger_samples(self) -> u32 {
+        self.retained_pretrigger_samples
+    }
+
+    /// Number of posttrigger samples actually available.
+    pub const fn retained_posttrigger_samples(self) -> u32 {
+        self.retained_posttrigger_samples
+    }
+
+    /// Whether the complete requested pretrigger window was present.
+    pub const fn pretrigger_complete(self) -> bool {
+        self.retained_pretrigger_samples == self.trigger.pretrigger_samples
+    }
+
+    /// Whether the complete requested posttrigger window was present.
+    pub const fn posttrigger_complete(self) -> bool {
+        self.retained_posttrigger_samples == self.trigger.posttrigger_samples
+    }
+}
+
+/// Replay state for the optional canonical host-side trigger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphProbeTriggerResolution {
+    /// The sidecar defines no trigger.
+    Disabled,
+    /// The trigger is valid but the finite replay contains no matching edge.
+    Waiting(GraphProbeTrigger),
+    /// The first matching edge and available exact window were resolved.
+    Matched(GraphProbeTriggerMatch),
 }
 
 impl GraphProbeCapture {
@@ -178,6 +342,7 @@ pub struct GraphProbeDocument {
     revision: u64,
     next_probe_id: u64,
     workspace_digest: Digest,
+    trigger: Option<GraphProbeTrigger>,
     probes: Vec<GraphProbeDefinition>,
 }
 
@@ -187,6 +352,7 @@ impl GraphProbeDocument {
         limits: GraphProbeLimits,
         revision: u64,
         next_probe_id: u64,
+        trigger: Option<GraphProbeTrigger>,
         workspace: &GraphWorkspaceDocument,
         mut probes: Vec<GraphProbeDefinition>,
     ) -> Result<Self, GraphProbeError> {
@@ -197,6 +363,7 @@ impl GraphProbeDocument {
         probes.sort_unstable_by_key(GraphProbeDefinition::id);
         let workspace_digest = workspace_identity(workspace)?;
         validate_probes(workspace, &mut probes, limits)?;
+        validate_trigger(workspace, &probes, trigger, limits)?;
         validate_identity_cursor(
             next_probe_id,
             probes.iter().map(|probe| u64::from(probe.id.get())),
@@ -206,6 +373,7 @@ impl GraphProbeDocument {
             revision,
             next_probe_id,
             workspace_digest,
+            trigger,
             probes,
         })
     }
@@ -228,6 +396,11 @@ impl GraphProbeDocument {
     /// Return the exact canonical `ALGW` identity to which probes bind.
     pub const fn workspace_digest(&self) -> Digest {
         self.workspace_digest
+    }
+
+    /// Return the optional replay-only trigger request.
+    pub const fn trigger(&self) -> Option<GraphProbeTrigger> {
+        self.trigger
     }
 
     /// Borrow probes in canonical identity order.
@@ -267,6 +440,7 @@ impl GraphProbeDocument {
             self.limits,
             revision,
             self.next_probe_id,
+            self.trigger,
             workspace,
             self.probes.clone(),
         )?;
@@ -297,7 +471,14 @@ impl GraphProbeDocument {
         let id = GraphProbeId::new(value);
         let mut probes = self.probes.clone();
         probes.push(GraphProbeDefinition::new(id, name, source, capture));
-        let candidate = Self::try_new(self.limits, revision, following, workspace, probes)?;
+        let candidate = Self::try_new(
+            self.limits,
+            revision,
+            following,
+            self.trigger,
+            workspace,
+            probes,
+        )?;
         *self = candidate;
         Ok(id)
     }
@@ -318,8 +499,79 @@ impl GraphProbeDocument {
             .binary_search_by_key(&id, GraphProbeDefinition::id)
             .map_err(|_| GraphProbeError::UnknownProbe(id))?;
         probes.remove(index);
-        let candidate =
-            Self::try_new(self.limits, revision, self.next_probe_id, workspace, probes)?;
+        let trigger = self.trigger.filter(|trigger| trigger.probe != id);
+        let candidate = Self::try_new(
+            self.limits,
+            revision,
+            self.next_probe_id,
+            trigger,
+            workspace,
+            probes,
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Whether one probe is a Boolean Stream and can source an edge trigger.
+    pub fn supports_edge_trigger(
+        &self,
+        workspace: &GraphWorkspaceDocument,
+        id: GraphProbeId,
+    ) -> Result<bool, GraphProbeError> {
+        self.require_workspace(workspace)?;
+        let probe = self.probe(id).ok_or(GraphProbeError::UnknownProbe(id))?;
+        Ok(is_boolean_stream(workspace, probe.value_type))
+    }
+
+    /// Transactionally install or replace the one replay-only trigger. Setting
+    /// an identical trigger is an exact no-op.
+    pub fn set_trigger(
+        &mut self,
+        workspace: &GraphWorkspaceDocument,
+        trigger: GraphProbeTrigger,
+    ) -> Result<(), GraphProbeError> {
+        self.require_workspace(workspace)?;
+        if self.trigger == Some(trigger) {
+            return Ok(());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphProbeError::RevisionOverflow)?;
+        let candidate = Self::try_new(
+            self.limits,
+            revision,
+            self.next_probe_id,
+            Some(trigger),
+            workspace,
+            self.probes.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally remove the replay-only trigger. Clearing an already
+    /// disabled trigger is an exact no-op.
+    pub fn clear_trigger(
+        &mut self,
+        workspace: &GraphWorkspaceDocument,
+    ) -> Result<(), GraphProbeError> {
+        self.require_workspace(workspace)?;
+        if self.trigger.is_none() {
+            return Ok(());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphProbeError::RevisionOverflow)?;
+        let candidate = Self::try_new(
+            self.limits,
+            revision,
+            self.next_probe_id,
+            None,
+            workspace,
+            self.probes.clone(),
+        )?;
         *self = candidate;
         Ok(())
     }
@@ -398,6 +650,8 @@ pub enum GraphProbeError {
     UnsupportedVersion(u16),
     /// Reserved probe flags were nonzero.
     UnsupportedFlags(u16),
+    /// The encoded edge-trigger condition was not assigned by this version.
+    InvalidTriggerKind(u32),
     /// A fixed-width or length-delimited field ran past input.
     Truncated,
     /// A declared probe name was not UTF-8.
@@ -426,6 +680,15 @@ pub enum GraphProbeError {
     RevisionOverflow,
     /// A requested probe did not exist.
     UnknownProbe(GraphProbeId),
+    /// The configured trigger did not name a retained probe.
+    UnknownTriggerProbe(GraphProbeId),
+    /// The configured trigger source was not a Boolean Stream.
+    NonBooleanTriggerProbe {
+        /// Rejected trigger-source probe.
+        probe: GraphProbeId,
+        /// Exact output type retained by that probe.
+        value_type: GraphTypeId,
+    },
     /// A probe did not resolve to a graph output endpoint.
     UnknownOutput(WireEndpoint),
     /// A replayed or rebound endpoint changed exact value type.
@@ -444,6 +707,22 @@ pub enum GraphProbeError {
         /// Identity calculated over the supplied workspace.
         received: Digest,
     },
+    /// A replay came from another canonical graph than the bound workspace.
+    SimulationGraphIdentityMismatch {
+        /// Graph identity retained by the supplied workspace.
+        expected: Digest,
+        /// Graph identity retained by the simulation.
+        received: Digest,
+    },
+    /// One trigger-source trace sample was not Boolean.
+    TriggerSampleTypeMismatch(GraphProbeId),
+    /// One trigger-source output changed clocks within a canonical replay.
+    TriggerSampleClockMismatch {
+        /// Clock carried by the first retained source sample.
+        expected: GraphClockId,
+        /// Clock carried by a later retained source sample.
+        received: GraphClockId,
+    },
     /// Canonical workspace identity calculation failed.
     Workspace(GraphWorkspaceError),
 }
@@ -459,6 +738,9 @@ impl fmt::Display for GraphProbeError {
             }
             Self::UnsupportedFlags(flags) => {
                 write!(formatter, "graph probe flags {flags:#06x} are unsupported")
+            }
+            Self::InvalidTriggerKind(kind) => {
+                write!(formatter, "graph probe trigger kind {kind} is unsupported")
             }
             Self::Truncated => formatter.write_str("graph probe document is truncated"),
             Self::InvalidUtf8 => formatter.write_str("graph probe name is not UTF-8"),
@@ -480,12 +762,33 @@ impl fmt::Display for GraphProbeError {
             }
             Self::RevisionOverflow => formatter.write_str("graph probe revision is exhausted"),
             Self::UnknownProbe(id) => write!(formatter, "graph probe {id:?} is unknown"),
+            Self::UnknownTriggerProbe(id) => {
+                write!(formatter, "graph trigger probe {id:?} is unknown")
+            }
+            Self::NonBooleanTriggerProbe { probe, .. } => {
+                write!(
+                    formatter,
+                    "graph trigger probe {probe:?} is not a Boolean Stream"
+                )
+            }
             Self::UnknownOutput(source) => write!(formatter, "graph output {source:?} is unknown"),
             Self::ValueTypeMismatch { source, .. } => {
                 write!(formatter, "graph probe output {source:?} changed type")
             }
             Self::WorkspaceIdentityMismatch { .. } => {
                 formatter.write_str("graph probe workspace identity does not match")
+            }
+            Self::SimulationGraphIdentityMismatch { .. } => {
+                formatter.write_str("graph probe replay identity does not match the workspace")
+            }
+            Self::TriggerSampleTypeMismatch(probe) => {
+                write!(
+                    formatter,
+                    "graph trigger probe {probe:?} emitted a non-Boolean sample"
+                )
+            }
+            Self::TriggerSampleClockMismatch { .. } => {
+                formatter.write_str("graph trigger source changed clocks within one replay")
             }
             Self::Workspace(error) => write!(formatter, "graph probe workspace failed: {error}"),
         }
@@ -512,6 +815,7 @@ pub fn encode_graph_probes(
     encoder.u64(document.revision);
     encoder.u64(document.next_probe_id);
     encoder.bytes(&document.workspace_digest.0);
+    encode_trigger(&mut encoder, document.trigger);
     encoder.u32(
         u32::try_from(document.probes.len())
             .map_err(|_| GraphProbeError::IntegerOverflow("probe count"))?,
@@ -565,6 +869,7 @@ pub fn replay_graph_probes(
     let revision = decoder.u64()?;
     let next_probe_id = decoder.u64()?;
     let encoded_workspace_digest = Digest(decoder.array()?);
+    let trigger = decode_trigger(&mut decoder)?;
     let count = decoder.count(embedded_limits.maximum_probes, "probe count")?;
     let mut probes = Vec::with_capacity(count);
     for _ in 0..count {
@@ -594,8 +899,14 @@ pub fn replay_graph_probes(
             received: received_workspace_digest,
         });
     }
-    let document =
-        GraphProbeDocument::try_new(embedded_limits, revision, next_probe_id, workspace, probes)?;
+    let document = GraphProbeDocument::try_new(
+        embedded_limits,
+        revision,
+        next_probe_id,
+        trigger,
+        workspace,
+        probes,
+    )?;
     let canonical = encode_graph_probes(&document)?;
     if canonical.bytes() != encoded {
         return Err(GraphProbeError::NonCanonical);
@@ -604,6 +915,111 @@ pub fn replay_graph_probes(
         document,
         encoding: canonical,
     })
+}
+
+/// Resolve the first matching retained edge and its exact bounded replay
+/// window. This scans canonical host simulation output only; it does not arm or
+/// configure a device capture engine.
+pub fn resolve_graph_probe_trigger(
+    document: &GraphProbeDocument,
+    workspace: &GraphWorkspaceDocument,
+    simulation: &GraphSimulation,
+) -> Result<GraphProbeTriggerResolution, GraphProbeError> {
+    document.require_workspace(workspace)?;
+    if simulation.graph_digest() != workspace.graph_digest() {
+        return Err(GraphProbeError::SimulationGraphIdentityMismatch {
+            expected: workspace.graph_digest(),
+            received: simulation.graph_digest(),
+        });
+    }
+    let Some(trigger) = document.trigger else {
+        return Ok(GraphProbeTriggerResolution::Disabled);
+    };
+    let probe = document
+        .probe(trigger.probe)
+        .ok_or(GraphProbeError::UnknownTriggerProbe(trigger.probe))?;
+    let requested_pre = usize::try_from(trigger.pretrigger_samples)
+        .map_err(|_| GraphProbeError::IntegerOverflow("trigger pretrigger samples"))?;
+    let mut pretrigger = VecDeque::with_capacity(requested_pre.saturating_add(1));
+    let mut previous = None;
+    let mut source_ordinal = 0_u64;
+    let mut source_clock = None;
+    let mut matched = None;
+    let mut retained_posttrigger_samples = 0_u32;
+    let mut last_tick = 0_u64;
+    for entry in simulation.entries().iter().filter(|entry| {
+        entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == probe.source
+    }) {
+        let retained = source_ordinal.is_multiple_of(u64::from(probe.capture.sample_stride));
+        source_ordinal = source_ordinal
+            .checked_add(1)
+            .ok_or(GraphProbeError::IntegerOverflow("trigger sample ordinal"))?;
+        if !retained {
+            continue;
+        }
+        if let Some(expected) = source_clock {
+            if entry.clock() != expected {
+                return Err(GraphProbeError::TriggerSampleClockMismatch {
+                    expected,
+                    received: entry.clock(),
+                });
+            }
+        } else {
+            source_clock = Some(entry.clock());
+        }
+        let GraphValue::Boolean(value) = entry.value().value() else {
+            return Err(GraphProbeError::TriggerSampleTypeMismatch(trigger.probe));
+        };
+        if matched.is_some() {
+            retained_posttrigger_samples = retained_posttrigger_samples.checked_add(1).ok_or(
+                GraphProbeError::IntegerOverflow("retained posttrigger samples"),
+            )?;
+            last_tick = entry.clock_tick();
+            if retained_posttrigger_samples == trigger.posttrigger_samples {
+                break;
+            }
+            continue;
+        }
+        pretrigger.push_back((entry.clock_tick(), entry.sequence()));
+        if pretrigger.len() > requested_pre.saturating_add(1) {
+            pretrigger.pop_front();
+        }
+        if previous.is_some_and(|previous| trigger.edge.matches(previous, *value)) {
+            let retained_pretrigger_samples = u32::try_from(pretrigger.len().saturating_sub(1))
+                .map_err(|_| GraphProbeError::IntegerOverflow("retained pretrigger samples"))?;
+            matched = Some((
+                entry.clock(),
+                entry.clock_tick(),
+                entry.sequence(),
+                pretrigger
+                    .front()
+                    .map_or(entry.clock_tick(), |sample| sample.0),
+                retained_pretrigger_samples,
+            ));
+            last_tick = entry.clock_tick();
+            if trigger.posttrigger_samples == 0 {
+                break;
+            }
+        }
+        previous = Some(*value);
+    }
+    let Some((clock, trigger_tick, trigger_sequence, first_tick, retained_pretrigger_samples)) =
+        matched
+    else {
+        return Ok(GraphProbeTriggerResolution::Waiting(trigger));
+    };
+    Ok(GraphProbeTriggerResolution::Matched(
+        GraphProbeTriggerMatch {
+            trigger,
+            clock,
+            trigger_tick,
+            trigger_sequence,
+            first_tick,
+            last_tick,
+            retained_pretrigger_samples,
+            retained_posttrigger_samples,
+        },
+    ))
 }
 
 fn validate_probes(
@@ -652,6 +1068,81 @@ fn validate_probes(
         probe.value_type = value_type;
     }
     Ok(())
+}
+
+fn validate_trigger(
+    workspace: &GraphWorkspaceDocument,
+    probes: &[GraphProbeDefinition],
+    trigger: Option<GraphProbeTrigger>,
+    limits: GraphProbeLimits,
+) -> Result<(), GraphProbeError> {
+    let Some(trigger) = trigger else {
+        return Ok(());
+    };
+    let probe = probes
+        .binary_search_by_key(&trigger.probe, GraphProbeDefinition::id)
+        .ok()
+        .map(|index| &probes[index])
+        .ok_or(GraphProbeError::UnknownTriggerProbe(trigger.probe))?;
+    if !is_boolean_stream(workspace, probe.value_type) {
+        return Err(GraphProbeError::NonBooleanTriggerProbe {
+            probe: trigger.probe,
+            value_type: probe.value_type,
+        });
+    }
+    let window_samples = u64::from(trigger.pretrigger_samples)
+        .checked_add(1)
+        .and_then(|count| count.checked_add(u64::from(trigger.posttrigger_samples)))
+        .ok_or(GraphProbeError::IntegerOverflow("trigger window"))?;
+    if window_samples > u64::from(limits.maximum_samples_per_probe)
+        || window_samples > u64::from(probe.capture.maximum_samples)
+    {
+        return Err(GraphProbeError::LimitExceeded("trigger window"));
+    }
+    Ok(())
+}
+
+fn is_boolean_stream(workspace: &GraphWorkspaceDocument, value_type: GraphTypeId) -> bool {
+    let schema = workspace.graph().schema();
+    let Some(definition) = schema.value_type(value_type) else {
+        return false;
+    };
+    let TypeKind::Stream { sample, .. } = definition.kind() else {
+        return false;
+    };
+    schema
+        .value_type(*sample)
+        .is_some_and(|sample| matches!(sample.kind(), TypeKind::Boolean))
+}
+
+fn encode_trigger(encoder: &mut Encoder, trigger: Option<GraphProbeTrigger>) {
+    if let Some(trigger) = trigger {
+        encoder.u32(trigger.edge.code());
+        encoder.u32(trigger.probe.get());
+        encoder.u32(trigger.pretrigger_samples);
+        encoder.u32(trigger.posttrigger_samples);
+    } else {
+        for _ in 0..4 {
+            encoder.u32(0);
+        }
+    }
+}
+
+fn decode_trigger(decoder: &mut Decoder<'_>) -> Result<Option<GraphProbeTrigger>, GraphProbeError> {
+    let kind = decoder.u32()?;
+    let probe = GraphProbeId::new(decoder.u32()?);
+    let pretrigger_samples = decoder.u32()?;
+    let posttrigger_samples = decoder.u32()?;
+    if kind == 0 {
+        return Ok(None);
+    }
+    let edge = GraphProbeEdge::from_code(kind).ok_or(GraphProbeError::InvalidTriggerKind(kind))?;
+    Ok(Some(GraphProbeTrigger::new(
+        probe,
+        edge,
+        pretrigger_samples,
+        posttrigger_samples,
+    )))
 }
 
 fn output_value_type(
@@ -894,8 +1385,40 @@ mod tests {
             GraphProbeLimits::interactive(),
             1,
             5,
+            None,
             workspace,
             definitions,
+        )
+        .unwrap()
+    }
+
+    fn triggered_probes(workspace: &GraphWorkspaceDocument) -> GraphProbeDocument {
+        let probes = vec![
+            GraphProbeDefinition::new(
+                GraphProbeId::new(1),
+                "measurement-in-range",
+                RepresentativeControlSignal::MeasurementWithinRange.endpoint(),
+                GraphProbeCapture::new(4_096, 1),
+            ),
+            GraphProbeDefinition::new(
+                GraphProbeId::new(2),
+                "error",
+                RepresentativeControlSignal::Error.endpoint(),
+                GraphProbeCapture::new(4_096, 1),
+            ),
+        ];
+        GraphProbeDocument::try_new(
+            GraphProbeLimits::interactive(),
+            1,
+            3,
+            Some(GraphProbeTrigger::new(
+                GraphProbeId::new(1),
+                GraphProbeEdge::Falling,
+                2,
+                2,
+            )),
+            workspace,
+            probes,
         )
         .unwrap()
     }
@@ -953,6 +1476,208 @@ mod tests {
     }
 
     #[test]
+    fn boolean_edge_trigger_round_trips_and_resolves_exact_pre_post_window() {
+        let workspace = workspace();
+        let document = triggered_probes(&workspace);
+        let encoded = encode_graph_probes(&document).unwrap();
+        let replay =
+            replay_graph_probes(encoded.bytes(), &workspace, GraphProbeLimits::interactive())
+                .unwrap();
+        assert_eq!(replay.document(), &document);
+        assert_eq!(replay.encoding(), &encoded);
+        assert_eq!(document.trigger().unwrap().edge(), GraphProbeEdge::Falling);
+        assert!(
+            document
+                .supports_edge_trigger(&workspace, GraphProbeId::new(1))
+                .unwrap()
+        );
+        assert!(
+            !document
+                .supports_edge_trigger(&workspace, GraphProbeId::new(2))
+                .unwrap()
+        );
+
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let GraphProbeTriggerResolution::Matched(matched) =
+            resolve_graph_probe_trigger(&document, &workspace, fixture.simulation()).unwrap()
+        else {
+            panic!("reference falling edge did not match");
+        };
+        assert_eq!(matched.trigger_tick(), 3);
+        assert_eq!(matched.trigger_sequence(), 3);
+        assert_eq!((matched.first_tick(), matched.last_tick()), (1, 5));
+        assert_eq!(matched.retained_pretrigger_samples(), 2);
+        assert_eq!(matched.retained_posttrigger_samples(), 2);
+        assert!(matched.pretrigger_complete());
+        assert!(matched.posttrigger_complete());
+    }
+
+    #[test]
+    fn trigger_resolution_preserves_stride_waiting_disabled_and_truncation_states() {
+        let workspace = workspace();
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let external = |capture, trigger| {
+            GraphProbeDocument::try_new(
+                GraphProbeLimits::interactive(),
+                1,
+                2,
+                trigger,
+                &workspace,
+                vec![GraphProbeDefinition::new(
+                    GraphProbeId::new(1),
+                    "external-permit",
+                    RepresentativeControlSignal::ExternalPermit.endpoint(),
+                    capture,
+                )],
+            )
+            .unwrap()
+        };
+        let strided = external(
+            GraphProbeCapture::new(16, 2),
+            Some(GraphProbeTrigger::new(
+                GraphProbeId::new(1),
+                GraphProbeEdge::Falling,
+                1,
+                0,
+            )),
+        );
+        let GraphProbeTriggerResolution::Matched(strided_match) =
+            resolve_graph_probe_trigger(&strided, &workspace, fixture.simulation()).unwrap()
+        else {
+            panic!("strided falling edge did not match");
+        };
+        assert_eq!(strided_match.trigger_tick(), 4);
+        assert_eq!(
+            (strided_match.first_tick(), strided_match.last_tick()),
+            (2, 4)
+        );
+
+        let truncated = external(
+            GraphProbeCapture::new(11, 1),
+            Some(GraphProbeTrigger::new(
+                GraphProbeId::new(1),
+                GraphProbeEdge::Falling,
+                5,
+                5,
+            )),
+        );
+        let GraphProbeTriggerResolution::Matched(truncated_match) =
+            resolve_graph_probe_trigger(&truncated, &workspace, fixture.simulation()).unwrap()
+        else {
+            panic!("truncated falling edge did not match");
+        };
+        assert_eq!(
+            (truncated_match.first_tick(), truncated_match.last_tick()),
+            (0, 5)
+        );
+        assert_eq!(truncated_match.retained_pretrigger_samples(), 4);
+        assert_eq!(truncated_match.retained_posttrigger_samples(), 1);
+        assert!(!truncated_match.pretrigger_complete());
+        assert!(!truncated_match.posttrigger_complete());
+
+        let waiting = external(
+            GraphProbeCapture::new(3, 1),
+            Some(GraphProbeTrigger::new(
+                GraphProbeId::new(1),
+                GraphProbeEdge::Rising,
+                1,
+                1,
+            )),
+        );
+        assert!(matches!(
+            resolve_graph_probe_trigger(&waiting, &workspace, fixture.simulation()).unwrap(),
+            GraphProbeTriggerResolution::Waiting(_)
+        ));
+        assert_eq!(
+            resolve_graph_probe_trigger(&probes(&workspace), &workspace, fixture.simulation())
+                .unwrap(),
+            GraphProbeTriggerResolution::Disabled
+        );
+    }
+
+    #[test]
+    fn trigger_edits_are_transactional_and_removing_source_clears_trigger() {
+        let workspace = workspace();
+        let mut document = triggered_probes(&workspace);
+        let initial = document.clone();
+        document
+            .set_trigger(&workspace, initial.trigger().unwrap())
+            .unwrap();
+        assert_eq!(document, initial);
+
+        document
+            .set_trigger(
+                &workspace,
+                GraphProbeTrigger::new(GraphProbeId::new(1), GraphProbeEdge::Either, 1, 1),
+            )
+            .unwrap();
+        assert_eq!(document.revision(), initial.revision() + 1);
+        document
+            .remove_probe(&workspace, GraphProbeId::new(1))
+            .unwrap();
+        assert_eq!(document.trigger(), None);
+        assert_eq!(document.next_probe_id(), 3);
+
+        let cleared = document.clone();
+        document.clear_trigger(&workspace).unwrap();
+        assert_eq!(document, cleared);
+    }
+
+    #[test]
+    fn trigger_rejects_unknown_non_boolean_and_excessive_window() {
+        let workspace = workspace();
+        let definitions = vec![GraphProbeDefinition::new(
+            GraphProbeId::new(1),
+            "error",
+            RepresentativeControlSignal::Error.endpoint(),
+            GraphProbeCapture::new(4, 1),
+        )];
+        assert!(matches!(
+            GraphProbeDocument::try_new(
+                GraphProbeLimits::interactive(),
+                1,
+                2,
+                Some(GraphProbeTrigger::new(
+                    GraphProbeId::new(1),
+                    GraphProbeEdge::Falling,
+                    1,
+                    1,
+                )),
+                &workspace,
+                definitions.clone(),
+            ),
+            Err(GraphProbeError::NonBooleanTriggerProbe { .. })
+        ));
+        assert_eq!(
+            GraphProbeDocument::try_new(
+                GraphProbeLimits::interactive(),
+                1,
+                2,
+                Some(GraphProbeTrigger::new(
+                    GraphProbeId::new(2),
+                    GraphProbeEdge::Falling,
+                    1,
+                    1,
+                )),
+                &workspace,
+                definitions,
+            ),
+            Err(GraphProbeError::UnknownTriggerProbe(GraphProbeId::new(2)))
+        );
+
+        let mut document = triggered_probes(&workspace);
+        let before = document.clone();
+        assert_eq!(
+            document.set_trigger(
+                &workspace,
+                GraphProbeTrigger::new(GraphProbeId::new(1), GraphProbeEdge::Falling, 4_096, 0,),
+            ),
+            Err(GraphProbeError::LimitExceeded("trigger window"))
+        );
+        assert_eq!(document, before);
+    }
+
+    #[test]
     fn replay_rejects_wrong_workspace_corruption_trailing_bytes_and_tighter_policy() {
         let workspace = workspace();
         let encoded = encode_graph_probes(&probes(&workspace)).unwrap();
@@ -985,6 +1710,27 @@ mod tests {
             replay_graph_probes(&trailing, &workspace, GraphProbeLimits::interactive()),
             Err(GraphProbeError::TrailingBytes)
         );
+        const TRIGGER_KIND_OFFSET: usize = 4 + 2 + 2 + 4 * 8 + 8 + 8 + 32;
+        let mut invalid_trigger = encoded.bytes().to_vec();
+        invalid_trigger[TRIGGER_KIND_OFFSET] = 9;
+        assert_eq!(
+            replay_graph_probes(
+                &invalid_trigger,
+                &workspace,
+                GraphProbeLimits::interactive()
+            ),
+            Err(GraphProbeError::InvalidTriggerKind(9))
+        );
+        let mut noncanonical_disabled_trigger = encoded.bytes().to_vec();
+        noncanonical_disabled_trigger[TRIGGER_KIND_OFFSET + 4] = 1;
+        assert_eq!(
+            replay_graph_probes(
+                &noncanonical_disabled_trigger,
+                &workspace,
+                GraphProbeLimits::interactive()
+            ),
+            Err(GraphProbeError::NonCanonical)
+        );
         let mut tight = GraphProbeLimits::interactive();
         tight.maximum_probes = 3;
         assert_eq!(
@@ -1013,6 +1759,7 @@ mod tests {
                 GraphProbeLimits::interactive(),
                 0,
                 3,
+                None,
                 &workspace,
                 vec![base.clone(), invalid],
             ),
@@ -1029,6 +1776,7 @@ mod tests {
                 GraphProbeLimits::interactive(),
                 0,
                 3,
+                None,
                 &workspace,
                 vec![base.clone(), duplicate],
             ),
@@ -1045,6 +1793,7 @@ mod tests {
                 GraphProbeLimits::interactive(),
                 0,
                 3,
+                None,
                 &workspace,
                 vec![base, unbounded],
             ),
@@ -1064,6 +1813,7 @@ mod tests {
                 GraphProbeLimits::interactive(),
                 0,
                 2,
+                None,
                 &workspace,
                 vec![unknown],
             ),

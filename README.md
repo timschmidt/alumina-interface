@@ -247,13 +247,15 @@ prototype.
   host-only simulator separately publishes a small CC0 diagnostic PNG and four
   GPIO hotspots to exercise digest-bound acquisition, dimension-checked
   rendering, picking, and live typed-resource linkage without resembling or
-  claiming a PCB photograph. Canonical `ALGP`
-  V1 sidecars bind bounded diagnostic probes to exact workspace outputs. Probe
+  claiming a PCB photograph. Canonical `ALGP` V2 sidecars bind bounded
+  diagnostic probes to exact workspace outputs and retain one replay-only
+  Boolean edge trigger with a bounded pre/post sample window. Probe/trigger
   edits filter host plots without mutating the graph or granting firmware
-  telemetry/resource access. Exact-rational series use certified analog
-  enclosures, while Boolean series use aligned high/low logic-analyzer lanes;
-  both share the same exact-time cursor. Plot coordinates come only from
-  certified `f64` enclosures, and cursor labels retain exact sample values.
+  telemetry/resource access or device-trigger authority. Exact-rational series
+  use certified analog enclosures, while Boolean series use aligned high/low
+  logic-analyzer lanes; both share the trigger-selected exact-time window,
+  trigger marker, and cursor. Plot coordinates come only from certified `f64`
+  enclosures, and cursor labels retain exact sample values.
   This remains editor state, not deployment or firmware authority. See
   [`docs/GRAPH-WORKSPACE-V1.md`](docs/GRAPH-WORKSPACE-V1.md).
   The component/front-panel boundary is in
@@ -265,7 +267,7 @@ prototype.
   The descriptive-versus-operational board boundary is in
   [`docs/BOARD-EXPLORER-V1.md`](docs/BOARD-EXPLORER-V1.md).
   The diagnostic-probe sidecar is in
-  [`docs/GRAPH-PROBE-V1.md`](docs/GRAPH-PROBE-V1.md).
+  [`docs/GRAPH-PROBE-V2.md`](docs/GRAPH-PROBE-V2.md).
 - Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
   external authority, reruns the fixed simulator, and requires every regenerated
