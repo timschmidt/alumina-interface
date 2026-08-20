@@ -20,12 +20,13 @@ if (
     "abort-stale-response",
     "confirmed-safety-fault",
     "confirmed-safety-propagation",
+    "confirmed-safety-propagation-recovery",
     "installing-stop",
     "reattach",
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, installing-stop, or reattach",
+    "cached-job mode must be single, repeat, recovery, confirm-recovery, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, installing-stop, or reattach",
   );
 }
 const repeat = mode === "repeat";
@@ -42,6 +43,8 @@ const abortDuplicate = mode === "abort-duplicate";
 const abortStaleResponse = mode === "abort-stale-response";
 const confirmedSafetyFault = mode === "confirmed-safety-fault";
 const confirmedSafetyPropagation = mode === "confirmed-safety-propagation";
+const confirmedSafetyPropagationRecovery =
+  mode === "confirmed-safety-propagation-recovery";
 const installingStop = mode === "installing-stop";
 const multipleAttempts = repeat || installingStop;
 const reattach = mode === "reattach";
@@ -116,11 +119,13 @@ const expectation = repeat
                         ? "cached-job-confirmed-safety-fault"
                         : confirmedSafetyPropagation
                           ? "cached-job-confirmed-safety-propagation"
-                          : installingStop
-                            ? "cached-job-installing-stop"
-                            : recovery
-                              ? "cached-job-recovery"
-                              : "cached-job";
+                          : confirmedSafetyPropagationRecovery
+                            ? "cached-job-confirmed-safety-propagation-recovery"
+                            : installingStop
+                              ? "cached-job-installing-stop"
+                              : recovery
+                                ? "cached-job-recovery"
+                                : "cached-job";
 
 const pages = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) =>
   response.json(),

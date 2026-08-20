@@ -1533,6 +1533,18 @@ mod tests {
         assert_eq!(coordinator.phase(), DistributedSchedulePhase::Confirmed);
     }
 
+    fn apply_abort(
+        authority: &mut Authority,
+        request: &DistributedScheduleRequest,
+        commit: JobCommitRequest,
+    ) {
+        let reference = alumina_job::JobScheduleReference::decode(&request.request.body).unwrap();
+        authority
+            .schedule
+            .abort(reference, DeviceCycle(commit.confirm_deadline_cycle.0 - 1))
+            .unwrap();
+    }
+
     fn complete_authority(authority: &mut Authority, commit: JobCommitRequest, output_token: u32) {
         assert!(matches!(
             authority.schedule.advance(commit.abort_guard_cycle),
@@ -1935,8 +1947,6 @@ mod tests {
 
         let stopped_request = coordinator.next_request().unwrap().unwrap();
         assert_eq!(stopped_request.request.operation, Operation::JobAbort);
-        let stopped_reference =
-            alumina_job::JobScheduleReference::decode(&stopped_request.request.body).unwrap();
         let stopped_commit = coordinator
             .participant_commit(stopped_request.device_id)
             .unwrap();
@@ -1944,13 +1954,7 @@ mod tests {
             .iter_mut()
             .find(|authority| authority.device_id == stopped_request.device_id)
             .unwrap();
-        stopped_authority
-            .schedule
-            .abort(
-                stopped_reference,
-                DeviceCycle(stopped_commit.confirm_deadline_cycle.0 - 1),
-            )
-            .unwrap();
+        apply_abort(stopped_authority, &stopped_request, stopped_commit);
         coordinator
             .accept_response(
                 stopped_request.device_id,
@@ -2070,8 +2074,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn observed_safety_fault_automatically_aborts_remaining_participant() {
+    fn assert_observed_safety_fault_cleanup(lost_abort_response: bool) {
         let (job, ready, preparations, clocks) = fixture();
         let mut coordinator =
             DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
@@ -2115,8 +2118,6 @@ mod tests {
         let stopped_request = coordinator.next_request().unwrap().unwrap();
         assert_eq!(stopped_request.device_id, peer_status.device_id);
         assert_eq!(stopped_request.request.operation, Operation::JobAbort);
-        let stopped_reference =
-            alumina_job::JobScheduleReference::decode(&stopped_request.request.body).unwrap();
         let stopped_commit = coordinator
             .participant_commit(stopped_request.device_id)
             .unwrap();
@@ -2124,22 +2125,45 @@ mod tests {
             .iter_mut()
             .find(|authority| authority.device_id == stopped_request.device_id)
             .unwrap();
-        stopped_authority
-            .schedule
-            .abort(
-                stopped_reference,
-                DeviceCycle(stopped_commit.confirm_deadline_cycle.0 - 1),
-            )
-            .unwrap();
-        assert_eq!(
-            coordinator
-                .accept_response(
-                    stopped_request.device_id,
-                    &response(&ready_status(stopped_authority)),
-                )
-                .unwrap(),
-            DistributedSchedulePhase::Faulted
-        );
+        apply_abort(stopped_authority, &stopped_request, stopped_commit);
+        if lost_abort_response {
+            assert!(
+                coordinator
+                    .abandon_pending(stopped_request.device_id)
+                    .unwrap()
+            );
+            assert_eq!(coordinator.phase(), DistributedSchedulePhase::Aborting);
+            assert_eq!(
+                coordinator.participant_phase(faulted_status.device_id),
+                Some(ParticipantSchedulePhase::Faulted)
+            );
+            assert_eq!(
+                coordinator.participant_phase(stopped_request.device_id),
+                Some(ParticipantSchedulePhase::Confirmed)
+            );
+            let reconciliation = coordinator.next_request().unwrap().unwrap();
+            assert_eq!(reconciliation.device_id, stopped_request.device_id);
+            assert_eq!(reconciliation.request.operation, Operation::JobStatus);
+            assert_eq!(
+                coordinator
+                    .accept_response(
+                        reconciliation.device_id,
+                        &response(&ready_status(stopped_authority)),
+                    )
+                    .unwrap(),
+                DistributedSchedulePhase::Faulted
+            );
+        } else {
+            assert_eq!(
+                coordinator
+                    .accept_response(
+                        stopped_request.device_id,
+                        &response(&ready_status(stopped_authority)),
+                    )
+                    .unwrap(),
+                DistributedSchedulePhase::Faulted
+            );
+        }
         assert_eq!(coordinator.next_request().unwrap(), None);
         assert_eq!(
             coordinator.participant_phase(faulted_status.device_id),
@@ -2149,6 +2173,16 @@ mod tests {
             coordinator.participant_phase(stopped_request.device_id),
             Some(ParticipantSchedulePhase::Aborted)
         );
+    }
+
+    #[test]
+    fn observed_safety_fault_automatically_aborts_remaining_participant() {
+        assert_observed_safety_fault_cleanup(false);
+    }
+
+    #[test]
+    fn observed_safety_fault_recovers_lost_peer_abort_response() {
+        assert_observed_safety_fault_cleanup(true);
     }
 
     #[test]
