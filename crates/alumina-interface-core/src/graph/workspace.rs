@@ -1373,8 +1373,8 @@ mod tests {
         GraphWorkspaceDocument::try_new(
             GraphWorkspaceLimits::interactive(),
             7,
-            20,
-            23,
+            22,
+            26,
             fixture.document().clone(),
             placements(fixture.document()),
         )
@@ -1489,8 +1489,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(id, GraphWireId::new(23));
-        assert_eq!(workspace.next_wire_id(), 24);
+        assert_eq!(id, GraphWireId::new(26));
+        assert_eq!(workspace.next_wire_id(), 27);
         assert_eq!(workspace.graph().revision(), 3);
         assert_eq!(workspace.revision(), 9);
         assert_ne!(
@@ -1530,9 +1530,9 @@ mod tests {
                 40,
             )
             .unwrap();
-        assert_eq!(created, GraphNodeId::new(20));
-        assert_eq!(workspace.next_node_id(), 21);
-        assert_eq!(workspace.next_wire_id(), 23);
+        assert_eq!(created, GraphNodeId::new(22));
+        assert_eq!(workspace.next_node_id(), 23);
+        assert_eq!(workspace.next_wire_id(), 26);
         assert_eq!(workspace.graph().revision(), 2);
         assert_eq!(workspace.revision(), 8);
         assert_eq!(
@@ -1542,9 +1542,9 @@ mod tests {
 
         assert_eq!(workspace.delete_node(GraphNodeId::new(18)).unwrap(), 3);
         assert!(workspace.graph().node(GraphNodeId::new(18)).is_none());
-        assert_eq!(workspace.graph().wires().len(), 19);
-        assert_eq!(workspace.next_node_id(), 21);
-        assert_eq!(workspace.next_wire_id(), 23);
+        assert_eq!(workspace.graph().wires().len(), 22);
+        assert_eq!(workspace.next_node_id(), 23);
+        assert_eq!(workspace.next_wire_id(), 26);
         assert_eq!(workspace.graph().revision(), 3);
         assert_eq!(workspace.revision(), 9);
 
@@ -1796,8 +1796,8 @@ mod tests {
             GraphWorkspaceDocument::try_new(
                 GraphWorkspaceLimits::interactive(),
                 1,
-                20,
-                23,
+                22,
+                26,
                 fixture.document().clone(),
                 missing,
             ),
@@ -1807,8 +1807,8 @@ mod tests {
             GraphWorkspaceDocument::try_new(
                 GraphWorkspaceLimits::interactive(),
                 1,
-                19,
-                23,
+                21,
+                26,
                 fixture.document().clone(),
                 placements(fixture.document()),
             )

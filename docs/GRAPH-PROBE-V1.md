@@ -49,7 +49,7 @@ still records the bounded authoring intent but invents no data.
 
 The reference sidecar binds error, integral-prior, clamped-controller, and
 permit-gated-output endpoints. It is 257 bytes with SHA-256
-`3bbd8ff29e118f3f0a37885adf13e263252ecc01148d50eb88058be1a1b42651`.
+`712e68be8902d3c87ca67f58b426670e8f7f99ac79923c4c38e6485b35f3b03a`.
 
 ## Closed runtime claims
 

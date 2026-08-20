@@ -53,9 +53,9 @@ before allocation, independently replays the embedded `ALGW` and `ALGR`,
 reconstructs every component invariant, rejects trailing bytes, and requires an
 exact re-encoding match. SHA-256 identity is returned only after byte equality.
 
-The initial 19-node PID/interlock component is 4,099 bytes with SHA-256
-`20759fd476c435eca5318204c1048eed8156244f739bb2df5448a7f580d359d1`.
-It embeds the existing 3,396-byte canonical reference workspace unchanged.
+The initial 21-node PID/interlock component is 4,554 bytes with SHA-256
+`1745af2a70981fcd61c87361e62ba9cb236eccf9ce4fbe498b33e6d278fc29a6`.
+It embeds the existing 3,755-byte canonical reference workspace unchanged.
 
 ## Connector semantics
 
@@ -100,8 +100,9 @@ byte.
 
 The native/WASM control workspace constructs `control.reference_pid` version 1
 around its current canonical workspace. The autonomous reference fixture has
-four public Stream outputs, six exact parameter controls (P/I/D gains, clamp
-minimum/maximum, and safe output), and four exact replay indicators. Controls
+four public Stream outputs, eight exact parameter controls (P/I/D gains, clamp
+minimum/maximum, safe output, and inclusive interlock minimum/maximum), and four
+exact replay indicators. Controls
 use the same Hyperreal parsing, typed-value validation, canonical `ALGR` edit,
 history, and persistence path as the selected-node inspector.
 

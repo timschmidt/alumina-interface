@@ -201,10 +201,11 @@ prototype.
   transition. Exact clock resolution proves a shared tick-zero root, the
   smallest rational schedule pattern, minimum input capacity, and separately
   bounded held-sample state; implicit or independent-root transitions reject.
-- A separate implementation registry admits nine reviewed `HostExact`
+- A separate implementation registry admits eleven reviewed `HostExact`
   simulation behaviors: external Stream source, audited latest-at-or-before
   transition, Stream sink, exact add/subtract/scale/clamp, explicit
-  read-before-write unit delay, and a fail-safe Boolean permit gate. A visible
+  inclusive-range predicates, Boolean conjunction, read-before-write unit
+  delay, and a fail-safe Boolean permit gate. A visible
   multi-rate discrete PID/interlock fixture composes those primitives without
   hidden controller state. The bounded simulator uses exact rational clock
   time and unit scales, orders every coincident source tick first, and produces
@@ -213,7 +214,7 @@ prototype.
   open a bounded workspace by default: semantic current-tick layers, explicit
   feedback routes, typed ports, exact parameters/state, and four control traces.
   Canonical `ALGW` V1 embeds the unchanged `ALGR` plus integer canvas positions
-  and monotonic ID cursors. Its 11-entry fixed-schema palette supports
+  and monotonic ID cursors. Its 13-entry fixed-schema palette supports
   monotonic node creation, atomic node/incident-wire deletion, node moves,
   typed wire edits, and bounded exact scalar parameter editing. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
@@ -223,12 +224,12 @@ prototype.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible
-  reference component supplies six exact PID/interlock controls and four exact
+  reference component supplies eight exact PID/interlock controls and four exact
   replay indicators; invalidating a binding detaches the panel without
   weakening or rejecting the underlying workspace draft.
   Canonical `ALGH` V1 then binds a collapsed authoring instance to that exact
   component digest and deterministically flattens it to an ordinary audited
-  19-node/22-wire workspace with fresh monotonic identities. V1 rejects nested
+  21-node/25-wire workspace with fresh monotonic identities. V1 rejects nested
   instances outright until recursive depth/cycle authority is explicit.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The

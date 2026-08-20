@@ -42,10 +42,11 @@ bounds the outer bytes before reading lengths, independently replays the
 embedded `ALGR`, reconstructs all invariants, re-encodes every byte, and assigns
 SHA-256 identity only after exact byte equality.
 
-The representative 19-node/22-wire PID workspace is 3,396 bytes with SHA-256
-`d7d4ef9e27359a474b59f48cdbcb604b3d4d16f2a768a65f12c95dde8aee9799`.
+The representative 21-node/25-wire PID/interlock workspace is 3,755 bytes with
+SHA-256
+`bf5135c39b67c46a3a5908d4d0d8a1d13d065b59231890e8fbdda818f064ae16`.
 It embeds graph identity
-`fb173fb30bc5e04269caea439dea8fa455050142fac3a4afc78f5fd16e7ac59a`.
+`96a3348264a9b65d267b45f9a6419a44ee60473fd961abcf4436295e10b3735f`.
 
 ## Transactional editing
 
@@ -68,7 +69,7 @@ parameter edits also advance the embedded graph revision and therefore change
 its canonical digest.
 
 The native/WASM control workspace initializes one canonical `ALGW` from the
-audited deterministic layout. Its 11-entry palette is derived from the fixed
+audited deterministic layout. Its 13-entry palette is derived from the fixed
 simulation registry: kind/version, ports, and parameter contracts come from
 the audited node schema, while each exact initial parameter value comes from
 the lowest-ID reviewed representative instance of that kind. A kind without a

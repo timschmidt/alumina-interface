@@ -3621,6 +3621,8 @@ fn representative_component(
         (4, "output_minimum", 17, 1, 240, 20),
         (5, "output_maximum", 17, 2, 240, 84),
         (6, "safe_output", 18, 1, 240, 148),
+        (11, "interlock_minimum", 20, 1, 240, 212),
+        (12, "interlock_maximum", 20, 2, 240, 276),
     ];
     let mut panel_items = parameter_specs
         .into_iter()
@@ -3657,7 +3659,7 @@ fn representative_component(
         "control.reference_pid",
         1,
         5,
-        11,
+        13,
         workspace.clone(),
         Vec::new(),
         outputs,
@@ -4237,8 +4239,8 @@ mod tests {
     #[test]
     fn representative_layout_is_bounded_acyclic_and_keeps_feedback_visible() {
         let workspace = ExactControlWorkspace::try_new().unwrap();
-        assert_eq!(workspace.presentation.nodes.len(), 19);
-        assert_eq!(workspace.presentation.wires.len(), 22);
+        assert_eq!(workspace.presentation.nodes.len(), 21);
+        assert_eq!(workspace.presentation.wires.len(), 25);
         assert_eq!(
             workspace
                 .presentation
@@ -4268,13 +4270,13 @@ mod tests {
             GraphLimits::interactive(),
         )
         .unwrap();
-        assert_eq!(workspace.workspace_encoding.bytes().len(), 3_396);
+        assert_eq!(workspace.workspace_encoding.bytes().len(), 3_755);
         assert_eq!(
             workspace.workspace_encoding.digest().0,
             [
-                0xd7, 0xd4, 0xef, 0x9e, 0x27, 0x35, 0x9a, 0x47, 0x4b, 0x59, 0xf4, 0x8c, 0xdb, 0xcb,
-                0x60, 0x4b, 0x3d, 0x4d, 0x16, 0xf2, 0xa7, 0x68, 0xa6, 0x5f, 0x12, 0xc9, 0x5d, 0xde,
-                0x8a, 0xee, 0x97, 0x99,
+                0xbf, 0x51, 0x35, 0xc3, 0x9b, 0x67, 0xc4, 0x6a, 0x3a, 0x59, 0x08, 0xd4, 0xd0, 0xd8,
+                0xa1, 0xd1, 0x3d, 0x06, 0x5b, 0x59, 0x23, 0x18, 0x90, 0xe8, 0xfb, 0xdd, 0xa8, 0x18,
+                0xf0, 0x64, 0xae, 0x16,
             ]
         );
         assert_eq!(replay.document(), &workspace.workspace);
@@ -4286,9 +4288,9 @@ mod tests {
         assert_eq!(
             probes.encoding.digest().0,
             [
-                0x3b, 0xbd, 0x8f, 0xf2, 0x9e, 0x11, 0x8f, 0x3f, 0x0a, 0x37, 0x88, 0x5a, 0xdf, 0x13,
-                0xe2, 0x63, 0x25, 0x2e, 0xcc, 0x01, 0x14, 0x8d, 0x50, 0xeb, 0x88, 0x05, 0x8b, 0xe1,
-                0xa1, 0xb4, 0x26, 0x51,
+                0x71, 0x2e, 0x68, 0xbe, 0x89, 0x02, 0xd3, 0xc8, 0x7c, 0xa6, 0x7f, 0x58, 0xb4, 0x26,
+                0x67, 0x0e, 0x8f, 0x7f, 0x99, 0xac, 0x79, 0x92, 0x3c, 0x4c, 0x38, 0xe6, 0x48, 0x5b,
+                0x35, 0xf3, 0xb0, 0x3a,
             ]
         );
         let probe_replay = replay_graph_probes(
@@ -4299,7 +4301,7 @@ mod tests {
         .unwrap();
         assert_eq!(probe_replay.document(), &probes.document);
         assert_eq!(probe_replay.encoding(), &probes.encoding);
-        assert_eq!(workspace.palette.len(), 11);
+        assert_eq!(workspace.palette.len(), 13);
         assert!(workspace.palette.iter().all(|entry| {
             workspace
                 .fixture
@@ -4451,18 +4453,18 @@ mod tests {
     fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let initial = workspace.component.as_ref().unwrap();
-        assert_eq!(initial.encoding.bytes().len(), 4_099);
+        assert_eq!(initial.encoding.bytes().len(), 4_554);
         assert_eq!(
             initial.encoding.digest().0,
             [
-                0x20, 0x75, 0x9f, 0xd4, 0x76, 0xc4, 0x35, 0xec, 0xa5, 0x31, 0x82, 0x04, 0xc1, 0x04,
-                0x8e, 0xed, 0x81, 0x56, 0x24, 0x4f, 0x73, 0x9b, 0xb2, 0xdf, 0x54, 0x48, 0xa7, 0xf5,
-                0x80, 0xd3, 0x59, 0xd1,
+                0x17, 0x45, 0xaf, 0x2a, 0x70, 0x98, 0x1f, 0xcd, 0x61, 0xc8, 0x73, 0x61, 0xe6, 0x2b,
+                0xa9, 0xcb, 0x23, 0x6e, 0xcc, 0xf9, 0xce, 0x4f, 0xbe, 0x49, 0x8b, 0x33, 0xe6, 0xd2,
+                0x78, 0xfc, 0x29, 0xa6,
             ]
         );
         assert!(initial.document.inputs().is_empty());
         assert_eq!(initial.document.outputs().len(), 4);
-        assert_eq!(initial.document.panel_items().len(), 10);
+        assert_eq!(initial.document.panel_items().len(), 12);
         assert_eq!(
             initial.document.workspace_digest(),
             workspace.workspace_encoding.digest()
@@ -4477,26 +4479,26 @@ mod tests {
         assert_eq!(replay.document(), &initial.document);
         assert_eq!(replay.encoding(), &initial.encoding);
         assert_eq!(initial.hierarchy.document.instances().len(), 1);
-        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_008);
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_463);
         assert_eq!(
             initial.hierarchy.encoding.digest().0,
             [
-                0xd9, 0xa0, 0xd5, 0xcb, 0xe0, 0xb7, 0x69, 0x4b, 0x50, 0x67, 0x11, 0xf4, 0x8d, 0x85,
-                0xac, 0x2a, 0x90, 0x48, 0x74, 0x26, 0x1f, 0xd0, 0xd2, 0xd8, 0x62, 0x44, 0xda, 0x06,
-                0xcf, 0x2e, 0x5f, 0x64,
+                0x96, 0xd0, 0x1a, 0x24, 0x27, 0x30, 0x3b, 0xff, 0xa3, 0xa7, 0x22, 0xb1, 0x90, 0xa8,
+                0x43, 0x3b, 0x04, 0x7a, 0x43, 0x53, 0x64, 0x29, 0x8e, 0x45, 0xd4, 0x04, 0xb7, 0xfd,
+                0xa5, 0xb0, 0xf1, 0x61,
             ]
         );
-        assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_396);
+        assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_755);
         assert_eq!(
             initial.hierarchy.flattening.encoding().digest().0,
             [
-                0xa5, 0xe0, 0xab, 0xfd, 0x4f, 0x1e, 0x86, 0x42, 0xa7, 0x82, 0x44, 0xb7, 0xc1, 0x4f,
-                0x91, 0x15, 0x06, 0x65, 0xfa, 0xad, 0xef, 0x48, 0x98, 0xc4, 0x9d, 0xdc, 0x25, 0x6c,
-                0x88, 0xa9, 0x82, 0x77,
+                0xe3, 0x9c, 0x53, 0x96, 0x53, 0x96, 0x89, 0xb8, 0xb5, 0x63, 0xa7, 0x22, 0x0e, 0x11,
+                0x80, 0xd7, 0x71, 0x7e, 0x70, 0x89, 0x3b, 0x71, 0x58, 0x0e, 0xbb, 0xe5, 0x18, 0x73,
+                0xfa, 0x13, 0xb6, 0x8f,
             ]
         );
-        assert_eq!(initial.hierarchy.document.flattened_node_count(), 19);
-        assert_eq!(initial.hierarchy.document.flattened_wire_count(), 22);
+        assert_eq!(initial.hierarchy.document.flattened_node_count(), 21);
+        assert_eq!(initial.hierarchy.document.flattened_wire_count(), 25);
         assert_eq!(
             initial
                 .hierarchy
@@ -4505,7 +4507,7 @@ mod tests {
                 .graph()
                 .nodes()
                 .len(),
-            19
+            21
         );
         assert_eq!(
             initial
@@ -4515,7 +4517,7 @@ mod tests {
                 .graph()
                 .wires()
                 .len(),
-            22
+            25
         );
         let hierarchy_replay = replay_graph_hierarchy(
             initial.hierarchy.encoding.bytes(),
@@ -4583,7 +4585,7 @@ mod tests {
             node: GraphNodeId::new(19),
             port: GraphPortId::new(1),
         }));
-        assert_eq!(workspace.workspace.graph().wires().len(), 21);
+        assert_eq!(workspace.workspace.graph().wires().len(), 24);
         assert!(!workspace.reference_trace_is_current());
         assert!(workspace.edit_status.contains("draft semantic blocker"));
 
@@ -4617,10 +4619,10 @@ mod tests {
             .position(|entry| entry.prototype.kind().name() == "control.exact.scale")
             .unwrap();
         workspace.add_palette_node();
-        let created = GraphNodeId::new(20);
+        let created = GraphNodeId::new(22);
         assert_eq!(workspace.selected_node, Some(created));
-        assert_eq!(workspace.workspace.graph().nodes().len(), 20);
-        assert_eq!(workspace.workspace.next_node_id(), 21);
+        assert_eq!(workspace.workspace.graph().nodes().len(), 22);
+        assert_eq!(workspace.workspace.next_node_id(), 23);
         assert_eq!(
             workspace
                 .workspace
@@ -4635,8 +4637,8 @@ mod tests {
         assert!(workspace.edit_status.contains("draft semantic blocker"));
 
         workspace.delete_selected_node(created);
-        assert_eq!(workspace.workspace.graph().nodes().len(), 19);
-        assert_eq!(workspace.workspace.next_node_id(), 21);
+        assert_eq!(workspace.workspace.graph().nodes().len(), 21);
+        assert_eq!(workspace.workspace.next_node_id(), 23);
         assert_eq!(workspace.selected_node, None);
 
         workspace.reset_draft();
@@ -4688,11 +4690,11 @@ mod tests {
 
         workspace.add_palette_node();
         assert_eq!(workspace.workspace.graph().nodes().len(), 1);
-        assert_eq!(workspace.selected_node, Some(GraphNodeId::new(20)));
+        assert_eq!(workspace.selected_node, Some(GraphNodeId::new(22)));
         assert_eq!(
-            workspace.workspace.placement(GraphNodeId::new(20)),
+            workspace.workspace.placement(GraphNodeId::new(22)),
             Some(GraphNodePlacement::new(
-                GraphNodeId::new(20),
+                GraphNodeId::new(22),
                 NEW_NODE_ORIGIN,
                 NEW_NODE_ORIGIN,
             ))

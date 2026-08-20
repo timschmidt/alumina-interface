@@ -160,7 +160,7 @@ proofs.
 ## Fixed deterministic host simulation
 
 `GraphSimulationRegistry` is a second, explicit authority above the audited
-semantic registry. It binds exact node kind/version identities to one of nine
+semantic registry. It binds exact node kind/version identities to one of eleven
 reviewed behaviors:
 
 - caller-supplied external Stream source;
@@ -169,6 +169,8 @@ reviewed behaviors:
 - same-clock exact-rational add and subtract;
 - exact scale by a dimensionless unit-bearing parameter;
 - exact inclusive clamp;
+- an exact inclusive-range predicate with same-unit lower and upper parameters;
+- same-clock Boolean conjunction;
 - an explicit read-before-write unit delay; and
 - an exact-value permit gate whose false branch always selects its declared
   safe parameter.
@@ -210,7 +212,10 @@ cycle rejection. No controller state is hidden in a PID-specific opcode.
 
 The representative control fixture resamples 50 Hz setpoint, measurement, and
 permit Streams onto a 10 Hz control clock. It composes subtract, two explicit
-delays, exact scale/add, clamp, and permit nodes into a discrete PID/interlock.
+delays, exact scale/add, clamp, an inclusive measurement-range predicate,
+Boolean conjunction, and a fail-safe permit node into a discrete
+PID/interlock. Reversed range parameters reject instead of silently swapping
+bounds, and the conjunction is independently tested with disagreeing inputs.
 The coefficients are percentage values with exact `1/100` unit scale. Its
 integral and derivative factors are explicitly pre-discretized for that clock;
 the simulator supplies no hidden or floating-point `dt`. Its
@@ -219,11 +224,11 @@ is `5, 5, 4, 2, 3, 3` mm, and dropping permit forces the final trace to
 `5, 5, 4, 0, 0, 0` mm. Reversing every caller sample reproduces the same
 simulation, and `ALGT` replay regenerates the complete trace byte for byte.
 The canonical fixture graph identity is
-`fb173fb30bc5e04269caea439dea8fa455050142fac3a4afc78f5fd16e7ac59a`;
+`96a3348264a9b65d267b45f9a6419a44ee60473fd961abcf4436295e10b3735f`;
 its fixed semantic/implementation registry identity is
-`6bb6f814941b632ac5c9858fbbfe599fe8febb3a04b4dcc7bf4fbc8ac2f61537`.
-The 7,836-byte trace has SHA-256
-`4d9b63633be3afc658cac8d6475d6ede602568ab084de005ac5dd2dfcb7542a3`.
+`fc68d37f279782c5a5368bc0e44aa695a3b2babbfaf967b09cf4fc75287eae83`.
+The 8,292-byte trace has SHA-256
+`e2f8a0f20b3e5f9fdfc12c394e1e325d7b65243efad8c9c7f558f8845c965fe3`.
 
 The fixture is one fallible public core construction shared by its regression
 test and the native/WASM application; the UI does not reproduce its values or
@@ -232,15 +237,15 @@ topology. The initial workspace independently caps presentation at 256 nodes,
 current-tick dependencies, excludes only declared next-state captures from that
 acyclic rank, and routes those captures visibly as feedback. Its canonical
 `ALGW` envelope retains one bounded integer position per node and monotonic
-identity cursors. An 11-entry palette derives kind/version and port/parameter
+identity cursors. A 13-entry palette derives kind/version and port/parameter
 shape from the fixed audited schemas and exact defaults from reviewed fixture
 instances. Monotonic node creation, atomic node/incident-wire deletion, node
 drags, typed wire connect/disconnect, and exact scalar parameter replacement
 replace the draft only after complete candidate validation. Any embedded graph
 edit detaches the reference trace because its `ALGT` identity still binds the
 reviewed graph; placement-only edits preserve it.
-The initial 3,396-byte workspace has SHA-256
-`d7d4ef9e27359a474b59f48cdbcb604b3d4d16f2a768a65f12c95dde8aee9799`.
+The initial 3,755-byte workspace has SHA-256
+`bf5135c39b67c46a3a5908d4d0d8a1d13d065b59231890e8fbdda818f064ae16`.
 Node selection exposes kind/version, typed ports, exact parameters, and explicit
 state facts. Current exact-rational parameters can be entered as bounded
 Hyperreal text and are normalized into the canonical graph with no floating
@@ -379,7 +384,7 @@ enforces caller and embedded limits, and requires byte-for-byte canonical
 re-encoding. Probe add/remove/rebind operations are transactional, never reuse
 IDs, and never mutate the graph. The 257-byte four-series reference sidecar has
 SHA-256
-`3bbd8ff29e118f3f0a37885adf13e263252ecc01148d50eb88058be1a1b42651`.
+`712e68be8902d3c87ca67f58b426670e8f7f99ac79923c4c38e6485b35f3b03a`.
 It filters immutable host trace series only; it grants no firmware read,
 telemetry, trigger, or deployment authority. See
 [`GRAPH-PROBE-V1.md`](GRAPH-PROBE-V1.md).

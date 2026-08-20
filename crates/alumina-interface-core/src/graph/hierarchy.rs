@@ -1307,8 +1307,8 @@ mod tests {
         let mut workspace = GraphWorkspaceDocument::try_new(
             GraphWorkspaceLimits::interactive(),
             1,
-            20,
-            23,
+            22,
+            26,
             fixture.document().clone(),
             fixture
                 .document()
@@ -1495,8 +1495,8 @@ mod tests {
             graph_component_instance_output_port(component, GraphComponentOutputId::new(1)),
             Some(GraphPortId::new(2))
         );
-        assert_eq!(hierarchy.flattened_node_count(), 20);
-        assert_eq!(hierarchy.flattened_wire_count(), 23);
+        assert_eq!(hierarchy.flattened_node_count(), 22);
+        assert_eq!(hierarchy.flattened_wire_count(), 26);
         let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
         let replay = replay_graph_hierarchy(
             encoding.bytes(),
@@ -1511,10 +1511,10 @@ mod tests {
 
         let flattened = flatten_graph_hierarchy(&hierarchy).unwrap();
         assert_eq!(flattened.source_digest(), encoding.digest());
-        assert_eq!(flattened.workspace().graph().nodes().len(), 20);
-        assert_eq!(flattened.workspace().graph().wires().len(), 23);
+        assert_eq!(flattened.workspace().graph().nodes().len(), 22);
+        assert_eq!(flattened.workspace().graph().wires().len(), 26);
         assert_eq!(flattened.instances().len(), 1);
-        assert_eq!(flattened.instances()[0].nodes().len(), 18);
+        assert_eq!(flattened.instances()[0].nodes().len(), 20);
         let map = flattened.instances()[0].nodes();
         let remapped_four = map
             .iter()
@@ -1884,8 +1884,8 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(hierarchy.flattened_node_count(), 36);
-        assert_eq!(hierarchy.flattened_wire_count(), 43);
+        assert_eq!(hierarchy.flattened_node_count(), 40);
+        assert_eq!(hierarchy.flattened_wire_count(), 49);
         let flattened = flatten_graph_hierarchy(&hierarchy).unwrap();
         let first_source = flattened.instances()[0]
             .nodes()

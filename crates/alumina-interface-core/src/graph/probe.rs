@@ -848,8 +848,8 @@ mod tests {
         GraphWorkspaceDocument::try_new(
             GraphWorkspaceLimits::interactive(),
             1,
-            20,
-            23,
+            22,
+            26,
             fixture.document().clone(),
             placements,
         )

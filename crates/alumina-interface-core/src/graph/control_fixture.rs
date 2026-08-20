@@ -260,6 +260,8 @@ const fn representative_node_label(id: u32) -> &'static str {
         17 => "Output clamp",
         18 => "Safety permit gate",
         19 => "Controller output",
+        20 => "Measurement range interlock",
+        21 => "Combined permit",
         _ => "Representative control node",
     }
 }
@@ -551,6 +553,26 @@ fn document_and_registry()
             Vec::new(),
             Vec::new(),
         ),
+        node(
+            20,
+            "control.exact.within",
+            vec![port(1, "value", CONTROL_VALUE_STREAM)],
+            vec![port(2, "inside", CONTROL_BOOL_STREAM)],
+            vec![
+                parameter(&schema, 1, "minimum", VALUE, Rational::zero())?,
+                parameter(&schema, 2, "maximum", VALUE, Rational::from(2))?,
+            ],
+        ),
+        node(
+            21,
+            "control.bool.and",
+            vec![
+                port(1, "left", CONTROL_BOOL_STREAM),
+                port(2, "right", CONTROL_BOOL_STREAM),
+            ],
+            vec![port(3, "all", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
     ];
 
     let raw_wires = [
@@ -574,8 +596,11 @@ fn document_and_registry()
         (18, endpoint(14, 2), endpoint(16, 2)),
         (19, endpoint(16, 3), endpoint(17, 1)),
         (20, endpoint(17, 2), endpoint(18, 1)),
-        (21, endpoint(6, 2), endpoint(18, 2)),
+        (21, endpoint(6, 2), endpoint(21, 1)),
         (22, endpoint(18, 3), endpoint(19, 1)),
+        (23, endpoint(5, 2), endpoint(20, 1)),
+        (24, endpoint(20, 2), endpoint(21, 2)),
+        (25, endpoint(21, 3), endpoint(18, 2)),
     ];
     let wires = raw_wires
         .into_iter()
@@ -694,6 +719,34 @@ fn document_and_registry()
         Vec::new(),
         None,
     );
+    let within = NodeSchema::new(
+        NodeKind::new("control.exact.within", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        vec![port(1, "value", CONTROL_VALUE_STREAM)],
+        vec![queue(1, 1)],
+        vec![port(2, "inside", CONTROL_BOOL_STREAM)],
+        vec![
+            parameter_contract(1, "minimum", VALUE),
+            parameter_contract(2, "maximum", VALUE),
+        ],
+        vec![dependency(2, &[1])],
+        Vec::new(),
+        None,
+    );
+    let boolean_and = NodeSchema::new(
+        NodeKind::new("control.bool.and", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        vec![
+            port(1, "left", CONTROL_BOOL_STREAM),
+            port(2, "right", CONTROL_BOOL_STREAM),
+        ],
+        vec![queue(1, 1), queue(2, 1)],
+        vec![port(3, "all", CONTROL_BOOL_STREAM)],
+        Vec::new(),
+        vec![dependency(3, &[1, 2])],
+        Vec::new(),
+        None,
+    );
     let permit = NodeSchema::new(
         NodeKind::new("control.exact.permit", 1),
         ExecutionDomainSet::HOST_EXACT,
@@ -732,6 +785,8 @@ fn document_and_registry()
             scale,
             delay,
             clamp,
+            within,
+            boolean_and,
             permit,
             sink,
         ],
@@ -802,6 +857,23 @@ fn document_and_registry()
                 minimum_parameter: 1,
                 maximum_parameter: 2,
                 output: GraphPortId::new(2),
+            },
+        ),
+        GraphSimulationImplementation::new(
+            NodeKind::new("control.exact.within", 1),
+            GraphSimulationNodeKind::ExactWithinInclusive {
+                input: GraphPortId::new(1),
+                minimum_parameter: 1,
+                maximum_parameter: 2,
+                output: GraphPortId::new(2),
+            },
+        ),
+        GraphSimulationImplementation::new(
+            NodeKind::new("control.bool.and", 1),
+            GraphSimulationNodeKind::BooleanAnd {
+                left: GraphPortId::new(1),
+                right: GraphPortId::new(2),
+                output: GraphPortId::new(3),
             },
         ),
         GraphSimulationImplementation::new(
@@ -891,6 +963,19 @@ fn rational_trace(simulation: &GraphSimulation, endpoint: WireEndpoint) -> Vec<R
 }
 
 #[cfg(test)]
+fn boolean_trace(simulation: &GraphSimulation, endpoint: WireEndpoint) -> Vec<bool> {
+    simulation
+        .entries()
+        .iter()
+        .filter(|entry| entry.endpoint() == endpoint)
+        .map(|entry| match entry.value().value() {
+            GraphValue::Boolean(value) => *value,
+            value => panic!("unexpected trace value {value:?}"),
+        })
+        .collect()
+}
+
+#[cfg(test)]
 #[test]
 fn multirate_exact_pid_and_interlock_are_visible_deterministic_and_replayable() {
     let fixture = compile_representative_exact_control_graph().unwrap();
@@ -925,34 +1010,171 @@ fn multirate_exact_pid_and_interlock_are_visible_deterministic_and_replayable() 
         rational_trace(simulation, endpoint(18, 3)),
         [5, 5, 4, 0, 0, 0].map(Rational::from)
     );
+    assert_eq!(
+        boolean_trace(simulation, endpoint(20, 2)),
+        [true, true, true, false, false, false]
+    );
+    assert_eq!(
+        boolean_trace(simulation, endpoint(21, 3)),
+        [true, true, true, false, false, false]
+    );
 
     let trace = fixture.trace();
     assert_eq!(
         simulation.graph_digest().0,
         [
-            0xfb, 0x17, 0x3f, 0xb3, 0x0b, 0xc5, 0xe0, 0x42, 0x69, 0xca, 0xea, 0x43, 0x9d, 0xea,
-            0x8f, 0xa4, 0x55, 0x05, 0x01, 0x42, 0xfa, 0xc3, 0xa4, 0xaf, 0xc7, 0x8f, 0x5f, 0xd1,
-            0x6e, 0x7a, 0xc5, 0x9a,
+            0x96, 0xa3, 0x34, 0x82, 0x64, 0xa9, 0xb6, 0x5d, 0x26, 0x7b, 0x45, 0xf9, 0xa6, 0x41,
+            0x9a, 0x44, 0xee, 0x60, 0x47, 0x3f, 0xd9, 0x61, 0xab, 0xcf, 0x44, 0x36, 0x29, 0x5e,
+            0x10, 0xb3, 0x73, 0x5f,
         ]
     );
     assert_eq!(
         simulation.registry_digest().0,
         [
-            0x6b, 0xb6, 0xf8, 0x14, 0x94, 0x1b, 0x63, 0x2a, 0xc5, 0xc9, 0x85, 0x8f, 0xbb, 0xfe,
-            0x59, 0x9f, 0xe8, 0xfe, 0xbb, 0x3a, 0x04, 0xb4, 0xdc, 0xc7, 0xbf, 0x4f, 0xbc, 0x8a,
-            0xc2, 0xf6, 0x15, 0x37,
+            0xfc, 0x68, 0xd3, 0x7f, 0x27, 0x97, 0x82, 0xc5, 0xa5, 0x36, 0x8b, 0xc0, 0xe4, 0x4a,
+            0xa6, 0x95, 0xa3, 0xb2, 0xba, 0xbb, 0xfa, 0xf9, 0x67, 0xb0, 0x9c, 0xf4, 0xfc, 0x75,
+            0x28, 0x7e, 0xae, 0x83,
         ]
     );
-    assert_eq!(trace.bytes().len(), 7_836);
+    assert_eq!(trace.bytes().len(), 8_292);
     assert_eq!(
         trace.digest().0,
         [
-            0x4d, 0x9b, 0x63, 0x63, 0x3b, 0xe3, 0xaf, 0xc6, 0x58, 0xca, 0xc8, 0xd6, 0x47, 0x5d,
-            0x6e, 0xde, 0x60, 0x25, 0x68, 0xab, 0x08, 0x4d, 0xe0, 0x05, 0xac, 0x5d, 0xd2, 0xdf,
-            0xcb, 0x75, 0x42, 0xa3,
+            0xe2, 0xf8, 0xa0, 0xf2, 0x0b, 0x3e, 0x5f, 0x9f, 0xdf, 0xc1, 0x2c, 0x39, 0x4e, 0x1e,
+            0x32, 0x5d, 0x7b, 0x65, 0x24, 0x3e, 0xfa, 0xd8, 0xc9, 0xc7, 0xf5, 0x58, 0xf8, 0x84,
+            0x5c, 0x96, 0x5f, 0xe3,
         ]
     );
     let replay = super::replay_graph_trace(trace.bytes(), document, registry, limits).unwrap();
     assert_eq!(replay.simulation(), simulation);
     assert_eq!(replay.encoding().digest(), trace.digest());
+}
+
+#[cfg(test)]
+#[test]
+fn boolean_conjunction_distinguishes_each_interlock_operand() {
+    let (document, registry) = document_and_registry().unwrap();
+    let mut input = Vec::new();
+    for tick in 0_u64..=25 {
+        let control_tick = tick / 5;
+        input.push(ExternalStreamSample::new(
+            endpoint(1, 1),
+            tick,
+            100 + tick,
+            exact(document.schema(), VALUE, Rational::from(3)).unwrap(),
+        ));
+        input.push(ExternalStreamSample::new(
+            endpoint(2, 1),
+            tick,
+            200 + tick,
+            exact(
+                document.schema(),
+                VALUE,
+                Rational::from(control_tick.min(3)),
+            )
+            .unwrap(),
+        ));
+        input.push(ExternalStreamSample::new(
+            endpoint(3, 1),
+            tick,
+            300 + tick,
+            boolean(document.schema(), matches!(control_tick, 1 | 3 | 4 | 5)).unwrap(),
+        ));
+    }
+    let simulation = simulate_graph(
+        &document,
+        &registry,
+        GraphSimulationHorizon::new(ROOT, 50),
+        &input,
+        GraphSimulationLimits::interactive(),
+    )
+    .unwrap();
+    assert_eq!(
+        boolean_trace(&simulation, endpoint(20, 2)),
+        [true, true, true, false, false, false]
+    );
+    assert_eq!(
+        boolean_trace(&simulation, endpoint(21, 3)),
+        [false, true, false, false, false, false]
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn new_interlock_primitives_reject_malformed_bindings_and_inverted_ranges() {
+    let (document, registry) = document_and_registry().unwrap();
+    for (kind, behavior, aspect) in [
+        (
+            NodeKind::new("control.exact.within", 1),
+            GraphSimulationNodeKind::ExactWithinInclusive {
+                input: GraphPortId::new(1),
+                minimum_parameter: 1,
+                maximum_parameter: 2,
+                output: GraphPortId::new(1),
+            },
+            "same-clock exact inclusive-range predicate shape",
+        ),
+        (
+            NodeKind::new("control.bool.and", 1),
+            GraphSimulationNodeKind::BooleanAnd {
+                left: GraphPortId::new(1),
+                right: GraphPortId::new(1),
+                output: GraphPortId::new(3),
+            },
+            "same-clock Boolean conjunction shape",
+        ),
+    ] {
+        let mut implementations = registry.implementations().to_vec();
+        let binding = implementations
+            .iter_mut()
+            .find(|implementation| implementation.kind() == &kind)
+            .unwrap();
+        *binding = GraphSimulationImplementation::new(kind.clone(), behavior);
+        assert_eq!(
+            GraphSimulationRegistry::try_new(
+                registry.semantic_registry().clone(),
+                implementations,
+            )
+            .unwrap_err(),
+            GraphSimulationError::InvalidImplementation { kind, aspect }
+        );
+    }
+
+    let mut nodes = document.nodes().to_vec();
+    *nodes
+        .iter_mut()
+        .find(|candidate| candidate.id() == GraphNodeId::new(20))
+        .unwrap() = node(
+        20,
+        "control.exact.within",
+        vec![port(1, "value", CONTROL_VALUE_STREAM)],
+        vec![port(2, "inside", CONTROL_BOOL_STREAM)],
+        vec![
+            parameter(document.schema(), 1, "minimum", VALUE, Rational::from(3)).unwrap(),
+            parameter(document.schema(), 2, "maximum", VALUE, Rational::from(2)).unwrap(),
+        ],
+    );
+    let inverted = GraphDocument::try_new(
+        document.revision(),
+        document.schema().clone(),
+        document.clocks().to_vec(),
+        nodes,
+        document.wires().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        simulate_graph(
+            &inverted,
+            &registry,
+            GraphSimulationHorizon::new(ROOT, 50),
+            &samples(&inverted).unwrap(),
+            GraphSimulationLimits::interactive(),
+        )
+        .unwrap_err(),
+        GraphSimulationError::InvalidParameterValue {
+            node: GraphNodeId::new(20),
+            parameter: 1,
+            aspect: "ordered inclusive range",
+        }
+    );
 }

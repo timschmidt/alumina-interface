@@ -3,8 +3,8 @@
 //! The structural document and audited semantic registry still do not grant an
 //! arbitrary implementation. This module adds a second, explicit registry for
 //! explicitly supplied Stream sources, latest-at-or-before rate transitions,
-//! exact same-clock arithmetic, explicit read-before-write unit delays,
-//! fail-safe permit gates, and Stream sinks. The small arithmetic palette is
+//! exact same-clock arithmetic and predicates, Boolean conjunctions, explicit
+//! read-before-write unit delays, fail-safe permit gates, and Stream sinks. The small palette is
 //! sufficient to assemble a visible discrete PID/interlock graph without
 //! hiding controller state inside an opaque implementation. It evaluates no
 //! firmware resource and grants no deployment authority.
@@ -82,6 +82,26 @@ pub enum GraphSimulationNodeKind {
         /// Exact upper-limit parameter.
         maximum_parameter: u32,
         /// Clamped Stream output.
+        output: GraphPortId,
+    },
+    /// Test whether one exact-rational Stream lies inside inclusive limits.
+    ExactWithinInclusive {
+        /// Exact value Stream input.
+        input: GraphPortId,
+        /// Exact inclusive lower-limit parameter.
+        minimum_parameter: u32,
+        /// Exact inclusive upper-limit parameter.
+        maximum_parameter: u32,
+        /// Boolean result Stream output on the same clock.
+        output: GraphPortId,
+    },
+    /// Conjoin two same-clock Boolean Streams.
+    BooleanAnd {
+        /// Left Boolean Stream input.
+        left: GraphPortId,
+        /// Right Boolean Stream input.
+        right: GraphPortId,
+        /// Boolean conjunction Stream output.
         output: GraphPortId,
     },
     /// One explicit read-before-write Stream delay.
@@ -698,6 +718,8 @@ pub fn simulate_graph(
             | GraphSimulationNodeKind::ExactSubtract { .. }
             | GraphSimulationNodeKind::ExactScale { .. }
             | GraphSimulationNodeKind::ExactClamp { .. }
+            | GraphSimulationNodeKind::ExactWithinInclusive { .. }
+            | GraphSimulationNodeKind::BooleanAnd { .. }
             | GraphSimulationNodeKind::UnitDelay { .. }
             | GraphSimulationNodeKind::ExactPermitGate { .. }) => {
                 clocked_nodes.push(ClockedNode {
@@ -1176,20 +1198,38 @@ fn evaluate_clocked_node(
             _ => Err(GraphSimulationError::ComputedValueOutOfBounds(node.node)),
         }
     };
-    let exact = match node.behavior {
+    let boolean_input = |port| -> Result<bool, GraphSimulationError> {
+        let target = WireEndpoint {
+            node: node.node,
+            port,
+        };
+        let source = source_for_input(document, target)?;
+        values
+            .get(&source)
+            .and_then(|value| match value.value() {
+                GraphValue::Boolean(value) => Some(*value),
+                _ => None,
+            })
+            .ok_or(GraphSimulationError::MissingClockedSample {
+                input: target,
+                clock_tick: tick,
+            })
+    };
+    let computed = match node.behavior {
         GraphSimulationNodeKind::ExactAdd { left, right, .. } => {
-            rational_input(left)? + rational_input(right)?
+            GraphValue::ExactRational(rational_input(left)? + rational_input(right)?)
         }
         GraphSimulationNodeKind::ExactSubtract { left, right, .. } => {
-            rational_input(left)? - rational_input(right)?
+            GraphValue::ExactRational(rational_input(left)? - rational_input(right)?)
         }
         GraphSimulationNodeKind::ExactScale {
             input,
             factor_parameter,
             ..
-        } => {
-            rational_input(input)? * dimensionless_parameter(document, node.node, factor_parameter)?
-        }
+        } => GraphValue::ExactRational(
+            rational_input(input)?
+                * dimensionless_parameter(document, node.node, factor_parameter)?,
+        ),
         GraphSimulationNodeKind::ExactClamp {
             input,
             minimum_parameter,
@@ -1206,13 +1246,37 @@ fn evaluate_clocked_node(
                     aspect: "ordered clamp range",
                 });
             }
-            if value < minimum {
+            let clamped = if value < minimum {
                 minimum
             } else if value > maximum {
                 maximum
             } else {
                 value
+            };
+            GraphValue::ExactRational(clamped)
+        }
+        GraphSimulationNodeKind::ExactWithinInclusive {
+            input,
+            minimum_parameter,
+            maximum_parameter,
+            ..
+        } => {
+            let value = rational_input(input)?;
+            let minimum = exact_parameter(document, node.node, minimum_parameter)?;
+            let maximum = exact_parameter(document, node.node, maximum_parameter)?;
+            if minimum > maximum {
+                return Err(GraphSimulationError::InvalidParameterValue {
+                    node: node.node,
+                    parameter: minimum_parameter,
+                    aspect: "ordered inclusive range",
+                });
             }
+            GraphValue::Boolean(value >= minimum && value <= maximum)
+        }
+        GraphSimulationNodeKind::BooleanAnd { left, right, .. } => {
+            let left = boolean_input(left)?;
+            let right = boolean_input(right)?;
+            GraphValue::Boolean(left && right)
         }
         GraphSimulationNodeKind::ExactPermitGate {
             value,
@@ -1220,26 +1284,12 @@ fn evaluate_clocked_node(
             safe_parameter,
             ..
         } => {
-            let target = WireEndpoint {
-                node: node.node,
-                port: permit,
-            };
-            let source = source_for_input(document, target)?;
-            let permitted = values
-                .get(&source)
-                .and_then(|value| match value.value() {
-                    GraphValue::Boolean(value) => Some(*value),
-                    _ => None,
-                })
-                .ok_or(GraphSimulationError::MissingClockedSample {
-                    input: target,
-                    clock_tick: tick,
-                })?;
-            if permitted {
+            let exact = if boolean_input(permit)? {
                 rational_input(value)?
             } else {
                 exact_parameter(document, node.node, safe_parameter)?
-            }
+            };
+            GraphValue::ExactRational(exact)
         }
         GraphSimulationNodeKind::ExternalStreamSource { .. }
         | GraphSimulationNodeKind::LatestRateTransition { .. }
@@ -1248,12 +1298,8 @@ fn evaluate_clocked_node(
             unreachable!("only combinational exact nodes are evaluated here")
         }
     };
-    TypedGraphValue::try_new(
-        document.schema(),
-        output_port.sample_type,
-        GraphValue::ExactRational(exact),
-    )
-    .map_err(|_| GraphSimulationError::ComputedValueOutOfBounds(node.node))
+    TypedGraphValue::try_new(document.schema(), output_port.sample_type, computed)
+        .map_err(|_| GraphSimulationError::ComputedValueOutOfBounds(node.node))
 }
 
 fn emit_clocked_value(
@@ -1374,6 +1420,8 @@ const fn clocked_output(behavior: GraphSimulationNodeKind) -> Option<GraphPortId
         | GraphSimulationNodeKind::ExactSubtract { output, .. }
         | GraphSimulationNodeKind::ExactScale { output, .. }
         | GraphSimulationNodeKind::ExactClamp { output, .. }
+        | GraphSimulationNodeKind::ExactWithinInclusive { output, .. }
+        | GraphSimulationNodeKind::BooleanAnd { output, .. }
         | GraphSimulationNodeKind::UnitDelay { output, .. }
         | GraphSimulationNodeKind::ExactPermitGate { output, .. } => Some(output),
         GraphSimulationNodeKind::ExternalStreamSource { .. }
@@ -1385,9 +1433,11 @@ const fn clocked_output(behavior: GraphSimulationNodeKind) -> Option<GraphPortId
 const fn clocked_inputs(behavior: GraphSimulationNodeKind) -> [Option<GraphPortId>; 2] {
     match behavior {
         GraphSimulationNodeKind::ExactAdd { left, right, .. }
-        | GraphSimulationNodeKind::ExactSubtract { left, right, .. } => [Some(left), Some(right)],
+        | GraphSimulationNodeKind::ExactSubtract { left, right, .. }
+        | GraphSimulationNodeKind::BooleanAnd { left, right, .. } => [Some(left), Some(right)],
         GraphSimulationNodeKind::ExactScale { input, .. }
         | GraphSimulationNodeKind::ExactClamp { input, .. }
+        | GraphSimulationNodeKind::ExactWithinInclusive { input, .. }
         | GraphSimulationNodeKind::UnitDelay { input, .. } => [Some(input), None],
         GraphSimulationNodeKind::ExactPermitGate { value, permit, .. } => {
             [Some(value), Some(permit)]
@@ -1691,6 +1741,55 @@ fn validate_implementation(
                 return Err(invalid("same-clock exact clamp shape"));
             }
         }
+        GraphSimulationNodeKind::ExactWithinInclusive {
+            input,
+            minimum_parameter,
+            maximum_parameter,
+            output,
+        } => {
+            let input_stream = exact_input_stream(schema, values, input);
+            let output_stream = boolean_output_stream(schema, values, output);
+            let sample = input_stream.map(|port| port.sample_type);
+            if schema.inputs().len() != 1
+                || schema.outputs().len() != 1
+                || minimum_parameter == maximum_parameter
+                || input_stream.is_none()
+                || input_stream.map(|port| port.clock) != output_stream.map(|port| port.clock)
+                || !required_stream_queue(schema, input)
+                || !dependency_matches(schema, output, &[input])
+                || schema.parameters().len() != 2
+                || parameter_type(schema, minimum_parameter) != sample
+                || parameter_type(schema, maximum_parameter) != sample
+                || !schema.rate_transitions().is_empty()
+                || schema.state().is_some()
+            {
+                return Err(invalid("same-clock exact inclusive-range predicate shape"));
+            }
+        }
+        GraphSimulationNodeKind::BooleanAnd {
+            left,
+            right,
+            output,
+        } => {
+            let left_stream = boolean_input_stream(schema, values, left);
+            let right_stream = boolean_input_stream(schema, values, right);
+            let output_stream = boolean_output_stream(schema, values, output);
+            if schema.inputs().len() != 2
+                || schema.outputs().len() != 1
+                || left == right
+                || left_stream.is_none()
+                || left_stream != right_stream
+                || left_stream != output_stream
+                || !required_stream_queue(schema, left)
+                || !required_stream_queue(schema, right)
+                || !dependency_matches(schema, output, &[left, right])
+                || !schema.parameters().is_empty()
+                || !schema.rate_transitions().is_empty()
+                || schema.state().is_some()
+            {
+                return Err(invalid("same-clock Boolean conjunction shape"));
+            }
+        }
         GraphSimulationNodeKind::UnitDelay {
             input,
             initial_parameter,
@@ -1771,6 +1870,25 @@ fn boolean_input_stream(
 ) -> Option<StreamPort> {
     let stream = schema
         .inputs()
+        .iter()
+        .find(|candidate| candidate.id() == port)
+        .and_then(|port| stream_port(values, port.value_type()))?;
+    matches!(
+        values
+            .value_type(stream.sample_type)
+            .map(super::TypeDefinition::kind),
+        Some(TypeKind::Boolean)
+    )
+    .then_some(stream)
+}
+
+fn boolean_output_stream(
+    schema: &NodeSchema,
+    values: &GraphSchema,
+    port: GraphPortId,
+) -> Option<StreamPort> {
+    let stream = schema
+        .outputs()
         .iter()
         .find(|candidate| candidate.id() == port)
         .and_then(|port| stream_port(values, port.value_type()))?;
@@ -2025,6 +2143,28 @@ fn simulation_registry_digest(
                 put_u32(&mut bytes, value.get());
                 put_u32(&mut bytes, permit.get());
                 put_u32(&mut bytes, safe_parameter);
+                put_u32(&mut bytes, output.get());
+            }
+            GraphSimulationNodeKind::ExactWithinInclusive {
+                input,
+                minimum_parameter,
+                maximum_parameter,
+                output,
+            } => {
+                bytes.push(9);
+                put_u32(&mut bytes, input.get());
+                put_u32(&mut bytes, minimum_parameter);
+                put_u32(&mut bytes, maximum_parameter);
+                put_u32(&mut bytes, output.get());
+            }
+            GraphSimulationNodeKind::BooleanAnd {
+                left,
+                right,
+                output,
+            } => {
+                bytes.push(10);
+                put_u32(&mut bytes, left.get());
+                put_u32(&mut bytes, right.get());
                 put_u32(&mut bytes, output.get());
             }
         }
