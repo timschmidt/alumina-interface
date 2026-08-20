@@ -279,6 +279,15 @@ passed ordinary `complete` in 434. See sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION-RECOVERY.md`.
 This closes no repeated-loss, physical-output, or Wi-Fi safety claim.
 
+The complementary `confirmed-safety-propagation-request-recovery`
+qualification drops the peer's first abort before authentication or
+application. Browser status reconciliation must preserve `confirmed`; the
+native delivery matrix requires the next abort to match the lost request
+exactly, and only that retry may reach terminal global `faulted` with
+`faulted`/`aborted` participants. The production run passed in 392 snapshots;
+fresh actors passed ordinary `complete` in 434. See sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION-REQUEST-RECOVERY.md`.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
 durable browser job persistence, indefinite schedule or total endpoint outage,

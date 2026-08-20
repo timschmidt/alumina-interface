@@ -486,6 +486,17 @@ snapshots at epoch `43,730,200,001 ns` and local cycles `68,357,413` and
 sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION-RECOVERY.md`.
 
+The complementary
+`cached-job-confirmed-safety-propagation-request-recovery` expectation drops
+actor two's first automatic `JobAbort` before authentication or application.
+The worker retains exact `faulted`/`confirmed` state for one `fetch failed`
+observation, reconciles the unchanged confirmed actor through `JobStatus`, and
+only then retries the abort. The native fixture requires byte-identical retry.
+On 2026-08-20 the production artifact passed in 392 snapshots at epoch
+`43,731,900,002 ns` and local cycles `82,293,368` and `81,107,236`; fresh
+actors passed ordinary `complete` in 434 snapshots. See sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION-REQUEST-RECOVERY.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first
