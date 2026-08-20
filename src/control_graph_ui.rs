@@ -4349,7 +4349,9 @@ mod tests {
             panel.snapshot.identity(),
             calculate_identity(&alumina_sim::capability::package()).unwrap()
         );
-        assert!(panel.snapshot.visuals().is_empty());
+        assert_eq!(panel.snapshot.visuals().len(), 1);
+        assert_eq!(panel.snapshot.visuals()[0].id(), "simulated-topology");
+        assert_eq!(panel.snapshot.visuals()[0].hotspots().len(), 4);
         assert_eq!(panel.selected, Some(ResourceId::Gpio(33)));
         let resources = panel.snapshot.resources();
         let matching_resources = |filter| {

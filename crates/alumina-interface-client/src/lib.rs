@@ -19,6 +19,7 @@ pub mod health;
 pub mod http;
 pub mod schedule;
 pub mod upload;
+pub mod visual;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 pub mod worker;

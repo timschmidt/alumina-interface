@@ -34,12 +34,14 @@ use alumina_interface_client::diagnostics::{
 };
 use alumina_interface_client::health::RuntimeHealthModel;
 use alumina_interface_client::http::{AuthenticatedHttpSession, DeviceIdentity};
+use alumina_interface_client::visual::{VisualAssetDownloadMachine, VisualAssetDownloadPhase};
 use alumina_interface_client::wasm::{
     BrowserCapabilityError, BrowserClockError, BrowserConfigurationError, BrowserFetchError,
-    BrowserHealthError, BrowserTelemetryError, BrowserWaveformError, DeviceOrigin,
-    drive_capability_step_in_worker, drive_clock_probe_in_worker,
+    BrowserHealthError, BrowserTelemetryError, BrowserVisualAssetError, BrowserWaveformError,
+    DeviceOrigin, drive_capability_step_in_worker, drive_clock_probe_in_worker,
     drive_configuration_status_in_worker, drive_runtime_health_in_worker,
-    drive_telemetry_step_in_worker, drive_waveform_step_in_worker, fetch_device_identity_in_worker,
+    drive_telemetry_step_in_worker, drive_visual_asset_step_in_worker,
+    drive_waveform_step_in_worker, fetch_device_identity_in_worker,
     fetch_pending_request_in_worker, open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
@@ -50,7 +52,7 @@ use alumina_interface_client::worker::{
     WORKER_SCHEMA_VERSION, WorkerCachedJobPhaseSnapshot, WorkerCachedJobRequest,
     WorkerCachedJobSnapshot, WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope,
     WorkerEvent, WorkerEventEnvelope, WorkerJobExecutionMode, WorkerTelemetryDocument,
-    WorkerWaveformDocument, WorkerWaveformRequest,
+    WorkerVisualAssetDocument, WorkerWaveformDocument, WorkerWaveformRequest,
 };
 use alumina_interface_core::board_explorer::{
     BoardExplorerSnapshot, build_board_explorer_snapshot,
@@ -77,6 +79,9 @@ const MAXIMUM_COMMAND_JSON_BYTES: usize = 48 * 1024 * 1024;
 const MAXIMUM_UI_DIAGNOSTICS: usize = 16;
 const MAXIMUM_RETRY_MS: u32 = 30_000;
 const CAPABILITY_RANGES_PER_HEARTBEAT: usize = 4;
+const VISUAL_RANGES_PER_HEARTBEAT: usize = 4;
+const MAXIMUM_VISUAL_ASSET_BYTES: u32 = 8 * 1_024 * 1_024;
+const MAXIMUM_VISUAL_ASSET_TOTAL_BYTES: u64 = 16 * 1_024 * 1_024;
 const WAVEFORM_OPERATIONS_PER_HEARTBEAT: usize = 8;
 const TELEMETRY_RESOURCE_LIMIT: usize = 4;
 const JOB_START_LEAD_NS: u64 = 5_000_000_000;
@@ -124,6 +129,12 @@ struct DeviceState {
     next_configuration_attempt_ms: f64,
     capability_consecutive_failures: u32,
     capability_last_error: Option<String>,
+    visual_assets_initialized: bool,
+    visual_asset_digests: Vec<Digest>,
+    visual_downloads: Vec<VisualAssetDownloadMachine>,
+    visual_events_published: usize,
+    visual_consecutive_failures: u32,
+    visual_last_error: Option<String>,
     telemetry: Option<TelemetrySubscriptionMachine>,
     pending_telemetry_event: Option<Vec<u8>>,
     telemetry_consecutive_failures: u32,
@@ -135,6 +146,14 @@ struct DeviceState {
     waveform_last_error: Option<String>,
     next_capture_sequence: u64,
 }
+
+type TelemetryProgressSnapshot = (
+    Option<TelemetryPhaseSnapshot>,
+    Option<u64>,
+    Option<[u8; 32]>,
+    u64,
+    u64,
+);
 
 impl DeviceState {
     fn from_request(
@@ -178,6 +197,12 @@ impl DeviceState {
             next_configuration_attempt_ms: 0.0,
             capability_consecutive_failures: 0,
             capability_last_error: None,
+            visual_assets_initialized: false,
+            visual_asset_digests: Vec::new(),
+            visual_downloads: Vec::new(),
+            visual_events_published: 0,
+            visual_consecutive_failures: 0,
+            visual_last_error: None,
             telemetry: None,
             pending_telemetry_event: None,
             telemetry_consecutive_failures: 0,
@@ -198,20 +223,7 @@ impl DeviceState {
             telemetry_subscription_digest,
             telemetry_event_sequence,
             telemetry_dropped_events,
-        ) = self
-            .telemetry
-            .as_ref()
-            .map_or((None, None, None, 0, 0), |telemetry| {
-                let reference = telemetry.reference();
-                let progress = telemetry.event_progress();
-                (
-                    Some(telemetry.phase().into()),
-                    Some(reference.subscription_id.get()),
-                    Some(reference.subscription_digest.0),
-                    progress.map_or(0, |progress| progress.event_sequence),
-                    progress.map_or(0, |progress| progress.dropped_events),
-                )
-            });
+        ) = self.telemetry_progress_snapshot();
         let (waveform_phase, waveform_capture_id, waveform_received_bytes, waveform_total_bytes) =
             self.waveform
                 .as_ref()
@@ -237,6 +249,8 @@ impl DeviceState {
                         total,
                     )
                 });
+        let (visual_asset_count, visual_assets_complete, visual_received_bytes, visual_total_bytes) =
+            self.visual_progress_snapshot();
         DeviceSessionSnapshot {
             connection_id: self.connection_id,
             label: self.label.clone(),
@@ -276,6 +290,12 @@ impl DeviceState {
                 .map(CapabilityIdentitySnapshot::from_identity),
             capability_consecutive_failures: self.capability_consecutive_failures,
             capability_last_error: self.capability_last_error.clone(),
+            visual_asset_count,
+            visual_assets_complete,
+            visual_received_bytes,
+            visual_total_bytes,
+            visual_consecutive_failures: self.visual_consecutive_failures,
+            visual_last_error: self.visual_last_error.clone(),
             telemetry_phase,
             telemetry_subscription_id,
             telemetry_subscription_digest,
@@ -290,6 +310,45 @@ impl DeviceState {
             waveform_consecutive_failures: self.waveform_consecutive_failures,
             waveform_last_error: self.waveform_last_error.clone(),
         }
+    }
+
+    fn visual_progress_snapshot(&self) -> (u16, u16, u64, u64) {
+        let selected = u16::try_from(self.visual_asset_digests.len()).unwrap_or(u16::MAX);
+        let complete = u16::try_from(
+            self.visual_downloads
+                .iter()
+                .filter(|download| download.phase() == VisualAssetDownloadPhase::Complete)
+                .count(),
+        )
+        .unwrap_or(u16::MAX);
+        let received = self.visual_downloads.iter().fold(0_u64, |sum, download| {
+            sum.saturating_add(u64::from(download.progress().received_bytes))
+        });
+        let total = self.visual_downloads.iter().fold(0_u64, |sum, download| {
+            sum.saturating_add(
+                download
+                    .progress()
+                    .identity
+                    .map_or(0, |identity| u64::from(identity.byte_len)),
+            )
+        });
+        (selected, complete, received, total)
+    }
+
+    fn telemetry_progress_snapshot(&self) -> TelemetryProgressSnapshot {
+        self.telemetry
+            .as_ref()
+            .map_or((None, None, None, 0, 0), |telemetry| {
+                let reference = telemetry.reference();
+                let progress = telemetry.event_progress();
+                (
+                    Some(telemetry.phase().into()),
+                    Some(reference.subscription_id.get()),
+                    Some(reference.subscription_digest.0),
+                    progress.map_or(0, |progress| progress.event_sequence),
+                    progress.map_or(0, |progress| progress.dropped_events),
+                )
+            })
     }
 
     fn schedule_success(&mut self, now_ms: f64) {
@@ -386,7 +445,102 @@ impl DeviceState {
         self.capability_event_published = false;
         self.capability_consecutive_failures = 0;
         self.capability_last_error = None;
+        self.reset_visual_assets_for_new_boot();
         self.reset_telemetry_for_new_boot();
+    }
+
+    fn record_visual_success(&mut self) {
+        self.visual_consecutive_failures = 0;
+        self.visual_last_error = None;
+    }
+
+    fn record_visual_failure(&mut self, error: &str) {
+        self.visual_consecutive_failures = self.visual_consecutive_failures.saturating_add(1);
+        self.visual_last_error = Some(bounded_diagnostic(error));
+    }
+
+    fn reset_visual_assets_for_new_boot(&mut self) {
+        self.visual_assets_initialized = false;
+        self.visual_asset_digests.clear();
+        self.visual_downloads.clear();
+        self.visual_events_published = 0;
+        self.visual_consecutive_failures = 0;
+        self.visual_last_error = None;
+    }
+
+    fn initialize_visual_assets(&mut self) -> Result<(), String> {
+        if self.visual_assets_initialized {
+            return Ok(());
+        }
+        let identity = self
+            .capability
+            .identity()
+            .ok_or_else(|| "complete capability identity is unavailable".to_owned())?;
+        let document = self
+            .capability
+            .document()
+            .ok_or_else(|| "complete capability bytes are unavailable".to_owned())?;
+        let capability = decode_board_capability(document, BoardCapabilityLimits::interactive())
+            .map_err(|error| format!("board capability rejected: {error:?}"))?;
+        if capability.identity() != identity {
+            return Err("visual authority does not match complete capability bytes".to_owned());
+        }
+        let mut digests = Vec::new();
+        digests
+            .try_reserve_exact(capability.visual_count())
+            .map_err(|_| "visual authority allocation failed".to_owned())?;
+        for visual in capability.visuals() {
+            if !digests.contains(&visual.asset_digest()) {
+                digests.push(visual.asset_digest());
+            }
+        }
+        self.visual_asset_digests = digests;
+        self.visual_assets_initialized = true;
+        Ok(())
+    }
+
+    fn ensure_next_visual_download(&mut self) -> Result<bool, String> {
+        if self.visual_downloads.len() >= self.visual_asset_digests.len() {
+            return Ok(false);
+        }
+        if self
+            .visual_downloads
+            .last()
+            .is_some_and(|download| download.phase() != VisualAssetDownloadPhase::Complete)
+        {
+            return Ok(true);
+        }
+        let retained_bytes = self
+            .visual_downloads
+            .iter()
+            .try_fold(0_u64, |sum, download| {
+                let bytes = download
+                    .asset()
+                    .ok_or_else(|| "prior visual is incomplete".to_owned())?;
+                sum.checked_add(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| "visual byte count overflowed".to_owned())?,
+                )
+                .ok_or_else(|| "visual aggregate byte count overflowed".to_owned())
+            })?;
+        let remaining = MAXIMUM_VISUAL_ASSET_TOTAL_BYTES
+            .checked_sub(retained_bytes)
+            .filter(|remaining| *remaining != 0)
+            .ok_or_else(|| "visual assets exceed the aggregate browser bound".to_owned())?;
+        let maximum = remaining.min(u64::from(MAXIMUM_VISUAL_ASSET_BYTES));
+        let maximum = u32::try_from(maximum)
+            .map_err(|_| "visual asset bound does not fit the downloader".to_owned())?;
+        let digest = self.visual_asset_digests[self.visual_downloads.len()];
+        let capability_digest = self
+            .capability
+            .identity()
+            .ok_or_else(|| "visual capability identity is unavailable".to_owned())?
+            .digest;
+        self.visual_downloads.push(
+            VisualAssetDownloadMachine::new(capability_digest, digest, maximum)
+                .map_err(|error| error.to_string())?,
+        );
+        Ok(true)
     }
 
     fn record_telemetry_success(&mut self) {
@@ -2138,6 +2292,14 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
             if state.session.is_some()
                 && state.capability.phase() == CapabilityDownloadPhase::Complete
             {
+                match state.initialize_visual_assets() {
+                    Ok(()) => download_visual_assets(worker_scope, &mut state).await,
+                    Err(error) => state.record_visual_failure(&error),
+                }
+            }
+            if state.session.is_some()
+                && state.capability.phase() == CapabilityDownloadPhase::Complete
+            {
                 match state.start_telemetry() {
                     Ok(true) => drive_state_telemetry(worker_scope, &mut state).await,
                     Ok(false) => {}
@@ -2270,6 +2432,47 @@ async fn download_capability(worker_scope: &WorkerGlobalScope, state: &mut Devic
                 }
                 state.record_capability_failure(&error.to_string());
                 break;
+            }
+        }
+    }
+}
+
+async fn download_visual_assets(worker_scope: &WorkerGlobalScope, state: &mut DeviceState) {
+    if state.session.is_none() || !state.visual_assets_initialized {
+        return;
+    }
+    for _ in 0..VISUAL_RANGES_PER_HEARTBEAT {
+        match state.ensure_next_visual_download() {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                state.record_visual_failure(&error);
+                return;
+            }
+        }
+        let download = state
+            .visual_downloads
+            .last_mut()
+            .expect("visual selection created one current downloader");
+        let result = drive_visual_asset_step_in_worker(
+            worker_scope,
+            &state.origin,
+            state
+                .session
+                .as_mut()
+                .expect("visual burst retains its authenticated session"),
+            download,
+            &state.secret,
+        )
+        .await;
+        match result {
+            Ok(_) => state.record_visual_success(),
+            Err(error) => {
+                if visual_session_must_reopen(&error) {
+                    state.session = None;
+                }
+                state.record_visual_failure(&error.to_string());
+                return;
             }
         }
     }
@@ -2471,6 +2674,21 @@ const fn capability_session_must_reopen(error: &BrowserCapabilityError) -> bool 
     )
 }
 
+const fn visual_session_must_reopen(error: &BrowserVisualAssetError) -> bool {
+    matches!(
+        error,
+        BrowserVisualAssetError::ConfigurationIdentity
+            | BrowserVisualAssetError::Session(_)
+            | BrowserVisualAssetError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
 const fn configuration_session_must_reopen(error: &BrowserConfigurationError) -> bool {
     matches!(
         error,
@@ -2545,6 +2763,7 @@ fn finish_device_step(
         return;
     }
     publish_capability_document(runtime, connection_id);
+    publish_visual_asset_documents(runtime, connection_id);
     publish_telemetry_document(runtime, connection_id);
     publish_waveform_document(runtime, connection_id);
     publish_snapshot(runtime, connection_id);
@@ -2670,6 +2889,56 @@ fn publish_capability_document(runtime: &SharedWorkerRuntime, connection_id: u64
     }
 }
 
+fn publish_visual_asset_documents(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    let transfers: Result<Vec<_>, String> = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let Some(DeviceEntry::Idle(state)) = runtime_ref.devices.get_mut(&connection_id) else {
+            return;
+        };
+        let mut transfers = Vec::new();
+        let mut failure = None;
+        while state.visual_events_published < state.visual_downloads.len() {
+            let download = &state.visual_downloads[state.visual_events_published];
+            let Some(bytes) = download.asset() else {
+                break;
+            };
+            let transfer = WorkerVisualAssetDocument::try_new(
+                state.connection_id,
+                state.generation,
+                download.capability_digest(),
+                download.expected_asset_digest(),
+                bytes.to_vec(),
+            );
+            match transfer {
+                Ok(transfer) => {
+                    transfers.push(transfer);
+                    state.visual_events_published += 1;
+                }
+                Err(error) => {
+                    failure = Some(format!("validated visual transfer failed: {error}"));
+                    break;
+                }
+            }
+        }
+        failure.map_or_else(|| Ok(transfers), Err)
+    };
+    let transfers = match transfers {
+        Ok(transfers) => transfers,
+        Err(message) => {
+            emit_worker_event(runtime, WorkerEvent::Fatal { message });
+            return;
+        }
+    };
+    for visual in transfers {
+        emit_worker_event(
+            runtime,
+            WorkerEvent::VisualAssetDocument {
+                visual: Box::new(visual),
+            },
+        );
+    }
+}
+
 fn worker_now_ms(scope: &DedicatedWorkerGlobalScope) -> f64 {
     let worker_scope: &WorkerGlobalScope = scope.as_ref();
     worker_scope
@@ -2755,6 +3024,8 @@ pub struct SupervisorView {
     pub job: Option<WorkerCachedJobSnapshot>,
     /// Canonical connected-board documents decoded once per matching generation.
     pub capabilities: Vec<ConnectedCapabilityView>,
+    /// Complete hash-verified visual assets bound to those capabilities.
+    pub visuals: Vec<ConnectedVisualAssetView>,
     /// Bounded exact overview history per connected telemetry subscription.
     pub telemetry: Vec<ConnectedTelemetryView>,
     /// Latest complete capability- and boot-bound digital capture per connection.
@@ -2876,6 +3147,48 @@ pub struct ConnectedCapabilityView {
     board: BoardExplorerSnapshot,
 }
 
+/// Rendering-realm copy of one complete capability-bound visual asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedVisualAssetView {
+    connection_id: u64,
+    generation: u64,
+    capability_digest: Digest,
+    asset_digest: Digest,
+    bytes: Rc<[u8]>,
+}
+
+impl ConnectedVisualAssetView {
+    /// UI-local connection identity owning this visual.
+    #[must_use]
+    pub const fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
+
+    /// Worker generation that acquired and verified the bytes.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Canonical capability digest that declared the visual.
+    #[must_use]
+    pub const fn capability_digest(&self) -> Digest {
+        self.capability_digest
+    }
+
+    /// SHA-256 of the complete visual bytes.
+    #[must_use]
+    pub const fn asset_digest(&self) -> Digest {
+        self.asset_digest
+    }
+
+    /// Complete immutable visual bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl ConnectedCapabilityView {
     /// UI-local connection identity owning this board authority.
     #[must_use]
@@ -2901,6 +3214,7 @@ struct MutableSupervisorView {
     devices: BTreeMap<u64, DeviceSessionSnapshot>,
     job: Option<WorkerCachedJobSnapshot>,
     capabilities: BTreeMap<u64, ConnectedCapabilityView>,
+    visuals: BTreeMap<(u64, [u8; 32]), ConnectedVisualAssetView>,
     telemetry: BTreeMap<u64, ConnectedTelemetryView>,
     waveforms: BTreeMap<u64, ConnectedWaveformView>,
     diagnostics: VecDeque<String>,
@@ -2913,6 +3227,7 @@ impl Default for MutableSupervisorView {
             devices: BTreeMap::new(),
             job: None,
             capabilities: BTreeMap::new(),
+            visuals: BTreeMap::new(),
             telemetry: BTreeMap::new(),
             waveforms: BTreeMap::new(),
             diagnostics: VecDeque::new(),
@@ -3169,6 +3484,46 @@ impl MutableSupervisorView {
         }
     }
 
+    fn apply_visual_transfer(&mut self, visual: &WorkerVisualAssetDocument) {
+        let connection_id = visual.connection_id;
+        let generation = visual.generation;
+        let capability_digest = Digest(visual.capability_digest);
+        let asset_digest = Digest(visual.asset_digest);
+        let valid = self
+            .devices
+            .get(&connection_id)
+            .is_some_and(|snapshot| snapshot.generation == generation)
+            && self
+                .capabilities
+                .get(&connection_id)
+                .is_some_and(|capability| {
+                    capability.generation == generation
+                        && capability.board.identity().digest == capability_digest
+                        && capability
+                            .board
+                            .visuals()
+                            .iter()
+                            .any(|declared| declared.asset_digest() == asset_digest)
+                })
+            && sha256(visual.bytes()).digest == asset_digest;
+        if !valid {
+            self.push_diagnostic(format!(
+                "connection {connection_id}: visual transfer rejected against live capability authority"
+            ));
+            return;
+        }
+        self.visuals.insert(
+            (connection_id, asset_digest.0),
+            ConnectedVisualAssetView {
+                connection_id,
+                generation,
+                capability_digest,
+                asset_digest,
+                bytes: Rc::from(visual.bytes()),
+            },
+        );
+    }
+
     fn apply_snapshot(&mut self, snapshot: DeviceSessionSnapshot) {
         if self
             .capabilities
@@ -3184,6 +3539,25 @@ impl MutableSupervisorView {
         {
             self.capabilities.remove(&snapshot.connection_id);
         }
+        let admitted_visual_capability = self
+            .capabilities
+            .get(&snapshot.connection_id)
+            .is_some_and(|capability| {
+                capability.generation == snapshot.generation
+                    && snapshot.capability_phase == CapabilityDownloadPhaseSnapshot::Complete
+                    && snapshot
+                        .capability_identity
+                        .and_then(|identity| identity.identity().ok())
+                        == Some(capability.board.identity())
+            });
+        self.visuals.retain(|(connection_id, _), visual| {
+            *connection_id != snapshot.connection_id
+                || (admitted_visual_capability
+                    && visual.generation == snapshot.generation
+                    && snapshot
+                        .capability_identity
+                        .is_some_and(|identity| identity.digest == visual.capability_digest.0))
+        });
         if self
             .telemetry
             .get(&snapshot.connection_id)
@@ -3274,6 +3648,9 @@ impl MutableSupervisorView {
                     )),
                 }
             }
+            WorkerEvent::VisualAssetDocument { visual } => {
+                self.apply_visual_transfer(visual.as_ref());
+            }
             WorkerEvent::WaveformDocument { waveform } => {
                 self.apply_waveform_transfer(waveform.as_ref());
             }
@@ -3283,6 +3660,8 @@ impl MutableSupervisorView {
             WorkerEvent::Removed { connection_id } => {
                 self.devices.remove(&connection_id);
                 self.capabilities.remove(&connection_id);
+                self.visuals
+                    .retain(|(visual_connection, _), _| *visual_connection != connection_id);
                 self.telemetry.remove(&connection_id);
                 self.waveforms.remove(&connection_id);
             }
@@ -3313,6 +3692,7 @@ impl MutableSupervisorView {
             devices: self.devices.values().cloned().collect(),
             job: self.job.clone(),
             capabilities: self.capabilities.values().cloned().collect(),
+            visuals: self.visuals.values().cloned().collect(),
             telemetry: self.telemetry.values().cloned().collect(),
             waveforms: self.waveforms.values().cloned().collect(),
             diagnostics: self.diagnostics.iter().cloned().collect(),

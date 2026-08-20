@@ -162,7 +162,8 @@ prototype.
   bounded 64-observation history. It also owns passive runtime-health polling,
   retains independently validated queue/stack evidence and health-specific
   failures, retry-safe bounded board-capability acquisition, capability-selected
-  live telemetry, and bounded retained waveform capture. Strict schema-v12
+  live telemetry, bounded retained waveform capture, and capability-bound
+  immutable visual acquisition. Strict schema-v13
   snapshots expose only redacted progress and immutable identity; complete
   canonical capability, telemetry, and capture documents cross to the UI only
   after independent validation. The UI can add, probe, disconnect, and request
@@ -238,8 +239,12 @@ prototype.
   safe/hazard facts and supporting-section counts while retaining that four-item
   graph access set as a visibly narrower authority. Search and filters separate
   graph-readable, graph-closed, hazardous, Service and Realtime resources. The
-  package has no licensed visual, so the UI explicitly draws no board shape or
-  hotspot and keeps physical placement/HIL authority closed. Canonical `ALGP`
+  physical package has no licensed visual, so the UI explicitly draws no board
+  shape or hotspot and keeps physical placement/HIL authority closed. The
+  host-only simulator separately publishes a small CC0 diagnostic PNG and four
+  GPIO hotspots to exercise digest-bound acquisition, dimension-checked
+  rendering, picking, and live typed-resource linkage without resembling or
+  claiming a PCB photograph. Canonical `ALGP`
   V1 sidecars bind bounded diagnostic probes to exact workspace outputs. Probe
   edits filter host plots without mutating the graph or granting firmware
   telemetry/resource access.

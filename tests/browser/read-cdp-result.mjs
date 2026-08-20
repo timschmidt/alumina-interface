@@ -112,6 +112,12 @@ if (compact) {
     device_identity: snapshot.device_identity,
     capability_phase: snapshot.capability_phase,
     capability_identity: snapshot.capability_identity,
+    visual_asset_count: snapshot.visual_asset_count,
+    visual_assets_complete: snapshot.visual_assets_complete,
+    visual_received_bytes: snapshot.visual_received_bytes,
+    visual_total_bytes: snapshot.visual_total_bytes,
+    visual_consecutive_failures: snapshot.visual_consecutive_failures,
+    visual_last_error: snapshot.visual_last_error,
     configuration_availability: snapshot.configuration_availability,
     configuration: snapshot.configuration,
     consecutive_failures: snapshot.consecutive_failures,
@@ -138,6 +144,7 @@ if (compact) {
   const deviceSnapshots =
     result.detail.device_snapshots ??
     (result.detail.snapshot === undefined ? [] : [result.detail.snapshot]);
+  const visualDocument = result.detail.visual_document;
   result.detail = {
     expectation: result.detail.expectation,
     error: result.detail.error,
@@ -151,6 +158,17 @@ if (compact) {
       latestJobSnapshot === undefined
         ? undefined
         : compactJobSnapshot(latestJobSnapshot),
+    visual_document:
+      visualDocument === undefined
+        ? undefined
+        : {
+            connection_id: visualDocument.connection_id,
+            generation: visualDocument.generation,
+            capability_digest: visualDocument.capability_digest,
+            asset_digest: visualDocument.asset_digest,
+            byte_len: visualDocument.bytes.length,
+            signature: visualDocument.bytes.slice(0, 8),
+          },
     device_snapshots: deviceSnapshots.map(compactDeviceSnapshot),
   };
 }

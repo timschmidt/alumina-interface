@@ -36,6 +36,8 @@
       let isolatedCapabilityFailureSnapshot;
       let capabilityDocument;
       const capabilityDocuments = new Map();
+      let visualDocument;
+      const visualDocuments = new Map();
       const telemetryDocuments = [];
       let waveformDocument;
       const waveformDocuments = [];
@@ -311,7 +313,7 @@
         cachedJobStaged = true;
         worker.postMessage(
           JSON.stringify({
-            schema_version: 12,
+            schema_version: 13,
             command: { kind: "stage_cached_job", request: cachedJobRequest },
           }),
         );
@@ -330,7 +332,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 12,
+            schema_version: 13,
             command: {
               kind: "capture_waveform",
               request: {
@@ -358,6 +360,8 @@
         deviceSnapshots.clear();
         capabilityDocument = undefined;
         capabilityDocuments.clear();
+        visualDocument = undefined;
+        visualDocuments.clear();
         workerRestartTimeout = setTimeout(() => {
           cachedJobWorkerRestarted = true;
           worker = createWorker();
@@ -378,7 +382,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 12) {
+        if (envelope.schema_version !== 13) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -403,6 +407,7 @@
                 isolated_capability_failure_snapshot:
                   isolatedCapabilityFailureSnapshot,
                 capability_document: capabilityDocument,
+                visual_document: visualDocument,
                 telemetry_documents: telemetryDocuments,
                 waveform_document: waveformDocument,
                 waveform_documents: waveformDocuments,
@@ -422,7 +427,7 @@
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
-                schema_version: 12,
+                schema_version: 13,
                 command: {
                   kind: "configure",
                   request: {
@@ -513,7 +518,7 @@
             cachedJobStarted = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 12,
+                schema_version: 13,
                 command: {
                   kind: "start_cached_job",
                   job_id: snapshot.job_id,
@@ -537,7 +542,7 @@
             cachedJobStopRequested = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 12,
+                schema_version: 13,
                 command: {
                   kind: "stop_cached_job",
                   job_id: snapshot.job_id,
@@ -1116,7 +1121,7 @@
               cachedJobClearing = true;
               worker.postMessage(
                 JSON.stringify({
-                  schema_version: 12,
+                  schema_version: 13,
                   command: {
                     kind: "clear_cached_job",
                     job_id: snapshot.job_id,
@@ -1208,6 +1213,51 @@
           }
           capabilityDocuments.set(capability.connection_id, capability);
           if (capability.connection_id === 1) capabilityDocument = capability;
+          return;
+        }
+        if (event.kind === "visual_asset_document") {
+          const visual = event.visual;
+          if (visualDocuments.has(visual.connection_id)) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "visual asset was emitted more than once for a connection",
+              event_kinds: eventKinds,
+              connection_id: visual.connection_id,
+            });
+            return;
+          }
+          const capability = capabilityDocuments.get(visual.connection_id);
+          const pngMagic = [137, 80, 78, 71, 13, 10, 26, 10];
+          const expectedDigest = [
+            121, 252, 244, 100, 227, 67, 255, 200,
+            243, 60, 222, 201, 106, 142, 47, 216,
+            125, 168, 134, 197, 125, 212, 190, 8,
+            8, 152, 165, 252, 89, 181, 36, 18,
+          ];
+          if (
+            visual.connection_id < 1 ||
+            visual.connection_id > (cachedJobExpectation ? 2 : 1) ||
+            visual.generation < 1 ||
+            capability === undefined ||
+            visual.generation !== capability.generation ||
+            visual.bytes.length !== 109 ||
+            JSON.stringify(visual.bytes.slice(0, 8)) !==
+              JSON.stringify(pngMagic) ||
+            JSON.stringify(visual.asset_digest) !==
+              JSON.stringify(expectedDigest) ||
+            JSON.stringify(visual.capability_digest) !==
+              JSON.stringify(capability.identity.digest)
+          ) {
+            clearTimeout(timeout);
+            finish("failed", {
+              error: "visual asset event was malformed or not capability-bound",
+              visual,
+              capability,
+            });
+            return;
+          }
+          visualDocuments.set(visual.connection_id, visual);
+          if (visual.connection_id === 1) visualDocument = visual;
           return;
         }
         if (event.kind === "telemetry_document") {
@@ -1358,6 +1408,12 @@
               snapshot.capability_identity.document_bytes &&
             snapshot.capability_consecutive_failures === 0 &&
             snapshot.capability_last_error === null &&
+            snapshot.visual_asset_count === 1 &&
+            snapshot.visual_assets_complete === 1 &&
+            snapshot.visual_received_bytes === 109 &&
+            snapshot.visual_total_bytes === 109 &&
+            snapshot.visual_consecutive_failures === 0 &&
+            snapshot.visual_last_error === null &&
             snapshot.configuration_availability === "available" &&
             snapshot.configuration !== null &&
             snapshot.configuration.phase === "active" &&
@@ -1372,7 +1428,9 @@
             capabilityDocument.identity.document_bytes ===
               snapshot.capability_identity.document_bytes &&
             JSON.stringify(capabilityDocument.identity.digest) ===
-              JSON.stringify(snapshot.capability_identity.digest);
+              JSON.stringify(snapshot.capability_identity.digest) &&
+            visualDocument !== undefined &&
+            visualDocument.generation === snapshot.generation;
           const waveformComplete =
             snapshot.waveform_phase === "complete" &&
             snapshot.waveform_capture_id !== null &&
@@ -1408,6 +1466,7 @@
             finish("passed", {
               expectation,
               capability_document: capabilityDocument,
+              visual_document: visualDocument,
               snapshot,
             });
           } else if (

@@ -37,6 +37,9 @@ use crate::http::{
     decode_device_identity,
 };
 use crate::upload::{CacheUploadError, CacheUploadMachine, CacheUploadPhase, UploadSource};
+use crate::visual::{
+    VisualAssetDownloadError, VisualAssetDownloadMachine, VisualAssetDownloadPhase,
+};
 
 const JSON_MEDIA_TYPE: &str = "application/json";
 const COUNTERS_PER_MILLISECOND: u64 = 1_000_000;
@@ -602,6 +605,61 @@ async fn drive_capability_step_inner(
             session.abandon_pending();
             download.abandon_pending();
             return Err(BrowserCapabilityError::Fetch(error));
+        }
+    };
+    download.accept_response(&response)?;
+    Ok(download.phase())
+}
+
+/// Acquires one authenticated, side-effect-free capability visual range.
+pub async fn drive_visual_asset_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    download: &mut VisualAssetDownloadMachine,
+    secret: &[u8],
+) -> Result<VisualAssetDownloadPhase, BrowserVisualAssetError> {
+    drive_visual_asset_step_inner(window, origin, session, download, secret).await
+}
+
+/// Worker-scope variant of [`drive_visual_asset_step`].
+pub async fn drive_visual_asset_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    download: &mut VisualAssetDownloadMachine,
+    secret: &[u8],
+) -> Result<VisualAssetDownloadPhase, BrowserVisualAssetError> {
+    drive_visual_asset_step_inner(worker, origin, session, download, secret).await
+}
+
+async fn drive_visual_asset_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    download: &mut VisualAssetDownloadMachine,
+    secret: &[u8],
+) -> Result<VisualAssetDownloadPhase, BrowserVisualAssetError> {
+    if !session.config_digest().is_zero() {
+        return Err(BrowserVisualAssetError::ConfigurationIdentity);
+    }
+    let Some(operation) = download.next_request()? else {
+        return Ok(VisualAssetDownloadPhase::Complete);
+    };
+    let request = match session.begin_request(operation.operation, &operation.body, secret) {
+        Ok(request) => request,
+        Err(error) => {
+            download.abandon_pending();
+            return Err(BrowserVisualAssetError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            download.abandon_pending();
+            return Err(BrowserVisualAssetError::Fetch(error));
         }
     };
     download.accept_response(&response)?;
@@ -1245,6 +1303,42 @@ impl fmt::Display for BrowserCapabilityError {
 }
 
 impl std::error::Error for BrowserCapabilityError {}
+
+/// One authenticated browser visual-asset range acquisition failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserVisualAssetError {
+    /// The session would substitute an active configuration into this immutable read.
+    ConfigurationIdentity,
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+    /// Range, identity, bound, allocation, or complete-content validation failed.
+    Visual(VisualAssetDownloadError),
+}
+
+impl From<VisualAssetDownloadError> for BrowserVisualAssetError {
+    fn from(value: VisualAssetDownloadError) -> Self {
+        Self::Visual(value)
+    }
+}
+
+impl fmt::Display for BrowserVisualAssetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigurationIdentity => {
+                formatter.write_str("visual reads require a zero-configuration session")
+            }
+            Self::Session(error) => {
+                write!(formatter, "visual request construction failed: {error}")
+            }
+            Self::Fetch(error) => write!(formatter, "visual fetch failed: {error}"),
+            Self::Visual(error) => write!(formatter, "visual response rejected: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserVisualAssetError {}
 
 /// One authenticated browser telemetry-lifecycle failure.
 #[derive(Clone, Debug, Eq, PartialEq)]

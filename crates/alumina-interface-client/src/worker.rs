@@ -23,7 +23,7 @@ use alumina_runtime::health::{
     RuntimeHealthFlags, RuntimeHealthSnapshot as WireRuntimeHealthSnapshot,
 };
 use alumina_runtime::stack::{StackDomain, StackWatermarkFlags, StackWatermarkSnapshot};
-use alumina_storage::{CacheLimits, ObjectKind, UploadPlan};
+use alumina_storage::{CacheLimits, ObjectKind, UploadPlan, sha256};
 use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilityDownloadPhase;
@@ -35,7 +35,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 12;
+pub const WORKER_SCHEMA_VERSION: u16 = 13;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -48,6 +48,8 @@ const MAXIMUM_SECRET_BYTES: usize = 256;
 pub const MAXIMUM_CACHED_JOB_PARTICIPANTS: usize = 8;
 /// Aggregate canonical manifest and partition bytes accepted in one worker command.
 pub const MAXIMUM_CACHED_JOB_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
+/// Largest single capability-declared visual admitted across worker JSON.
+pub const MAXIMUM_VISUAL_ASSET_BYTES: usize = 8 * 1024 * 1024;
 /// Storage policy used to independently decode compiler-supplied upload plans.
 pub const WORKER_CACHED_JOB_LIMITS: CacheLimits = CacheLimits {
     maximum_object_bytes: 4 * 1024 * 1024,
@@ -1359,6 +1361,72 @@ impl WorkerCapabilityDocument {
     }
 }
 
+/// One complete capability-bound visual transferred from worker to UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerVisualAssetDocument {
+    /// UI-local connection identity owning this visual.
+    pub connection_id: u64,
+    /// Exact worker session generation that acquired the bytes.
+    pub generation: u64,
+    /// Canonical capability document that declared the visual digest.
+    pub capability_digest: [u8; 32],
+    /// SHA-256 selected from the canonical visual record.
+    pub asset_digest: [u8; 32],
+    /// Complete immutable visual bytes.
+    bytes: Vec<u8>,
+}
+
+impl WorkerVisualAssetDocument {
+    /// Constructs and hash-validates one bounded visual transfer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero session/capability identity, an empty or oversized asset,
+    /// or bytes that do not match the capability-declared digest.
+    pub fn try_new(
+        connection_id: u64,
+        generation: u64,
+        capability_digest: Digest,
+        asset_digest: Digest,
+        bytes: Vec<u8>,
+    ) -> Result<Self, WorkerContractError> {
+        let transfer = Self {
+            connection_id,
+            generation,
+            capability_digest: capability_digest.0,
+            asset_digest: asset_digest.0,
+            bytes,
+        };
+        transfer.validate()?;
+        Ok(transfer)
+    }
+
+    /// Complete independently hash-verified visual bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Revalidates all identity, bound, and content facts after JSON transfer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed or substituted worker JSON before it reaches UI state.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0
+            || self.generation == 0
+            || self.capability_digest.iter().all(|byte| *byte == 0)
+            || self.asset_digest.iter().all(|byte| *byte == 0)
+            || self.bytes.is_empty()
+            || self.bytes.len() > MAXIMUM_VISUAL_ASSET_BYTES
+            || sha256(&self.bytes).digest.0 != self.asset_digest
+        {
+            return Err(WorkerContractError::VisualAssetDocument);
+        }
+        Ok(())
+    }
+}
+
 /// Rendering-safe global lifecycle for the one worker-owned cached job.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1797,6 +1865,18 @@ pub struct DeviceSessionSnapshot {
     pub capability_consecutive_failures: u32,
     /// Latest capability acquisition failure, independent from clock/health state.
     pub capability_last_error: Option<String>,
+    /// Number of visual records selected from the complete capability.
+    pub visual_asset_count: u16,
+    /// Number of complete SHA-256-verified assets retained by the worker.
+    pub visual_assets_complete: u16,
+    /// Sum of contiguous bytes retained across all visual downloads.
+    pub visual_received_bytes: u64,
+    /// Sum of established complete byte lengths; undiscovered lengths add zero.
+    pub visual_total_bytes: u64,
+    /// Consecutive visual-range failures since the latest accepted range.
+    pub visual_consecutive_failures: u32,
+    /// Latest visual acquisition failure, isolated from capability acquisition.
+    pub visual_last_error: Option<String>,
     /// Current capability-derived overview subscription lifecycle.
     pub telemetry_phase: Option<TelemetryPhaseSnapshot>,
     /// Nonzero worker-created subscription identity while telemetry exists.
@@ -1844,6 +1924,7 @@ impl DeviceSessionSnapshot {
             || !diagnostic_is_valid(self.runtime_health_last_error.as_deref())
             || !diagnostic_is_valid(self.configuration_last_error.as_deref())
             || !diagnostic_is_valid(self.capability_last_error.as_deref())
+            || !diagnostic_is_valid(self.visual_last_error.as_deref())
             || !diagnostic_is_valid(self.telemetry_last_error.as_deref())
             || !diagnostic_is_valid(self.waveform_last_error.as_deref())
             || (self.consecutive_failures == 0) != self.last_error.is_none()
@@ -1852,6 +1933,7 @@ impl DeviceSessionSnapshot {
             || (self.configuration_consecutive_failures == 0)
                 != self.configuration_last_error.is_none()
             || (self.capability_consecutive_failures == 0) != self.capability_last_error.is_none()
+            || (self.visual_consecutive_failures == 0) != self.visual_last_error.is_none()
             || (self.telemetry_consecutive_failures == 0) != self.telemetry_last_error.is_none()
             || (self.waveform_consecutive_failures == 0) != self.waveform_last_error.is_none()
         {
@@ -1909,6 +1991,27 @@ impl DeviceSessionSnapshot {
             if identity.capability != capability {
                 return Err(WorkerContractError::DeviceIdentity);
             }
+        }
+        if self.visual_assets_complete > self.visual_asset_count
+            || self.visual_received_bytes > self.visual_total_bytes
+            || (self.capability_phase != CapabilityDownloadPhaseSnapshot::Complete
+                && (self.visual_asset_count != 0
+                    || self.visual_assets_complete != 0
+                    || self.visual_received_bytes != 0
+                    || self.visual_total_bytes != 0
+                    || self.visual_consecutive_failures != 0))
+            || (self.visual_asset_count == 0
+                && (self.visual_assets_complete != 0
+                    || self.visual_received_bytes != 0
+                    || self.visual_total_bytes != 0
+                    || self.visual_consecutive_failures != 0))
+            || (self.visual_asset_count != 0
+                && self.visual_assets_complete == self.visual_asset_count
+                && (self.visual_total_bytes == 0
+                    || self.visual_received_bytes != self.visual_total_bytes
+                    || self.visual_consecutive_failures != 0))
+        {
+            return Err(WorkerContractError::VisualAssetProgress);
         }
         match (
             self.telemetry_phase,
@@ -2001,6 +2104,11 @@ pub enum WorkerEvent {
         /// Independently validated immutable bytes and owning session identity.
         capability: Box<WorkerCapabilityDocument>,
     },
+    /// One complete capability-declared visual, emitted once per digest and generation.
+    VisualAssetDocument {
+        /// Independently hash-validated immutable bytes and owning session identity.
+        visual: Box<WorkerVisualAssetDocument>,
+    },
     /// One complete canonical digital capture, emitted once per capture attempt.
     WaveformDocument {
         /// Independently validated retained record and owning session identity.
@@ -2084,6 +2192,9 @@ impl WorkerEventEnvelope {
         if let WorkerEvent::CapabilityDocument { capability } = &self.event {
             capability.validate()?;
         }
+        if let WorkerEvent::VisualAssetDocument { visual } = &self.event {
+            visual.validate()?;
+        }
         if let WorkerEvent::WaveformDocument { waveform } = &self.event {
             waveform.validate()?;
         }
@@ -2123,6 +2234,10 @@ pub enum WorkerContractError {
     CapabilityProgress,
     /// A one-time capability document transfer failed canonical validation.
     CapabilityDocument,
+    /// Capability-selected visual progress fields contradicted one another.
+    VisualAssetProgress,
+    /// A complete visual transfer failed identity, bounds, or SHA-256 validation.
+    VisualAssetDocument,
     /// Telemetry lifecycle identity or event progress was inconsistent.
     TelemetryProgress,
     /// A telemetry event transfer failed canonical validation.
@@ -2168,6 +2283,12 @@ impl fmt::Display for WorkerContractError {
             }
             Self::CapabilityDocument => {
                 formatter.write_str("capability document transfer is invalid")
+            }
+            Self::VisualAssetProgress => {
+                formatter.write_str("visual asset download progress is invalid")
+            }
+            Self::VisualAssetDocument => {
+                formatter.write_str("visual asset document transfer is invalid")
             }
             Self::TelemetryProgress => formatter.write_str("telemetry progress is invalid"),
             Self::TelemetryDocument => formatter.write_str("telemetry document is invalid"),
@@ -2431,6 +2552,12 @@ mod tests {
                 capability_identity: None,
                 capability_consecutive_failures: 0,
                 capability_last_error: None,
+                visual_asset_count: 0,
+                visual_assets_complete: 0,
+                visual_received_bytes: 0,
+                visual_total_bytes: 0,
+                visual_consecutive_failures: 0,
+                visual_last_error: None,
                 telemetry_phase: None,
                 telemetry_subscription_id: None,
                 telemetry_subscription_digest: None,
@@ -2451,7 +2578,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 12);
+        assert_eq!(WORKER_SCHEMA_VERSION, 13);
     }
 
     #[test]
@@ -2700,6 +2827,12 @@ mod tests {
             capability_identity: None,
             capability_consecutive_failures: 0,
             capability_last_error: None,
+            visual_asset_count: 0,
+            visual_assets_complete: 0,
+            visual_received_bytes: 0,
+            visual_total_bytes: 0,
+            visual_consecutive_failures: 0,
+            visual_last_error: None,
             telemetry_phase: None,
             telemetry_subscription_id: None,
             telemetry_subscription_digest: None,
@@ -2793,6 +2926,36 @@ mod tests {
         assert_eq!(
             decoded.validate(),
             Err(WorkerContractError::CapabilityDocument)
+        );
+    }
+
+    #[test]
+    fn visual_asset_event_is_revalidated_after_json_transfer() {
+        let package = alumina_sim::capability::package();
+        let capability = calculate_identity(&package).unwrap();
+        let asset = alumina_sim::capability::visual_assets()[0];
+        let transfer = WorkerVisualAssetDocument::try_new(
+            7,
+            3,
+            capability.digest,
+            asset.digest,
+            asset.bytes.to_vec(),
+        )
+        .unwrap();
+        let event = WorkerEventEnvelope::current(WorkerEvent::VisualAssetDocument {
+            visual: Box::new(transfer),
+        });
+        let json = serde_json::to_vec(&event).unwrap();
+        let mut decoded: WorkerEventEnvelope = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.validate(), Ok(()));
+        if let WorkerEvent::VisualAssetDocument { visual } = &mut decoded.event {
+            visual.bytes[0] ^= 1;
+        } else {
+            panic!("round trip changed visual event kind");
+        }
+        assert_eq!(
+            decoded.validate(),
+            Err(WorkerContractError::VisualAssetDocument)
         );
     }
 

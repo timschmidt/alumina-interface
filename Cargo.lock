@@ -133,6 +133,7 @@ dependencies = [
  "hypercurve",
  "hypergraphics",
  "hyperreal",
+ "image",
  "js-sys",
  "log",
  "serde_json",

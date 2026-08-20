@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
+use alumina_board::ResourceId;
+#[cfg(target_arch = "wasm32")]
 use alumina_capability::encode_resource_id;
 #[cfg(target_arch = "wasm32")]
 use alumina_diagnostics::{
@@ -36,7 +38,7 @@ use hypergraphics::{ExactCamera, PredicatePolicy, Projection64, Real, Viewport};
 #[cfg(target_arch = "wasm32")]
 use crate::browser_worker::{
     BrowserWorkerSupervisor, ConnectedCapabilityView, ConnectedTelemetryView,
-    ConnectedWaveformView, SupervisorLifecycle,
+    ConnectedVisualAssetView, ConnectedWaveformView, SupervisorLifecycle,
 };
 use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
@@ -108,6 +110,42 @@ struct LiveDeviceForm {
     origin: String,
     secret: String,
     error: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+enum LiveVisualTextureEntry {
+    Ready {
+        texture: egui::TextureHandle,
+        pixel_dimensions: (u32, u32),
+    },
+    Rejected(String),
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const MAXIMUM_VISUAL_RGBA_BYTES: u64 = 64 * 1_024 * 1_024;
+#[cfg(target_arch = "wasm32")]
+const MAXIMUM_VISUAL_RGBA_TOTAL_BYTES: u64 = 128 * 1_024 * 1_024;
+#[cfg(any(target_arch = "wasm32", test))]
+const MAXIMUM_VISUAL_DECODER_ALLOCATION_BYTES: u64 = 128 * 1_024 * 1_024;
+
+#[cfg(target_arch = "wasm32")]
+struct LiveBoardExplorerUiState {
+    generation: u64,
+    capability_digest: Option<alumina_protocol::Digest>,
+    selected_resource: Option<ResourceId>,
+    textures: BTreeMap<[u8; 32], LiveVisualTextureEntry>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl LiveBoardExplorerUiState {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            capability_digest: None,
+            selected_resource: None,
+            textures: BTreeMap::new(),
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -260,6 +298,8 @@ pub struct AluminaApp {
     #[cfg(target_arch = "wasm32")]
     live_capture_cursors: BTreeMap<u64, u64>,
     #[cfg(target_arch = "wasm32")]
+    live_board_explorers: BTreeMap<u64, LiveBoardExplorerUiState>,
+    #[cfg(target_arch = "wasm32")]
     next_job_id: u64,
     #[cfg(target_arch = "wasm32")]
     live_job_error: Option<String>,
@@ -375,6 +415,8 @@ impl AluminaApp {
             next_connection_id: 1,
             #[cfg(target_arch = "wasm32")]
             live_capture_cursors: BTreeMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            live_board_explorers: BTreeMap::new(),
             #[cfg(target_arch = "wasm32")]
             next_job_id: 1,
             #[cfg(target_arch = "wasm32")]
@@ -754,6 +796,23 @@ impl AluminaApp {
             return;
         };
         self.show_live_job_control(ui, &view);
+        self.show_live_devices(ui, &view);
+        if !view.diagnostics.is_empty() {
+            ui.separator();
+            ui.collapsing("Worker diagnostics", |ui| {
+                for diagnostic in &view.diagnostics {
+                    ui.colored_label(egui::Color32::LIGHT_RED, diagnostic);
+                }
+            });
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn show_live_devices(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: &crate::browser_worker::SupervisorView,
+    ) {
         let mut actions = Vec::new();
         for snapshot in &view.devices {
             let capability = view.capabilities.iter().find(|capability| {
@@ -769,16 +828,40 @@ impl AluminaApp {
                 telemetry.connection_id() == snapshot.connection_id
                     && telemetry.generation() == snapshot.generation
             });
+            let visuals = view
+                .visuals
+                .iter()
+                .filter(|visual| {
+                    visual.connection_id() == snapshot.connection_id
+                        && visual.generation() == snapshot.generation
+                })
+                .collect::<Vec<_>>();
             let cursor = self
                 .live_capture_cursors
                 .entry(snapshot.connection_id)
                 .or_insert(0);
+            let explorer = self
+                .live_board_explorers
+                .entry(snapshot.connection_id)
+                .or_insert_with(|| LiveBoardExplorerUiState::new(snapshot.generation));
+            if explorer.generation != snapshot.generation {
+                *explorer = LiveBoardExplorerUiState::new(snapshot.generation);
+            }
+            let capability_digest = capability.map(|view| view.board().identity().digest);
+            if explorer.capability_digest != capability_digest {
+                *explorer = LiveBoardExplorerUiState::new(snapshot.generation);
+                explorer.capability_digest = capability_digest;
+            }
             show_live_device_snapshot(
                 ui,
-                snapshot,
-                capability,
-                telemetry,
-                waveform,
+                LiveDeviceEvidence {
+                    snapshot,
+                    capability,
+                    visuals: &visuals,
+                    telemetry,
+                    waveform,
+                },
+                explorer,
                 cursor,
                 &mut actions,
             );
@@ -788,15 +871,13 @@ impl AluminaApp {
                 .iter()
                 .any(|snapshot| snapshot.connection_id == *connection_id)
         });
+        self.live_board_explorers.retain(|connection_id, explorer| {
+            view.devices.iter().any(|snapshot| {
+                snapshot.connection_id == *connection_id
+                    && snapshot.generation == explorer.generation
+            })
+        });
         self.apply_live_actions(actions);
-        if !view.diagnostics.is_empty() {
-            ui.separator();
-            ui.collapsing("Worker diagnostics", |ui| {
-                for diagnostic in &view.diagnostics {
-                    ui.colored_label(egui::Color32::LIGHT_RED, diagnostic);
-                }
-            });
-        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1198,15 +1279,30 @@ fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct LiveDeviceEvidence<'a> {
+    snapshot: &'a DeviceSessionSnapshot,
+    capability: Option<&'a ConnectedCapabilityView>,
+    visuals: &'a [&'a ConnectedVisualAssetView],
+    telemetry: Option<&'a ConnectedTelemetryView>,
+    waveform: Option<&'a ConnectedWaveformView>,
+}
+
+#[cfg(target_arch = "wasm32")]
 fn show_live_device_snapshot(
     ui: &mut egui::Ui,
-    snapshot: &DeviceSessionSnapshot,
-    capability: Option<&ConnectedCapabilityView>,
-    telemetry: Option<&ConnectedTelemetryView>,
-    waveform: Option<&ConnectedWaveformView>,
+    evidence: LiveDeviceEvidence<'_>,
+    explorer: &mut LiveBoardExplorerUiState,
     capture_cursor: &mut u64,
     actions: &mut Vec<LiveDeviceAction>,
 ) {
+    let LiveDeviceEvidence {
+        snapshot,
+        capability,
+        visuals,
+        telemetry,
+        waveform,
+    } = evidence;
     ui.separator();
     ui.collapsing(
         format!("{} — {:?}", snapshot.label, snapshot.phase),
@@ -1257,6 +1353,7 @@ fn show_live_device_snapshot(
                 ));
             }
             show_live_capability_snapshot(ui, snapshot, capability);
+            show_live_board_visuals(ui, snapshot, capability, visuals, explorer, telemetry);
             show_live_configuration_snapshot(ui, snapshot);
             show_runtime_health_snapshot(ui, snapshot);
             show_live_telemetry_status(ui, snapshot, capability, telemetry);
@@ -1344,6 +1441,24 @@ fn show_live_capability_snapshot(
         ));
     }
     if let Some(error) = &snapshot.capability_last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+    if snapshot.visual_asset_count != 0 {
+        ui.label(format!(
+            "verified board visuals: {} / {}; contiguous bytes {} / {}",
+            snapshot.visual_assets_complete,
+            snapshot.visual_asset_count,
+            snapshot.visual_received_bytes,
+            snapshot.visual_total_bytes,
+        ));
+    }
+    if snapshot.visual_consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive visual-range failures: {}",
+            snapshot.visual_consecutive_failures
+        ));
+    }
+    if let Some(error) = &snapshot.visual_last_error {
         ui.colored_label(egui::Color32::LIGHT_RED, error);
     }
 }
@@ -1457,6 +1572,373 @@ fn show_admitted_board_capability(ui: &mut egui::Ui, capability: &ConnectedCapab
     ui.small(
         "These immutable facts label later diagnostic selection; they grant no resource lease, output command, arm transition, or physical-safety claim.",
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "verified raster dimensions are projected only into the lossy egui display plane"
+)]
+fn show_live_board_visuals(
+    ui: &mut egui::Ui,
+    snapshot: &DeviceSessionSnapshot,
+    capability: Option<&ConnectedCapabilityView>,
+    assets: &[&ConnectedVisualAssetView],
+    state: &mut LiveBoardExplorerUiState,
+    telemetry: Option<&ConnectedTelemetryView>,
+) {
+    let Some(capability) = capability else {
+        return;
+    };
+    let board = capability.board();
+    ui.separator();
+    ui.strong("Capability-bound board visual");
+    if board.visuals().is_empty() {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "No licensed revision-specific photograph or reviewed hotspot map is declared by this firmware image.",
+        );
+        ui.small(
+            "No silhouette, connector position, or physical correspondence is inferred. Any physical fixture remains behind this explicit evidence gate.",
+        );
+        return;
+    }
+    if let Err(error) = validate_live_visual_decode_budget(board) {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+        return;
+    }
+
+    for declared in board.visuals() {
+        ui.strong(format!(
+            "{} · {} · {}",
+            declared.id(),
+            declared.license(),
+            declared.attribution()
+        ));
+        let asset = assets.iter().copied().find(|asset| {
+            asset.capability_digest() == board.identity().digest
+                && asset.asset_digest() == declared.asset_digest()
+        });
+        let Some(asset) = asset else {
+            ui.label(format!(
+                "Awaiting verified bytes for {}… ({}/{})",
+                encode_hex(&declared.asset_digest().0[..8]),
+                snapshot.visual_assets_complete,
+                snapshot.visual_asset_count
+            ));
+            continue;
+        };
+        state
+            .textures
+            .entry(asset.asset_digest().0)
+            .or_insert_with(|| decode_live_visual_texture(ui.ctx(), declared, asset));
+        let texture = match state.textures.get(&asset.asset_digest().0) {
+            Some(LiveVisualTextureEntry::Ready {
+                texture,
+                pixel_dimensions,
+            }) => {
+                if *pixel_dimensions != declared.pixel_dimensions() {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_RED,
+                        "Decoded raster dimensions no longer match canonical visual authority.",
+                    );
+                    continue;
+                }
+                texture.clone()
+            }
+            Some(LiveVisualTextureEntry::Rejected(error)) => {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                continue;
+            }
+            None => unreachable!("visual texture entry was inserted above"),
+        };
+        show_live_visual_overlay(ui, board, declared, &texture, state, telemetry);
+    }
+    ui.small(
+        "Raster bytes were fetched by the dedicated worker, rebound to this session and capability, SHA-256 checked in both realms, and dimension checked before drawing. Hotspots are descriptive input links, never I/O authority.",
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn validate_live_visual_decode_budget(
+    board: &alumina_interface_core::BoardExplorerSnapshot,
+) -> Result<(), String> {
+    let mut total = 0_u64;
+    for (index, visual) in board.visuals().iter().enumerate() {
+        if board.visuals()[..index]
+            .iter()
+            .any(|prior| prior.asset_digest() == visual.asset_digest())
+        {
+            continue;
+        }
+        let (width, height) = visual.pixel_dimensions();
+        let bytes = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .filter(|bytes| *bytes != 0 && *bytes <= MAXIMUM_VISUAL_RGBA_BYTES)
+            .ok_or_else(|| {
+                format!(
+                    "Visual {} exceeds the {} MiB decoded-RGBA policy.",
+                    visual.id(),
+                    MAXIMUM_VISUAL_RGBA_BYTES / (1_024 * 1_024)
+                )
+            })?;
+        total = total.checked_add(bytes).ok_or_else(|| {
+            "Capability visual decoded-byte total overflowed browser policy.".to_owned()
+        })?;
+        if total > MAXIMUM_VISUAL_RGBA_TOTAL_BYTES {
+            return Err(format!(
+                "Capability visuals exceed the {} MiB aggregate decoded-RGBA policy.",
+                MAXIMUM_VISUAL_RGBA_TOTAL_BYTES / (1_024 * 1_024)
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_live_visual_texture(
+    context: &egui::Context,
+    declared: &alumina_interface_core::BoardExplorerVisual,
+    asset: &ConnectedVisualAssetView,
+) -> LiveVisualTextureEntry {
+    let rgba = match decode_capability_png(
+        declared.id(),
+        declared.media_type(),
+        declared.pixel_dimensions(),
+        asset.bytes(),
+    ) {
+        Ok(rgba) => rgba,
+        Err(error) => return LiveVisualTextureEntry::Rejected(error),
+    };
+    let pixel_dimensions = (rgba.width(), rgba.height());
+    let Ok(width) = usize::try_from(rgba.width()) else {
+        return LiveVisualTextureEntry::Rejected("Visual width does not fit this UI.".to_owned());
+    };
+    let Ok(height) = usize::try_from(rgba.height()) else {
+        return LiveVisualTextureEntry::Rejected("Visual height does not fit this UI.".to_owned());
+    };
+    let color = egui::ColorImage::from_rgba_unmultiplied([width, height], rgba.as_raw());
+    let texture = context.load_texture(
+        format!("alumina-board-{}", encode_hex(&asset.asset_digest().0[..8])),
+        color,
+        egui::TextureOptions::LINEAR,
+    );
+    LiveVisualTextureEntry::Ready {
+        texture,
+        pixel_dimensions,
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn decode_capability_png(
+    visual_id: &str,
+    media_type: &str,
+    declared_dimensions: (u32, u32),
+    bytes: &[u8],
+) -> Result<image::RgbaImage, String> {
+    if media_type != "image/png" {
+        return Err(format!(
+            "Visual {visual_id} uses unsupported media type {media_type}; this checkpoint decodes image/png only."
+        ));
+    }
+    let (declared_width, declared_height) = declared_dimensions;
+    u64::from(declared_width)
+        .checked_mul(u64::from(declared_height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|decoded_bytes| *decoded_bytes != 0 && *decoded_bytes <= MAXIMUM_VISUAL_RGBA_BYTES)
+        .ok_or_else(|| {
+            format!(
+                "Visual {visual_id} exceeds the {} MiB decoded-RGBA policy.",
+                MAXIMUM_VISUAL_RGBA_BYTES / (1_024 * 1_024)
+            )
+        })?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(declared_width);
+    limits.max_image_height = Some(declared_height);
+    limits.max_alloc = Some(MAXIMUM_VISUAL_DECODER_ALLOCATION_BYTES);
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| format!("Visual {visual_id} PNG decoding failed: {error}"))?;
+    let decoded_dimensions = (decoded.width(), decoded.height());
+    if decoded_dimensions != declared_dimensions {
+        return Err(format!(
+            "Visual {visual_id} decoded as {}×{}, not its canonical {}×{} dimensions.",
+            decoded_dimensions.0, decoded_dimensions.1, declared_width, declared_height,
+        ));
+    }
+    Ok(decoded.into_rgba8())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "verified raster aspect ratio is projected only into the lossy egui display plane"
+)]
+fn show_live_visual_overlay(
+    ui: &mut egui::Ui,
+    board: &alumina_interface_core::BoardExplorerSnapshot,
+    visual: &alumina_interface_core::BoardExplorerVisual,
+    texture: &egui::TextureHandle,
+    state: &mut LiveBoardExplorerUiState,
+    telemetry: Option<&ConnectedTelemetryView>,
+) {
+    let (pixel_width, pixel_height) = visual.pixel_dimensions();
+    let width = ui.available_width().clamp(180.0, 560.0);
+    let height = width * (f64::from(pixel_height) / f64::from(pixel_width)) as f32;
+    let (response, painter) =
+        ui.allocate_painter(egui::vec2(width, height.max(90.0)), egui::Sense::click());
+    let image_rect = egui::Rect::from_min_size(response.rect.min, egui::vec2(width, height));
+    painter.image(
+        texture.id(),
+        image_rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+
+    let hover_point = response
+        .hover_pos()
+        .filter(|point| image_rect.contains(*point));
+    let mut hovered = None;
+    for hotspot in visual.hotspots() {
+        let points = hotspot
+            .polygon()
+            .iter()
+            .map(|point| normalized_visual_point(image_rect, *point))
+            .collect::<Vec<_>>();
+        let is_hovered = hover_point.is_some_and(|point| point_in_polygon(point, &points));
+        if is_hovered {
+            hovered = Some(hotspot.resource());
+        }
+        let selected = state.selected_resource == Some(hotspot.resource());
+        let color = if selected {
+            egui::Color32::WHITE
+        } else if is_hovered {
+            egui::Color32::from_rgb(255, 164, 64)
+        } else {
+            live_hotspot_color(hotspot.resource(), telemetry)
+        };
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(
+                if selected || is_hovered {
+                    3.0_f32
+                } else {
+                    1.5_f32
+                },
+                color,
+            ),
+        ));
+    }
+    if response.clicked()
+        && let Some(resource) = hovered
+    {
+        state.selected_resource = Some(resource);
+    }
+    if let Some(resource) = hovered {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 164, 64),
+            format!("hotspot: {}", live_resource_label(board, resource)),
+        );
+    }
+    if let Some(resource) = state.selected_resource {
+        show_live_hotspot_resource(ui, board, resource, telemetry);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalized_visual_point(rect: egui::Rect, point: alumina_board::NormalizedPoint) -> egui::Pos2 {
+    const NORMALIZED_EXTENT: f32 = 10_000.0;
+    egui::pos2(
+        rect.left() + rect.width() * f32::from(point.x) / NORMALIZED_EXTENT,
+        rect.top() + rect.height() * f32::from(point.y) / NORMALIZED_EXTENT,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn point_in_polygon(point: egui::Pos2, polygon: &[egui::Pos2]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut previous = polygon.len() - 1;
+    for current in 0..polygon.len() {
+        let a = polygon[current];
+        let b = polygon[previous];
+        if (a.y > point.y) != (b.y > point.y)
+            && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
+        {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+#[cfg(target_arch = "wasm32")]
+fn live_hotspot_color(
+    resource: ResourceId,
+    telemetry: Option<&ConnectedTelemetryView>,
+) -> egui::Color32 {
+    telemetry
+        .and_then(ConnectedTelemetryView::latest)
+        .and_then(|event| event.overview().sample(resource))
+        .map_or(egui::Color32::LIGHT_BLUE, |sample| {
+            live_telemetry_quality_color(sample.quality)
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_hotspot_resource(
+    ui: &mut egui::Ui,
+    board: &alumina_interface_core::BoardExplorerSnapshot,
+    resource: ResourceId,
+    telemetry: Option<&ConnectedTelemetryView>,
+) {
+    let Some(resource_view) = board.resource(resource) else {
+        ui.colored_label(
+            egui::Color32::LIGHT_RED,
+            "Selected hotspot names a resource absent from the capability ledger.",
+        );
+        return;
+    };
+    let descriptor = resource_view.descriptor();
+    ui.group(|ui| {
+        ui.strong(live_resource_label(board, resource));
+        ui.monospace(format!(
+            "{:?} · owner {:?} · safe {:?} · hazardous {}",
+            descriptor.id, descriptor.owner, descriptor.safe_value, descriptor.hazardous_output
+        ));
+        if !resource_view.aliases().is_empty() {
+            ui.label(format!("aliases: {}", resource_view.aliases().join(", ")));
+        }
+        ui.label(format!(
+            "passive overview: {} · digital capture: {} · graph access: {}",
+            resource_view.is_diagnostic_observable(),
+            resource_view.is_digitally_capturable(),
+            resource_view.is_graph_addressable(),
+        ));
+        match telemetry
+            .and_then(ConnectedTelemetryView::latest)
+            .and_then(|event| event.overview().sample(resource))
+        {
+            Some(sample) => ui.colored_label(
+                live_telemetry_quality_color(sample.quality),
+                format!(
+                    "live {} · {:?} / {:?} · captured cycle {}",
+                    live_resource_value(sample.value),
+                    sample.provenance,
+                    sample.quality,
+                    sample.captured_cycle.0,
+                ),
+            ),
+            None => ui.label("No current passive sample for this hotspot resource."),
+        };
+    });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2384,4 +2866,35 @@ pub fn start_control_worker() -> Result<(), wasm_bindgen::JsValue> {
 
     let worker = js_sys::global().dyn_into::<web_sys::DedicatedWorkerGlobalScope>()?;
     browser_worker::install_control_worker(&worker)
+}
+
+#[cfg(test)]
+mod visual_decode_tests {
+    use super::decode_capability_png;
+
+    #[test]
+    fn simulator_png_matches_its_capability_dimensions() {
+        let package = alumina_sim::capability::package();
+        let visual = package.visuals[0];
+        let asset = alumina_sim::capability::visual_assets()[0];
+        let rgba = decode_capability_png(
+            visual.id,
+            visual.media_type,
+            (visual.pixel_width, visual.pixel_height),
+            asset.bytes,
+        )
+        .unwrap();
+        assert_eq!((rgba.width(), rgba.height()), (40, 20));
+        assert_eq!(rgba.as_raw().len(), 40 * 20 * 4);
+
+        assert!(
+            decode_capability_png(
+                visual.id,
+                visual.media_type,
+                (visual.pixel_width + 1, visual.pixel_height),
+                asset.bytes,
+            )
+            .is_err()
+        );
+    }
 }
