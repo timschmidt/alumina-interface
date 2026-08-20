@@ -51,6 +51,9 @@ use crate::workspace_file::{BoundedFileBridge, BoundedFileEvent, BoundedFileSpec
 const MAXIMUM_VISIBLE_NODES: usize = 256;
 const MAXIMUM_VISIBLE_WIRES: usize = 1_024;
 const MAXIMUM_POINTS_PER_SERIES: usize = 4_096;
+const MAXIMUM_ANALOG_TRACE_GROUPS: usize = 32;
+const ANALOG_TRACE_GROUP_HEIGHT: f32 = 144.0;
+const TRACE_SECTION_GAP: f32 = 10.0;
 const NODE_WIDTH: f32 = 218.0;
 const COLUMN_GAP: f32 = 82.0;
 const NODE_GAP: f32 = 24.0;
@@ -142,6 +145,7 @@ struct TraceSignal {
     source: WireEndpoint,
     representative: Option<RepresentativeControlSignal>,
     sample_type: GraphTypeId,
+    sample_type_name: String,
     unit_symbol: Option<String>,
 }
 
@@ -164,6 +168,29 @@ struct TraceSeries {
     signal: TraceSignal,
     kind: TraceSeriesKind,
     points: Vec<TracePoint>,
+}
+
+#[derive(Debug)]
+struct AnalogTraceGroup<'a> {
+    sample_type: GraphTypeId,
+    sample_type_name: &'a str,
+    unit_symbol: &'a str,
+    series: Vec<&'a TraceSeries>,
+}
+
+impl AnalogTraceGroup<'_> {
+    fn label(&self) -> String {
+        let unit = if self.unit_symbol.is_empty() {
+            "unitless"
+        } else {
+            self.unit_symbol
+        };
+        format!(
+            "{unit}\n{} [t{}]",
+            self.sample_type_name,
+            self.sample_type.get()
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3690,12 +3717,8 @@ impl ExactControlWorkspace {
             return;
         };
         self.cursor_root_tick = time_axis.clamp(&self.cursor_root_tick);
-        let analog = traces
-            .iter()
-            .filter(|series| series.kind == TraceSeriesKind::ExactRational)
-            .collect::<Vec<_>>();
-        let analog_unit_label = match shared_analog_unit_label(&analog) {
-            Ok(label) => label,
+        let analog_groups = match analog_trace_groups(&traces) {
+            Ok(groups) => groups,
             Err(error) => {
                 ui.colored_label(egui::Color32::YELLOW, error);
                 return;
@@ -3706,14 +3729,14 @@ impl ExactControlWorkspace {
             .filter(|series| series.kind == TraceSeriesKind::Boolean)
             .collect::<Vec<_>>();
         digital.sort_by_key(|series| trace_digital_order(&series.signal));
-        let analog_height = if analog.is_empty() { 0.0 } else { 160.0 };
         let digital_height = display_index(digital.len()) * 36.0;
-        let section_gap = if analog.is_empty() || digital.is_empty() {
-            0.0
-        } else {
-            10.0
-        };
-        let surface_height = 14.0 + analog_height + section_gap + digital_height + 31.0;
+        let section_count = analog_groups.len() + usize::from(!digital.is_empty());
+        let section_gaps = display_index(section_count.saturating_sub(1)) * TRACE_SECTION_GAP;
+        let surface_height = 14.0
+            + display_index(analog_groups.len()) * ANALOG_TRACE_GROUP_HEIGHT
+            + digital_height
+            + section_gaps
+            + 31.0;
         let width = ui.available_width().max(164.0);
         let (response, painter) = ui.allocate_painter(
             egui::vec2(width, surface_height.max(82.0)),
@@ -3722,14 +3745,15 @@ impl ExactControlWorkspace {
         let plot_left = response.rect.left() + 112.0;
         let plot_right = response.rect.right() - 12.0;
         let mut section_top = response.rect.top() + 14.0;
-        let analog_plot = (!analog.is_empty()).then(|| {
+        let mut analog_plots = Vec::with_capacity(analog_groups.len());
+        for _ in &analog_groups {
             let rect = egui::Rect::from_min_max(
                 egui::pos2(plot_left, section_top),
-                egui::pos2(plot_right, section_top + analog_height),
+                egui::pos2(plot_right, section_top + ANALOG_TRACE_GROUP_HEIGHT),
             );
-            section_top = rect.bottom() + section_gap;
-            rect
-        });
+            analog_plots.push(rect);
+            section_top = rect.bottom() + TRACE_SECTION_GAP;
+        }
         let digital_plot = (!digital.is_empty()).then(|| {
             egui::Rect::from_min_max(
                 egui::pos2(plot_left, section_top),
@@ -3737,21 +3761,21 @@ impl ExactControlWorkspace {
             )
         });
 
-        if let Some(plot) = analog_plot {
-            painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
-            let (minimum_value, maximum_value) = trace_value_bounds(&analog);
+        for (index, (group, plot)) in analog_groups.iter().zip(&analog_plots).enumerate() {
+            painter.rect_filled(*plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+            let (minimum_value, maximum_value) = trace_value_bounds(&group.series);
             paint_trace_grid(
                 &painter,
-                plot,
+                *plot,
                 &time_axis,
                 minimum_value,
                 maximum_value,
-                digital_plot.is_none(),
+                digital_plot.is_none() && index + 1 == analog_groups.len(),
             );
-            for series in &analog {
+            for series in &group.series {
                 paint_analog_trace_series(
                     &painter,
-                    plot,
+                    *plot,
                     series,
                     &time_axis,
                     minimum_value,
@@ -3761,7 +3785,7 @@ impl ExactControlWorkspace {
             painter.text(
                 egui::pos2(response.rect.left() + 6.0, plot.top()),
                 egui::Align2::LEFT_TOP,
-                analog_unit_label,
+                group.label(),
                 egui::FontId::proportional(10.0),
                 egui::Color32::GRAY,
             );
@@ -3779,14 +3803,24 @@ impl ExactControlWorkspace {
             );
         }
 
-        let time_plot = analog_plot
+        let time_plot = analog_plots
+            .first()
+            .copied()
             .or(digital_plot)
             .expect("one trace section exists");
-        let interaction = match (analog_plot, digital_plot) {
-            (Some(analog), Some(digital)) => analog.union(digital),
-            (Some(analog), None) => analog,
-            (None, Some(digital)) => digital,
-            (None, None) => unreachable!("one trace section exists"),
+        let interaction = if let Some(digital) = digital_plot {
+            analog_plots
+                .first()
+                .map_or(digital, |analog| analog.union(digital))
+        } else {
+            analog_plots
+                .first()
+                .expect("one analog trace section exists")
+                .union(
+                    *analog_plots
+                        .last()
+                        .expect("one analog trace section exists"),
+                )
         };
         if let Some(pointer) = response
             .hover_pos()
@@ -3834,7 +3868,11 @@ impl ExactControlWorkspace {
 
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("root tick {}", self.cursor_root_tick));
-            for series in analog.iter().chain(digital.iter()).copied() {
+            for series in analog_groups
+                .iter()
+                .flat_map(|group| group.series.iter().copied())
+                .chain(digital.iter().copied())
+            {
                 if let Some(point) = trace_point_at_or_before(series, &self.cursor_root_tick) {
                     ui.colored_label(
                         trace_signal_color(&series.signal),
@@ -5053,6 +5091,7 @@ fn trace_signal(
             .copied()
             .find(|signal| signal.endpoint() == definition.source()),
         sample_type,
+        sample_type_name: type_definition.name().to_owned(),
         unit_symbol,
     })
 }
@@ -5422,20 +5461,56 @@ fn paint_trace_time_grid(
     }
 }
 
-fn shared_analog_unit_label<'a>(series: &[&'a TraceSeries]) -> Result<&'a str, &'static str> {
-    let sample_types = series
+fn analog_trace_groups(traces: &[TraceSeries]) -> Result<Vec<AnalogTraceGroup<'_>>, String> {
+    let mut by_type = BTreeMap::<GraphTypeId, Vec<&TraceSeries>>::new();
+    for series in traces
         .iter()
-        .map(|series| series.signal.sample_type)
-        .collect::<BTreeSet<_>>();
-    if sample_types.len() > 1 {
-        return Err(
-            "exact rational probes use different value types; this shared analog scale refuses to overlay them",
-        );
+        .filter(|series| series.kind == TraceSeriesKind::ExactRational)
+    {
+        by_type
+            .entry(series.signal.sample_type)
+            .or_default()
+            .push(series);
     }
-    Ok(series
-        .first()
-        .and_then(|series| series.signal.unit_symbol.as_deref())
-        .unwrap_or("exact rational"))
+    if by_type.len() > MAXIMUM_ANALOG_TRACE_GROUPS {
+        return Err(format!(
+            "{} exact value types exceed the bounded {}-pane trace display policy",
+            by_type.len(),
+            MAXIMUM_ANALOG_TRACE_GROUPS
+        ));
+    }
+    by_type
+        .into_iter()
+        .map(|(sample_type, series)| {
+            let first = series
+                .first()
+                .copied()
+                .ok_or_else(|| "exact trace group is unexpectedly empty".to_owned())?;
+            let sample_type_name = first.signal.sample_type_name.as_str();
+            let unit_symbol = first.signal.unit_symbol.as_deref().ok_or_else(|| {
+                format!(
+                    "exact trace type t{} has no canonical unit",
+                    sample_type.get()
+                )
+            })?;
+            if series.iter().any(|candidate| {
+                candidate.signal.sample_type != sample_type
+                    || candidate.signal.sample_type_name != sample_type_name
+                    || candidate.signal.unit_symbol.as_deref() != Some(unit_symbol)
+            }) {
+                return Err(format!(
+                    "exact trace type t{} has inconsistent canonical metadata",
+                    sample_type.get()
+                ));
+            }
+            Ok(AnalogTraceGroup {
+                sample_type,
+                sample_type_name,
+                unit_symbol,
+                series,
+            })
+        })
+        .collect()
 }
 
 fn trace_value_bounds(series: &[&TraceSeries]) -> (f64, f64) {
@@ -6528,6 +6603,7 @@ mod tests {
             .name();
         assert_eq!(source_series.signal.name, canonical_name);
         assert_eq!(source_series.signal.representative, None);
+        assert_eq!(source_series.signal.sample_type_name, "exact.mm");
         assert_eq!(source_series.signal.unit_symbol.as_deref(), Some("mm"));
         assert_eq!(source_series.points.len(), 21);
         assert_eq!(
@@ -6564,6 +6640,7 @@ mod tests {
                     source: RepresentativeControlSignal::ExternalPermit.endpoint(),
                     representative: Some(RepresentativeControlSignal::ExternalPermit),
                     sample_type: GraphTypeId::new(1),
+                    sample_type_name: "core.bool".to_owned(),
                     unit_symbol: None,
                 },
                 kind: TraceSeriesKind::Boolean,
@@ -6589,6 +6666,7 @@ mod tests {
                     source: RepresentativeControlSignal::CombinedPermit.endpoint(),
                     representative: Some(RepresentativeControlSignal::CombinedPermit),
                     sample_type: GraphTypeId::new(1),
+                    sample_type_name: "core.bool".to_owned(),
                     unit_symbol: None,
                 },
                 kind: TraceSeriesKind::Boolean,
@@ -6624,26 +6702,71 @@ mod tests {
             .flat_map(|series| series.points.iter().map(|point| point.clock))
             .collect::<BTreeSet<_>>();
         assert_eq!(graph_clock_set_label(&clocks), "2, 9");
+    }
 
-        let mut millimetres = traces[0].signal.clone();
-        millimetres.sample_type = GraphTypeId::new(2);
-        millimetres.unit_symbol = Some("mm".to_owned());
-        let mut percent = traces[1].signal.clone();
-        percent.sample_type = GraphTypeId::new(3);
-        percent.unit_symbol = Some("%".to_owned());
-        let incompatible = [
-            TraceSeries {
-                signal: millimetres,
-                kind: TraceSeriesKind::ExactRational,
-                points: Vec::new(),
+    #[test]
+    fn analog_trace_groups_overlay_only_identical_types_and_enforce_the_pane_bound() {
+        let series = |probe: u32, sample_type: u32, name: &str, unit: Option<&str>| TraceSeries {
+            signal: TraceSignal {
+                probe: GraphProbeId::new(probe),
+                name: format!("probe-{probe}"),
+                source: RepresentativeControlSignal::Error.endpoint(),
+                representative: None,
+                sample_type: GraphTypeId::new(sample_type),
+                sample_type_name: name.to_owned(),
+                unit_symbol: unit.map(str::to_owned),
             },
-            TraceSeries {
-                signal: percent,
-                kind: TraceSeriesKind::ExactRational,
-                points: Vec::new(),
-            },
+            kind: TraceSeriesKind::ExactRational,
+            points: Vec::new(),
+        };
+        let traces = vec![
+            series(1, 3, "exact.percent", Some("%")),
+            series(2, 2, "exact.mm", Some("mm")),
+            series(3, 2, "exact.mm", Some("mm")),
         ];
-        assert!(shared_analog_unit_label(&[&incompatible[0], &incompatible[1]]).is_err());
+        let groups = analog_trace_groups(&traces).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].sample_type, GraphTypeId::new(2));
+        assert_eq!(groups[0].series.len(), 2);
+        assert_eq!(groups[0].sample_type_name, "exact.mm");
+        assert_eq!(groups[0].unit_symbol, "mm");
+        assert_eq!(groups[0].label(), "mm\nexact.mm [t2]");
+        assert_eq!(groups[1].sample_type, GraphTypeId::new(3));
+        assert_eq!(groups[1].series.len(), 1);
+        assert_eq!(groups[1].sample_type_name, "exact.percent");
+        assert_eq!(groups[1].unit_symbol, "%");
+        assert_eq!(groups[1].label(), "%\nexact.percent [t3]");
+
+        let inconsistent = vec![
+            series(1, 2, "exact.mm", Some("mm")),
+            series(2, 2, "exact.mm", Some("%")),
+        ];
+        assert!(
+            analog_trace_groups(&inconsistent)
+                .unwrap_err()
+                .contains("inconsistent canonical metadata")
+        );
+        assert!(
+            analog_trace_groups(&[series(1, 2, "exact.mm", None)])
+                .unwrap_err()
+                .contains("no canonical unit")
+        );
+
+        let excessive = (1..=u32::try_from(MAXIMUM_ANALOG_TRACE_GROUPS).unwrap() + 1)
+            .map(|sample_type| {
+                series(
+                    sample_type,
+                    sample_type,
+                    &format!("exact.type-{sample_type}"),
+                    Some("u"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            analog_trace_groups(&excessive)
+                .unwrap_err()
+                .contains("bounded 32-pane trace display policy")
+        );
     }
 
     #[test]

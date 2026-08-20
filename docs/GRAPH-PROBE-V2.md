@@ -95,9 +95,15 @@ root can therefore coexist without conflating equal-looking local tick
 integers. Local clock/tick identity remains visible in cursor labels. Every
 nonempty projected Boolean or exact-rational probe, including an
 external-source output, is keyed by its canonical probe name and endpoint
-rather than a fixed reference-series whitelist. A shared analog scale accepts
-only one exact sample type; mixed rational types fail closed instead of
-overlaying incompatible units.
+rather than a fixed reference-series whitelist. Exact-rational series are
+grouped in stable sample-type-ID order. Series with the identical registered
+type share one certified-enclosure Y scale, while every distinct exact type
+receives its own pane labeled with the schema's canonical type name, type ID,
+and unit symbol. This prevents incompatible units or meanings from being
+overlaid while retaining one exact root-time axis, trigger marker, and cursor
+across every analog pane and the Boolean lanes. The display admits at most 32
+distinct analog type panes and fails explicitly above that bound; the ALGP
+sidecar and replay remain unchanged.
 
 Only a named one-way enclosure maps exact root time into egui coordinates.
 Pointer motion chooses the nearest displayed candidate but retains that
@@ -160,13 +166,13 @@ canonical 407-byte sidecar has SHA-256
 The reference match is control tick 3 / sequence 3 with the complete exact
 window from ticks 1 through 5.
 
-The first four exact-rational series render as certified analog enclosures. The
-last three Boolean series render as aligned high/low logic-analyzer lanes. Both
-views use the trigger-selected exact time window, per-probe decimation and
-retention, one cursor, and a distinct trigger marker; neither converts a
-retained value into a firmware command or physical observation. The unchanged
-reference policy projects five samples for each of seven probes (35 aggregate)
-inside ticks 1–5.
+The first four exact-rational series render as certified analog enclosures in
+their registered-type pane. The last three Boolean series render as aligned
+high/low logic-analyzer lanes. All panes use the trigger-selected exact time
+window, per-probe decimation and retention, one cursor, and a distinct trigger
+marker; none converts a retained value into a firmware command or physical
+observation. The unchanged reference policy projects five samples for each of
+seven probes (35 aggregate) inside ticks 1–5.
 
 ## Closed device claims
 
