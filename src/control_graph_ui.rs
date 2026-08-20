@@ -7669,7 +7669,12 @@ mod tests {
             },
         );
         assert!(!painted.shapes.is_empty());
+    }
 
+    #[test]
+    fn state_lane_order_and_count_are_bounded() {
+        let schema = state_trace_schema();
+        let definition = schema.value_type(STATE_TEXT).unwrap();
         let mut unordered = vec![
             TraceSeries {
                 signal: state_trace_signal(STATE_TEXT, definition.name(), 12),
