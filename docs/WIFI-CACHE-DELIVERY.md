@@ -245,10 +245,23 @@ pending request per session, so this is a bounded substitution test rather than
 an arbitrary concurrent-reordering claim. See sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
 
+The `confirmed-safety-fault` qualification now covers one canonical local
+safety stop after both participants confirm. Actor one latches the modeled
+`SafetyStop` only after returning its successful confirmation response. The
+next abort returns native `Conflict` with the exact faulted report; the browser
+retains it, does not repeat an abort to that terminal actor, and aborts actor
+two. The production run required one `faulted`/`confirmed` failure observation
+and terminated as global `faulted` with exact `faulted`/`aborted` participants
+in 389 snapshots. Fresh actors passed ordinary `complete` in 434 snapshots.
+See sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRMED-SAFETY-FAULT.md`.
+The simulator models a completed safe-output transaction, so this closes no
+physical output or safety qualification.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
 durable browser job persistence, indefinite schedule or total endpoint outage,
 authentication/bootstrap loss, arbitrary concurrent reordering or substitution
-beyond the exact one-shot cases, broader duplication, faulted or other terminal
-mixtures, live TinyBee/T-Deck Pro cached starts, electrical
+beyond the exact one-shot cases, broader duplication, other fault families or
+terminal mixtures, live TinyBee/T-Deck Pro cached starts, electrical
 simultaneity measurement, and every physical motion/safety qualification claim.

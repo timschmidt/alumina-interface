@@ -445,6 +445,23 @@ cached-job fetch and each session owns one pending request, so arbitrary
 concurrent response reordering remains outside this evidence. See sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-ABORT-STALE-RESPONSE.md`.
 
+The `cached-job-confirmed-safety-fault` expectation covers one exact terminal
+fault mixture. Actor one returns its successful `JobConfirm` response and then
+latches a simulator-modeled canonical `SafetyStop`. The browser requests stop,
+receives an authenticated native `Conflict` carrying the complete faulted
+report, retains that report before surfacing the typed failure, skips another
+abort mutation to the terminal actor, and aborts actor two. The expectation
+requires exactly one `aborting` failure with `faulted`/`confirmed` participants,
+then exact terminal global `faulted` with `faulted`/`aborted` participants,
+complete immutable cache facts, retained local cycles, zero terminal error,
+and a recovery flag. On 2026-08-19 the final production artifact passed in 389
+snapshots at epoch `43,731,500,001 ns` and local cycles `76,301,063` and
+`76,315,387`. Fresh actors passed ordinary `complete` in 434 snapshots. See
+sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-CONFIRMED-SAFETY-FAULT.md`.
+This is software-only evidence for the worker/coordinator boundary; it does not
+qualify a physical safe-output transaction.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first
@@ -454,9 +471,11 @@ request and require HTTP 401 before second dispatch. It can retain one
 successful signed response after a selected operation and substitute it for the
 next successful schedule response, or arm a bounded schedule-operation outage
 only after a selected successful response is written and then discard the exact
-next count before authentication or application. The harness has separate
-qualified and conservative-rejection expectations so an excessive causal
-interval must remain unusable instead of being mistaken for successful
+next count before authentication or application. It can also latch one
+simulator-modeled local `SafetyStop` only after a selected successful response
+has been written. The harness has separate qualified and
+conservative-rejection expectations so an excessive causal interval or an
+unexpected fault must remain unusable instead of being mistaken for successful
 recovery.
 
 At `alumina-interface` commit `0e0a53e` and sibling `alumina-firmware` simulator commit
