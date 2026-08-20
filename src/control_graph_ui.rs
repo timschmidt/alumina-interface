@@ -5053,6 +5053,15 @@ mod tests {
 
     #[test]
     fn persistence_round_trips_only_current_canonical_workspace() {
+        let canonical = ExactControlWorkspace::try_new().unwrap();
+        let canonical_persisted = canonical.persisted_workspace().unwrap();
+        let canonical_restored =
+            ExactControlWorkspace::try_new_with_persisted(Some(&canonical_persisted)).unwrap();
+        assert_eq!(
+            canonical_restored.probes.as_ref().unwrap().encoding,
+            canonical.probes.as_ref().unwrap().encoding
+        );
+
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
         assert_eq!(workspace.history.undo_len(), 1);

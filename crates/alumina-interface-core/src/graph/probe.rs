@@ -249,11 +249,16 @@ impl GraphProbeDocument {
     }
 
     /// Transactionally rebind unchanged probe endpoints to a revised
-    /// workspace. Every endpoint and exact value type must remain valid.
+    /// workspace. Every endpoint and exact value type must remain valid. An
+    /// identical workspace identity is an exact no-op and does not consume a
+    /// document revision.
     pub fn replace_workspace(
         &mut self,
         workspace: &GraphWorkspaceDocument,
     ) -> Result<(), GraphProbeError> {
+        if workspace_identity(workspace)? == self.workspace_digest {
+            return Ok(());
+        }
         let revision = self
             .revision
             .checked_add(1)
@@ -914,6 +919,9 @@ mod tests {
     fn probe_mutation_and_workspace_rebinding_are_transactional() {
         let mut workspace = workspace();
         let mut document = probes(&workspace);
+        let unchanged = document.clone();
+        document.replace_workspace(&workspace).unwrap();
+        assert_eq!(document, unchanged);
         let old_digest = document.workspace_digest();
         workspace.move_node(GraphNodeId::new(7), 800, 50).unwrap();
         document.replace_workspace(&workspace).unwrap();

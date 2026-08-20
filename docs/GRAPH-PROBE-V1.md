@@ -39,6 +39,8 @@ before a probe can influence presentation.
 Adding and removing probes advances the sidecar revision and never reuses a
 deleted identity. A workspace replacement can retain probes only when every
 endpoint and exact type survives; otherwise the operation returns no candidate.
+Rebinding to the identical canonical workspace is an exact no-op and does not
+consume a revision or change sidecar identity.
 The UI treats such failure as sidecar detachment without weakening or rejecting
 the underlying `ALGW` draft.
 
