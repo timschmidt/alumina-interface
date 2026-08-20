@@ -48,11 +48,11 @@ series. Adding a valid output with no samples in the immutable reference `ALGT`
 still records the bounded authoring intent but invents no data.
 
 The reference sidecar binds error, integral-prior, clamped-controller,
-permit-gated-output, measurement-within-range, and combined-permit endpoints.
-It is 348 bytes with SHA-256
-`5e1dcccb37920329208fd9c97bc08ea8c909064c061e6d8c95e265cdbe15c4b5`.
+permit-gated-output, measurement-within-range, combined-permit, and
+independently resampled external-permit endpoints. It is 391 bytes with SHA-256
+`c2e2e41cfd3ef8d89605d188a884263ebac57d08907cfa5f38815d63cf323d46`.
 The first four exact-rational series render as certified analog enclosures. The
-last two Boolean series render as aligned high/low logic-analyzer lanes. Both
+last three Boolean series render as aligned high/low logic-analyzer lanes. Both
 views use one exact sample-time grid and cursor; neither converts a retained
 value into a firmware command or physical observation.
 

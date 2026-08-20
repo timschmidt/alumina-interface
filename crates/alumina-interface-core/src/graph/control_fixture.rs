@@ -31,6 +31,8 @@ pub enum RepresentativeControlSignal {
     IntegralPrior,
     /// Controller output after the exact inclusive clamp.
     ClampedController,
+    /// External safety permit after its audited control-clock transition.
+    ExternalPermit,
     /// Exact inclusive measurement-range interlock result.
     MeasurementWithinRange,
     /// Conjunction of the external permit and measurement-range interlock.
@@ -46,6 +48,7 @@ impl RepresentativeControlSignal {
             Self::Error => endpoint(7, 3),
             Self::IntegralPrior => endpoint(9, 2),
             Self::ClampedController => endpoint(17, 2),
+            Self::ExternalPermit => endpoint(6, 2),
             Self::MeasurementWithinRange => endpoint(20, 2),
             Self::CombinedPermit => endpoint(21, 3),
             Self::PermittedOutput => endpoint(18, 3),
@@ -58,6 +61,7 @@ impl RepresentativeControlSignal {
             Self::Error => "error",
             Self::IntegralPrior => "integral prior state",
             Self::ClampedController => "clamped controller",
+            Self::ExternalPermit => "external permit",
             Self::MeasurementWithinRange => "measurement in range",
             Self::CombinedPermit => "combined permit",
             Self::PermittedOutput => "permit-gated output",
@@ -925,7 +929,10 @@ fn samples(document: &GraphDocument) -> Result<Vec<ExternalStreamSample>, GraphS
             endpoint(3, 1),
             tick,
             300 + tick,
-            boolean(document.schema(), control_tick < 3)?,
+            // The range interlock falls at control tick 3; retaining this
+            // independent permit through that tick makes the stop cause
+            // unambiguous in the representative logic-analyzer trace.
+            boolean(document.schema(), control_tick < 4)?,
         ));
     }
     Ok(samples)
@@ -1019,6 +1026,10 @@ fn multirate_exact_pid_and_interlock_are_visible_deterministic_and_replayable() 
         [5, 5, 4, 0, 0, 0].map(Rational::from)
     );
     assert_eq!(
+        boolean_trace(simulation, endpoint(6, 2)),
+        [true, true, true, true, false, false]
+    );
+    assert_eq!(
         boolean_trace(simulation, endpoint(20, 2)),
         [true, true, true, false, false, false]
     );
@@ -1048,9 +1059,9 @@ fn multirate_exact_pid_and_interlock_are_visible_deterministic_and_replayable() 
     assert_eq!(
         trace.digest().0,
         [
-            0xe2, 0xf8, 0xa0, 0xf2, 0x0b, 0x3e, 0x5f, 0x9f, 0xdf, 0xc1, 0x2c, 0x39, 0x4e, 0x1e,
-            0x32, 0x5d, 0x7b, 0x65, 0x24, 0x3e, 0xfa, 0xd8, 0xc9, 0xc7, 0xf5, 0x58, 0xf8, 0x84,
-            0x5c, 0x96, 0x5f, 0xe3,
+            0x1a, 0x1f, 0x7e, 0x0e, 0x80, 0xe2, 0x4f, 0x11, 0x27, 0x87, 0xbf, 0xcc, 0x9d, 0x5e,
+            0x04, 0xc2, 0x01, 0x2a, 0x51, 0x22, 0xa9, 0x01, 0x3d, 0x14, 0xc9, 0x98, 0xfd, 0x6f,
+            0xbd, 0xc9, 0x5f, 0x72,
         ]
     );
     let replay = super::replay_graph_trace(trace.bytes(), document, registry, limits).unwrap();

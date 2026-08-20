@@ -72,13 +72,14 @@ const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
 ];
 #[cfg(target_arch = "wasm32")]
 pub(crate) const WORKSPACE_STORAGE_KEY: &str = "alumina.graph-workspace.algw.v1";
-const SIGNALS: [RepresentativeControlSignal; 6] = [
+const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
     RepresentativeControlSignal::ClampedController,
     RepresentativeControlSignal::PermittedOutput,
     RepresentativeControlSignal::MeasurementWithinRange,
     RepresentativeControlSignal::CombinedPermit,
+    RepresentativeControlSignal::ExternalPermit,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2839,10 +2840,11 @@ impl ExactControlWorkspace {
             .iter()
             .filter(|series| series.kind == TraceSeriesKind::ExactRational)
             .collect::<Vec<_>>();
-        let digital = traces
+        let mut digital = traces
             .iter()
             .filter(|series| series.kind == TraceSeriesKind::Boolean)
             .collect::<Vec<_>>();
+        digital.sort_by_key(|series| digital_signal_order(series.signal));
         let analog_height = if analog.is_empty() { 0.0 } else { 160.0 };
         let digital_height = display_index(digital.len()) * 36.0;
         let section_gap = if analog.is_empty() || digital.is_empty() {
@@ -2956,7 +2958,7 @@ impl ExactControlWorkspace {
 
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("tick {}", self.cursor_tick));
-            for series in &traces {
+            for series in analog.iter().chain(digital.iter()).copied() {
                 if let Some(point) = series
                     .points
                     .iter()
@@ -3662,6 +3664,7 @@ fn probe_name(source: WireEndpoint) -> String {
                 RepresentativeControlSignal::Error => "error".to_owned(),
                 RepresentativeControlSignal::IntegralPrior => "integral-prior".to_owned(),
                 RepresentativeControlSignal::ClampedController => "controller-clamped".to_owned(),
+                RepresentativeControlSignal::ExternalPermit => "external-permit".to_owned(),
                 RepresentativeControlSignal::MeasurementWithinRange => {
                     "measurement-in-range".to_owned()
                 }
@@ -3686,6 +3689,7 @@ fn representative_component(
                 RepresentativeControlSignal::Error => "error",
                 RepresentativeControlSignal::IntegralPrior => "integral_prior",
                 RepresentativeControlSignal::ClampedController => "clamped_controller",
+                RepresentativeControlSignal::ExternalPermit => "external_permit",
                 RepresentativeControlSignal::MeasurementWithinRange => "measurement_within_range",
                 RepresentativeControlSignal::CombinedPermit => "combined_permit",
                 RepresentativeControlSignal::PermittedOutput => "permitted_output",
@@ -3726,8 +3730,9 @@ fn representative_component(
         (8, "integral_prior_indicator", 2, 84),
         (9, "clamped_controller_indicator", 3, 148),
         (10, "permitted_output_indicator", 4, 212),
-        (13, "measurement_within_range_indicator", 5, 276),
-        (14, "combined_permit_indicator", 6, 340),
+        (13, "measurement_within_range_indicator", 5, 340),
+        (14, "combined_permit_indicator", 6, 404),
+        (15, "external_permit_indicator", 7, 276),
     ];
     panel_items.extend(output_specs.into_iter().map(|(id, name, output, y)| {
         GraphFrontPanelItem::new(
@@ -3743,8 +3748,8 @@ fn representative_component(
         1,
         "control.reference_pid",
         1,
-        7,
-        15,
+        8,
+        16,
         workspace.clone(),
         Vec::new(),
         outputs,
@@ -4256,6 +4261,18 @@ fn trace_cursor_label(signal: RepresentativeControlSignal, point: &TracePoint) -
     }
 }
 
+const fn digital_signal_order(signal: RepresentativeControlSignal) -> u8 {
+    match signal {
+        RepresentativeControlSignal::ExternalPermit => 0,
+        RepresentativeControlSignal::MeasurementWithinRange => 1,
+        RepresentativeControlSignal::CombinedPermit => 2,
+        RepresentativeControlSignal::Error
+        | RepresentativeControlSignal::IntegralPrior
+        | RepresentativeControlSignal::ClampedController
+        | RepresentativeControlSignal::PermittedOutput => u8::MAX,
+    }
+}
+
 fn paint_trace_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -4412,6 +4429,7 @@ const fn signal_color(signal: RepresentativeControlSignal) -> egui::Color32 {
         RepresentativeControlSignal::Error => egui::Color32::from_rgb(247, 196, 86),
         RepresentativeControlSignal::IntegralPrior => egui::Color32::from_rgb(91, 205, 224),
         RepresentativeControlSignal::ClampedController => egui::Color32::from_rgb(102, 221, 142),
+        RepresentativeControlSignal::ExternalPermit => egui::Color32::from_rgb(255, 207, 92),
         RepresentativeControlSignal::MeasurementWithinRange => {
             egui::Color32::from_rgb(249, 153, 82)
         }
@@ -4500,14 +4518,14 @@ mod tests {
         assert_eq!(replay.encoding(), &workspace.workspace_encoding);
         assert!(workspace.reference_trace_is_current());
         let probes = workspace.probes.as_ref().unwrap();
-        assert_eq!(probes.document.probes().len(), 6);
-        assert_eq!(probes.encoding.bytes().len(), 348);
+        assert_eq!(probes.document.probes().len(), 7);
+        assert_eq!(probes.encoding.bytes().len(), 391);
         assert_eq!(
             probes.encoding.digest().0,
             [
-                0x5e, 0x1d, 0xcc, 0xcb, 0x37, 0x92, 0x03, 0x29, 0x20, 0x8f, 0xd9, 0xc9, 0x7b, 0xc0,
-                0x8e, 0xa8, 0xc9, 0x09, 0x06, 0x4c, 0x06, 0x1e, 0x6d, 0x8c, 0x95, 0xe2, 0x65, 0xcd,
-                0xbe, 0x15, 0xc4, 0xb5,
+                0xc2, 0xe2, 0xe4, 0x1c, 0xfd, 0x3e, 0xf8, 0xd8, 0x96, 0x05, 0xd1, 0x88, 0xa8, 0x84,
+                0x26, 0x3e, 0xba, 0xc5, 0x7d, 0x08, 0x90, 0x7c, 0xfa, 0x5f, 0x38, 0x81, 0x5d, 0x63,
+                0xcf, 0x32, 0x3d, 0x46,
             ]
         );
         let probe_replay = replay_graph_probes(
@@ -4530,7 +4548,7 @@ mod tests {
     }
 
     #[test]
-    fn representative_trace_retains_four_analog_and_two_boolean_series() {
+    fn representative_trace_retains_four_analog_and_three_causal_boolean_series() {
         let workspace = ExactControlWorkspace::try_new().unwrap();
         assert_eq!(workspace.traces.len(), SIGNALS.len());
         assert!(
@@ -4553,7 +4571,40 @@ mod tests {
                 .iter()
                 .filter(|series| series.kind == TraceSeriesKind::Boolean)
                 .count(),
-            2
+            3
+        );
+        let mut digital_order = workspace
+            .traces
+            .iter()
+            .filter(|series| series.kind == TraceSeriesKind::Boolean)
+            .map(|series| series.signal)
+            .collect::<Vec<_>>();
+        digital_order.sort_by_key(|signal| digital_signal_order(*signal));
+        assert_eq!(
+            digital_order,
+            [
+                RepresentativeControlSignal::ExternalPermit,
+                RepresentativeControlSignal::MeasurementWithinRange,
+                RepresentativeControlSignal::CombinedPermit,
+            ]
+        );
+        let external = workspace
+            .traces
+            .iter()
+            .find(|series| series.signal == RepresentativeControlSignal::ExternalPermit)
+            .unwrap();
+        assert_eq!(
+            external
+                .points
+                .iter()
+                .map(|point| match &point.value {
+                    TracePointValue::Boolean(value) => *value,
+                    TracePointValue::ExactRational { .. } => {
+                        panic!("external permit trace changed value kind")
+                    }
+                })
+                .collect::<Vec<_>>(),
+            [true, true, true, true, false, false]
         );
         let range = workspace
             .traces
@@ -4716,18 +4767,18 @@ mod tests {
     fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let initial = workspace.component.as_ref().unwrap();
-        assert_eq!(initial.encoding.bytes().len(), 4_734);
+        assert_eq!(initial.encoding.bytes().len(), 4_815);
         assert_eq!(
             initial.encoding.digest().0,
             [
-                0xc3, 0x09, 0xdb, 0x77, 0x80, 0xac, 0x40, 0x00, 0x6a, 0x24, 0x3a, 0x50, 0x5d, 0x36,
-                0x50, 0x86, 0x5b, 0x87, 0x83, 0xc3, 0x0a, 0x0a, 0xc3, 0x1b, 0x62, 0xae, 0xa9, 0x5d,
-                0xbc, 0x1f, 0xce, 0x11,
+                0x10, 0xe6, 0x49, 0x8e, 0xc3, 0x6a, 0xfc, 0x37, 0x7f, 0x13, 0x8c, 0xac, 0xb5, 0xc6,
+                0xaf, 0xe2, 0x09, 0x1c, 0x40, 0x74, 0x9e, 0xa3, 0xc9, 0xe9, 0xd4, 0xbb, 0xa8, 0x92,
+                0x5a, 0x4f, 0x02, 0x28,
             ]
         );
         assert!(initial.document.inputs().is_empty());
-        assert_eq!(initial.document.outputs().len(), 6);
-        assert_eq!(initial.document.panel_items().len(), 14);
+        assert_eq!(initial.document.outputs().len(), 7);
+        assert_eq!(initial.document.panel_items().len(), 15);
         assert_eq!(
             initial.document.workspace_digest(),
             workspace.workspace_encoding.digest()
@@ -4742,13 +4793,13 @@ mod tests {
         assert_eq!(replay.document(), &initial.document);
         assert_eq!(replay.encoding(), &initial.encoding);
         assert_eq!(initial.hierarchy.document.instances().len(), 1);
-        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_706);
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_814);
         assert_eq!(
             initial.hierarchy.encoding.digest().0,
             [
-                0xe4, 0x83, 0x56, 0x14, 0xa0, 0x85, 0x7c, 0xd6, 0x2a, 0x4b, 0x78, 0x76, 0xcf, 0xd0,
-                0xe9, 0xe3, 0x36, 0x75, 0x1e, 0x45, 0x86, 0x63, 0x8d, 0x7b, 0x8d, 0x51, 0x87, 0xfa,
-                0xe0, 0x59, 0xd8, 0xdd,
+                0x23, 0x26, 0x03, 0xde, 0x0d, 0x4a, 0x17, 0xff, 0x45, 0xb7, 0xbd, 0xa1, 0xc3, 0x63,
+                0x74, 0x5b, 0x31, 0x64, 0x05, 0xc9, 0x9f, 0xbd, 0xbd, 0xc4, 0x43, 0x47, 0xfa, 0x12,
+                0xbd, 0x00, 0xe0, 0xc8,
             ]
         );
         assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_755);
@@ -5142,7 +5193,7 @@ mod tests {
         }
         assert_eq!(
             workspace.probes.as_ref().unwrap().document.probes().len(),
-            2
+            3
         );
         let digital_only = context.run(
             egui::RawInput {

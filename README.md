@@ -212,8 +212,8 @@ prototype.
   the same canonical result regardless of caller sample order.
 - The native and browser shells construct that same fallible core fixture and
   open a bounded workspace by default: semantic current-tick layers, explicit
-  feedback routes, typed ports, exact parameters/state, and six mixed-signal
-  control traces: four exact-rational signals and two Boolean interlock lanes.
+  feedback routes, typed ports, exact parameters/state, and seven mixed-signal
+  control traces: four exact-rational signals and three Boolean interlock lanes.
   Canonical `ALGW` V1 embeds the unchanged `ALGR` plus integer canvas positions
   and monotonic ID cursors. Its 13-entry fixed-schema palette supports
   monotonic node creation, atomic node/incident-wire deletion, node moves,
@@ -225,9 +225,9 @@ prototype.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible
-  reference component supplies eight exact PID/interlock controls and six exact
-  replay indicators (four rational and two Boolean); invalidating a binding
-  detaches the panel without
+  reference component supplies eight exact PID/interlock controls and seven
+  exact replay indicators (four rational and three Boolean); invalidating a
+  binding detaches the panel without
   weakening or rejecting the underlying workspace draft.
   Canonical `ALGH` V1 then binds a collapsed authoring instance to that exact
   component digest and deterministically flattens it to an ordinary audited

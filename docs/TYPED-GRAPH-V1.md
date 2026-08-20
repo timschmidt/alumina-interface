@@ -220,15 +220,19 @@ The coefficients are percentage values with exact `1/100` unit scale. Its
 integral and derivative factors are explicitly pre-discretized for that clock;
 the simulator supplies no hidden or floating-point `dt`. Its
 integral prior-state trace is `0, 3, 5, 6, 6, 6` mm, the clamped controller trace
-is `5, 5, 4, 2, 3, 3` mm, and dropping permit forces the final trace to
-`5, 5, 4, 0, 0, 0` mm. Reversing every caller sample reproduces the same
-simulation, and `ALGT` replay regenerates the complete trace byte for byte.
+is `5, 5, 4, 2, 3, 3` mm, and the exact interlock forces the final trace to
+`5, 5, 4, 0, 0, 0` mm. The independently resampled external permit is
+`[true, true, true, true, false, false]`; the measurement-range and combined
+permit results are `[true, true, true, false, false, false]`, visibly
+attributing the tick-3 stop to the range predicate. Reversing every caller
+sample reproduces the same simulation, and `ALGT` replay regenerates the
+complete trace byte for byte.
 The canonical fixture graph identity is
 `96a3348264a9b65d267b45f9a6419a44ee60473fd961abcf4436295e10b3735f`;
 its fixed semantic/implementation registry identity is
 `fc68d37f279782c5a5368bc0e44aa695a3b2babbfaf967b09cf4fc75287eae83`.
 The 8,292-byte trace has SHA-256
-`e2f8a0f20b3e5f9fdfc12c394e1e325d7b65243efad8c9c7f558f8845c965fe3`.
+`1a1f7e0e80e24f112787bfcc9d5e04c2012a5122a9013d14c998fd6fbdc95f72`.
 
 The fixture is one fallible public core construction shared by its regression
 test and the native/WASM application; the UI does not reproduce its values or
@@ -251,10 +255,11 @@ state facts. Current exact-rational parameters can be entered as bounded
 Hyperreal text and are normalized into the canonical graph with no floating
 conversion; Boolean, measurement-interval, canonical integer, and text scalar
 shapes share that editor boundary, while composite and identity-bearing values
-remain read-only. Six mixed-signal traces show error, integral prior state,
-clamped controller, permit-gated output, measurement-within-range, and combined
-permit. The first four render as certified analog enclosures and the final two
-as aligned Boolean logic-analyzer lanes on the same exact time grid. Egui
+remain read-only. Seven mixed-signal traces show error, integral prior state,
+clamped controller, permit-gated output, external permit,
+measurement-within-range, and combined permit. The first four render as
+certified analog enclosures and the final three as aligned Boolean
+logic-analyzer lanes on the same exact time grid. Egui
 coordinates and analog plot labels are named display projections from
 certified finite `f64` enclosures; the shared cursor displays the retained exact
 rational or Boolean value. Headless core-edit and full-frame tests exercise the
@@ -385,9 +390,9 @@ IDs/names and capture-retention ceilings to exact output endpoints and one
 canonical `ALGW` digest. Replay resolves output direction and exact value type,
 enforces caller and embedded limits, and requires byte-for-byte canonical
 re-encoding. Probe add/remove/rebind operations are transactional, never reuse
-IDs, and never mutate the graph. The 348-byte six-series reference sidecar has
+IDs, and never mutate the graph. The 391-byte seven-series reference sidecar has
 SHA-256
-`5e1dcccb37920329208fd9c97bc08ea8c909064c061e6d8c95e265cdbe15c4b5`.
+`c2e2e41cfd3ef8d89605d188a884263ebac57d08907cfa5f38815d63cf323d46`.
 It filters immutable host trace series only; it grants no firmware read,
 telemetry, trigger, or deployment authority. See
 [`GRAPH-PROBE-V1.md`](GRAPH-PROBE-V1.md).
