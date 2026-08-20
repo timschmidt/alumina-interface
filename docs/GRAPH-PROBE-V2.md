@@ -68,6 +68,16 @@ exact no-op. A workspace replacement can retain probes and trigger only when
 every endpoint and exact value type survives. Rebinding to the identical
 canonical workspace is also an exact no-op.
 
+The UI can also transactionally replace one retained probe's name, maximum
+sample count, and event-ordinal stride while preserving its stable identity,
+source endpoint, and resolved value type. Names remain 1–64 ASCII bytes,
+begin with a letter, and contain only letters, digits, `_`, `-`, or `.`; names
+and source endpoints remain unique. Capture values remain nonzero and within
+the sidecar's embedded one-million-sample/stride ceilings. Shrinking the active
+trigger probe below its complete pre/current/post window rejects the entire
+metadata edit. Reapplying identical metadata neither advances revision nor
+changes canonical bytes.
+
 Probe edits do not mutate the graph. The visible PID/interlock trace is filtered
 by attached endpoints, so removing a probe removes only that plotted series.
 Adding a valid output with no samples in the immutable reference `ALGT` still
@@ -79,14 +89,18 @@ before committing either, so a malformed sidecar or workspace-identity mismatch
 falls back without partial state. Native and browser `.algp` exchange uses the
 same 2 MiB byte admission and canonical replay boundary; import can replace
 only the sidecar after proving the current `ALGW` identity, and importing
-identical bytes is an exact no-op. Probe and trigger identity changes mark the
-pair dirty; canonical no-op edits do not. If a graph edit removes or retypes an
+identical bytes is an exact no-op. Probe, capture-policy, and trigger identity
+changes mark the pair dirty; canonical no-op edits do not. If a graph edit removes or retypes an
 observed endpoint, the incompatible sidecar is visibly and atomically replaced
 with an empty sidecar bound to the revised workspace rather than persisting
 unbound probe intent. Ephemeral undo/redo retains complete canonical ALGW/ALGP
 pairs, so undo restores the exact prior probes, trigger, revisions, and graph
 binding even after such an invalidation; redo restores the exact revised pair.
-Probe/trigger edits and canonical ALGP imports are pair-history operations too.
+Probe metadata/trigger edits and canonical ALGP imports are pair-history
+operations too. Per-probe edit fields are transient UI state: unrelated
+trigger or workspace-binding changes preserve a draft, while history
+navigation and file/storage restore reset fields from the replayed canonical
+sidecar.
 
 The reference sidecar binds error, integral-prior, clamped-controller,
 permit-gated-output, measurement-within-range, combined-permit, and independently

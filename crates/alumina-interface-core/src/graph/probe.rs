@@ -29,7 +29,8 @@ pub const GRAPH_PROBE_VERSION: u16 = 2;
 
 const GRAPH_PROBE_FLAGS: u16 = 0;
 const PROBE_LIMIT_FIELD_COUNT: usize = 4;
-const PROBE_NAME_BYTES: usize = 64;
+/// Maximum canonical ASCII bytes in one probe name.
+pub const GRAPH_PROBE_NAME_BYTES: usize = 64;
 const EXHAUSTED_U32_CURSOR: u64 = u32::MAX as u64 + 1;
 
 /// Caller-owned and embedded bounds for one probe sidecar.
@@ -505,6 +506,46 @@ impl GraphProbeDocument {
             revision,
             self.next_probe_id,
             trigger,
+            workspace,
+            probes,
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally replace one probe's presentation name and bounded host
+    /// capture policy while preserving its stable identity, source endpoint,
+    /// and resolved value type. Reapplying identical metadata is an exact
+    /// no-op. Any duplicate/malformed name, invalid capture bound, or active
+    /// trigger window that no longer fits rejects without mutation.
+    pub fn replace_probe_metadata(
+        &mut self,
+        workspace: &GraphWorkspaceDocument,
+        id: GraphProbeId,
+        name: impl Into<String>,
+        capture: GraphProbeCapture,
+    ) -> Result<(), GraphProbeError> {
+        self.require_workspace(workspace)?;
+        let index = self
+            .probes
+            .binary_search_by_key(&id, GraphProbeDefinition::id)
+            .map_err(|_| GraphProbeError::UnknownProbe(id))?;
+        let name = name.into();
+        let current = &self.probes[index];
+        if current.name == name && current.capture == capture {
+            return Ok(());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphProbeError::RevisionOverflow)?;
+        let mut probes = self.probes.clone();
+        probes[index] = GraphProbeDefinition::new(id, name, current.source, capture);
+        let candidate = Self::try_new(
+            self.limits,
+            revision,
+            self.next_probe_id,
+            self.trigger,
             workspace,
             probes,
         )?;
@@ -1180,7 +1221,7 @@ fn validate_identity_cursor(
 fn valid_probe_name(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= PROBE_NAME_BYTES
+        && bytes.len() <= GRAPH_PROBE_NAME_BYTES
         && bytes[0].is_ascii_alphabetic()
         && bytes
             .iter()
@@ -1310,7 +1351,7 @@ impl<'a> Decoder<'a> {
     fn string(&mut self) -> Result<String, GraphProbeError> {
         let length = usize::try_from(self.u32()?)
             .map_err(|_| GraphProbeError::IntegerOverflow("name length"))?;
-        if length > PROBE_NAME_BYTES {
+        if length > GRAPH_PROBE_NAME_BYTES {
             return Err(GraphProbeError::LimitExceeded("name length"));
         }
         let value = str::from_utf8(self.take(length)?).map_err(|_| GraphProbeError::InvalidUtf8)?;
@@ -1473,6 +1514,103 @@ mod tests {
             ))
         );
         assert_eq!(document, before);
+    }
+
+    #[test]
+    fn probe_metadata_replacement_is_transactional_and_noop_aware() {
+        let workspace = workspace();
+        let mut document = triggered_probes(&workspace);
+        let initial_revision = document.revision();
+        document
+            .replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(2),
+                "control-error",
+                GraphProbeCapture::new(128, 3),
+            )
+            .unwrap();
+        let replaced = document.probe(GraphProbeId::new(2)).unwrap();
+        assert_eq!(replaced.name(), "control-error");
+        assert_eq!(replaced.capture(), GraphProbeCapture::new(128, 3));
+        assert_eq!(
+            replaced.source(),
+            RepresentativeControlSignal::Error.endpoint()
+        );
+        assert_eq!(document.revision(), initial_revision + 1);
+        let canonical = encode_graph_probes(&document).unwrap();
+        assert_eq!(
+            replay_graph_probes(
+                canonical.bytes(),
+                &workspace,
+                GraphProbeLimits::interactive()
+            )
+            .unwrap()
+            .document(),
+            &document
+        );
+
+        let unchanged = document.clone();
+        document
+            .replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(2),
+                "control-error",
+                GraphProbeCapture::new(128, 3),
+            )
+            .unwrap();
+        assert_eq!(document, unchanged);
+
+        assert_eq!(
+            document.replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(2),
+                "measurement-in-range",
+                GraphProbeCapture::new(128, 3),
+            ),
+            Err(GraphProbeError::DuplicateName)
+        );
+        assert_eq!(document, unchanged);
+        assert_eq!(
+            document.replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(2),
+                "2-invalid",
+                GraphProbeCapture::new(128, 3),
+            ),
+            Err(GraphProbeError::InvalidName)
+        );
+        assert_eq!(document, unchanged);
+        assert_eq!(
+            document.replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(2),
+                "control-error",
+                GraphProbeCapture::new(0, 3),
+            ),
+            Err(GraphProbeError::LimitExceeded("sample count"))
+        );
+        assert_eq!(document, unchanged);
+        assert_eq!(
+            document.replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(2),
+                "control-error",
+                GraphProbeCapture::new(128, 0),
+            ),
+            Err(GraphProbeError::LimitExceeded("sample stride"))
+        );
+        assert_eq!(document, unchanged);
+
+        assert_eq!(
+            document.replace_probe_metadata(
+                &workspace,
+                GraphProbeId::new(1),
+                "measurement-in-range",
+                GraphProbeCapture::new(4, 1),
+            ),
+            Err(GraphProbeError::LimitExceeded("trigger window"))
+        );
+        assert_eq!(document, unchanged);
     }
 
     #[test]

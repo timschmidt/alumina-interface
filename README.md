@@ -220,8 +220,10 @@ prototype.
   typed wire edits, and bounded exact scalar parameter editing. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
   Canonical replay-backed undo/redo retains bounded complete `ALGW`/`ALGP` pair
-  snapshots across graph, probe, trigger, and sidecar-import edits. Browser
-  local storage atomically preserves only the exact current pair, and
+  snapshots across graph, probe, trigger, and sidecar-import edits. Per-probe
+  canonical name, retained-sample, and decimation-stride editors preserve
+  stable source/type identity and reject any capture policy that cannot hold
+  its active trigger window. Browser local storage atomically preserves only the exact current pair, and
   native/browser `.algw` plus `.algp` exchange imports only after bounded full
   replay, exact sidecar binding, and audited UI admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged

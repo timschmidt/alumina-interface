@@ -263,11 +263,15 @@ logic-analyzer lanes on the same exact time grid. Egui
 coordinates and analog plot labels are named display projections from
 certified finite `f64` enclosures; the shared cursor displays the retained exact
 rational or Boolean value. Headless core-edit and full-frame tests exercise the
-same native/browser paths.
+same native/browser paths. Each probe row now exposes bounded canonical name,
+retained-sample, and event-stride fields. Applying them transactionally retains
+probe/source/type identity, rejects duplicate or malformed names and capture
+policies that cannot contain the active trigger window, and treats exact
+metadata reapplication as a no-op.
 
 Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
 including the sidecar's exact external-workspace binding, before mutating
-navigation state. Graph, probe, trigger, and ALGP-import changes share this
+navigation state. Graph, probe metadata, trigger, and ALGP-import changes share this
 history; exact no-ops do not consume a snapshot. Browser origin-local storage
 preserves only the current pair in one versioned lowercase-hex value, while
 history remains ephemeral. Browser `.algw`/`.algp` upload and download and the

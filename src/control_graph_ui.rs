@@ -17,7 +17,7 @@ use alumina_diagnostics::{
 use alumina_interface_core::graph::{
     CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
     CanonicalGraphWorkspaceEncoding, ClockDefinition, ClockKind, ExecutionDomain,
-    ExecutionDomainSet, GraphAnalysisLimits, GraphCapabilityCatalogLimits,
+    ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits, GraphCapabilityCatalogLimits,
     GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInstance,
     GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentNodeKind, GraphDeploymentRegistry,
@@ -165,6 +165,31 @@ struct HierarchyPackage {
 struct ProbePackage {
     document: GraphProbeDocument,
     encoding: CanonicalGraphProbeEncoding,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProbeEditDraft {
+    name: String,
+    maximum_samples: u32,
+    sample_stride: u32,
+}
+
+impl ProbeEditDraft {
+    fn from_probe(probe: &GraphProbeDefinition) -> Self {
+        Self {
+            name: probe.name().to_owned(),
+            maximum_samples: probe.capture().maximum_samples(),
+            sample_stride: probe.capture().sample_stride(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProbeUiAction {
+    Remove(GraphProbeId),
+    SetTrigger(GraphProbeId, GraphProbeEdge),
+    ApplyMetadata(GraphProbeId, ProbeEditDraft),
+    ResetMetadata(GraphProbeId),
 }
 
 #[derive(Clone, Debug)]
@@ -1150,6 +1175,7 @@ pub(crate) struct ExactControlWorkspace {
     palette: Vec<NodePaletteEntry>,
     palette_index: usize,
     parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
+    probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     selected_node: Option<GraphNodeId>,
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
@@ -1209,6 +1235,7 @@ impl ExactControlWorkspace {
             palette,
             palette_index: 0,
             parameter_drafts: BTreeMap::new(),
+            probe_drafts: BTreeMap::new(),
             selected_node: None,
             pending_source: None,
             drag: None,
@@ -1222,6 +1249,7 @@ impl ExactControlWorkspace {
             trigger_post_samples: trigger.posttrigger_samples(),
             cursor_tick,
         };
+        result.reset_probe_drafts();
         if let Some(persisted) = persisted {
             match decode_persisted_workspace_pair(
                 persisted,
@@ -1672,6 +1700,7 @@ impl ExactControlWorkspace {
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
+        self.probe_drafts.clear();
         self.selected_node = self
             .selected_node
             .filter(|node| self.workspace.graph().node(*node).is_some());
@@ -2652,6 +2681,7 @@ impl ExactControlWorkspace {
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
+        self.probe_drafts.clear();
         self.refresh_component();
         self.replace_probe_package(probes);
         self.reset_cursor_to_trigger();
@@ -2713,6 +2743,7 @@ impl ExactControlWorkspace {
                 }
                 Err(empty_error) => {
                     self.probes = None;
+                    self.probe_drafts.clear();
                     self.probe_status = format!(
                         "ALGP probes detached from this draft without affecting ALGW: {error}; empty sidecar failed: {empty_error}"
                     );
@@ -2730,15 +2761,56 @@ impl ExactControlWorkspace {
             self.trigger_pre_samples = trigger.pretrigger_samples();
             self.trigger_post_samples = trigger.posttrigger_samples();
         }
+        self.reconcile_probe_drafts(&probes.document);
         self.probes = Some(probes);
         if changed {
             self.persistence_dirty = true;
             self.persistence_attempted = false;
         }
-        if let Ok(GraphProbeTriggerResolution::Matched(matched)) = self.trigger_resolution() {
-            self.cursor_tick = matched.trigger_tick();
-        }
+        self.reset_cursor_to_trigger();
         changed
+    }
+
+    fn reset_probe_drafts(&mut self) {
+        self.probe_drafts.clear();
+        if let Some(probes) = &self.probes {
+            self.probe_drafts.extend(
+                probes
+                    .document
+                    .probes()
+                    .iter()
+                    .map(|probe| (probe.id(), ProbeEditDraft::from_probe(probe))),
+            );
+        }
+    }
+
+    fn reconcile_probe_drafts(&mut self, next: &GraphProbeDocument) {
+        let prior_metadata = self
+            .probes
+            .as_ref()
+            .map(|probes| {
+                probes
+                    .document
+                    .probes()
+                    .iter()
+                    .map(|probe| (probe.id(), ProbeEditDraft::from_probe(probe)))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let mut prior_drafts = std::mem::take(&mut self.probe_drafts);
+        self.probe_drafts = next
+            .probes()
+            .iter()
+            .map(|probe| {
+                let canonical = ProbeEditDraft::from_probe(probe);
+                let draft = if prior_metadata.get(&probe.id()) == Some(&canonical) {
+                    prior_drafts.remove(&probe.id()).unwrap_or(canonical)
+                } else {
+                    canonical
+                };
+                (probe.id(), draft)
+            })
+            .collect();
     }
 
     fn commit_probe_package(&mut self, probes: ProbePackage) -> Result<bool, String> {
@@ -2774,6 +2846,7 @@ impl ExactControlWorkspace {
             self.pending_source = None;
             self.drag = None;
             self.parameter_drafts.clear();
+            self.reset_probe_drafts();
             Ok(())
         } else {
             Err(self.edit_status.clone())
@@ -2788,6 +2861,7 @@ impl ExactControlWorkspace {
             encoding: replay.encoding().clone(),
         };
         let changed = self.commit_probe_package(probes)?;
+        self.reset_probe_drafts();
         if changed {
             "imported canonical ALGP after exact current-workspace replay"
                 .clone_into(&mut self.probe_status);
@@ -2902,46 +2976,115 @@ impl ExactControlWorkspace {
             "These saved bindings select exact graph outputs, bounded host retention, and one replay-only Boolean edge trigger. They do not grant GPIO access, telemetry bandwidth, device-trigger configuration, or firmware execution authority.",
         );
 
-        let mut remove = None;
-        let mut set_trigger = None;
         let clear_trigger = self.show_probe_trigger_controls(ui);
-        if let Some(probes) = &self.probes {
-            for probe in probes.document.probes() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(format!(
-                        "p{} {} ← #{}.{} · t{} · ≤{} values / stride {}",
-                        probe.id().get(),
-                        probe.name(),
-                        probe.source().node.get(),
-                        probe.source().port.get(),
-                        probe.value_type().get(),
-                        probe.capture().maximum_samples(),
-                        probe.capture().sample_stride()
-                    ));
-                    if ui.small_button("remove").clicked() {
-                        remove = Some(probe.id());
-                    }
-                    if probes
-                        .document
-                        .supports_edge_trigger(&self.workspace, probe.id())
-                        .unwrap_or(false)
-                    {
-                        if ui.small_button("rise trigger").clicked() {
-                            set_trigger = Some((probe.id(), GraphProbeEdge::Rising));
-                        }
-                        if ui.small_button("fall trigger").clicked() {
-                            set_trigger = Some((probe.id(), GraphProbeEdge::Falling));
-                        }
-                        if ui.small_button("either trigger").clicked() {
-                            set_trigger = Some((probe.id(), GraphProbeEdge::Either));
-                        }
-                    }
-                });
-            }
-        } else {
+        let row_action = self.show_probe_rows(ui);
+        if self.probes.is_none() {
             ui.colored_label(egui::Color32::YELLOW, &self.probe_status);
         }
 
+        let add = self.show_selected_probe_outputs(ui);
+        ui.label(&self.probe_status);
+        if clear_trigger {
+            self.clear_probe_trigger();
+        } else if let Some(action) = row_action {
+            self.apply_probe_ui_action(action);
+        } else if let Some(source) = add {
+            self.add_probe(source);
+        }
+    }
+
+    fn show_probe_rows(&mut self, ui: &mut egui::Ui) -> Option<ProbeUiAction> {
+        let mut action = None;
+        let probe_rows = self
+            .probes
+            .as_ref()
+            .map(|probes| probes.document.probes().to_vec())
+            .unwrap_or_default();
+        for probe in probe_rows {
+            if let Some(requested) = self.show_probe_row(ui, &probe) {
+                action = Some(requested);
+            }
+        }
+        action
+    }
+
+    fn show_probe_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        probe: &GraphProbeDefinition,
+    ) -> Option<ProbeUiAction> {
+        let mut action = None;
+        let supports_edge_trigger = self.probes.as_ref().is_some_and(|probes| {
+            probes
+                .document
+                .supports_edge_trigger(&self.workspace, probe.id())
+                .unwrap_or(false)
+        });
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!(
+                    "p{} {} ← #{}.{} · t{} · ≤{} values / stride {}",
+                    probe.id().get(),
+                    probe.name(),
+                    probe.source().node.get(),
+                    probe.source().port.get(),
+                    probe.value_type().get(),
+                    probe.capture().maximum_samples(),
+                    probe.capture().sample_stride()
+                ));
+                if ui.small_button("remove").clicked() {
+                    action = Some(ProbeUiAction::Remove(probe.id()));
+                }
+                if supports_edge_trigger {
+                    for (label, edge) in [
+                        ("rise trigger", GraphProbeEdge::Rising),
+                        ("fall trigger", GraphProbeEdge::Falling),
+                        ("either trigger", GraphProbeEdge::Either),
+                    ] {
+                        if ui.small_button(label).clicked() {
+                            action = Some(ProbeUiAction::SetTrigger(probe.id(), edge));
+                        }
+                    }
+                }
+            });
+            let draft = self
+                .probe_drafts
+                .entry(probe.id())
+                .or_insert_with(|| ProbeEditDraft::from_probe(probe));
+            ui.horizontal_wrapped(|ui| {
+                ui.label("name");
+                let name_response = ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .desired_width(170.0)
+                        .char_limit(GRAPH_PROBE_NAME_BYTES),
+                );
+                ui.label("retain");
+                ui.add(
+                    egui::DragValue::new(&mut draft.maximum_samples)
+                        .range(1..=GraphProbeLimits::interactive().maximum_samples_per_probe)
+                        .speed(1),
+                );
+                ui.label("stride");
+                ui.add(
+                    egui::DragValue::new(&mut draft.sample_stride)
+                        .range(1..=GraphProbeLimits::interactive().maximum_sample_stride)
+                        .speed(1),
+                );
+                let apply = ui.small_button("apply metadata").clicked()
+                    || (name_response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                if apply {
+                    action = Some(ProbeUiAction::ApplyMetadata(probe.id(), draft.clone()));
+                }
+                if ui.small_button("reset fields").clicked() {
+                    action = Some(ProbeUiAction::ResetMetadata(probe.id()));
+                }
+            });
+        });
+        action
+    }
+
+    fn show_selected_probe_outputs(&self, ui: &mut egui::Ui) -> Option<WireEndpoint> {
         let mut add = None;
         if let Some(selected) = self.selected_node
             && let Some(node) = self.workspace.graph().node(selected)
@@ -2965,15 +3108,15 @@ impl ExactControlWorkspace {
                 }
             });
         }
-        ui.label(&self.probe_status);
-        if let Some(id) = remove {
-            self.remove_probe(id);
-        } else if clear_trigger {
-            self.clear_probe_trigger();
-        } else if let Some((id, edge)) = set_trigger {
-            self.set_probe_trigger(id, edge);
-        } else if let Some(source) = add {
-            self.add_probe(source);
+        add
+    }
+
+    fn apply_probe_ui_action(&mut self, action: ProbeUiAction) {
+        match action {
+            ProbeUiAction::Remove(id) => self.remove_probe(id),
+            ProbeUiAction::SetTrigger(id, edge) => self.set_probe_trigger(id, edge),
+            ProbeUiAction::ApplyMetadata(id, draft) => self.apply_probe_metadata(id, &draft),
+            ProbeUiAction::ResetMetadata(id) => self.reset_probe_draft(id),
         }
     }
 
@@ -3071,6 +3214,66 @@ impl ExactControlWorkspace {
             id.get(),
             source.node.get(),
             source.port.get()
+        );
+    }
+
+    fn apply_probe_metadata(&mut self, id: GraphProbeId, draft: &ProbeEditDraft) {
+        let Some(current) = &self.probes else {
+            "probe metadata edit rejected without mutation: no sidecar is attached"
+                .clone_into(&mut self.probe_status);
+            return;
+        };
+        let mut document = current.document.clone();
+        if let Err(error) = document.replace_probe_metadata(
+            &self.workspace,
+            id,
+            draft.name.clone(),
+            GraphProbeCapture::new(draft.maximum_samples, draft.sample_stride),
+        ) {
+            self.probe_status = format!("probe metadata edit rejected without mutation: {error}");
+            return;
+        }
+        let encoding = match encode_graph_probes(&document) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.probe_status =
+                    format!("probe metadata encoding rejected without mutation: {error}");
+                return;
+            }
+        };
+        let changed = match self.commit_probe_package(ProbePackage { document, encoding }) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.probe_status =
+                    format!("probe metadata history rejected without mutation: {error}");
+                return;
+            }
+        };
+        self.probe_status = format!(
+            "{} p{} metadata: {} · ≤{} retained values / stride {}; authoring only",
+            if changed { "updated" } else { "retained" },
+            id.get(),
+            draft.name,
+            draft.maximum_samples,
+            draft.sample_stride
+        );
+    }
+
+    fn reset_probe_draft(&mut self, id: GraphProbeId) {
+        let Some(probe) = self
+            .probes
+            .as_ref()
+            .and_then(|probes| probes.document.probe(id))
+        else {
+            self.probe_drafts.remove(&id);
+            self.probe_status = format!("probe {id:?} no longer exists; draft removed");
+            return;
+        };
+        self.probe_drafts
+            .insert(id, ProbeEditDraft::from_probe(probe));
+        self.probe_status = format!(
+            "reset p{} metadata fields from the unchanged canonical sidecar",
+            id.get()
         );
     }
 
@@ -5748,6 +5951,121 @@ mod tests {
 
         workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
         assert!(workspace.persistence_pending());
+    }
+
+    #[test]
+    fn probe_metadata_edits_are_pair_historical_bounded_and_noop_aware() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let id = GraphProbeId::new(2);
+        let trigger_id = GraphProbeId::new(5);
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
+        let initial_revision = initial_probes.document.revision();
+        let draft = ProbeEditDraft {
+            name: "integrator-state".to_owned(),
+            maximum_samples: 2_048,
+            sample_stride: 4,
+        };
+
+        workspace.apply_probe_metadata(id, &draft);
+        let edited_probes = workspace.probes.as_ref().unwrap().clone();
+        let edited = edited_probes.document.probe(id).unwrap();
+        assert_eq!(edited.name(), draft.name);
+        assert_eq!(
+            edited.capture(),
+            GraphProbeCapture::new(draft.maximum_samples, draft.sample_stride)
+        );
+        assert_eq!(edited_probes.document.revision(), initial_revision + 1);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert_eq!(
+            workspace.probe_drafts.get(&id),
+            Some(&ProbeEditDraft::from_probe(
+                initial_probes.document.probe(id).unwrap()
+            ))
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            edited_probes.encoding
+        );
+        assert_eq!(workspace.probe_drafts.get(&id), Some(&draft));
+
+        workspace.mark_persisted();
+        let retained_history = workspace.history.clone();
+        workspace.apply_probe_metadata(id, &draft);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.probe_status.contains("retained p2 metadata"));
+
+        let retained_probes = workspace.probes.as_ref().unwrap().clone();
+        let duplicate_name = ProbeEditDraft {
+            name: retained_probes
+                .document
+                .probe(GraphProbeId::new(1))
+                .unwrap()
+                .name()
+                .to_owned(),
+            ..draft.clone()
+        };
+        workspace.apply_probe_metadata(id, &duplicate_name);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            retained_probes.encoding
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(workspace.probe_status.contains("rejected without mutation"));
+
+        let trigger_probe = retained_probes.document.probe(trigger_id).unwrap();
+        let undersized_trigger_capture = ProbeEditDraft {
+            name: trigger_probe.name().to_owned(),
+            maximum_samples: 4,
+            sample_stride: trigger_probe.capture().sample_stride(),
+        };
+        workspace.apply_probe_metadata(trigger_id, &undersized_trigger_capture);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            retained_probes.encoding
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(workspace.probe_status.contains("trigger window"));
+    }
+
+    #[test]
+    fn probe_drafts_survive_unrelated_trigger_edits_but_reset_on_history_navigation() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let id = GraphProbeId::new(2);
+        let mut unsaved = workspace.probe_drafts.get(&id).unwrap().clone();
+        unsaved.name = "unsaved-probe-name".to_owned();
+        workspace.probe_drafts.insert(id, unsaved.clone());
+
+        workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        assert_eq!(workspace.probe_drafts.get(&id), Some(&unsaved));
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.probe_drafts.get(&id),
+            workspace
+                .probes
+                .as_ref()
+                .unwrap()
+                .document
+                .probe(id)
+                .map(ProbeEditDraft::from_probe)
+                .as_ref()
+        );
+        assert_ne!(workspace.probe_drafts.get(&id), Some(&unsaved));
     }
 
     #[test]

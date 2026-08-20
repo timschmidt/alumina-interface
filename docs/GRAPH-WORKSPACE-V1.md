@@ -106,9 +106,9 @@ Undo and redo retain complete pairs of independent canonical `ALGW` and bound
 envelope. The default policy keeps at most 32 pair snapshots in each direction
 and at most 64 MiB of combined ALGW-plus-ALGP bytes across both stacks; the
 separately held current pair does not count against that budget. Both artifacts
-in the oldest snapshot are evicted together. A successful graph, probe,
-trigger, or ALGP-import edit records the exact prior pair and discards the
-abandoned redo branch. An exact no-op records nothing.
+in the oldest snapshot are evicted together. A successful graph, probe
+name/capture-policy, trigger, or ALGP-import edit records the exact prior pair
+and discards the abandoned redo branch. An exact no-op records nothing.
 
 Every navigation target first replays ALGW under the same 20 MiB workspace and
 interactive graph limits used for an imported file, then replays ALGP against
@@ -116,9 +116,9 @@ that reconstructed workspace under its 2 MiB policy. The UI also rebuilds its
 layout and reruns audited semantic admission before history state changes. A
 corrupt, noncanonical, unregistered, unbound, or otherwise inadmissible target
 leaves both current documents and both history stacks unchanged. Navigation
-clears transient wire, drag, and parameter-text state, but preserves a
-selection only when that node still exists and resets the cursor from the
-restored trigger resolution.
+clears transient wire, drag, parameter-text, and probe-metadata fields, but
+preserves a selection only when that node still exists and resets the cursor
+from the restored trigger resolution.
 
 History is intentionally ephemeral and is not nested inside `ALGW`, `ALGP`, or
 browser storage. This avoids recursive snapshots, keeps both document

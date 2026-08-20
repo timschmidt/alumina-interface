@@ -71,9 +71,9 @@ pub use hierarchy::{
     graph_component_instance_prototype, replay_graph_hierarchy,
 };
 pub use probe::{
-    CanonicalGraphProbeEncoding, GRAPH_PROBE_MAGIC, GRAPH_PROBE_VERSION, GraphProbeCapture,
-    GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeError, GraphProbeId,
-    GraphProbeLimits, GraphProbeReplay, GraphProbeTrigger, GraphProbeTriggerMatch,
+    CanonicalGraphProbeEncoding, GRAPH_PROBE_MAGIC, GRAPH_PROBE_NAME_BYTES, GRAPH_PROBE_VERSION,
+    GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeError,
+    GraphProbeId, GraphProbeLimits, GraphProbeReplay, GraphProbeTrigger, GraphProbeTriggerMatch,
     GraphProbeTriggerResolution, encode_graph_probes, replay_graph_probes,
     resolve_graph_probe_trigger,
 };
