@@ -258,6 +258,17 @@ See sibling
 The simulator models a completed safe-output transaction, so this closes no
 physical output or safety qualification.
 
+The separate `confirmed-safety-propagation` qualification sends no operator
+stop request. Ordinary authenticated status discovers the modeled fault, the
+coordinator automatically enters cleanup, exposes exact zero-error
+`faulted`/`confirmed` state, aborts only the remaining confirmed peer, and
+terminates as global `faulted` with exact `faulted`/`aborted` participants. The
+production run passed in 389 snapshots with no failure observations or
+recovery flag; fresh actors passed ordinary `complete` in 434 snapshots. See
+sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION.md`.
+This changes no physical or Wi-Fi safety boundary.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
 durable browser job persistence, indefinite schedule or total endpoint outage,

@@ -462,6 +462,18 @@ sibling
 This is software-only evidence for the worker/coordinator boundary; it does not
 qualify a physical safe-output transaction.
 
+The separate `cached-job-confirmed-safety-propagation` expectation sends no
+`stop_cached_job` command. Ordinary post-confirmation `JobStatus` discovers the
+same modeled `SafetyStop`; the coordinator automatically enters abort cleanup,
+retains a zero-error intermediate `faulted`/`confirmed` snapshot, aborts only
+the still-confirmed actor, and preserves global `faulted` with exact
+`faulted`/`aborted` terminal participants. On 2026-08-20 the final production
+artifact passed in 389 snapshots at epoch `43,732,400,002 ns` and local cycles
+`81,755,075` and `80,574,113`, with zero failure observations and no recovery
+flag. Fresh actors passed ordinary `complete` in 434 snapshots. See sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION.md`.
+This remains software-only evidence and does not make Wi-Fi a safety bus.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first
