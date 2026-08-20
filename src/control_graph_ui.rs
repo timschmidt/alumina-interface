@@ -72,11 +72,13 @@ const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
 ];
 #[cfg(target_arch = "wasm32")]
 pub(crate) const WORKSPACE_STORAGE_KEY: &str = "alumina.graph-workspace.algw.v1";
-const SIGNALS: [RepresentativeControlSignal; 4] = [
+const SIGNALS: [RepresentativeControlSignal; 6] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
     RepresentativeControlSignal::ClampedController,
     RepresentativeControlSignal::PermittedOutput,
+    RepresentativeControlSignal::MeasurementWithinRange,
+    RepresentativeControlSignal::CombinedPermit,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,15 +119,27 @@ enum PortEdit {
 }
 
 #[derive(Clone, Debug)]
+enum TracePointValue {
+    ExactRational { exact: String, enclosure: [f64; 2] },
+    Boolean(bool),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TraceSeriesKind {
+    ExactRational,
+    Boolean,
+}
+
+#[derive(Clone, Debug)]
 struct TracePoint {
     tick: u64,
-    exact: String,
-    enclosure: [f64; 2],
+    value: TracePointValue,
 }
 
 #[derive(Clone, Debug)]
 struct TraceSeries {
     signal: RepresentativeControlSignal,
+    kind: TraceSeriesKind,
     points: Vec<TracePoint>,
 }
 
@@ -1876,7 +1890,14 @@ impl ExactControlWorkspace {
             })
             .map_or_else(
                 || format!("no sample at tick {}", self.cursor_tick),
-                |point| format!("{} mm · tick {}", point.exact, point.tick),
+                |point| match &point.value {
+                    TracePointValue::ExactRational { exact, .. } => {
+                        format!("{exact} mm · tick {}", point.tick)
+                    }
+                    TracePointValue::Boolean(value) => {
+                        format!("{value} · tick {}", point.tick)
+                    }
+                },
             )
     }
 
@@ -2787,10 +2808,16 @@ impl ExactControlWorkspace {
         self.probe_status = format!("removed probe {}; identity was not reused", id.get());
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "mixed analog/digital layout, shared cursor interaction, and legend rendering remain one egui frame operation"
+    )]
     fn show_trace(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.strong("Exact control trace");
-            ui.label("10 Hz clock · ALGP-selected series · certified f64 display enclosures");
+            ui.strong("Exact mixed-signal control trace");
+            ui.label(
+                "10 Hz clock · ALGP-selected series · certified analog enclosures and exact Boolean lanes",
+            );
         });
         let traces = self
             .traces
@@ -2808,14 +2835,44 @@ impl ExactControlWorkspace {
             );
             return;
         }
-        let width = ui.available_width().max(120.0);
-        let (response, painter) =
-            ui.allocate_painter(egui::vec2(width, 214.0), egui::Sense::hover());
-        let plot = egui::Rect::from_min_max(
-            response.rect.min + egui::vec2(42.0, 14.0),
-            response.rect.max - egui::vec2(12.0, 31.0),
+        let analog = traces
+            .iter()
+            .filter(|series| series.kind == TraceSeriesKind::ExactRational)
+            .collect::<Vec<_>>();
+        let digital = traces
+            .iter()
+            .filter(|series| series.kind == TraceSeriesKind::Boolean)
+            .collect::<Vec<_>>();
+        let analog_height = if analog.is_empty() { 0.0 } else { 160.0 };
+        let digital_height = display_index(digital.len()) * 36.0;
+        let section_gap = if analog.is_empty() || digital.is_empty() {
+            0.0
+        } else {
+            10.0
+        };
+        let surface_height = 14.0 + analog_height + section_gap + digital_height + 31.0;
+        let width = ui.available_width().max(164.0);
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(width, surface_height.max(82.0)),
+            egui::Sense::hover(),
         );
-        painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+        let plot_left = response.rect.left() + 112.0;
+        let plot_right = response.rect.right() - 12.0;
+        let mut section_top = response.rect.top() + 14.0;
+        let analog_plot = (!analog.is_empty()).then(|| {
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(plot_left, section_top),
+                egui::pos2(plot_right, section_top + analog_height),
+            );
+            section_top = rect.bottom() + section_gap;
+            rect
+        });
+        let digital_plot = (!digital.is_empty()).then(|| {
+            egui::Rect::from_min_max(
+                egui::pos2(plot_left, section_top),
+                egui::pos2(plot_right, section_top + digital_height),
+            )
+        });
 
         let maximum_tick = traces
             .iter()
@@ -2823,56 +2880,76 @@ impl ExactControlWorkspace {
             .max()
             .unwrap_or(1)
             .max(1);
-        let (minimum_value, maximum_value) = trace_value_bounds(&traces);
-        paint_trace_grid(&painter, plot, maximum_tick, minimum_value, maximum_value);
+        if let Some(plot) = analog_plot {
+            painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+            let (minimum_value, maximum_value) = trace_value_bounds(&analog);
+            paint_trace_grid(
+                &painter,
+                plot,
+                maximum_tick,
+                minimum_value,
+                maximum_value,
+                digital_plot.is_none(),
+            );
+            for series in &analog {
+                paint_analog_trace_series(
+                    &painter,
+                    plot,
+                    series,
+                    maximum_tick,
+                    minimum_value,
+                    maximum_value,
+                );
+            }
+            painter.text(
+                egui::pos2(response.rect.left() + 6.0, plot.top()),
+                egui::Align2::LEFT_TOP,
+                "mm",
+                egui::FontId::proportional(10.0),
+                egui::Color32::GRAY,
+            );
+        }
+        if let Some(plot) = digital_plot {
+            painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
+            paint_trace_time_grid(&painter, plot, maximum_tick, true);
+            paint_digital_trace_series(&painter, plot, &digital, maximum_tick);
+            painter.text(
+                egui::pos2(response.rect.left() + 6.0, plot.top()),
+                egui::Align2::LEFT_TOP,
+                "logic",
+                egui::FontId::proportional(10.0),
+                egui::Color32::GRAY,
+            );
+        }
 
+        let time_plot = analog_plot
+            .or(digital_plot)
+            .expect("one trace section exists");
+        let interaction = match (analog_plot, digital_plot) {
+            (Some(analog), Some(digital)) => analog.union(digital),
+            (Some(analog), None) => analog,
+            (None, Some(digital)) => digital,
+            (None, None) => unreachable!("one trace section exists"),
+        };
         if let Some(pointer) = response
             .hover_pos()
-            .filter(|position| plot.contains(*position))
+            .filter(|position| interaction.contains(*position))
         {
-            self.cursor_tick = cursor_tick(plot, pointer.x, maximum_tick);
+            self.cursor_tick = cursor_tick(time_plot, pointer.x, maximum_tick);
         }
-        let cursor_x = plot_x(plot, self.cursor_tick, maximum_tick);
+        let cursor_x = plot_x(time_plot, self.cursor_tick, maximum_tick);
         painter.line_segment(
             [
-                egui::pos2(cursor_x, plot.top()),
-                egui::pos2(cursor_x, plot.bottom()),
+                egui::pos2(cursor_x, interaction.top()),
+                egui::pos2(cursor_x, interaction.bottom()),
             ],
             egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
         );
 
-        for series in &traces {
-            let color = signal_color(series.signal);
-            let mut line: Vec<egui::Pos2> = Vec::new();
-            for point in &series.points {
-                let x = plot_x(plot, point.tick, maximum_tick);
-                let lower = plot_y(plot, point.enclosure[0], minimum_value, maximum_value);
-                let upper = plot_y(plot, point.enclosure[1], minimum_value, maximum_value);
-                let middle = (lower + upper) * 0.5;
-                if let Some(previous) = line.last().copied() {
-                    line.push(egui::pos2(x, previous.y));
-                }
-                line.push(egui::pos2(x, middle));
-                painter.line_segment(
-                    [egui::pos2(x, lower), egui::pos2(x, upper)],
-                    egui::Stroke::new(3.0_f32, color.gamma_multiply(0.55)),
-                );
-                painter.circle_filled(egui::pos2(x, middle), 2.8, color);
-            }
-            painter.add(egui::Shape::line(line, egui::Stroke::new(1.8_f32, color)));
-        }
-
         painter.text(
-            egui::pos2(plot.left(), response.rect.bottom() - 8.0),
+            egui::pos2(time_plot.left(), response.rect.bottom() - 8.0),
             egui::Align2::LEFT_BOTTOM,
             "control clock tick",
-            egui::FontId::proportional(10.0),
-            egui::Color32::GRAY,
-        );
-        painter.text(
-            egui::pos2(response.rect.left() + 6.0, plot.top()),
-            egui::Align2::LEFT_TOP,
-            "mm",
             egui::FontId::proportional(10.0),
             egui::Color32::GRAY,
         );
@@ -2887,7 +2964,7 @@ impl ExactControlWorkspace {
                 {
                     ui.colored_label(
                         signal_color(series.signal),
-                        format!("{} = {} mm", series.signal.label(), point.exact),
+                        trace_cursor_label(series.signal, point),
                     );
                 }
             }
@@ -3585,6 +3662,10 @@ fn probe_name(source: WireEndpoint) -> String {
                 RepresentativeControlSignal::Error => "error".to_owned(),
                 RepresentativeControlSignal::IntegralPrior => "integral-prior".to_owned(),
                 RepresentativeControlSignal::ClampedController => "controller-clamped".to_owned(),
+                RepresentativeControlSignal::MeasurementWithinRange => {
+                    "measurement-in-range".to_owned()
+                }
+                RepresentativeControlSignal::CombinedPermit => "combined-permit".to_owned(),
                 RepresentativeControlSignal::PermittedOutput => "output-permitted".to_owned(),
             },
         )
@@ -3605,6 +3686,8 @@ fn representative_component(
                 RepresentativeControlSignal::Error => "error",
                 RepresentativeControlSignal::IntegralPrior => "integral_prior",
                 RepresentativeControlSignal::ClampedController => "clamped_controller",
+                RepresentativeControlSignal::MeasurementWithinRange => "measurement_within_range",
+                RepresentativeControlSignal::CombinedPermit => "combined_permit",
                 RepresentativeControlSignal::PermittedOutput => "permitted_output",
             };
             Ok(GraphComponentOutput::new(
@@ -3643,6 +3726,8 @@ fn representative_component(
         (8, "integral_prior_indicator", 2, 84),
         (9, "clamped_controller_indicator", 3, 148),
         (10, "permitted_output_indicator", 4, 212),
+        (13, "measurement_within_range_indicator", 5, 276),
+        (14, "combined_permit_indicator", 6, 340),
     ];
     panel_items.extend(output_specs.into_iter().map(|(id, name, output, y)| {
         GraphFrontPanelItem::new(
@@ -3658,8 +3743,8 @@ fn representative_component(
         1,
         "control.reference_pid",
         1,
-        5,
-        13,
+        7,
+        15,
         workspace.clone(),
         Vec::new(),
         outputs,
@@ -3916,29 +4001,54 @@ fn trace_series(fixture: &RepresentativeExactControlGraph) -> Result<Vec<TraceSe
     let mut result = Vec::with_capacity(SIGNALS.len());
     for signal in SIGNALS {
         let mut points = Vec::new();
+        let mut kind = None;
         for entry in fixture.simulation().entries().iter().filter(|entry| {
             entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == signal.endpoint()
         }) {
             if points.len() >= MAXIMUM_POINTS_PER_SERIES {
                 return Err(format!("{} trace exceeds display policy", signal.label()));
             }
-            let GraphValue::ExactRational(value) = entry.value().value() else {
-                return Err(format!("{} trace is not exact rational", signal.label()));
+            let (point_kind, value) = match entry.value().value() {
+                GraphValue::ExactRational(value) => {
+                    let enclosure = value
+                        .to_f64_enclosure()
+                        .filter(|bounds| bounds.iter().all(|bound| bound.is_finite()))
+                        .ok_or_else(|| {
+                            format!("{} has no finite display enclosure", signal.label())
+                        })?;
+                    (
+                        TraceSeriesKind::ExactRational,
+                        TracePointValue::ExactRational {
+                            exact: value.to_string(),
+                            enclosure,
+                        },
+                    )
+                }
+                GraphValue::Boolean(value) => {
+                    (TraceSeriesKind::Boolean, TracePointValue::Boolean(*value))
+                }
+                _ => {
+                    return Err(format!(
+                        "{} trace is neither exact rational nor Boolean",
+                        signal.label()
+                    ));
+                }
             };
-            let enclosure = value
-                .to_f64_enclosure()
-                .filter(|bounds| bounds.iter().all(|bound| bound.is_finite()))
-                .ok_or_else(|| format!("{} has no finite display enclosure", signal.label()))?;
+            if kind.is_some_and(|retained| retained != point_kind) {
+                return Err(format!("{} trace changes value kind", signal.label()));
+            }
+            kind = Some(point_kind);
             points.push(TracePoint {
                 tick: entry.clock_tick(),
-                exact: value.to_string(),
-                enclosure,
+                value,
             });
         }
-        if points.is_empty() {
-            return Err(format!("{} trace is empty", signal.label()));
-        }
-        result.push(TraceSeries { signal, points });
+        let kind = kind.ok_or_else(|| format!("{} trace is empty", signal.label()))?;
+        result.push(TraceSeries {
+            signal,
+            kind,
+            points,
+        });
     }
     Ok(result)
 }
@@ -4052,28 +4162,110 @@ fn panel_item_label(name: &str) -> String {
     name.replace('_', " ")
 }
 
+fn paint_analog_trace_series(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    series: &TraceSeries,
+    maximum_tick: u64,
+    minimum_value: f64,
+    maximum_value: f64,
+) {
+    debug_assert_eq!(series.kind, TraceSeriesKind::ExactRational);
+    let color = signal_color(series.signal);
+    let mut line: Vec<egui::Pos2> = Vec::new();
+    for point in &series.points {
+        let TracePointValue::ExactRational { enclosure, .. } = &point.value else {
+            continue;
+        };
+        let x = plot_x(rect, point.tick, maximum_tick);
+        let lower = plot_y(rect, enclosure[0], minimum_value, maximum_value);
+        let upper = plot_y(rect, enclosure[1], minimum_value, maximum_value);
+        let middle = (lower + upper) * 0.5;
+        if let Some(previous) = line.last().copied() {
+            line.push(egui::pos2(x, previous.y));
+        }
+        line.push(egui::pos2(x, middle));
+        painter.line_segment(
+            [egui::pos2(x, lower), egui::pos2(x, upper)],
+            egui::Stroke::new(3.0_f32, color.gamma_multiply(0.55)),
+        );
+        painter.circle_filled(egui::pos2(x, middle), 2.8, color);
+    }
+    painter.add(egui::Shape::line(line, egui::Stroke::new(1.8_f32, color)));
+}
+
+fn paint_digital_trace_series(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    series: &[&TraceSeries],
+    maximum_tick: u64,
+) {
+    let lane_height = rect.height() / display_index(series.len()).max(1.0);
+    let separator = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(35));
+    for (index, series) in series.iter().copied().enumerate() {
+        debug_assert_eq!(series.kind, TraceSeriesKind::Boolean);
+        let lane_top = rect.top() + display_index(index) * lane_height;
+        let lane_bottom = lane_top + lane_height;
+        let high = lane_top + 8.0;
+        let low = lane_bottom - 8.0;
+        if index > 0 {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), lane_top),
+                    egui::pos2(rect.right(), lane_top),
+                ],
+                separator,
+            );
+        }
+        let color = signal_color(series.signal);
+        painter.text(
+            egui::pos2(rect.left() - 6.0, (lane_top + lane_bottom) * 0.5),
+            egui::Align2::RIGHT_CENTER,
+            series.signal.label(),
+            egui::FontId::monospace(9.0),
+            color,
+        );
+        let mut line: Vec<egui::Pos2> = Vec::new();
+        for point in &series.points {
+            let TracePointValue::Boolean(value) = &point.value else {
+                continue;
+            };
+            let position = egui::pos2(
+                plot_x(rect, point.tick, maximum_tick),
+                if *value { high } else { low },
+            );
+            if let Some(previous) = line.last().copied() {
+                line.push(egui::pos2(position.x, previous.y));
+            }
+            line.push(position);
+            painter.circle_filled(position, 2.5, color);
+        }
+        if let Some(last) = line.last().copied().filter(|point| point.x < rect.right()) {
+            line.push(egui::pos2(rect.right(), last.y));
+        }
+        painter.add(egui::Shape::line(line, egui::Stroke::new(1.8_f32, color)));
+    }
+}
+
+fn trace_cursor_label(signal: RepresentativeControlSignal, point: &TracePoint) -> String {
+    match &point.value {
+        TracePointValue::ExactRational { exact, .. } => {
+            format!("{} = {exact} mm", signal.label())
+        }
+        TracePointValue::Boolean(value) => format!("{} = {value}", signal.label()),
+    }
+}
+
 fn paint_trace_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
     maximum_tick: u64,
     minimum_value: f64,
     maximum_value: f64,
+    label_ticks: bool,
 ) {
+    paint_trace_time_grid(painter, rect, maximum_tick, label_ticks);
     let grid = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28));
-    for tick in 0..=maximum_tick {
-        let x = plot_x(rect, tick, maximum_tick);
-        painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            grid,
-        );
-        painter.text(
-            egui::pos2(x, rect.bottom() + 4.0),
-            egui::Align2::CENTER_TOP,
-            tick.to_string(),
-            egui::FontId::monospace(9.5),
-            egui::Color32::GRAY,
-        );
-    }
     for index in 0..=4 {
         let fraction = f64::from(index) / 4.0;
         let value = minimum_value + (maximum_value - minimum_value) * fraction;
@@ -4092,12 +4284,40 @@ fn paint_trace_grid(
     }
 }
 
-fn trace_value_bounds(series: &[TraceSeries]) -> (f64, f64) {
+fn paint_trace_time_grid(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    maximum_tick: u64,
+    label_ticks: bool,
+) {
+    let grid = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28));
+    for tick in 0..=maximum_tick {
+        let x = plot_x(rect, tick, maximum_tick);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            grid,
+        );
+        if label_ticks {
+            painter.text(
+                egui::pos2(x, rect.bottom() + 4.0),
+                egui::Align2::CENTER_TOP,
+                tick.to_string(),
+                egui::FontId::monospace(9.5),
+                egui::Color32::GRAY,
+            );
+        }
+    }
+}
+
+fn trace_value_bounds(series: &[&TraceSeries]) -> (f64, f64) {
     let mut minimum = 0.0_f64;
     let mut maximum = 0.0_f64;
     for point in series.iter().flat_map(|series| &series.points) {
-        minimum = minimum.min(point.enclosure[0]);
-        maximum = maximum.max(point.enclosure[1]);
+        let TracePointValue::ExactRational { enclosure, .. } = &point.value else {
+            continue;
+        };
+        minimum = minimum.min(enclosure[0]);
+        maximum = maximum.max(enclosure[1]);
     }
     let span = (maximum - minimum).max(1.0);
     (minimum - span * 0.1, maximum + span * 0.1)
@@ -4192,6 +4412,10 @@ const fn signal_color(signal: RepresentativeControlSignal) -> egui::Color32 {
         RepresentativeControlSignal::Error => egui::Color32::from_rgb(247, 196, 86),
         RepresentativeControlSignal::IntegralPrior => egui::Color32::from_rgb(91, 205, 224),
         RepresentativeControlSignal::ClampedController => egui::Color32::from_rgb(102, 221, 142),
+        RepresentativeControlSignal::MeasurementWithinRange => {
+            egui::Color32::from_rgb(249, 153, 82)
+        }
+        RepresentativeControlSignal::CombinedPermit => egui::Color32::from_rgb(181, 143, 255),
         RepresentativeControlSignal::PermittedOutput => egui::Color32::from_rgb(245, 121, 169),
     }
 }
@@ -4257,13 +4481,6 @@ mod tests {
             }
         }
         assert!(nodes.iter().any(|node| node.rank == 0));
-        assert_eq!(workspace.traces.len(), SIGNALS.len());
-        assert!(
-            workspace
-                .traces
-                .iter()
-                .all(|series| series.points.len() == 6)
-        );
         let replay = replay_graph_workspace(
             workspace.workspace_encoding.bytes(),
             GraphWorkspaceLimits::interactive(),
@@ -4283,14 +4500,14 @@ mod tests {
         assert_eq!(replay.encoding(), &workspace.workspace_encoding);
         assert!(workspace.reference_trace_is_current());
         let probes = workspace.probes.as_ref().unwrap();
-        assert_eq!(probes.document.probes().len(), 4);
-        assert_eq!(probes.encoding.bytes().len(), 257);
+        assert_eq!(probes.document.probes().len(), 6);
+        assert_eq!(probes.encoding.bytes().len(), 348);
         assert_eq!(
             probes.encoding.digest().0,
             [
-                0x71, 0x2e, 0x68, 0xbe, 0x89, 0x02, 0xd3, 0xc8, 0x7c, 0xa6, 0x7f, 0x58, 0xb4, 0x26,
-                0x67, 0x0e, 0x8f, 0x7f, 0x99, 0xac, 0x79, 0x92, 0x3c, 0x4c, 0x38, 0xe6, 0x48, 0x5b,
-                0x35, 0xf3, 0xb0, 0x3a,
+                0x5e, 0x1d, 0xcc, 0xcb, 0x37, 0x92, 0x03, 0x29, 0x20, 0x8f, 0xd9, 0xc9, 0x7b, 0xc0,
+                0x8e, 0xa8, 0xc9, 0x09, 0x06, 0x4c, 0x06, 0x1e, 0x6d, 0x8c, 0x95, 0xe2, 0x65, 0xcd,
+                0xbe, 0x15, 0xc4, 0xb5,
             ]
         );
         let probe_replay = replay_graph_probes(
@@ -4310,6 +4527,52 @@ mod tests {
                 .schema(entry.prototype.kind())
                 .is_some()
         }));
+    }
+
+    #[test]
+    fn representative_trace_retains_four_analog_and_two_boolean_series() {
+        let workspace = ExactControlWorkspace::try_new().unwrap();
+        assert_eq!(workspace.traces.len(), SIGNALS.len());
+        assert!(
+            workspace
+                .traces
+                .iter()
+                .all(|series| series.points.len() == 6)
+        );
+        assert_eq!(
+            workspace
+                .traces
+                .iter()
+                .filter(|series| series.kind == TraceSeriesKind::ExactRational)
+                .count(),
+            4
+        );
+        assert_eq!(
+            workspace
+                .traces
+                .iter()
+                .filter(|series| series.kind == TraceSeriesKind::Boolean)
+                .count(),
+            2
+        );
+        let range = workspace
+            .traces
+            .iter()
+            .find(|series| series.signal == RepresentativeControlSignal::MeasurementWithinRange)
+            .unwrap();
+        assert_eq!(
+            range
+                .points
+                .iter()
+                .map(|point| match &point.value {
+                    TracePointValue::Boolean(value) => *value,
+                    TracePointValue::ExactRational { .. } => {
+                        panic!("range interlock trace changed value kind")
+                    }
+                })
+                .collect::<Vec<_>>(),
+            [true, true, true, false, false, false]
+        );
     }
 
     #[test]
@@ -4453,18 +4716,18 @@ mod tests {
     fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let initial = workspace.component.as_ref().unwrap();
-        assert_eq!(initial.encoding.bytes().len(), 4_554);
+        assert_eq!(initial.encoding.bytes().len(), 4_734);
         assert_eq!(
             initial.encoding.digest().0,
             [
-                0x17, 0x45, 0xaf, 0x2a, 0x70, 0x98, 0x1f, 0xcd, 0x61, 0xc8, 0x73, 0x61, 0xe6, 0x2b,
-                0xa9, 0xcb, 0x23, 0x6e, 0xcc, 0xf9, 0xce, 0x4f, 0xbe, 0x49, 0x8b, 0x33, 0xe6, 0xd2,
-                0x78, 0xfc, 0x29, 0xa6,
+                0xc3, 0x09, 0xdb, 0x77, 0x80, 0xac, 0x40, 0x00, 0x6a, 0x24, 0x3a, 0x50, 0x5d, 0x36,
+                0x50, 0x86, 0x5b, 0x87, 0x83, 0xc3, 0x0a, 0x0a, 0xc3, 0x1b, 0x62, 0xae, 0xa9, 0x5d,
+                0xbc, 0x1f, 0xce, 0x11,
             ]
         );
         assert!(initial.document.inputs().is_empty());
-        assert_eq!(initial.document.outputs().len(), 4);
-        assert_eq!(initial.document.panel_items().len(), 12);
+        assert_eq!(initial.document.outputs().len(), 6);
+        assert_eq!(initial.document.panel_items().len(), 14);
         assert_eq!(
             initial.document.workspace_digest(),
             workspace.workspace_encoding.digest()
@@ -4479,13 +4742,13 @@ mod tests {
         assert_eq!(replay.document(), &initial.document);
         assert_eq!(replay.encoding(), &initial.encoding);
         assert_eq!(initial.hierarchy.document.instances().len(), 1);
-        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_463);
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_706);
         assert_eq!(
             initial.hierarchy.encoding.digest().0,
             [
-                0x96, 0xd0, 0x1a, 0x24, 0x27, 0x30, 0x3b, 0xff, 0xa3, 0xa7, 0x22, 0xb1, 0x90, 0xa8,
-                0x43, 0x3b, 0x04, 0x7a, 0x43, 0x53, 0x64, 0x29, 0x8e, 0x45, 0xd4, 0x04, 0xb7, 0xfd,
-                0xa5, 0xb0, 0xf1, 0x61,
+                0xe4, 0x83, 0x56, 0x14, 0xa0, 0x85, 0x7c, 0xd6, 0x2a, 0x4b, 0x78, 0x76, 0xcf, 0xd0,
+                0xe9, 0xe3, 0x36, 0x75, 0x1e, 0x45, 0x86, 0x63, 0x8d, 0x7b, 0x8d, 0x51, 0x87, 0xfa,
+                0xe0, 0x59, 0xd8, 0xdd,
             ]
         );
         assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_755);
@@ -4873,5 +5136,26 @@ mod tests {
         );
         assert!(!output.shapes.is_empty());
         assert!(!output.textures_delta.set.is_empty());
+
+        for id in 1..=4 {
+            workspace.remove_probe(GraphProbeId::new(id));
+        }
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().document.probes().len(),
+            2
+        );
+        let digital_only = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_280.0, 360.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| workspace.show_trace(ui));
+            },
+        );
+        assert!(!digital_only.shapes.is_empty());
     }
 }

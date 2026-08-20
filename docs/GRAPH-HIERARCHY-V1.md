@@ -93,8 +93,8 @@ library/instance package.
 ## First visible proof
 
 The control workspace constructs a one-node hierarchy around
-`control.reference_pid`. The 5,463-byte `ALGH` has SHA-256
-`96d01a2427303bffa3a722b190a8433b047a435364298e45d404b7fda5b0f161`.
+`control.reference_pid`. The 5,706-byte `ALGH` has SHA-256
+`e4835614a0857cd62a4b7876cfd0e9e336751e4586638d7b8d5187fae059d8dd`.
 It deterministically expands one collapsed instance to 21 ordinary nodes and
 25 wires. The 3,755-byte flattened `ALGW` has SHA-256
 `e39c5396539689b8b563a7220e1180d7717e70893b71580ebbe51873fa13b68f`

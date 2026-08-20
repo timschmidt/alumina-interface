@@ -47,9 +47,14 @@ by attached probe endpoints, so removing a probe removes only that plotted
 series. Adding a valid output with no samples in the immutable reference `ALGT`
 still records the bounded authoring intent but invents no data.
 
-The reference sidecar binds error, integral-prior, clamped-controller, and
-permit-gated-output endpoints. It is 257 bytes with SHA-256
-`712e68be8902d3c87ca67f58b426670e8f7f99ac79923c4c38e6485b35f3b03a`.
+The reference sidecar binds error, integral-prior, clamped-controller,
+permit-gated-output, measurement-within-range, and combined-permit endpoints.
+It is 348 bytes with SHA-256
+`5e1dcccb37920329208fd9c97bc08ea8c909064c061e6d8c95e265cdbe15c4b5`.
+The first four exact-rational series render as certified analog enclosures. The
+last two Boolean series render as aligned high/low logic-analyzer lanes. Both
+views use one exact sample-time grid and cursor; neither converts a retained
+value into a firmware command or physical observation.
 
 ## Closed runtime claims
 

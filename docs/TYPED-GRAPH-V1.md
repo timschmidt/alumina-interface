@@ -251,11 +251,14 @@ state facts. Current exact-rational parameters can be entered as bounded
 Hyperreal text and are normalized into the canonical graph with no floating
 conversion; Boolean, measurement-interval, canonical integer, and text scalar
 shapes share that editor boundary, while composite and identity-bearing values
-remain read-only. Four traces show error, integral prior state, clamped
-controller, and permit-gated output. Egui coordinates and plot labels are named
-display projections from certified finite `f64` enclosures; the hover cursor
-displays the retained exact rational. Headless core-edit and full-frame tests
-exercise the same native/browser paths.
+remain read-only. Six mixed-signal traces show error, integral prior state,
+clamped controller, permit-gated output, measurement-within-range, and combined
+permit. The first four render as certified analog enclosures and the final two
+as aligned Boolean logic-analyzer lanes on the same exact time grid. Egui
+coordinates and analog plot labels are named display projections from
+certified finite `f64` enclosures; the shared cursor displays the retained exact
+rational or Boolean value. Headless core-edit and full-frame tests exercise the
+same native/browser paths.
 
 Bounded undo/redo stores complete canonical workspace encodings and replays a
 target before mutating navigation state. Browser origin-local storage preserves
@@ -382,9 +385,9 @@ IDs/names and capture-retention ceilings to exact output endpoints and one
 canonical `ALGW` digest. Replay resolves output direction and exact value type,
 enforces caller and embedded limits, and requires byte-for-byte canonical
 re-encoding. Probe add/remove/rebind operations are transactional, never reuse
-IDs, and never mutate the graph. The 257-byte four-series reference sidecar has
+IDs, and never mutate the graph. The 348-byte six-series reference sidecar has
 SHA-256
-`712e68be8902d3c87ca67f58b426670e8f7f99ac79923c4c38e6485b35f3b03a`.
+`5e1dcccb37920329208fd9c97bc08ea8c909064c061e6d8c95e265cdbe15c4b5`.
 It filters immutable host trace series only; it grants no firmware read,
 telemetry, trigger, or deployment authority. See
 [`GRAPH-PROBE-V1.md`](GRAPH-PROBE-V1.md).

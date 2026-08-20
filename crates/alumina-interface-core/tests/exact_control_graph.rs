@@ -1,7 +1,7 @@
 use alumina_interface_core::graph::{
-    ExternalStreamSample, GraphNodeId, GraphPortId, GraphSimulation, GraphSimulationLimits,
-    GraphTraceEntryKind, GraphValue, RepresentativeControlSignal, WireEndpoint,
-    compile_representative_exact_control_graph, replay_graph_trace, simulate_graph,
+    ExternalStreamSample, GraphSimulation, GraphSimulationLimits, GraphTraceEntryKind, GraphValue,
+    RepresentativeControlSignal, WireEndpoint, compile_representative_exact_control_graph,
+    replay_graph_trace, simulate_graph,
 };
 use hyperreal::Rational;
 
@@ -83,20 +83,14 @@ fn shared_multirate_exact_pid_is_visible_deterministic_and_replayable() {
     assert_eq!(
         boolean_trace(
             simulation,
-            WireEndpoint {
-                node: GraphNodeId::new(20),
-                port: GraphPortId::new(2),
-            },
+            RepresentativeControlSignal::MeasurementWithinRange.endpoint(),
         ),
         [true, true, true, false, false, false]
     );
     assert_eq!(
         boolean_trace(
             simulation,
-            WireEndpoint {
-                node: GraphNodeId::new(21),
-                port: GraphPortId::new(3),
-            },
+            RepresentativeControlSignal::CombinedPermit.endpoint(),
         ),
         [true, true, true, false, false, false]
     );

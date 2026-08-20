@@ -31,6 +31,10 @@ pub enum RepresentativeControlSignal {
     IntegralPrior,
     /// Controller output after the exact inclusive clamp.
     ClampedController,
+    /// Exact inclusive measurement-range interlock result.
+    MeasurementWithinRange,
+    /// Conjunction of the external permit and measurement-range interlock.
+    CombinedPermit,
     /// Final output after the fail-safe permit gate.
     PermittedOutput,
 }
@@ -42,6 +46,8 @@ impl RepresentativeControlSignal {
             Self::Error => endpoint(7, 3),
             Self::IntegralPrior => endpoint(9, 2),
             Self::ClampedController => endpoint(17, 2),
+            Self::MeasurementWithinRange => endpoint(20, 2),
+            Self::CombinedPermit => endpoint(21, 3),
             Self::PermittedOutput => endpoint(18, 3),
         }
     }
@@ -52,6 +58,8 @@ impl RepresentativeControlSignal {
             Self::Error => "error",
             Self::IntegralPrior => "integral prior state",
             Self::ClampedController => "clamped controller",
+            Self::MeasurementWithinRange => "measurement in range",
+            Self::CombinedPermit => "combined permit",
             Self::PermittedOutput => "permit-gated output",
         }
     }
