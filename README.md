@@ -223,9 +223,12 @@ prototype.
   snapshots across graph, probe, trigger, and sidecar-import edits. Per-probe
   canonical name, retained-sample, and decimation-stride editors preserve
   stable source/type identity and reject any capture policy that cannot hold
-  its active trigger window. Browser local storage atomically preserves only the exact current pair, and
-  native/browser `.algw` plus `.algp` exchange imports only after bounded full
-  replay, exact sidecar binding, and audited UI admission.
+  its active trigger window. A shared aggregate-bounded replay projection now
+  applies those policies to the plotted exact samples and carries exact
+  root-clock time across rate domains; the current single-clock axis rejects
+  mixed local clocks. Browser local storage atomically preserves only the exact
+  current pair, and native/browser `.algw` plus `.algp` exchange imports only
+  after bounded full replay, exact sidecar binding, and audited UI admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible

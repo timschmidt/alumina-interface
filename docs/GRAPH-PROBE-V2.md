@@ -58,6 +58,39 @@ requested side is complete. A finite replay with no edge reports `Waiting`;
 absence of a configured trigger reports `Disabled`. Neither result is a device
 capture operation.
 
+## Bounded replay projection
+
+`project_graph_probe_replay` is the shared HostExact boundary between canonical
+simulation entries and plots. It rechecks workspace, graph, and fixed simulation
+registry identities, resolves exact clock rates under the simulation's
+independent root, and attaches an exact rational root-clock tick to every
+retained sample while preserving the original clock/tick/sequence/value.
+
+For each probe, event ordinal advances only over that exact output's canonical
+node-output entries. Ordinal zero is retained, then every declared `stride`th
+entry. With a matched trigger, decimated samples are admitted only inside the
+trigger's first/last times after exact conversion to the shared root clock.
+With a disabled or waiting trigger, the complete finite replay is eligible.
+In either case a trailing ring keeps no more than the probe's declared maximum
+samples. Series remain in probe-ID order and samples remain in canonical
+simulation order.
+
+The caller additionally supplies an aggregate sample ceiling; the interactive
+policy is 131,072 samples across all probes. Projection limits capacity before
+allocation and rejects as soon as actual retained samples would exceed the
+remaining aggregate budget. Zero limits, a foreign registry, a graph/workspace
+substitution, unresolved clock analysis, or a sample on another independent
+clock tree fails closed without partial output.
+
+The current mixed-signal UI converts values directly from the projected exact
+entries; changing retention or stride therefore changes the plotted points
+rather than merely changing saved metadata. It displays the matched exact
+root-time window. Until its horizontal axis is generalized to exact rational
+root time, it accepts only one local display clock and refuses to conflate
+equal-looking tick integers from multiple clocks or a foreign trigger clock.
+The core projection already retains the exact cross-rate time needed for that
+later UI extension.
+
 ## Transactional editing
 
 Adding and removing probes advances the sidecar revision and never reuses a
@@ -113,9 +146,11 @@ window from ticks 1 through 5.
 
 The first four exact-rational series render as certified analog enclosures. The
 last three Boolean series render as aligned high/low logic-analyzer lanes. Both
-views use the trigger-selected exact time window, one cursor, and a distinct
-trigger marker; neither converts a retained value into a firmware command or
-physical observation.
+views use the trigger-selected exact time window, per-probe decimation and
+retention, one cursor, and a distinct trigger marker; neither converts a
+retained value into a firmware command or physical observation. The unchanged
+reference policy projects five samples for each of seven probes (35 aggregate)
+inside ticks 1–5.
 
 ## Closed device claims
 

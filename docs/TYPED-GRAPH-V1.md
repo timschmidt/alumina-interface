@@ -267,7 +267,11 @@ same native/browser paths. Each probe row now exposes bounded canonical name,
 retained-sample, and event-stride fields. Applying them transactionally retains
 probe/source/type identity, rejects duplicate or malformed names and capture
 policies that cannot contain the active trigger window, and treats exact
-metadata reapplication as a no-op.
+metadata reapplication as a no-op. Plot input now comes from a shared core
+projection that applies those policies to exact simulation entries, bounds all
+series to 131,072 aggregate samples, and preserves exact rational root-clock
+time alongside original clock/tick/sequence/value. The current single-clock
+axis rejects mixed local clocks instead of misaligning their tick integers.
 
 Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
 including the sidecar's exact external-workspace binding, before mutating

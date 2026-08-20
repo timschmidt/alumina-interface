@@ -14,10 +14,12 @@ use std::str;
 
 use alumina_protocol::Digest;
 use alumina_storage::sha256;
+use hyperreal::Rational;
 
 use super::{
-    GraphClockId, GraphNodeId, GraphPortId, GraphSimulation, GraphTraceEntryKind, GraphTypeId,
-    GraphValue, GraphWorkspaceDocument, GraphWorkspaceError, TypeKind, WireEndpoint,
+    GraphAnalysis, GraphAnalysisError, GraphClockId, GraphClockRate, GraphNodeId, GraphPortId,
+    GraphSimulation, GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, GraphTypeId,
+    GraphValue, GraphWorkspaceDocument, GraphWorkspaceError, TypeKind, WireEndpoint, analyze_graph,
     encode_graph_workspace,
 };
 
@@ -259,6 +261,128 @@ pub enum GraphProbeTriggerResolution {
     Waiting(GraphProbeTrigger),
     /// The first matching edge and available exact window were resolved.
     Matched(GraphProbeTriggerMatch),
+}
+
+/// Caller-owned host-memory bound for one projected ALGP replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphProbeProjectionLimits {
+    /// Maximum samples retained across every projected probe series.
+    pub maximum_total_samples: usize,
+}
+
+impl GraphProbeProjectionLimits {
+    /// First bounded HostExact plot/replay policy, aligned with the simulation
+    /// trace-entry ceiling.
+    pub const fn interactive() -> Self {
+        Self {
+            maximum_total_samples: 131_072,
+        }
+    }
+
+    fn validate(self) -> Result<(), GraphProbeProjectionError> {
+        if self.maximum_total_samples == 0 {
+            Err(GraphProbeProjectionError::ZeroLimit)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for GraphProbeProjectionLimits {
+    fn default() -> Self {
+        Self::interactive()
+    }
+}
+
+/// One exact trace sample retained by a projected probe, with its timestamp
+/// converted to an exact rational tick on the simulation's independent root
+/// clock. The original clock/tick/sequence/value remain in `entry`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphProbeProjectedSample {
+    entry: GraphTraceEntry,
+    root_tick: Rational,
+}
+
+impl GraphProbeProjectedSample {
+    /// Borrow the original exact canonical simulation entry.
+    pub const fn entry(&self) -> &GraphTraceEntry {
+        &self.entry
+    }
+
+    /// Borrow exact time in simulation-root ticks.
+    pub const fn root_tick(&self) -> &Rational {
+        &self.root_tick
+    }
+}
+
+/// One probe's independently decimated and bounded exact replay samples.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphProbeProjectedSeries {
+    probe: GraphProbeId,
+    source: WireEndpoint,
+    samples: Vec<GraphProbeProjectedSample>,
+}
+
+impl GraphProbeProjectedSeries {
+    /// Return the stable sidecar-local probe identity.
+    pub const fn probe(&self) -> GraphProbeId {
+        self.probe
+    }
+
+    /// Return the exact bound output endpoint.
+    pub const fn source(&self) -> WireEndpoint {
+        self.source
+    }
+
+    /// Borrow retained samples in canonical simulation order.
+    pub fn samples(&self) -> &[GraphProbeProjectedSample] {
+        &self.samples
+    }
+}
+
+/// Aggregate-bounded exact HostExact projection of one ALGP over one canonical
+/// simulation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphProbeProjection {
+    root_clock: GraphClockId,
+    trigger_resolution: GraphProbeTriggerResolution,
+    first_root_tick: Option<Rational>,
+    trigger_root_tick: Option<Rational>,
+    last_root_tick: Option<Rational>,
+    series: Vec<GraphProbeProjectedSeries>,
+    retained_samples: usize,
+}
+
+impl GraphProbeProjection {
+    /// Return the independent clock in whose exact rational ticks all projected
+    /// timestamps are expressed.
+    pub const fn root_clock(&self) -> GraphClockId {
+        self.root_clock
+    }
+
+    /// Return the trigger state used to select a matched replay window.
+    pub const fn trigger_resolution(&self) -> GraphProbeTriggerResolution {
+        self.trigger_resolution
+    }
+
+    /// Borrow exact first/trigger/last root ticks when a trigger matched.
+    pub fn trigger_root_window(&self) -> Option<(&Rational, &Rational, &Rational)> {
+        Some((
+            self.first_root_tick.as_ref()?,
+            self.trigger_root_tick.as_ref()?,
+            self.last_root_tick.as_ref()?,
+        ))
+    }
+
+    /// Borrow projected series in canonical probe-ID order.
+    pub fn series(&self) -> &[GraphProbeProjectedSeries] {
+        &self.series
+    }
+
+    /// Return retained samples across every series.
+    pub const fn retained_samples(&self) -> usize {
+        self.retained_samples
+    }
 }
 
 impl GraphProbeCapture {
@@ -844,6 +968,77 @@ impl From<GraphWorkspaceError> for GraphProbeError {
     }
 }
 
+/// Rejection at the aggregate-bounded exact probe-projection boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GraphProbeProjectionError {
+    /// The caller supplied a zero aggregate sample ceiling.
+    ZeroLimit,
+    /// Actual retained samples exceeded the caller's aggregate ceiling.
+    LimitExceeded(&'static str),
+    /// Canonical sidecar binding or trigger resolution failed.
+    Probe(GraphProbeError),
+    /// Exact graph/clock analysis failed under the supplied registry.
+    Analysis(GraphAnalysisError),
+    /// The supplied implementation registry was not the simulation authority.
+    RegistryIdentityMismatch {
+        /// Registry identity retained by the simulation.
+        expected: Digest,
+        /// Supplied registry identity.
+        received: Digest,
+    },
+    /// The simulation's declared independent root was not a root rate.
+    MissingRootClock(GraphClockId),
+    /// One retained sample belonged to another independent clock tree.
+    ClockOutsideRoot {
+        /// Sample clock.
+        clock: GraphClockId,
+        /// Independent root resolved for that clock.
+        clock_root: GraphClockId,
+        /// Simulation root required by this projection.
+        projection_root: GraphClockId,
+    },
+}
+
+impl From<GraphProbeError> for GraphProbeProjectionError {
+    fn from(value: GraphProbeError) -> Self {
+        Self::Probe(value)
+    }
+}
+
+impl From<GraphAnalysisError> for GraphProbeProjectionError {
+    fn from(value: GraphAnalysisError) -> Self {
+        Self::Analysis(value)
+    }
+}
+
+impl fmt::Display for GraphProbeProjectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroLimit => formatter.write_str("graph probe projection limit is zero"),
+            Self::LimitExceeded(name) => {
+                write!(formatter, "graph probe projection {name} exceeds policy")
+            }
+            Self::Probe(error) => write!(formatter, "graph probe projection sidecar: {error}"),
+            Self::Analysis(error) => write!(formatter, "graph probe projection analysis: {error}"),
+            Self::RegistryIdentityMismatch { .. } => {
+                formatter.write_str("graph probe projection registry identity does not match")
+            }
+            Self::MissingRootClock(clock) => {
+                write!(
+                    formatter,
+                    "graph probe projection root clock {clock:?} is invalid"
+                )
+            }
+            Self::ClockOutsideRoot { clock, .. } => write!(
+                formatter,
+                "graph probe projection sample clock {clock:?} is outside the simulation root"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphProbeProjectionError {}
+
 /// Encode one validated probe sidecar and compute its exact identity.
 pub fn encode_graph_probes(
     document: &GraphProbeDocument,
@@ -1061,6 +1256,150 @@ pub fn resolve_graph_probe_trigger(
             retained_posttrigger_samples,
         },
     ))
+}
+
+/// Project a canonical simulation through every bound probe's stride and
+/// retention policy under one aggregate host-memory ceiling. A matched trigger
+/// first defines an exact root-time window; disabled or waiting triggers retain
+/// each probe's most recent decimated samples from the complete replay.
+pub fn project_graph_probe_replay(
+    document: &GraphProbeDocument,
+    workspace: &GraphWorkspaceDocument,
+    simulation: &GraphSimulation,
+    registry: &GraphSimulationRegistry,
+    limits: GraphProbeProjectionLimits,
+) -> Result<GraphProbeProjection, GraphProbeProjectionError> {
+    limits.validate()?;
+    document.require_workspace(workspace)?;
+    if simulation.graph_digest() != workspace.graph_digest() {
+        return Err(GraphProbeError::SimulationGraphIdentityMismatch {
+            expected: workspace.graph_digest(),
+            received: simulation.graph_digest(),
+        }
+        .into());
+    }
+    if simulation.registry_digest() != registry.digest() {
+        return Err(GraphProbeProjectionError::RegistryIdentityMismatch {
+            expected: simulation.registry_digest(),
+            received: registry.digest(),
+        });
+    }
+    let analysis = analyze_graph(workspace.graph(), registry.semantic_registry())?;
+    let root_clock = simulation.horizon().root_clock();
+    let root_rate = analysis
+        .clock_rate(root_clock)
+        .filter(|rate| rate.root() == root_clock)
+        .ok_or(GraphProbeProjectionError::MissingRootClock(root_clock))?;
+    let trigger_resolution = resolve_graph_probe_trigger(document, workspace, simulation)?;
+    let root_window = match trigger_resolution {
+        GraphProbeTriggerResolution::Matched(matched) => Some((
+            projection_root_tick(&analysis, root_rate, matched.clock(), matched.first_tick())?,
+            projection_root_tick(
+                &analysis,
+                root_rate,
+                matched.clock(),
+                matched.trigger_tick(),
+            )?,
+            projection_root_tick(&analysis, root_rate, matched.clock(), matched.last_tick())?,
+        )),
+        GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_) => None,
+    };
+
+    let mut retained_samples = 0_usize;
+    let mut series = Vec::with_capacity(document.probes.len());
+    for probe in &document.probes {
+        let maximum = usize::try_from(probe.capture.maximum_samples)
+            .map_err(|_| GraphProbeError::IntegerOverflow("projection probe sample count"))?;
+        let available = limits
+            .maximum_total_samples
+            .checked_sub(retained_samples)
+            .ok_or(GraphProbeProjectionError::LimitExceeded(
+                "aggregate sample count",
+            ))?;
+        let capacity = maximum
+            .min(available.saturating_add(1))
+            .min(simulation.entries().len());
+        let mut retained = VecDeque::with_capacity(capacity);
+        let mut source_ordinal = 0_u64;
+        for entry in simulation.entries().iter().filter(|entry| {
+            entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == probe.source
+        }) {
+            let selected = source_ordinal.is_multiple_of(u64::from(probe.capture.sample_stride));
+            source_ordinal =
+                source_ordinal
+                    .checked_add(1)
+                    .ok_or(GraphProbeError::IntegerOverflow(
+                        "projection sample ordinal",
+                    ))?;
+            if !selected {
+                continue;
+            }
+            let root_tick =
+                projection_root_tick(&analysis, root_rate, entry.clock(), entry.clock_tick())?;
+            if let Some((first, _, last)) = &root_window
+                && (root_tick < first.clone() || root_tick > last.clone())
+            {
+                continue;
+            }
+            if retained.len() == maximum {
+                retained.pop_front();
+            }
+            retained.push_back((entry, root_tick));
+            if maximum > available && retained.len() > available {
+                return Err(GraphProbeProjectionError::LimitExceeded(
+                    "aggregate sample count",
+                ));
+            }
+        }
+        retained_samples = retained_samples.checked_add(retained.len()).ok_or(
+            GraphProbeProjectionError::LimitExceeded("aggregate sample count"),
+        )?;
+        let samples = retained
+            .into_iter()
+            .map(|(entry, root_tick)| GraphProbeProjectedSample {
+                entry: entry.clone(),
+                root_tick,
+            })
+            .collect();
+        series.push(GraphProbeProjectedSeries {
+            probe: probe.id,
+            source: probe.source,
+            samples,
+        });
+    }
+    let (first_root_tick, trigger_root_tick, last_root_tick) = root_window
+        .map_or((None, None, None), |(first, trigger, last)| {
+            (Some(first), Some(trigger), Some(last))
+        });
+    Ok(GraphProbeProjection {
+        root_clock,
+        trigger_resolution,
+        first_root_tick,
+        trigger_root_tick,
+        last_root_tick,
+        series,
+        retained_samples,
+    })
+}
+
+fn projection_root_tick(
+    analysis: &GraphAnalysis,
+    root_rate: &GraphClockRate,
+    clock: GraphClockId,
+    tick: u64,
+) -> Result<Rational, GraphProbeProjectionError> {
+    let rate = analysis
+        .clock_rate(clock)
+        .ok_or(GraphProbeProjectionError::MissingRootClock(clock))?;
+    if rate.root() != root_rate.clock() {
+        return Err(GraphProbeProjectionError::ClockOutsideRoot {
+            clock,
+            clock_root: rate.root(),
+            projection_root: root_rate.clock(),
+        });
+    }
+    Ok(Rational::from(tick) * root_rate.ticks_per_second().clone()
+        / rate.ticks_per_second().clone())
 }
 
 fn validate_probes(
@@ -1611,6 +1950,116 @@ mod tests {
             Err(GraphProbeError::LimitExceeded("trigger window"))
         );
         assert_eq!(document, unchanged);
+    }
+
+    #[test]
+    fn exact_projection_applies_trigger_window_stride_and_aggregate_bounds() {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let workspace = workspace();
+        let document = triggered_probes(&workspace);
+        let projection = project_graph_probe_replay(
+            &document,
+            &workspace,
+            fixture.simulation(),
+            fixture.registry(),
+            GraphProbeProjectionLimits::interactive(),
+        )
+        .unwrap();
+        assert!(matches!(
+            projection.trigger_resolution(),
+            GraphProbeTriggerResolution::Matched(_)
+        ));
+        let (first, trigger, last) = projection.trigger_root_window().unwrap();
+        assert_eq!(first, &Rational::from(10));
+        assert_eq!(trigger, &Rational::from(30));
+        assert_eq!(last, &Rational::from(50));
+        assert_eq!(projection.series().len(), 2);
+        assert_eq!(projection.retained_samples(), 10);
+        for series in projection.series() {
+            assert_eq!(series.samples().len(), 5);
+            assert_eq!(series.samples()[0].entry().clock_tick(), 1);
+            assert_eq!(series.samples()[4].entry().clock_tick(), 5);
+            assert_eq!(series.samples()[0].root_tick(), &Rational::from(10));
+            assert_eq!(series.samples()[4].root_tick(), &Rational::from(50));
+        }
+
+        assert_eq!(
+            project_graph_probe_replay(
+                &document,
+                &workspace,
+                fixture.simulation(),
+                fixture.registry(),
+                GraphProbeProjectionLimits {
+                    maximum_total_samples: 0,
+                },
+            ),
+            Err(GraphProbeProjectionError::ZeroLimit)
+        );
+        assert_eq!(
+            project_graph_probe_replay(
+                &document,
+                &workspace,
+                fixture.simulation(),
+                fixture.registry(),
+                GraphProbeProjectionLimits {
+                    maximum_total_samples: 1,
+                },
+            ),
+            Err(GraphProbeProjectionError::LimitExceeded(
+                "aggregate sample count"
+            ))
+        );
+    }
+
+    #[test]
+    fn disabled_projection_retains_the_latest_decimated_samples() {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let workspace = workspace();
+        let source = RepresentativeControlSignal::Error.endpoint();
+        let document = GraphProbeDocument::try_new(
+            GraphProbeLimits::interactive(),
+            1,
+            2,
+            None,
+            &workspace,
+            vec![GraphProbeDefinition::new(
+                GraphProbeId::new(1),
+                "decimated-error",
+                source,
+                GraphProbeCapture::new(2, 2),
+            )],
+        )
+        .unwrap();
+        let projection = project_graph_probe_replay(
+            &document,
+            &workspace,
+            fixture.simulation(),
+            fixture.registry(),
+            GraphProbeProjectionLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(
+            projection.trigger_resolution(),
+            GraphProbeTriggerResolution::Disabled
+        );
+        assert!(projection.trigger_root_window().is_none());
+        let expected = fixture
+            .simulation()
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == source
+            })
+            .enumerate()
+            .filter(|(ordinal, _)| ordinal.is_multiple_of(2))
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>();
+        let expected = &expected[expected.len() - 2..];
+        let retained = projection.series()[0].samples();
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].entry(), expected[0]);
+        assert_eq!(retained[1].entry(), expected[1]);
+        assert!(retained[0].root_tick() < retained[1].root_tick());
     }
 
     #[test]
