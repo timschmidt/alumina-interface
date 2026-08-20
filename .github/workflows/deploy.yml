@@ -5,110 +5,131 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
+    name: Build and deploy
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to publish the gh-pages branch.
     steps:
       - name: Check out Alumina Interface
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: alumina-interface
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check out Hypergraphics sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypergraphics
           path: hypergraphics
+          persist-credentials: false
 
       - name: Check out Alumina firmware protocol sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/alumina-firmware
           path: alumina-firmware
+          persist-credentials: false
 
       - name: Check out CSGRS sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/csgrs
           path: csgrs
+          persist-credentials: false
 
       - name: Check out Hypercurve sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypercurve
           path: hypercurve
+          persist-credentials: false
 
       - name: Check out Hyperlattice sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hyperlattice
           path: hyperlattice
+          persist-credentials: false
 
       - name: Check out Hyperlimit sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hyperlimit
           path: hyperlimit
+          persist-credentials: false
 
       - name: Check out Hypermesh sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypermesh
           path: hypermesh
+          persist-credentials: false
 
       - name: Check out Hyperpath sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hyperpath
           path: hyperpath
+          persist-credentials: false
 
       - name: Check out Hyperphysics sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hyperphysics
           path: hyperphysics
+          persist-credentials: false
 
       - name: Check out Hyperreal sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hyperreal
           path: hyperreal
+          persist-credentials: false
 
       - name: Check out Hypersdf sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypersdf
           path: hypersdf
+          persist-credentials: false
 
       - name: Check out Hypersolve sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypersolve
           path: hypersolve
+          persist-credentials: false
 
       - name: Check out Hypertri sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypertri
           path: hypertri
+          persist-credentials: false
 
       - name: Check out Hypervoxel sibling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.repository_owner }}/hypervoxel
           path: hypervoxel
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
 
       - name: Install web build tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: trunk@0.21.14,wasm-opt,wasm-tools
 
@@ -147,7 +168,7 @@ jobs:
         working-directory: alumina-interface
 
       - name: Deploy
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@373f7f263a76c20808c831209c920827a82a2847 # v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./alumina-interface/dist
