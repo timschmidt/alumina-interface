@@ -35,7 +35,7 @@ use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 11;
+pub const WORKER_SCHEMA_VERSION: u16 = 12;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -1676,7 +1676,11 @@ impl WorkerCachedJobSnapshot {
                     if lease > start
                         && authorized.is_none_or(|authorized| authorized >= lease)
                         && (authorized.is_some()
-                            || self.phase == WorkerCachedJobPhaseSnapshot::RetainedComplete) => {}
+                            || matches!(
+                                self.phase,
+                                WorkerCachedJobPhaseSnapshot::RetainedComplete
+                                    | WorkerCachedJobPhaseSnapshot::Faulted
+                            )) => {}
                 _ => return Err(WorkerContractError::CachedJobSnapshot),
             }
             if self.network_policy == WorkerJobNetworkPolicySnapshot::CachedAutonomous
@@ -2447,7 +2451,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 11);
+        assert_eq!(WORKER_SCHEMA_VERSION, 12);
     }
 
     #[test]
@@ -2500,6 +2504,29 @@ mod tests {
         retained.target_ui_ns = Some(7);
         assert_eq!(
             retained.validate(),
+            Err(WorkerContractError::CachedJobSnapshot)
+        );
+    }
+
+    #[test]
+    fn reattached_fault_retains_reported_lease_without_inventing_browser_authority() {
+        let mut faulted = complete_cached_job_snapshot();
+        faulted.phase = WorkerCachedJobPhaseSnapshot::Faulted;
+        faulted.target_ui_ns = None;
+        faulted.lease_renewal_rounds = 0;
+        for participant in &mut faulted.participants {
+            participant.schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Faulted;
+            participant.authorized_lease_expiry_cycle = None;
+        }
+        assert_eq!(faulted.validate(), Ok(()));
+
+        faulted.phase = WorkerCachedJobPhaseSnapshot::Irrevocable;
+        faulted.target_ui_ns = Some(20_000_000_000);
+        for participant in &mut faulted.participants {
+            participant.schedule_phase = WorkerParticipantSchedulePhaseSnapshot::Running;
+        }
+        assert_eq!(
+            faulted.validate(),
             Err(WorkerContractError::CachedJobSnapshot)
         );
     }

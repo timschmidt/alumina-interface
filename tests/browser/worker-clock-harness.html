@@ -8,12 +8,10 @@
     <pre id="result" data-status="starting">starting</pre>
     <script type="module">
       const output = document.querySelector("#result");
-      const worker = new Worker("/dist/alumina-worker.js", {
-        type: "module",
-        name: "alumina-clock-harness",
-      });
+      let worker;
       let configured = false;
       let timeout;
+      let workerRestartTimeout;
       let latestSnapshot;
       const deviceSnapshots = new Map();
       let cachedJobRequests = [];
@@ -28,6 +26,9 @@
       const cachedJobTransitions = [];
       const cachedJobFailureObservations = [];
       let cachedJobRecovered = false;
+      let cachedJobWorkerSuspended = false;
+      let cachedJobWorkerRestarted = false;
+      let suspendedCachedJobSnapshot;
       let priorCachedJobFailureState;
       const completedCachedJobs = [];
       let priorCachedJobState;
@@ -54,6 +55,7 @@
         expectation === "cached-job-lease-renew-recovery" ||
         expectation === "cached-job-lease-renew-request-recovery" ||
         expectation === "cached-job-lease-expiry" ||
+        expectation === "cached-job-worker-suspension" ||
         expectation === "cached-job-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-recovery" ||
         expectation === "cached-job-confirmed-abort-request-recovery" ||
@@ -80,6 +82,8 @@
         expectation === "cached-job-lease-renew-request-recovery";
       const cachedJobExpectedLeaseExpiry =
         expectation === "cached-job-lease-expiry";
+      const cachedJobWorkerSuspension =
+        expectation === "cached-job-worker-suspension";
       const cachedJobAbortGuardOutage =
         expectation === "cached-job-abort-guard-outage";
       const cachedJobAbortSplitOutage =
@@ -260,6 +264,9 @@
         cached_job_transitions: cachedJobTransitions,
         cached_job_failure_observations: cachedJobFailureObservations,
         cached_job_recovered: cachedJobRecovered,
+        worker_suspended: cachedJobWorkerSuspended,
+        worker_restarted: cachedJobWorkerRestarted,
+        suspended_cached_job_snapshot: suspendedCachedJobSnapshot,
         completed_cached_jobs: completedCachedJobs,
       });
 
@@ -304,25 +311,26 @@
         cachedJobStaged = true;
         worker.postMessage(
           JSON.stringify({
-            schema_version: 11,
+            schema_version: 12,
             command: { kind: "stage_cached_job", request: cachedJobRequest },
           }),
         );
       };
 
       const finish = (status, detail) => {
+        clearTimeout(workerRestartTimeout);
         output.dataset.status = status;
         output.textContent = JSON.stringify(detail, null, 2);
         document.title = `Alumina worker clock harness: ${status}`;
         if (status !== "sampling") {
-          worker.terminate();
+          worker?.terminate();
         }
       };
 
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 11,
+            schema_version: 12,
             command: {
               kind: "capture_waveform",
               request: {
@@ -340,12 +348,28 @@
         );
       };
 
-      worker.onerror = (event) => {
+      const suspendAndRestartCachedJobWorker = () => {
+        cachedJobWorkerSuspended = true;
+        worker.terminate();
+        worker = undefined;
+        configured = false;
+        cachedJobStaged = false;
+        latestSnapshot = undefined;
+        deviceSnapshots.clear();
+        capabilityDocument = undefined;
+        capabilityDocuments.clear();
+        workerRestartTimeout = setTimeout(() => {
+          cachedJobWorkerRestarted = true;
+          worker = createWorker();
+        }, 12000);
+      };
+
+      const handleWorkerError = (event) => {
         clearTimeout(timeout);
         finish("failed", { error: event.message });
       };
 
-      worker.onmessage = (message) => {
+      const handleWorkerMessage = (message) => {
         let envelope;
         try {
           envelope = JSON.parse(message.data);
@@ -354,7 +378,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 11) {
+        if (envelope.schema_version !== 12) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -366,35 +390,39 @@
         eventKinds.push(event.kind);
         if (event.kind === "ready" && !configured) {
           configured = true;
-          timeout = setTimeout(() => {
-            finish("failed", {
-              error:
-                cachedJobExpectation
-                  ? "cached-job workflow timed out"
-                  : "clock qualification timed out",
-              event_kinds: eventKinds,
-              latest_snapshot: latestSnapshot,
-              isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
-              isolated_capability_failure_snapshot:
-                isolatedCapabilityFailureSnapshot,
-              capability_document: capabilityDocument,
-              telemetry_documents: telemetryDocuments,
-              waveform_document: waveformDocument,
-              waveform_documents: waveformDocuments,
-              cached_job_snapshot_count: cachedJobSnapshotCount,
-              latest_cached_job_snapshot: latestCachedJobSnapshot,
-              cached_job_transitions: cachedJobTransitions,
-              cached_job_failure_observations: cachedJobFailureObservations,
-              cached_job_recovered: cachedJobRecovered,
-              completed_cached_jobs: completedCachedJobs,
-              device_snapshots: compactDeviceSnapshots(),
-            });
-          }, cachedJobExpectation ? 180000 : 30000);
+          if (timeout === undefined) {
+            timeout = setTimeout(() => {
+              finish("failed", {
+                error:
+                  cachedJobExpectation
+                    ? "cached-job workflow timed out"
+                    : "clock qualification timed out",
+                event_kinds: eventKinds,
+                latest_snapshot: latestSnapshot,
+                isolated_health_failure_snapshot: isolatedHealthFailureSnapshot,
+                isolated_capability_failure_snapshot:
+                  isolatedCapabilityFailureSnapshot,
+                capability_document: capabilityDocument,
+                telemetry_documents: telemetryDocuments,
+                waveform_document: waveformDocument,
+                waveform_documents: waveformDocuments,
+                cached_job_snapshot_count: cachedJobSnapshotCount,
+                latest_cached_job_snapshot: latestCachedJobSnapshot,
+                cached_job_transitions: cachedJobTransitions,
+                cached_job_failure_observations: cachedJobFailureObservations,
+                cached_job_recovered: cachedJobRecovered,
+                worker_suspended: cachedJobWorkerSuspended,
+                worker_restarted: cachedJobWorkerRestarted,
+                completed_cached_jobs: completedCachedJobs,
+                device_snapshots: compactDeviceSnapshots(),
+              });
+            }, cachedJobExpectation ? 180000 : 30000);
+          }
           const simulatorCount = cachedJobExpectation ? 2 : 1;
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
-                schema_version: 11,
+                schema_version: 12,
                 command: {
                   kind: "configure",
                   request: {
@@ -454,9 +482,22 @@
             return;
           }
           if (
+            cachedJobWorkerSuspension &&
+            !cachedJobWorkerSuspended &&
+            snapshot.phase === "irrevocable" &&
+            snapshot.participants.every(
+              (participant) => participant.schedule_phase === "running",
+            )
+          ) {
+            suspendedCachedJobSnapshot = latestCachedJobSnapshot;
+            suspendAndRestartCachedJobWorker();
+            return;
+          }
+          if (
             snapshot.phase === "faulted" &&
             !cachedJobExpectedSafetyFault &&
-            !cachedJobExpectedLeaseExpiry
+            !cachedJobExpectedLeaseExpiry &&
+            !cachedJobWorkerSuspension
           ) {
             clearTimeout(timeout);
             finish("failed", {
@@ -472,7 +513,7 @@
             cachedJobStarted = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 11,
+                schema_version: 12,
                 command: {
                   kind: "start_cached_job",
                   job_id: snapshot.job_id,
@@ -496,7 +537,7 @@
             cachedJobStopRequested = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 11,
+                schema_version: 12,
                 command: {
                   kind: "stop_cached_job",
                   job_id: snapshot.job_id,
@@ -529,7 +570,9 @@
               !cachedJobExpectedSafetyFault;
             const expectedTerminalPhase = retained
               ? "retained_complete"
-              : cachedJobExpectedSafetyFault || cachedJobExpectedLeaseExpiry
+              : cachedJobExpectedSafetyFault ||
+                  cachedJobExpectedLeaseExpiry ||
+                  cachedJobWorkerSuspension
                 ? "faulted"
                 : stopMissed
                   ? "completed_after_stop_request"
@@ -556,7 +599,26 @@
                       participant.schedule_phase === "aborted" &&
                       participant.local_start_cycle !== null,
                   ).length === 1
-                : cachedJobExpectedLeaseExpiry
+                : cachedJobWorkerSuspension
+                  ? snapshot.participants.every((participant) => {
+                      const suspendedParticipant =
+                        suspendedCachedJobSnapshot?.participants.find(
+                          (candidate) =>
+                            candidate.connection_id ===
+                            participant.connection_id,
+                        );
+                      return (
+                        participant.schedule_phase === "faulted" &&
+                        participant.local_start_cycle !== null &&
+                        participant.local_start_cycle ===
+                          suspendedParticipant?.local_start_cycle &&
+                        participant.lease_expiry_cycle !== null &&
+                        participant.lease_expiry_cycle ===
+                          suspendedParticipant?.lease_expiry_cycle &&
+                        participant.authorized_lease_expiry_cycle === null
+                      );
+                    })
+                  : cachedJobExpectedLeaseExpiry
                   ? snapshot.participants.every(
                       (participant) =>
                         participant.schedule_phase === "faulted" &&
@@ -611,7 +673,7 @@
                 (cachedJobAutonomous
                   ? "cached_autonomous"
                   : "network_attended") &&
-              (retained
+              (retained || cachedJobWorkerSuspension
                 ? snapshot.target_ui_ns === null
                 : snapshot.target_ui_ns !== null) &&
               snapshot.consecutive_failures === 0 &&
@@ -997,6 +1059,22 @@
                           participant.schedule_phase === "confirmed",
                       ).length === 1,
                   ))) &&
+              (!cachedJobWorkerSuspension ||
+                (cachedJobWorkerSuspended &&
+                  cachedJobWorkerRestarted &&
+                  cachedJobFailureObservations.length === 0 &&
+                  !cachedJobRecovered &&
+                  snapshot.lease_renewal_rounds === 0 &&
+                  suspendedCachedJobSnapshot?.target_ui_ns !== null &&
+                  suspendedCachedJobSnapshot?.lease_renewal_rounds > 0 &&
+                  cachedJobTransitions.some(
+                    (transition) =>
+                      transition.phase === "irrevocable" &&
+                      transition.participants.every(
+                        (participant) =>
+                          participant.schedule_phase === "running",
+                      ),
+                  ))) &&
               (expectation !== "cached-job-reattach" ||
                 (cachedJobFailureObservations.length === 0 &&
                   !cachedJobRecovered));
@@ -1013,6 +1091,9 @@
                 cached_job_failure_observations:
                   cachedJobFailureObservations,
                 cached_job_recovered: cachedJobRecovered,
+                worker_suspended: cachedJobWorkerSuspended,
+                worker_restarted: cachedJobWorkerRestarted,
+                suspended_cached_job_snapshot: suspendedCachedJobSnapshot,
                 completed_cached_jobs: completedCachedJobs,
                 device_snapshots: compactDeviceSnapshots(),
               });
@@ -1027,12 +1108,15 @@
                 ...cachedJobFailureObservations,
               ],
               cached_job_recovered: cachedJobRecovered,
+              worker_suspended: cachedJobWorkerSuspended,
+              worker_restarted: cachedJobWorkerRestarted,
+              suspended_cached_job_snapshot: suspendedCachedJobSnapshot,
             });
             if (cachedJobRequestIndex + 1 < cachedJobRequests.length) {
               cachedJobClearing = true;
               worker.postMessage(
                 JSON.stringify({
-                  schema_version: 11,
+                  schema_version: 12,
                   command: {
                     kind: "clear_cached_job",
                     job_id: snapshot.job_id,
@@ -1049,6 +1133,9 @@
               cached_job_transitions: cachedJobTransitions,
               cached_job_failure_observations: cachedJobFailureObservations,
               cached_job_recovered: cachedJobRecovered,
+              worker_suspended: cachedJobWorkerSuspended,
+              worker_restarted: cachedJobWorkerRestarted,
+              suspended_cached_job_snapshot: suspendedCachedJobSnapshot,
               completed_cached_jobs: completedCachedJobs,
               device_snapshots: compactDeviceSnapshots(),
             });
@@ -1432,6 +1519,18 @@
           finish("failed", event);
         }
       };
+
+      const createWorker = () => {
+        const next = new Worker("/dist/alumina-worker.js", {
+          type: "module",
+          name: "alumina-clock-harness",
+        });
+        next.onerror = handleWorkerError;
+        next.onmessage = handleWorkerMessage;
+        return next;
+      };
+
+      worker = createWorker();
     </script>
   </body>
 </html>

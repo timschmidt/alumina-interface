@@ -1038,11 +1038,23 @@ impl DistributedScheduleCoordinator {
         device_id: DeviceId,
         response: &Response,
     ) -> Result<DistributedSchedulePhase, DistributedScheduleError> {
+        let passive_initial_round = self.intent == CoordinationIntent::Prepare
+            && self
+                .participants
+                .iter()
+                .any(|participant| participant.control.report().is_none());
         let result = self
             .participant_mut(device_id)?
             .control
             .accept_response(response);
-        self.activate_fault_cleanup_if_observed();
+        if !passive_initial_round
+            || self
+                .participants
+                .iter()
+                .all(|participant| participant.control.report().is_some())
+        {
+            self.activate_fault_cleanup_if_observed();
+        }
         result?;
         Ok(self.phase())
     }
@@ -2554,6 +2566,75 @@ mod tests {
             .unwrap();
         assert_eq!(divergent.phase(), DistributedSchedulePhase::Faulted);
         assert_eq!(divergent.next_request().unwrap(), None);
+    }
+
+    #[test]
+    fn passive_initial_status_retains_same_attempt_lease_fault_without_authority() {
+        let (job, ready, preparations, clocks) = fixture();
+        let mut original =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut authorities = prepare_all(&mut original);
+        let inputs = start_inputs(&job, &clocks);
+        install_and_confirm(&mut original, &mut authorities, &inputs);
+
+        for (index, authority) in authorities.iter_mut().enumerate() {
+            let commit = original.participant_commit(authority.device_id).unwrap();
+            assert!(matches!(
+                authority.schedule.advance(commit.abort_guard_cycle),
+                alumina_job::JobScheduleAction::PrimeHardware { .. }
+            ));
+            authority
+                .schedule
+                .mark_primed(commit.abort_guard_cycle)
+                .unwrap();
+            assert!(matches!(
+                authority.schedule.advance(commit.local_start_cycle),
+                alumina_job::JobScheduleAction::Start { .. }
+            ));
+            authority
+                .schedule
+                .record_start_observation(alumina_job::JobStartObservation {
+                    source: JobStartObservationSource::SimulatedLatch,
+                    output_token: 41 + u32::try_from(index).unwrap(),
+                    scheduled_cycle: commit.local_start_cycle,
+                    earliest_cycle: commit.local_start_cycle,
+                    latest_cycle: commit.local_start_cycle,
+                })
+                .unwrap();
+            assert_eq!(
+                authority.schedule.advance(commit.lease_expiry_cycle),
+                alumina_job::JobScheduleAction::LeaseExpired
+            );
+        }
+
+        let mut reattached =
+            DistributedScheduleCoordinator::after_cache(&job, &ready, &preparations).unwrap();
+        let mut observed = 0;
+        while let Some(request) = reattached.next_request().unwrap() {
+            assert_eq!(request.request.operation, Operation::JobStatus);
+            let authority = authorities
+                .iter()
+                .find(|authority| authority.device_id == request.device_id)
+                .unwrap();
+            reattached
+                .accept_response(request.device_id, &response(&ready_status(authority)))
+                .unwrap();
+            observed += 1;
+        }
+        assert_eq!(observed, authorities.len());
+        assert_eq!(reattached.phase(), DistributedSchedulePhase::Faulted);
+        assert_eq!(reattached.target_ui_ns(), None);
+        for authority in &authorities {
+            assert_eq!(reattached.participant_commit(authority.device_id), None);
+            assert_eq!(
+                reattached.participant_lease_expiry_cycle(authority.device_id),
+                Some(authority.schedule.report().lease_expiry_cycle)
+            );
+            assert_eq!(
+                reattached.participant_authorized_lease_expiry_cycle(authority.device_id),
+                None
+            );
+        }
     }
 
     #[test]

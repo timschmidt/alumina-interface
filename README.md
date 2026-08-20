@@ -162,7 +162,7 @@ prototype.
   bounded 64-observation history. It also owns passive runtime-health polling,
   retains independently validated queue/stack evidence and health-specific
   failures, retry-safe bounded board-capability acquisition, capability-selected
-  live telemetry, and bounded retained waveform capture. Strict schema-v11
+  live telemetry, and bounded retained waveform capture. Strict schema-v12
   snapshots expose only redacted progress and immutable identity; complete
   canonical capability, telemetry, and capture documents cross to the UI only
   after independent validation. The UI can add, probe, disconnect, and request

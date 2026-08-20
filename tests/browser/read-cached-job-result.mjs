@@ -15,6 +15,7 @@ if (
     "lease-renew-recovery",
     "lease-renew-request-recovery",
     "lease-expiry",
+    "worker-suspension",
     "abort-recovery",
     "confirmed-abort-recovery",
     "confirmed-abort-request-recovery",
@@ -32,7 +33,7 @@ if (
   ].includes(mode)
 ) {
   throw new Error(
-    "cached-job mode must be single, autonomous, autonomous-outage, repeat, recovery, confirm-recovery, lease-renew-recovery, lease-renew-request-recovery, lease-expiry, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, confirmed-safety-propagation-request-recovery, installing-stop, or reattach",
+    "cached-job mode must be single, autonomous, autonomous-outage, repeat, recovery, confirm-recovery, lease-renew-recovery, lease-renew-request-recovery, lease-expiry, worker-suspension, abort-recovery, confirmed-abort-recovery, confirmed-abort-request-recovery, abort-guard-outage, abort-split-outage, abort-status-outage, abort-duplicate, abort-stale-response, confirmed-safety-fault, confirmed-safety-propagation, confirmed-safety-propagation-recovery, confirmed-safety-propagation-request-recovery, installing-stop, or reattach",
   );
 }
 const repeat = mode === "repeat";
@@ -243,6 +244,9 @@ if (result.status === "passed") {
         (observation) => observation.consecutive_failures,
       ),
       cached_job_recovered: run.cached_job_recovered ?? false,
+      worker_suspended: run.worker_suspended ?? false,
+      worker_restarted: run.worker_restarted ?? false,
+      suspended_cached_job_snapshot: run.suspended_cached_job_snapshot,
     };
   };
   const completedCachedJobs = (detail.completed_cached_jobs ?? []).map(compactRun);
