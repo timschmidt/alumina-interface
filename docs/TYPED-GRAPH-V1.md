@@ -270,8 +270,14 @@ policies that cannot contain the active trigger window, and treats exact
 metadata reapplication as a no-op. Plot input now comes from a shared core
 projection that applies those policies to exact simulation entries, bounds all
 series to 131,072 aggregate samples, and preserves exact rational root-clock
-time alongside original clock/tick/sequence/value. The current single-clock
-axis rejects mixed local clocks instead of misaligning their tick integers.
+time alongside original clock/tick/sequence/value. The plot now uses that exact
+shared-root time directly, so same-root local clocks can coexist without
+misaligning their tick integers. Pointer display coordinates snap to an
+original exact sample/window time, and each series has explicit last-value-at-
+or-before cursor semantics. The plot accepts every nonempty projected Boolean
+or exact-rational probe, including caller-owned external-source trace records;
+canonical names replace the former fixed-series whitelist. Rational series
+must share one exact sample type before they may share an analog scale.
 
 Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
 including the sidecar's exact external-workspace binding, before mutating

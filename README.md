@@ -225,10 +225,15 @@ prototype.
   stable source/type identity and reject any capture policy that cannot hold
   its active trigger window. A shared aggregate-bounded replay projection now
   applies those policies to the plotted exact samples and carries exact
-  root-clock time across rate domains; the current single-clock axis rejects
-  mixed local clocks. Browser local storage atomically preserves only the exact
-  current pair, and native/browser `.algw` plus `.algp` exchange imports only
-  after bounded full replay, exact sidecar binding, and audited UI admission.
+  root-clock time across rate domains. The horizontal axis and cursor retain
+  that exact shared time across mixed local clocks; pointer coordinates only
+  select an existing exact time, and per-series values use explicit
+  sample-and-hold. Nonempty Boolean and same-type exact-rational probes,
+  including external-source outputs, are plotted by canonical name without a
+  fixed-series whitelist. Browser local storage atomically preserves only the
+  exact current pair, and native/browser `.algw` plus `.algp` exchange imports
+  only after bounded full replay, exact sidecar binding, and audited UI
+  admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible

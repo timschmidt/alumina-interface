@@ -18,8 +18,8 @@ use hyperreal::Rational;
 
 use super::{
     GraphAnalysis, GraphAnalysisError, GraphClockId, GraphClockRate, GraphNodeId, GraphPortId,
-    GraphSimulation, GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, GraphTypeId,
-    GraphValue, GraphWorkspaceDocument, GraphWorkspaceError, TypeKind, WireEndpoint, analyze_graph,
+    GraphSimulation, GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue,
+    GraphWorkspaceDocument, GraphWorkspaceError, TypeKind, WireEndpoint, analyze_graph,
     encode_graph_workspace,
 };
 
@@ -1154,8 +1154,9 @@ pub fn replay_graph_probes(
 }
 
 /// Resolve the first matching retained edge and its exact bounded replay
-/// window. This scans canonical host simulation output only; it does not arm or
-/// configure a device capture engine.
+/// window. This scans canonical host trace entries at the bound output,
+/// including caller-owned external-source entries; it does not arm or configure
+/// a device capture engine.
 pub fn resolve_graph_probe_trigger(
     document: &GraphProbeDocument,
     workspace: &GraphWorkspaceDocument,
@@ -1183,9 +1184,11 @@ pub fn resolve_graph_probe_trigger(
     let mut matched = None;
     let mut retained_posttrigger_samples = 0_u32;
     let mut last_tick = 0_u64;
-    for entry in simulation.entries().iter().filter(|entry| {
-        entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == probe.source
-    }) {
+    for entry in simulation
+        .entries()
+        .iter()
+        .filter(|entry| entry.endpoint() == probe.source)
+    {
         let retained = source_ordinal.is_multiple_of(u64::from(probe.capture.sample_stride));
         source_ordinal = source_ordinal
             .checked_add(1)
@@ -1321,9 +1324,11 @@ pub fn project_graph_probe_replay(
             .min(simulation.entries().len());
         let mut retained = VecDeque::with_capacity(capacity);
         let mut source_ordinal = 0_u64;
-        for entry in simulation.entries().iter().filter(|entry| {
-            entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == probe.source
-        }) {
+        for entry in simulation
+            .entries()
+            .iter()
+            .filter(|entry| entry.endpoint() == probe.source)
+        {
             let selected = source_ordinal.is_multiple_of(u64::from(probe.capture.sample_stride));
             source_ordinal =
                 source_ordinal
@@ -1706,7 +1711,7 @@ impl<'a> Decoder<'a> {
 mod tests {
     use super::*;
     use crate::graph::{
-        GraphNodePlacement, GraphWorkspaceLimits, RepresentativeControlSignal,
+        GraphNodePlacement, GraphTraceEntryKind, GraphWorkspaceLimits, RepresentativeControlSignal,
         compile_representative_exact_control_graph,
     };
 
@@ -2047,9 +2052,7 @@ mod tests {
             .simulation()
             .entries()
             .iter()
-            .filter(|entry| {
-                entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == source
-            })
+            .filter(|entry| entry.endpoint() == source)
             .enumerate()
             .filter(|(ordinal, _)| ordinal.is_multiple_of(2))
             .map(|(_, entry)| entry)
@@ -2060,6 +2063,143 @@ mod tests {
         assert_eq!(retained[0].entry(), expected[0]);
         assert_eq!(retained[1].entry(), expected[1]);
         assert!(retained[0].root_tick() < retained[1].root_tick());
+    }
+
+    #[test]
+    fn same_root_mixed_rate_projection_aligns_distinct_local_ticks_exactly() {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let workspace = workspace();
+        let source_rate_output = WireEndpoint {
+            node: GraphNodeId::new(1),
+            port: GraphPortId::new(1),
+        };
+        let control_rate_output = RepresentativeControlSignal::Error.endpoint();
+        let document = GraphProbeDocument::try_new(
+            GraphProbeLimits::interactive(),
+            1,
+            3,
+            None,
+            &workspace,
+            vec![
+                GraphProbeDefinition::new(
+                    GraphProbeId::new(1),
+                    "source-rate",
+                    source_rate_output,
+                    GraphProbeCapture::new(3, 5),
+                ),
+                GraphProbeDefinition::new(
+                    GraphProbeId::new(2),
+                    "control-rate",
+                    control_rate_output,
+                    GraphProbeCapture::new(3, 1),
+                ),
+            ],
+        )
+        .unwrap();
+        let projection = project_graph_probe_replay(
+            &document,
+            &workspace,
+            fixture.simulation(),
+            fixture.registry(),
+            GraphProbeProjectionLimits::interactive(),
+        )
+        .unwrap();
+        let source = projection.series()[0].samples();
+        let control = projection.series()[1].samples();
+        assert_eq!(
+            source
+                .iter()
+                .map(|sample| (sample.entry().clock(), sample.entry().clock_tick()))
+                .collect::<Vec<_>>(),
+            vec![
+                (GraphClockId::new(2), 15),
+                (GraphClockId::new(2), 20),
+                (GraphClockId::new(2), 25),
+            ]
+        );
+        assert_eq!(
+            control
+                .iter()
+                .map(|sample| (sample.entry().clock(), sample.entry().clock_tick()))
+                .collect::<Vec<_>>(),
+            vec![
+                (GraphClockId::new(3), 3),
+                (GraphClockId::new(3), 4),
+                (GraphClockId::new(3), 5),
+            ]
+        );
+        let expected_root_ticks = vec![Rational::from(30), Rational::from(40), Rational::from(50)];
+        assert_eq!(
+            source
+                .iter()
+                .map(|sample| sample.root_tick().clone())
+                .collect::<Vec<_>>(),
+            expected_root_ticks
+        );
+        assert_eq!(
+            control
+                .iter()
+                .map(|sample| sample.root_tick().clone())
+                .collect::<Vec<_>>(),
+            expected_root_ticks
+        );
+    }
+
+    #[test]
+    fn external_source_output_can_trigger_without_losing_trace_origin() {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let workspace = workspace();
+        let source = WireEndpoint {
+            node: GraphNodeId::new(3),
+            port: GraphPortId::new(1),
+        };
+        let document = GraphProbeDocument::try_new(
+            GraphProbeLimits::interactive(),
+            1,
+            2,
+            Some(GraphProbeTrigger::new(
+                GraphProbeId::new(1),
+                GraphProbeEdge::Falling,
+                2,
+                2,
+            )),
+            &workspace,
+            vec![GraphProbeDefinition::new(
+                GraphProbeId::new(1),
+                "external-permit-source",
+                source,
+                GraphProbeCapture::new(8, 1),
+            )],
+        )
+        .unwrap();
+        let GraphProbeTriggerResolution::Matched(matched) =
+            resolve_graph_probe_trigger(&document, &workspace, fixture.simulation()).unwrap()
+        else {
+            panic!("external Boolean source did not match its falling edge");
+        };
+        assert_eq!(matched.clock(), GraphClockId::new(2));
+        assert_eq!(matched.trigger_tick(), 20);
+        assert_eq!(matched.trigger_sequence(), 320);
+        assert_eq!((matched.first_tick(), matched.last_tick()), (18, 22));
+
+        let projection = project_graph_probe_replay(
+            &document,
+            &workspace,
+            fixture.simulation(),
+            fixture.registry(),
+            GraphProbeProjectionLimits::interactive(),
+        )
+        .unwrap();
+        let samples = projection.series()[0].samples();
+        assert_eq!(samples.len(), 5);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.entry().kind() == GraphTraceEntryKind::ExternalInput)
+        );
+        assert_eq!(samples[0].root_tick(), &Rational::from(36));
+        assert_eq!(samples[2].root_tick(), &Rational::from(40));
+        assert_eq!(samples[4].root_tick(), &Rational::from(44));
     }
 
     #[test]

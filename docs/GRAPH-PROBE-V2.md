@@ -48,9 +48,10 @@ on identity before a probe can influence presentation.
 
 `resolve_graph_probe_trigger` additionally requires the canonical simulation's
 `ALGR` identity to equal the graph embedded by the bound workspace. It scans
-only the trigger probe's canonical node-output records, applies the declared
-stride, and selects the first matching edge. A bounded ring retains no more
-than the requested pretrigger samples plus the current sample while waiting.
+only canonical trace records at the trigger probe's exact bound output, applies
+the declared stride, and selects the first matching edge. A bounded ring
+retains no more than the requested pretrigger samples plus the current sample
+while waiting.
 
 A match reports the exact graph clock, trigger tick and source sequence, first
 and last available window ticks, retained pre/post counts, and whether each
@@ -66,10 +67,13 @@ registry identities, resolves exact clock rates under the simulation's
 independent root, and attaches an exact rational root-clock tick to every
 retained sample while preserving the original clock/tick/sequence/value.
 
-For each probe, event ordinal advances only over that exact output's canonical
-node-output entries. Ordinal zero is retained, then every declared `stride`th
-entry. With a matched trigger, decimated samples are admitted only inside the
-trigger's first/last times after exact conversion to the shared root clock.
+For each probe, event ordinal advances only over canonical trace entries at
+that exact output. This includes caller-owned `ExternalInput` records at an
+external-source output as well as modeled `NodeOutput` records; the original
+trace-origin tag remains intact. Ordinal zero is retained, then every declared
+`stride`th entry. With a matched trigger, decimated samples are admitted only
+inside the trigger's first/last times after exact conversion to the shared root
+clock.
 With a disabled or waiting trigger, the complete finite replay is eligible.
 In either case a trailing ring keeps no more than the probe's declared maximum
 samples. Series remain in probe-ID order and samples remain in canonical
@@ -85,11 +89,23 @@ clock tree fails closed without partial output.
 The current mixed-signal UI converts values directly from the projected exact
 entries; changing retention or stride therefore changes the plotted points
 rather than merely changing saved metadata. It displays the matched exact
-root-time window. Until its horizontal axis is generalized to exact rational
-root time, it accepts only one local display clock and refuses to conflate
-equal-looking tick integers from multiple clocks or a foreign trigger clock.
-The core projection already retains the exact cross-rate time needed for that
-later UI extension.
+root-time window and uses every retained sample's exact rational root tick as
+its horizontal coordinate. Probes on different local rates within the shared
+root can therefore coexist without conflating equal-looking local tick
+integers. Local clock/tick identity remains visible in cursor labels. Every
+nonempty projected Boolean or exact-rational probe, including an
+external-source output, is keyed by its canonical probe name and endpoint
+rather than a fixed reference-series whitelist. A shared analog scale accepts
+only one exact sample type; mixed rational types fail closed instead of
+overlaying incompatible units.
+
+Only a named one-way enclosure maps exact root time into egui coordinates.
+Pointer motion chooses the nearest displayed candidate but retains that
+candidate's original `Rational`; it never converts a float coordinate back into
+canonical time. The cursor candidates include retained sample times and the
+exact matched-window anchors. At a shared cursor time, each series displays its
+last retained value at or before that time, giving explicit sample-and-hold
+semantics across rates. Non-finite projection or unordered time fails closed.
 
 ## Transactional editing
 

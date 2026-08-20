@@ -27,16 +27,15 @@ use alumina_interface_core::graph::{
     GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument,
     GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, GraphTypeId, GraphValue,
-    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceLimits, GraphWorkspaceProbeHistory,
-    NodeDefinition, NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema,
-    PortDefinition, RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
-    TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
+    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphWireId,
+    GraphWorkspaceDocument, GraphWorkspaceLimits, GraphWorkspaceProbeHistory, NodeDefinition,
+    NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema, PortDefinition,
+    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId, TypeDefinition,
+    TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
     compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
     encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
     flatten_graph_hierarchy, graph_component_instance_prototype, graph_resource_label,
     project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
-    resolve_graph_probe_trigger,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
@@ -136,16 +135,33 @@ enum TraceSeriesKind {
     Boolean,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TraceSignal {
+    probe: GraphProbeId,
+    name: String,
+    source: WireEndpoint,
+    representative: Option<RepresentativeControlSignal>,
+    sample_type: GraphTypeId,
+    unit_symbol: Option<String>,
+}
+
+impl TraceSignal {
+    fn label(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TracePoint {
     clock: GraphClockId,
     tick: u64,
+    root_tick: Rational,
     value: TracePointValue,
 }
 
 #[derive(Clone, Debug)]
 struct TraceSeries {
-    signal: RepresentativeControlSignal,
+    signal: TraceSignal,
     kind: TraceSeriesKind,
     points: Vec<TracePoint>,
 }
@@ -154,7 +170,159 @@ struct TraceSeries {
 struct TraceProjection {
     exact: GraphProbeProjection,
     traces: Vec<TraceSeries>,
-    display_clock: Option<GraphClockId>,
+    source_clocks: BTreeSet<GraphClockId>,
+    time_axis: Option<TraceTimeAxis>,
+}
+
+#[derive(Clone, Debug)]
+struct TraceTimeAxis {
+    minimum: Rational,
+    maximum: Rational,
+    selectable_ticks: Vec<Rational>,
+    selectable_fractions: Vec<f64>,
+    divisions: usize,
+}
+
+impl TraceTimeAxis {
+    fn try_new(
+        traces: &[TraceSeries],
+        trigger_window: Option<(&Rational, &Rational, &Rational)>,
+    ) -> Result<Option<Self>, String> {
+        let mut selectable_ticks = traces
+            .iter()
+            .flat_map(|series| series.points.iter().map(|point| point.root_tick.clone()))
+            .collect::<Vec<_>>();
+        if selectable_ticks.is_empty() {
+            return Ok(None);
+        }
+        if let Some((first, trigger, last)) = trigger_window {
+            selectable_ticks.extend([first.clone(), trigger.clone(), last.clone()]);
+        }
+        selectable_ticks
+            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        if selectable_ticks.windows(2).any(|pair| {
+            !matches!(
+                pair[0].partial_cmp(&pair[1]),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            )
+        }) {
+            return Err("exact trace-time values are not totally ordered".to_owned());
+        }
+        selectable_ticks.dedup();
+        let minimum = selectable_ticks
+            .first()
+            .cloned()
+            .ok_or_else(|| "exact trace-time axis has no minimum".to_owned())?;
+        let maximum = selectable_ticks
+            .last()
+            .cloned()
+            .ok_or_else(|| "exact trace-time axis has no maximum".to_owned())?;
+        let mut selectable_fractions = selectable_ticks
+            .iter()
+            .map(|tick| exact_time_fraction(tick, &minimum, &maximum))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut preceding = 0.0_f64;
+        for fraction in &mut selectable_fractions {
+            *fraction = (*fraction).max(preceding);
+            preceding = *fraction;
+        }
+        let divisions = selectable_ticks.len().saturating_sub(1).clamp(1, 5);
+        Ok(Some(Self {
+            minimum,
+            maximum,
+            selectable_ticks,
+            selectable_fractions,
+            divisions,
+        }))
+    }
+
+    fn clamp(&self, tick: &Rational) -> Rational {
+        if tick < &self.minimum {
+            self.minimum.clone()
+        } else if tick > &self.maximum {
+            self.maximum.clone()
+        } else {
+            tick.clone()
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "exact root time is projected one way into bounded egui f32 coordinates"
+    )]
+    fn plot_x(&self, rect: egui::Rect, tick: &Rational) -> Option<f32> {
+        let retained = self
+            .selectable_ticks
+            .binary_search_by(|candidate| {
+                candidate
+                    .partial_cmp(tick)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .ok()
+            .and_then(|index| self.selectable_fractions.get(index).copied());
+        retained
+            .or_else(|| exact_time_fraction(tick, &self.minimum, &self.maximum).ok())
+            .map(|fraction| rect.left() + rect.width() * fraction as f32)
+    }
+
+    fn nearest_tick(&self, rect: egui::Rect, x: f32) -> Option<Rational> {
+        let width = rect.width();
+        if !width.is_finite() || width <= 0.0 {
+            return self.selectable_ticks.first().cloned();
+        }
+        let target = f64::from(((x - rect.left()) / width).clamp(0.0, 1.0));
+        let after = self
+            .selectable_fractions
+            .partition_point(|fraction| *fraction < target);
+        let selected = match after {
+            0 => 0,
+            index if index == self.selectable_fractions.len() => index - 1,
+            index => {
+                let before_distance = (target - self.selectable_fractions[index - 1]).abs();
+                let after_distance = (self.selectable_fractions[index] - target).abs();
+                if before_distance <= after_distance {
+                    index - 1
+                } else {
+                    index
+                }
+            }
+        };
+        self.selectable_ticks.get(selected).cloned()
+    }
+
+    fn grid_ticks(&self) -> Vec<Rational> {
+        if self.minimum == self.maximum {
+            return vec![self.minimum.clone()];
+        }
+        let span = self.maximum.clone() - self.minimum.clone();
+        let denominator = Rational::from(
+            u64::try_from(self.divisions).expect("trace grid divisions are bounded to five"),
+        );
+        (0..=self.divisions)
+            .map(|index| {
+                let numerator = Rational::from(
+                    u64::try_from(index).expect("trace grid index is bounded to five"),
+                );
+                self.minimum.clone() + span.clone() * numerator / denominator.clone()
+            })
+            .collect()
+    }
+}
+
+fn exact_time_fraction(
+    tick: &Rational,
+    minimum: &Rational,
+    maximum: &Rational,
+) -> Result<f64, String> {
+    if minimum == maximum {
+        return Ok(0.5);
+    }
+    let ratio = (tick.clone() - minimum.clone()) / (maximum.clone() - minimum.clone());
+    let enclosure = ratio
+        .to_f64_enclosure()
+        .filter(|bounds| bounds.iter().all(|bound| bound.is_finite()))
+        .ok_or_else(|| "exact root-time fraction has no finite display enclosure".to_owned())?;
+    Ok((enclosure[0] + (enclosure[1] - enclosure[0]) * 0.5).clamp(0.0, 1.0))
 }
 
 #[derive(Clone, Debug)]
@@ -1197,7 +1365,7 @@ pub(crate) struct ExactControlWorkspace {
     probe_file_bridge: BoundedFileBridge,
     trigger_pre_samples: u32,
     trigger_post_samples: u32,
-    cursor_tick: u64,
+    cursor_root_tick: Rational,
 }
 
 impl ExactControlWorkspace {
@@ -1214,21 +1382,16 @@ impl ExactControlWorkspace {
         let probes = representative_probes(&workspace)?;
         let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
-        let traces = trace_series(&fixture)?;
+        let traces = trace_series(&fixture, &workspace, &probes.document)?;
         let palette = control_palette(&fixture)?;
         let trigger = probes
             .document
             .trigger()
             .ok_or_else(|| "reference ALGP has no edge trigger".to_owned())?;
-        let cursor_tick =
-            match resolve_graph_probe_trigger(&probes.document, &workspace, fixture.simulation())
-                .map_err(|error| error.to_string())?
-            {
-                GraphProbeTriggerResolution::Matched(matched) => matched.trigger_tick(),
-                GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_) => {
-                    0
-                }
-            };
+        let initial_projection = exact_probe_projection(&fixture, &workspace, &probes.document)?;
+        let cursor_root_tick = initial_projection
+            .trigger_root_window()
+            .map_or_else(|| Rational::from(0), |(_, trigger, _)| trigger.clone());
         let mut result = Self {
             fixture,
             workspace,
@@ -1257,7 +1420,7 @@ impl ExactControlWorkspace {
             probe_file_bridge: BoundedFileBridge::default(),
             trigger_pre_samples: trigger.pretrigger_samples(),
             trigger_post_samples: trigger.posttrigger_samples(),
-            cursor_tick,
+            cursor_root_tick,
         };
         result.reset_probe_drafts();
         if let Some(persisted) = persisted {
@@ -2047,21 +2210,26 @@ impl ExactControlWorkspace {
         };
         self.traces
             .iter()
-            .find(|series| series.signal == signal)
-            .and_then(|series| {
-                series
-                    .points
-                    .iter()
-                    .find(|point| point.tick == self.cursor_tick)
-            })
+            .find(|series| series.signal.representative == Some(signal))
+            .and_then(|series| trace_point_at_or_before(series, &self.cursor_root_tick))
             .map_or_else(
-                || format!("no sample at tick {}", self.cursor_tick),
+                || format!("no sample at or before root tick {}", self.cursor_root_tick),
                 |point| match &point.value {
                     TracePointValue::ExactRational { exact, .. } => {
-                        format!("{exact} mm · tick {}", point.tick)
+                        format!(
+                            "{exact} mm · c{}:t{} · root {}",
+                            point.clock.get(),
+                            point.tick,
+                            point.root_tick
+                        )
                     }
                     TracePointValue::Boolean(value) => {
-                        format!("{value} · tick {}", point.tick)
+                        format!(
+                            "{value} · c{}:t{} · root {}",
+                            point.clock.get(),
+                            point.tick,
+                            point.root_tick
+                        )
                     }
                 },
             )
@@ -2703,11 +2871,18 @@ impl ExactControlWorkspace {
     }
 
     fn reset_cursor_to_trigger(&mut self) {
-        self.cursor_tick = match self.trigger_resolution() {
-            Ok(GraphProbeTriggerResolution::Matched(matched)) => matched.trigger_tick(),
-            Ok(GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_))
-            | Err(_) => 0,
-        };
+        self.cursor_root_tick = self
+            .probes
+            .as_ref()
+            .and_then(|probes| {
+                exact_probe_projection(&self.fixture, &self.workspace, &probes.document).ok()
+            })
+            .and_then(|projection| {
+                projection
+                    .trigger_root_window()
+                    .map(|(_, trigger, _)| trigger.clone())
+            })
+            .unwrap_or_else(|| Rational::from(0));
     }
 
     fn refresh_component(&mut self) {
@@ -3394,13 +3569,14 @@ impl ExactControlWorkspace {
         }
     }
 
+    #[cfg(test)]
     fn trigger_resolution(&self) -> Result<GraphProbeTriggerResolution, String> {
         let probes = self
             .probes
             .as_ref()
             .ok_or_else(|| "no canonical ALGP sidecar is attached".to_owned())?;
-        resolve_graph_probe_trigger(&probes.document, &self.workspace, self.fixture.simulation())
-            .map_err(|error| error.to_string())
+        exact_probe_projection(&self.fixture, &self.workspace, &probes.document)
+            .map(|projection| projection.trigger_resolution())
     }
 
     fn trace_projection(&self) -> Result<TraceProjection, String> {
@@ -3408,39 +3584,18 @@ impl ExactControlWorkspace {
             .probes
             .as_ref()
             .ok_or_else(|| "no canonical ALGP sidecar is attached".to_owned())?;
-        let exact = project_graph_probe_replay(
-            &probes.document,
-            &self.workspace,
-            self.fixture.simulation(),
-            self.fixture.registry(),
-            GraphProbeProjectionLimits::interactive(),
-        )
-        .map_err(|error| error.to_string())?;
-        let traces = projected_trace_series(&exact)?;
-        let display_clocks = traces
+        let exact = exact_probe_projection(&self.fixture, &self.workspace, &probes.document)?;
+        let traces = projected_trace_series(&exact, &probes.document, &self.workspace)?;
+        let source_clocks = traces
             .iter()
             .flat_map(|series| series.points.iter().map(|point| point.clock))
             .collect::<BTreeSet<_>>();
-        if display_clocks.len() > 1 {
-            return Err(
-                "projected probes span multiple exact clocks; this single-clock plot refuses to align their local tick integers"
-                    .to_owned(),
-            );
-        }
-        let display_clock = display_clocks.first().copied();
-        if let (Some(clock), GraphProbeTriggerResolution::Matched(matched)) =
-            (display_clock, exact.trigger_resolution())
-            && clock != matched.clock()
-        {
-            return Err(
-                "projected display clock differs from the trigger clock; local ticks will not be conflated"
-                    .to_owned(),
-            );
-        }
+        let time_axis = TraceTimeAxis::try_new(&traces, exact.trigger_root_window())?;
         Ok(TraceProjection {
             exact,
             traces,
-            display_clock,
+            source_clocks,
+            time_axis,
         })
     }
 
@@ -3512,13 +3667,14 @@ impl ExactControlWorkspace {
             ));
         }
         ui.weak(format!(
-            "{} retained samples across {} probes · display clock {}",
+            "{} retained samples across {} probes · source clocks {}",
             projection.retained_samples(),
             projection.series().len(),
-            trace_projection
-                .display_clock
-                .map_or_else(|| "none".to_owned(), |clock| clock.get().to_string())
+            graph_clock_set_label(&trace_projection.source_clocks)
         ));
+        let trigger_root_tick = projection
+            .trigger_root_window()
+            .map(|(_, trigger, _)| trigger.clone());
         let traces = trace_projection.traces;
         if traces.is_empty() {
             ui.weak(
@@ -3526,30 +3682,30 @@ impl ExactControlWorkspace {
             );
             return;
         }
-        let minimum_tick = traces
-            .iter()
-            .flat_map(|series| series.points.iter().map(|point| point.tick))
-            .min()
-            .unwrap_or(0);
-        let maximum_tick = traces
-            .iter()
-            .flat_map(|series| series.points.iter().map(|point| point.tick))
-            .max()
-            .unwrap_or(minimum_tick);
-        let trigger_tick = match trigger_resolution {
-            GraphProbeTriggerResolution::Matched(matched) => Some(matched.trigger_tick()),
-            GraphProbeTriggerResolution::Disabled | GraphProbeTriggerResolution::Waiting(_) => None,
+        let Some(time_axis) = trace_projection.time_axis else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "exact root-time axis unavailable for retained probe samples",
+            );
+            return;
         };
-        self.cursor_tick = self.cursor_tick.clamp(minimum_tick, maximum_tick);
+        self.cursor_root_tick = time_axis.clamp(&self.cursor_root_tick);
         let analog = traces
             .iter()
             .filter(|series| series.kind == TraceSeriesKind::ExactRational)
             .collect::<Vec<_>>();
+        let analog_unit_label = match shared_analog_unit_label(&analog) {
+            Ok(label) => label,
+            Err(error) => {
+                ui.colored_label(egui::Color32::YELLOW, error);
+                return;
+            }
+        };
         let mut digital = traces
             .iter()
             .filter(|series| series.kind == TraceSeriesKind::Boolean)
             .collect::<Vec<_>>();
-        digital.sort_by_key(|series| digital_signal_order(series.signal));
+        digital.sort_by_key(|series| trace_digital_order(&series.signal));
         let analog_height = if analog.is_empty() { 0.0 } else { 160.0 };
         let digital_height = display_index(digital.len()) * 36.0;
         let section_gap = if analog.is_empty() || digital.is_empty() {
@@ -3587,8 +3743,7 @@ impl ExactControlWorkspace {
             paint_trace_grid(
                 &painter,
                 plot,
-                minimum_tick,
-                maximum_tick,
+                &time_axis,
                 minimum_value,
                 maximum_value,
                 digital_plot.is_none(),
@@ -3598,8 +3753,7 @@ impl ExactControlWorkspace {
                     &painter,
                     plot,
                     series,
-                    minimum_tick,
-                    maximum_tick,
+                    &time_axis,
                     minimum_value,
                     maximum_value,
                 );
@@ -3607,15 +3761,15 @@ impl ExactControlWorkspace {
             painter.text(
                 egui::pos2(response.rect.left() + 6.0, plot.top()),
                 egui::Align2::LEFT_TOP,
-                "mm",
+                analog_unit_label,
                 egui::FontId::proportional(10.0),
                 egui::Color32::GRAY,
             );
         }
         if let Some(plot) = digital_plot {
             painter.rect_filled(plot, 3.0, egui::Color32::from_rgb(17, 21, 29));
-            paint_trace_time_grid(&painter, plot, minimum_tick, maximum_tick, true);
-            paint_digital_trace_series(&painter, plot, &digital, minimum_tick, maximum_tick);
+            paint_trace_time_grid(&painter, plot, &time_axis, true);
+            paint_digital_trace_series(&painter, plot, &digital, &time_axis);
             painter.text(
                 egui::pos2(response.rect.left() + 6.0, plot.top()),
                 egui::Align2::LEFT_TOP,
@@ -3637,11 +3791,14 @@ impl ExactControlWorkspace {
         if let Some(pointer) = response
             .hover_pos()
             .filter(|position| interaction.contains(*position))
+            && let Some(tick) = time_axis.nearest_tick(time_plot, pointer.x)
         {
-            self.cursor_tick = cursor_tick(time_plot, pointer.x, minimum_tick, maximum_tick);
+            self.cursor_root_tick = tick;
         }
-        if let Some(trigger_tick) = trigger_tick {
-            let trigger_x = plot_x(time_plot, trigger_tick, minimum_tick, maximum_tick);
+        if let Some(trigger_x) = trigger_root_tick
+            .as_ref()
+            .and_then(|tick| time_axis.plot_x(time_plot, tick))
+        {
             painter.line_segment(
                 [
                     egui::pos2(trigger_x, interaction.top()),
@@ -3657,34 +3814,31 @@ impl ExactControlWorkspace {
                 egui::Color32::from_rgb(249, 153, 82),
             );
         }
-        let cursor_x = plot_x(time_plot, self.cursor_tick, minimum_tick, maximum_tick);
-        painter.line_segment(
-            [
-                egui::pos2(cursor_x, interaction.top()),
-                egui::pos2(cursor_x, interaction.bottom()),
-            ],
-            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
-        );
+        if let Some(cursor_x) = time_axis.plot_x(time_plot, &self.cursor_root_tick) {
+            painter.line_segment(
+                [
+                    egui::pos2(cursor_x, interaction.top()),
+                    egui::pos2(cursor_x, interaction.bottom()),
+                ],
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
+            );
+        }
 
         painter.text(
             egui::pos2(time_plot.left(), response.rect.bottom() - 8.0),
             egui::Align2::LEFT_BOTTOM,
-            "control clock tick",
+            format!("root clock {} exact tick", projection.root_clock().get()),
             egui::FontId::proportional(10.0),
             egui::Color32::GRAY,
         );
 
         ui.horizontal_wrapped(|ui| {
-            ui.strong(format!("tick {}", self.cursor_tick));
+            ui.strong(format!("root tick {}", self.cursor_root_tick));
             for series in analog.iter().chain(digital.iter()).copied() {
-                if let Some(point) = series
-                    .points
-                    .iter()
-                    .find(|point| point.tick == self.cursor_tick)
-                {
+                if let Some(point) = trace_point_at_or_before(series, &self.cursor_root_tick) {
                     ui.colored_label(
-                        signal_color(series.signal),
-                        trace_cursor_label(series.signal, point),
+                        trace_signal_color(&series.signal),
+                        trace_cursor_label(&series.signal, point),
                     );
                 }
             }
@@ -4781,51 +4935,73 @@ fn graph_presentation(
     Ok(GraphPresentation { nodes, wires, size })
 }
 
-fn trace_series(fixture: &RepresentativeExactControlGraph) -> Result<Vec<TraceSeries>, String> {
-    let mut result = Vec::with_capacity(SIGNALS.len());
+fn exact_probe_projection(
+    fixture: &RepresentativeExactControlGraph,
+    workspace: &GraphWorkspaceDocument,
+    probes: &GraphProbeDocument,
+) -> Result<GraphProbeProjection, String> {
+    project_graph_probe_replay(
+        probes,
+        workspace,
+        fixture.simulation(),
+        fixture.registry(),
+        GraphProbeProjectionLimits::interactive(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn trace_series(
+    fixture: &RepresentativeExactControlGraph,
+    workspace: &GraphWorkspaceDocument,
+    probes: &GraphProbeDocument,
+) -> Result<Vec<TraceSeries>, String> {
+    let mut complete = probes.clone();
+    complete
+        .clear_trigger(workspace)
+        .map_err(|error| error.to_string())?;
+    let projection = exact_probe_projection(fixture, workspace, &complete)?;
+    let result = projected_trace_series(&projection, &complete, workspace)?;
     for signal in SIGNALS {
-        let mut points = Vec::new();
-        let mut kind = None;
-        for entry in fixture.simulation().entries().iter().filter(|entry| {
-            entry.kind() == GraphTraceEntryKind::NodeOutput && entry.endpoint() == signal.endpoint()
-        }) {
-            if points.len() >= MAXIMUM_POINTS_PER_SERIES {
-                return Err(format!("{} trace exceeds display policy", signal.label()));
-            }
-            let (point_kind, point) = trace_point(signal, entry)?;
-            if kind.is_some_and(|retained| retained != point_kind) {
-                return Err(format!("{} trace changes value kind", signal.label()));
-            }
-            kind = Some(point_kind);
-            points.push(point);
+        if !result
+            .iter()
+            .any(|series| series.signal.representative == Some(signal))
+        {
+            return Err(format!("{} trace is empty", signal.label()));
         }
-        let kind = kind.ok_or_else(|| format!("{} trace is empty", signal.label()))?;
-        result.push(TraceSeries {
-            signal,
-            kind,
-            points,
-        });
     }
     Ok(result)
 }
 
-fn projected_trace_series(projection: &GraphProbeProjection) -> Result<Vec<TraceSeries>, String> {
-    let mut result = Vec::with_capacity(projection.series().len().min(SIGNALS.len()));
+fn projected_trace_series(
+    projection: &GraphProbeProjection,
+    probes: &GraphProbeDocument,
+    workspace: &GraphWorkspaceDocument,
+) -> Result<Vec<TraceSeries>, String> {
+    let mut result = Vec::with_capacity(projection.series().len());
     for projected in projection.series() {
-        let Some(signal) = SIGNALS
-            .iter()
-            .copied()
-            .find(|signal| signal.endpoint() == projected.source())
-        else {
+        let Some(first) = projected.samples().first() else {
             continue;
         };
+        let definition = probes.probe(projected.probe()).ok_or_else(|| {
+            format!(
+                "projected probe p{} has no canonical definition",
+                projected.probe().get()
+            )
+        })?;
+        if definition.source() != projected.source() {
+            return Err(format!(
+                "projected probe p{} changed its exact output endpoint",
+                projected.probe().get()
+            ));
+        }
+        let signal = trace_signal(definition, workspace, first.entry().value().value_type())?;
         let mut points = Vec::with_capacity(projected.samples().len());
         let mut kind = None;
         for sample in projected.samples() {
             if points.len() >= MAXIMUM_POINTS_PER_SERIES {
                 return Err(format!("{} trace exceeds display policy", signal.label()));
             }
-            let (point_kind, point) = trace_point(signal, sample.entry())?;
+            let (point_kind, point) = trace_point(&signal, sample.entry(), sample.root_tick())?;
             if kind.is_some_and(|retained| retained != point_kind) {
                 return Err(format!("{} trace changes value kind", signal.label()));
             }
@@ -4843,10 +5019,55 @@ fn projected_trace_series(projection: &GraphProbeProjection) -> Result<Vec<Trace
     Ok(result)
 }
 
+fn trace_signal(
+    definition: &GraphProbeDefinition,
+    workspace: &GraphWorkspaceDocument,
+    sample_type: GraphTypeId,
+) -> Result<TraceSignal, String> {
+    let schema = workspace.graph().schema();
+    let type_definition = schema.value_type(sample_type).ok_or_else(|| {
+        format!(
+            "probe p{} sample type t{} is unavailable",
+            definition.id().get(),
+            sample_type.get()
+        )
+    })?;
+    let unit_symbol = match type_definition.kind() {
+        TypeKind::ExactRational { unit } => Some(
+            schema
+                .unit(*unit)
+                .ok_or_else(|| {
+                    format!("probe p{} exact unit is unavailable", definition.id().get())
+                })?
+                .symbol()
+                .to_owned(),
+        ),
+        _ => None,
+    };
+    Ok(TraceSignal {
+        probe: definition.id(),
+        name: definition.name().to_owned(),
+        source: definition.source(),
+        representative: SIGNALS
+            .iter()
+            .copied()
+            .find(|signal| signal.endpoint() == definition.source()),
+        sample_type,
+        unit_symbol,
+    })
+}
+
 fn trace_point(
-    signal: RepresentativeControlSignal,
+    signal: &TraceSignal,
     entry: &GraphTraceEntry,
+    root_tick: &Rational,
 ) -> Result<(TraceSeriesKind, TracePoint), String> {
+    if entry.endpoint() != signal.source || entry.value().value_type() != signal.sample_type {
+        return Err(format!(
+            "{} trace changed its exact endpoint or sample type",
+            signal.label()
+        ));
+    }
     let (kind, value) = match entry.value().value() {
         GraphValue::ExactRational(value) => {
             let enclosure = value
@@ -4874,6 +5095,7 @@ fn trace_point(
         TracePoint {
             clock: entry.clock(),
             tick: entry.clock_tick(),
+            root_tick: root_tick.clone(),
             value,
         },
     ))
@@ -4992,19 +5214,20 @@ fn paint_analog_trace_series(
     painter: &egui::Painter,
     rect: egui::Rect,
     series: &TraceSeries,
-    minimum_tick: u64,
-    maximum_tick: u64,
+    time_axis: &TraceTimeAxis,
     minimum_value: f64,
     maximum_value: f64,
 ) {
     debug_assert_eq!(series.kind, TraceSeriesKind::ExactRational);
-    let color = signal_color(series.signal);
+    let color = trace_signal_color(&series.signal);
     let mut line: Vec<egui::Pos2> = Vec::new();
     for point in &series.points {
         let TracePointValue::ExactRational { enclosure, .. } = &point.value else {
             continue;
         };
-        let x = plot_x(rect, point.tick, minimum_tick, maximum_tick);
+        let Some(x) = time_axis.plot_x(rect, &point.root_tick) else {
+            continue;
+        };
         let lower = plot_y(rect, enclosure[0], minimum_value, maximum_value);
         let upper = plot_y(rect, enclosure[1], minimum_value, maximum_value);
         let middle = (lower + upper) * 0.5;
@@ -5025,8 +5248,7 @@ fn paint_digital_trace_series(
     painter: &egui::Painter,
     rect: egui::Rect,
     series: &[&TraceSeries],
-    minimum_tick: u64,
-    maximum_tick: u64,
+    time_axis: &TraceTimeAxis,
 ) {
     let lane_height = rect.height() / display_index(series.len()).max(1.0);
     let separator = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(35));
@@ -5045,7 +5267,7 @@ fn paint_digital_trace_series(
                 separator,
             );
         }
-        let color = signal_color(series.signal);
+        let color = trace_signal_color(&series.signal);
         painter.text(
             egui::pos2(rect.left() - 6.0, (lane_top + lane_bottom) * 0.5),
             egui::Align2::RIGHT_CENTER,
@@ -5058,10 +5280,10 @@ fn paint_digital_trace_series(
             let TracePointValue::Boolean(value) = &point.value else {
                 continue;
             };
-            let position = egui::pos2(
-                plot_x(rect, point.tick, minimum_tick, maximum_tick),
-                if *value { high } else { low },
-            );
+            let Some(x) = time_axis.plot_x(rect, &point.root_tick) else {
+                continue;
+            };
+            let position = egui::pos2(x, if *value { high } else { low });
             if let Some(previous) = line.last().copied() {
                 line.push(egui::pos2(position.x, previous.y));
             }
@@ -5075,13 +5297,47 @@ fn paint_digital_trace_series(
     }
 }
 
-fn trace_cursor_label(signal: RepresentativeControlSignal, point: &TracePoint) -> String {
+fn trace_cursor_label(signal: &TraceSignal, point: &TracePoint) -> String {
     match &point.value {
-        TracePointValue::ExactRational { exact, .. } => {
-            format!("{} = {exact} mm", signal.label())
-        }
-        TracePointValue::Boolean(value) => format!("{} = {value}", signal.label()),
+        TracePointValue::ExactRational { exact, .. } => format!(
+            "{} = {exact}{} @ c{}:t{}",
+            signal.label(),
+            signal
+                .unit_symbol
+                .as_deref()
+                .map_or_else(String::new, |unit| format!(" {unit}")),
+            point.clock.get(),
+            point.tick
+        ),
+        TracePointValue::Boolean(value) => format!(
+            "{} = {value} @ c{}:t{}",
+            signal.label(),
+            point.clock.get(),
+            point.tick
+        ),
     }
+}
+
+fn trace_point_at_or_before<'a>(
+    series: &'a TraceSeries,
+    root_tick: &Rational,
+) -> Option<&'a TracePoint> {
+    series
+        .points
+        .iter()
+        .rev()
+        .find(|point| &point.root_tick <= root_tick)
+}
+
+fn graph_clock_set_label(clocks: &BTreeSet<GraphClockId>) -> String {
+    if clocks.is_empty() {
+        return "none".to_owned();
+    }
+    clocks
+        .iter()
+        .map(|clock| clock.get().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const fn digital_signal_order(signal: RepresentativeControlSignal) -> u8 {
@@ -5096,6 +5352,13 @@ const fn digital_signal_order(signal: RepresentativeControlSignal) -> u8 {
     }
 }
 
+fn trace_digital_order(signal: &TraceSignal) -> (u8, u32) {
+    (
+        signal.representative.map_or(u8::MAX, digital_signal_order),
+        signal.probe.get(),
+    )
+}
+
 const fn probe_edge_label(edge: GraphProbeEdge) -> &'static str {
     match edge {
         GraphProbeEdge::Rising => "rising-edge",
@@ -5107,13 +5370,12 @@ const fn probe_edge_label(edge: GraphProbeEdge) -> &'static str {
 fn paint_trace_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
-    minimum_tick: u64,
-    maximum_tick: u64,
+    time_axis: &TraceTimeAxis,
     minimum_value: f64,
     maximum_value: f64,
     label_ticks: bool,
 ) {
-    paint_trace_time_grid(painter, rect, minimum_tick, maximum_tick, label_ticks);
+    paint_trace_time_grid(painter, rect, time_axis, label_ticks);
     let grid = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28));
     for index in 0..=4 {
         let fraction = f64::from(index) / 4.0;
@@ -5136,17 +5398,14 @@ fn paint_trace_grid(
 fn paint_trace_time_grid(
     painter: &egui::Painter,
     rect: egui::Rect,
-    minimum_tick: u64,
-    maximum_tick: u64,
+    time_axis: &TraceTimeAxis,
     label_ticks: bool,
 ) {
     let grid = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28));
-    let span = maximum_tick.saturating_sub(minimum_tick);
-    let divisions = span.clamp(1, 5);
-    let final_index = if span == 0 { 0 } else { divisions };
-    for index in 0..=final_index {
-        let tick = minimum_tick + span.saturating_mul(index) / divisions;
-        let x = plot_x(rect, tick, minimum_tick, maximum_tick);
+    for tick in time_axis.grid_ticks() {
+        let Some(x) = time_axis.plot_x(rect, &tick) else {
+            continue;
+        };
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             grid,
@@ -5161,6 +5420,22 @@ fn paint_trace_time_grid(
             );
         }
     }
+}
+
+fn shared_analog_unit_label<'a>(series: &[&'a TraceSeries]) -> Result<&'a str, &'static str> {
+    let sample_types = series
+        .iter()
+        .map(|series| series.signal.sample_type)
+        .collect::<BTreeSet<_>>();
+    if sample_types.len() > 1 {
+        return Err(
+            "exact rational probes use different value types; this shared analog scale refuses to overlay them",
+        );
+    }
+    Ok(series
+        .first()
+        .and_then(|series| series.signal.unit_symbol.as_deref())
+        .unwrap_or("exact rational"))
 }
 
 fn trace_value_bounds(series: &[&TraceSeries]) -> (f64, f64) {
@@ -5234,16 +5509,6 @@ fn display_index(value: usize) -> f32 {
 }
 
 #[allow(
-    clippy::cast_precision_loss,
-    reason = "bounded trace ticks are projected only into non-authoritative egui coordinates"
-)]
-fn plot_x(rect: egui::Rect, tick: u64, minimum_tick: u64, maximum_tick: u64) -> f32 {
-    let span = maximum_tick.saturating_sub(minimum_tick).max(1);
-    let offset = tick.saturating_sub(minimum_tick).min(span);
-    rect.left() + rect.width() * (offset as f32 / span as f32)
-}
-
-#[allow(
     clippy::cast_possible_truncation,
     reason = "certified finite enclosure coordinates are intentionally projected to egui f32"
 )]
@@ -5252,19 +5517,21 @@ fn plot_y(rect: egui::Rect, value: f64, minimum: f64, maximum: f64) -> f32 {
     rect.bottom() - rect.height() * fraction
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "a clamped hover coordinate selects one bounded display tick"
-)]
-fn cursor_tick(rect: egui::Rect, x: f32, minimum_tick: u64, maximum_tick: u64) -> u64 {
-    let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-    let span = maximum_tick.saturating_sub(minimum_tick);
-    minimum_tick + (fraction * span as f32).round() as u64
+fn trace_signal_color(signal: &TraceSignal) -> egui::Color32 {
+    signal.representative.map_or_else(
+        || match signal.probe.get() % 6 {
+            0 => DIAGNOSTIC_CHANNEL_COLORS[0],
+            1 => DIAGNOSTIC_CHANNEL_COLORS[1],
+            2 => DIAGNOSTIC_CHANNEL_COLORS[2],
+            3 => DIAGNOSTIC_CHANNEL_COLORS[3],
+            4 => DIAGNOSTIC_CHANNEL_COLORS[4],
+            _ => DIAGNOSTIC_CHANNEL_COLORS[5],
+        },
+        representative_signal_color,
+    )
 }
 
-const fn signal_color(signal: RepresentativeControlSignal) -> egui::Color32 {
+const fn representative_signal_color(signal: RepresentativeControlSignal) -> egui::Color32 {
     match signal {
         RepresentativeControlSignal::Error => egui::Color32::from_rgb(247, 196, 86),
         RepresentativeControlSignal::IntegralPrior => egui::Color32::from_rgb(91, 205, 224),
@@ -5384,7 +5651,7 @@ mod tests {
         assert_eq!(trigger.trigger().edge(), GraphProbeEdge::Falling);
         assert_eq!(trigger.trigger_tick(), 3);
         assert_eq!((trigger.first_tick(), trigger.last_tick()), (1, 5));
-        assert_eq!(workspace.cursor_tick, 3);
+        assert_eq!(workspace.cursor_root_tick, Rational::from(30));
         assert_eq!(workspace.palette.len(), 13);
         assert!(workspace.palette.iter().all(|entry| {
             workspace
@@ -5426,7 +5693,7 @@ mod tests {
             .traces
             .iter()
             .filter(|series| series.kind == TraceSeriesKind::Boolean)
-            .map(|series| series.signal)
+            .map(|series| series.signal.representative.unwrap())
             .collect::<Vec<_>>();
         digital_order.sort_by_key(|signal| digital_signal_order(*signal));
         assert_eq!(
@@ -5440,7 +5707,9 @@ mod tests {
         let external = workspace
             .traces
             .iter()
-            .find(|series| series.signal == RepresentativeControlSignal::ExternalPermit)
+            .find(|series| {
+                series.signal.representative == Some(RepresentativeControlSignal::ExternalPermit)
+            })
             .unwrap();
         assert_eq!(
             external
@@ -5458,7 +5727,10 @@ mod tests {
         let range = workspace
             .traces
             .iter()
-            .find(|series| series.signal == RepresentativeControlSignal::MeasurementWithinRange)
+            .find(|series| {
+                series.signal.representative
+                    == Some(RepresentativeControlSignal::MeasurementWithinRange)
+            })
             .unwrap();
         assert_eq!(
             range
@@ -5610,7 +5882,7 @@ mod tests {
         };
         assert_eq!(trigger.trigger_tick(), 4);
         assert_eq!((trigger.first_tick(), trigger.last_tick()), (3, 5));
-        assert_eq!(workspace.cursor_tick, 4);
+        assert_eq!(workspace.cursor_root_tick, Rational::from(40));
         assert_eq!(workspace.workspace, graph);
 
         let canonical = workspace.probes.as_ref().unwrap().encoding.clone();
@@ -6169,7 +6441,13 @@ mod tests {
         assert_eq!(initial.exact.retained_samples(), 35);
         assert_eq!(initial.traces.len(), SIGNALS.len());
         assert!(initial.traces.iter().all(|series| series.points.len() == 5));
-        assert_eq!(initial.display_clock, Some(GraphClockId::new(3)));
+        assert_eq!(
+            initial.source_clocks,
+            BTreeSet::from([GraphClockId::new(3)])
+        );
+        let axis = initial.time_axis.as_ref().unwrap();
+        assert_eq!(axis.minimum, Rational::from(10));
+        assert_eq!(axis.maximum, Rational::from(50));
 
         let id = GraphProbeId::new(2);
         let mut draft = workspace.probe_drafts.get(&id).unwrap().clone();
@@ -6180,7 +6458,9 @@ mod tests {
         let integral = projected
             .traces
             .iter()
-            .find(|series| series.signal == RepresentativeControlSignal::IntegralPrior)
+            .find(|series| {
+                series.signal.representative == Some(RepresentativeControlSignal::IntegralPrior)
+            })
             .unwrap();
         assert_eq!(
             integral
@@ -6208,10 +6488,162 @@ mod tests {
         let integral = untriggered
             .traces
             .iter()
-            .find(|series| series.signal == RepresentativeControlSignal::IntegralPrior)
+            .find(|series| {
+                series.signal.representative == Some(RepresentativeControlSignal::IntegralPrior)
+            })
             .unwrap();
         assert_eq!(integral.points.len(), 2);
         assert!(integral.points[0].tick < integral.points[1].tick);
+    }
+
+    #[test]
+    fn mixed_rate_plot_includes_external_source_on_exact_shared_root_axis() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let source = WireEndpoint {
+            node: GraphNodeId::new(1),
+            port: GraphPortId::new(1),
+        };
+        workspace.add_probe(source);
+        let projection = workspace.trace_projection().unwrap();
+        assert_eq!(projection.exact.series().len(), 8);
+        assert_eq!(projection.exact.retained_samples(), 56);
+        assert_eq!(
+            projection.source_clocks,
+            BTreeSet::from([GraphClockId::new(2), GraphClockId::new(3)])
+        );
+        let source_series = projection
+            .traces
+            .iter()
+            .find(|series| series.signal.source == source)
+            .unwrap();
+        let canonical_name = workspace
+            .probes
+            .as_ref()
+            .unwrap()
+            .document
+            .probes()
+            .iter()
+            .find(|probe| probe.source() == source)
+            .unwrap()
+            .name();
+        assert_eq!(source_series.signal.name, canonical_name);
+        assert_eq!(source_series.signal.representative, None);
+        assert_eq!(source_series.signal.unit_symbol.as_deref(), Some("mm"));
+        assert_eq!(source_series.points.len(), 21);
+        assert_eq!(
+            (
+                source_series.points[0].clock,
+                source_series.points[0].tick,
+                source_series.points[0].root_tick.clone(),
+            ),
+            (GraphClockId::new(2), 5, Rational::from(10))
+        );
+        assert_eq!(
+            (
+                source_series.points[20].clock,
+                source_series.points[20].tick,
+                source_series.points[20].root_tick.clone(),
+            ),
+            (GraphClockId::new(2), 25, Rational::from(50))
+        );
+        let axis = projection.time_axis.unwrap();
+        assert_eq!(axis.minimum, Rational::from(10));
+        assert_eq!(axis.maximum, Rational::from(50));
+    }
+
+    #[test]
+    fn exact_root_time_axis_snaps_mixed_clocks_to_retained_rationals() {
+        let one_third = Rational::from(1) / Rational::from(3);
+        let one_half = Rational::from(1) / Rational::from(2);
+        let two_thirds = Rational::from(2) / Rational::from(3);
+        let traces = vec![
+            TraceSeries {
+                signal: TraceSignal {
+                    probe: GraphProbeId::new(1),
+                    name: "external-permit".to_owned(),
+                    source: RepresentativeControlSignal::ExternalPermit.endpoint(),
+                    representative: Some(RepresentativeControlSignal::ExternalPermit),
+                    sample_type: GraphTypeId::new(1),
+                    unit_symbol: None,
+                },
+                kind: TraceSeriesKind::Boolean,
+                points: vec![
+                    TracePoint {
+                        clock: GraphClockId::new(2),
+                        tick: 1,
+                        root_tick: one_third.clone(),
+                        value: TracePointValue::Boolean(false),
+                    },
+                    TracePoint {
+                        clock: GraphClockId::new(2),
+                        tick: 2,
+                        root_tick: two_thirds.clone(),
+                        value: TracePointValue::Boolean(true),
+                    },
+                ],
+            },
+            TraceSeries {
+                signal: TraceSignal {
+                    probe: GraphProbeId::new(2),
+                    name: "combined-permit".to_owned(),
+                    source: RepresentativeControlSignal::CombinedPermit.endpoint(),
+                    representative: Some(RepresentativeControlSignal::CombinedPermit),
+                    sample_type: GraphTypeId::new(1),
+                    unit_symbol: None,
+                },
+                kind: TraceSeriesKind::Boolean,
+                points: vec![TracePoint {
+                    clock: GraphClockId::new(9),
+                    tick: 7,
+                    root_tick: one_half.clone(),
+                    value: TracePointValue::Boolean(true),
+                }],
+            },
+        ];
+        let axis = TraceTimeAxis::try_new(&traces, Some((&one_third, &one_half, &two_thirds)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(axis.minimum, one_third);
+        assert_eq!(axis.maximum, two_thirds);
+        assert_eq!(
+            axis.grid_ticks(),
+            vec![
+                Rational::from(1) / Rational::from(3),
+                Rational::from(1) / Rational::from(2),
+                Rational::from(2) / Rational::from(3),
+            ]
+        );
+
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 0.0), egui::vec2(100.0, 20.0));
+        assert_eq!(axis.nearest_tick(rect, 60.0), Some(one_half.clone()));
+        let held = trace_point_at_or_before(&traces[0], &one_half).unwrap();
+        assert_eq!(held.clock, GraphClockId::new(2));
+        assert_eq!(held.tick, 1);
+        let clocks = traces
+            .iter()
+            .flat_map(|series| series.points.iter().map(|point| point.clock))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(graph_clock_set_label(&clocks), "2, 9");
+
+        let mut millimetres = traces[0].signal.clone();
+        millimetres.sample_type = GraphTypeId::new(2);
+        millimetres.unit_symbol = Some("mm".to_owned());
+        let mut percent = traces[1].signal.clone();
+        percent.sample_type = GraphTypeId::new(3);
+        percent.unit_symbol = Some("%".to_owned());
+        let incompatible = [
+            TraceSeries {
+                signal: millimetres,
+                kind: TraceSeriesKind::ExactRational,
+                points: Vec::new(),
+            },
+            TraceSeries {
+                signal: percent,
+                kind: TraceSeriesKind::ExactRational,
+                points: Vec::new(),
+            },
+        ];
+        assert!(shared_analog_unit_label(&[&incompatible[0], &incompatible[1]]).is_err());
     }
 
     #[test]
