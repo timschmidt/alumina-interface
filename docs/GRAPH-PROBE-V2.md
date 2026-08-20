@@ -93,17 +93,28 @@ root-time window and uses every retained sample's exact rational root tick as
 its horizontal coordinate. Probes on different local rates within the shared
 root can therefore coexist without conflating equal-looking local tick
 integers. Local clock/tick identity remains visible in cursor labels. Every
-nonempty projected Boolean or exact-rational probe, including an
+nonempty projected Boolean or supported physical-scalar probe, including an
 external-source output, is keyed by its canonical probe name and endpoint
-rather than a fixed reference-series whitelist. Exact-rational series are
-grouped in stable sample-type-ID order. Series with the identical registered
-type share one certified-enclosure Y scale, while every distinct exact type
-receives its own pane labeled with the schema's canonical type name, type ID,
-and unit symbol. This prevents incompatible units or meanings from being
-overlaid while retaining one exact root-time axis, trigger marker, and cursor
-across every analog pane and the Boolean lanes. The display admits at most 32
-distinct analog type panes and fails explicitly above that bound; the ALGP
-sidecar and replay remain unchanged.
+rather than a fixed reference-series whitelist. The analog families are exact
+rationals, exact closed measurement intervals, and signed or unsigned canonical
+integer counts carrying a registered exact lattice quantum. They are grouped
+in stable sample-type-ID order. Series with the identical registered type share
+one certified-enclosure Y scale, while every distinct exact type receives its
+own pane labeled with the schema's canonical type name, type ID, and unit
+symbol. This prevents incompatible units or meanings from being overlaid while
+retaining one exact root-time axis, trigger marker, and cursor across every
+analog pane and the Boolean lanes. The display admits at most 32 distinct
+analog type panes and fails explicitly above that bound; the ALGP sidecar and
+replay remain unchanged.
+
+An exact rational produces an outward binary64 enclosure only for display. A
+measurement interval retains both exact endpoints and projects the lower
+endpoint downward and upper endpoint upward. A canonical integer is multiplied
+by its registered exact quantum before projection, while its original signed or
+unsigned count remains in the cursor label. Reversed intervals, type/value
+mismatches, missing unit metadata, and values without finite display
+enclosures fail before painting. Text, structured, identity-bearing, and other
+non-scalar values are not implicitly converted into analog data.
 
 Only a named one-way enclosure maps exact root time into egui coordinates.
 Pointer motion chooses the nearest displayed candidate but retains that

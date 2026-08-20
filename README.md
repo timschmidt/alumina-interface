@@ -228,14 +228,15 @@ prototype.
   root-clock time across rate domains. The horizontal axis and cursor retain
   that exact shared time across mixed local clocks; pointer coordinates only
   select an existing exact time, and per-series values use explicit
-  sample-and-hold. Nonempty Boolean and exact-rational probes, including
-  external-source outputs, are plotted by canonical name without a fixed-series
-  whitelist. Exact rational probes with the same registered type share one
-  scale; distinct types receive deterministic separate panes with their
-  canonical type name and unit while retaining the shared exact-time axis and
-  cursor. Browser local storage atomically preserves only the exact current
-  pair, and native/browser `.algw` plus `.algp` exchange imports only after
-  bounded full replay, exact sidecar binding, and audited UI admission.
+  sample-and-hold. Nonempty Boolean and physical-scalar probes—exact rationals,
+  measured intervals, and signed/unsigned canonical lattice counts—including
+  external-source outputs are plotted by canonical name without a fixed-series
+  whitelist. Physical scalars with the same registered type share one scale;
+  distinct types receive deterministic separate panes with their canonical type
+  name and unit while retaining the shared exact-time axis and cursor. Browser
+  local storage atomically preserves only the exact current pair, and
+  native/browser `.algw` plus `.algp` exchange imports only after bounded full
+  replay, exact sidecar binding, and audited UI admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible
@@ -265,14 +266,16 @@ prototype.
   diagnostic probes to exact workspace outputs and retain one replay-only
   Boolean edge trigger with a bounded pre/post sample window. Probe/trigger
   edits filter host plots without mutating the graph or granting firmware
-  telemetry/resource access or device-trigger authority. Exact-rational series
-  use certified analog enclosures on independently scaled type panes, while
-  Boolean series use aligned high/low logic-analyzer lanes; all panes share the
-  trigger-selected exact-time window, trigger marker, and cursor. Plot
-  coordinates come only from certified `f64` enclosures, and cursor labels
-  retain exact sample values. Stored or imported sidecars for another workspace
-  fail closed without partial graph/probe mutation; exact no-op sidecar edits do
-  not trigger redundant persistence.
+  telemetry/resource access or device-trigger authority. Physical-scalar
+  series use certified analog enclosures on independently scaled type panes;
+  measured intervals retain both exact endpoints, and canonical counts are
+  multiplied by their registered exact quantum while retaining the count in the
+  cursor label. Boolean series use aligned high/low logic-analyzer lanes. All
+  panes share the trigger-selected exact-time window, trigger marker, and
+  cursor. Plot coordinates come only from certified `f64` enclosures, and
+  cursor labels retain exact sample values. Stored or imported sidecars for
+  another workspace fail closed without partial graph/probe mutation; exact
+  no-op sidecar edits do not trigger redundant persistence.
   This remains editor state, not deployment or firmware authority. See
   [`docs/GRAPH-WORKSPACE-V1.md`](docs/GRAPH-WORKSPACE-V1.md).
   The component/front-panel boundary is in

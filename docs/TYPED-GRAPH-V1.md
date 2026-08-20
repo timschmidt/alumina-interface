@@ -262,9 +262,13 @@ certified analog enclosures and the final three as aligned Boolean
 logic-analyzer lanes on the same exact time grid. Egui
 coordinates and analog plot labels are named display projections from
 certified finite `f64` enclosures; the shared cursor displays the retained exact
-rational or Boolean value. Headless core-edit and full-frame tests exercise the
-same native/browser paths. Each probe row now exposes bounded canonical name,
-retained-sample, and event-stride fields. Applying them transactionally retains
+physical scalar or Boolean value. Measurement intervals and signed/unsigned
+canonical lattice counts use the same analog boundary: intervals retain exact
+closed endpoints, while counts are multiplied by the registered exact quantum
+and keep the original count in the cursor label. Headless core-edit and
+full-frame tests exercise the same native/browser paths. Each probe row now
+exposes bounded canonical name, retained-sample, and event-stride fields.
+Applying them transactionally retains
 probe/source/type identity, rejects duplicate or malformed names and capture
 policies that cannot contain the active trigger window, and treats exact
 metadata reapplication as a no-op. Plot input now comes from a shared core
@@ -275,9 +279,11 @@ shared-root time directly, so same-root local clocks can coexist without
 misaligning their tick integers. Pointer display coordinates snap to an
 original exact sample/window time, and each series has explicit last-value-at-
 or-before cursor semantics. The plot accepts every nonempty projected Boolean
-or exact-rational probe, including caller-owned external-source trace records;
-canonical names replace the former fixed-series whitelist. Rational series
-must share one exact sample type before they may share an analog scale.
+or supported physical-scalar probe, including caller-owned external-source
+trace records; canonical names replace the former fixed-series whitelist.
+Physical scalar series share an analog scale only when their complete
+registered sample type is identical; other types receive deterministic
+separate panes on the shared exact root-time axis.
 
 Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
 including the sidecar's exact external-workspace binding, before mutating

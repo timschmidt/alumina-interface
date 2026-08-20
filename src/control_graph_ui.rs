@@ -128,13 +128,13 @@ enum PortEdit {
 
 #[derive(Clone, Debug)]
 enum TracePointValue {
-    ExactRational { exact: String, enclosure: [f64; 2] },
+    Analog { exact: String, enclosure: [f64; 2] },
     Boolean(bool),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TraceSeriesKind {
-    ExactRational,
+    Analog,
     Boolean,
 }
 
@@ -2235,31 +2235,35 @@ impl ExactControlWorkspace {
                 endpoint.port.get()
             );
         };
-        self.traces
+        let Some(series) = self
+            .traces
             .iter()
             .find(|series| series.signal.representative == Some(signal))
-            .and_then(|series| trace_point_at_or_before(series, &self.cursor_root_tick))
-            .map_or_else(
-                || format!("no sample at or before root tick {}", self.cursor_root_tick),
-                |point| match &point.value {
-                    TracePointValue::ExactRational { exact, .. } => {
-                        format!(
-                            "{exact} mm · c{}:t{} · root {}",
-                            point.clock.get(),
-                            point.tick,
-                            point.root_tick
-                        )
-                    }
-                    TracePointValue::Boolean(value) => {
-                        format!(
-                            "{value} · c{}:t{} · root {}",
-                            point.clock.get(),
-                            point.tick,
-                            point.root_tick
-                        )
-                    }
-                },
-            )
+        else {
+            return format!("no replay series for {}", signal.label());
+        };
+        let Some(point) = trace_point_at_or_before(series, &self.cursor_root_tick) else {
+            return format!("no sample at or before root tick {}", self.cursor_root_tick);
+        };
+        match &point.value {
+            TracePointValue::Analog { exact, .. } => format!(
+                "{exact}{} · c{}:t{} · root {}",
+                series
+                    .signal
+                    .unit_symbol
+                    .as_deref()
+                    .map_or_else(String::new, |unit| format!(" {unit}")),
+                point.clock.get(),
+                point.tick,
+                point.root_tick
+            ),
+            TracePointValue::Boolean(value) => format!(
+                "{value} · c{}:t{} · root {}",
+                point.clock.get(),
+                point.tick,
+                point.root_tick
+            ),
+        }
     }
 
     #[allow(
@@ -5039,7 +5043,12 @@ fn projected_trace_series(
             if points.len() >= MAXIMUM_POINTS_PER_SERIES {
                 return Err(format!("{} trace exceeds display policy", signal.label()));
             }
-            let (point_kind, point) = trace_point(&signal, sample.entry(), sample.root_tick())?;
+            let (point_kind, point) = trace_point(
+                &signal,
+                workspace.graph().schema(),
+                sample.entry(),
+                sample.root_tick(),
+            )?;
             if kind.is_some_and(|retained| retained != point_kind) {
                 return Err(format!("{} trace changes value kind", signal.label()));
             }
@@ -5071,11 +5080,17 @@ fn trace_signal(
         )
     })?;
     let unit_symbol = match type_definition.kind() {
-        TypeKind::ExactRational { unit } => Some(
+        TypeKind::ExactRational { unit }
+        | TypeKind::MeasurementInterval { unit }
+        | TypeKind::CanonicalI64 { unit, .. }
+        | TypeKind::CanonicalU64 { unit, .. } => Some(
             schema
                 .unit(*unit)
                 .ok_or_else(|| {
-                    format!("probe p{} exact unit is unavailable", definition.id().get())
+                    format!(
+                        "probe p{} physical scalar unit is unavailable",
+                        definition.id().get()
+                    )
                 })?
                 .symbol()
                 .to_owned(),
@@ -5098,6 +5113,7 @@ fn trace_signal(
 
 fn trace_point(
     signal: &TraceSignal,
+    schema: &GraphSchema,
     entry: &GraphTraceEntry,
     root_tick: &Rational,
 ) -> Result<(TraceSeriesKind, TracePoint), String> {
@@ -5107,28 +5123,14 @@ fn trace_point(
             signal.label()
         ));
     }
-    let (kind, value) = match entry.value().value() {
-        GraphValue::ExactRational(value) => {
-            let enclosure = value
-                .to_f64_enclosure()
-                .filter(|bounds| bounds.iter().all(|bound| bound.is_finite()))
-                .ok_or_else(|| format!("{} has no finite display enclosure", signal.label()))?;
-            (
-                TraceSeriesKind::ExactRational,
-                TracePointValue::ExactRational {
-                    exact: value.to_string(),
-                    enclosure,
-                },
-            )
-        }
-        GraphValue::Boolean(value) => (TraceSeriesKind::Boolean, TracePointValue::Boolean(*value)),
-        _ => {
-            return Err(format!(
-                "{} trace is neither exact rational nor Boolean",
-                signal.label()
-            ));
-        }
-    };
+    let type_definition = schema.value_type(signal.sample_type).ok_or_else(|| {
+        format!(
+            "{} trace sample type t{} is unavailable",
+            signal.label(),
+            signal.sample_type.get()
+        )
+    })?;
+    let (kind, value) = trace_sample_value(signal, type_definition.kind(), entry.value().value())?;
     Ok((
         kind,
         TracePoint {
@@ -5137,6 +5139,83 @@ fn trace_point(
             root_tick: root_tick.clone(),
             value,
         },
+    ))
+}
+
+fn trace_sample_value(
+    signal: &TraceSignal,
+    sample_kind: &TypeKind,
+    value: &GraphValue,
+) -> Result<(TraceSeriesKind, TracePointValue), String> {
+    match (sample_kind, value) {
+        (TypeKind::Boolean, GraphValue::Boolean(value)) => {
+            Ok((TraceSeriesKind::Boolean, TracePointValue::Boolean(*value)))
+        }
+        (TypeKind::ExactRational { .. }, GraphValue::ExactRational(value)) => {
+            analog_trace_point_value(signal, value.to_string(), value, value)
+        }
+        (
+            TypeKind::MeasurementInterval { .. },
+            GraphValue::MeasurementInterval { lower, upper },
+        ) => analog_trace_point_value(signal, format!("{lower}..{upper}"), lower, upper),
+        (TypeKind::CanonicalI64 { quantum, .. }, GraphValue::CanonicalI64(count)) => {
+            let exact = Rational::from(*count) * quantum;
+            analog_trace_point_value(
+                signal,
+                format!("{exact} [{count} lattice counts]"),
+                &exact,
+                &exact,
+            )
+        }
+        (TypeKind::CanonicalU64 { quantum, .. }, GraphValue::CanonicalU64(count)) => {
+            let exact = Rational::from(*count) * quantum;
+            analog_trace_point_value(
+                signal,
+                format!("{exact} [{count} lattice counts]"),
+                &exact,
+                &exact,
+            )
+        }
+        _ => Err(format!(
+            "{} trace type {} [t{}] does not admit a plotted {:?} value",
+            signal.label(),
+            signal.sample_type_name,
+            signal.sample_type.get(),
+            value.kind()
+        )),
+    }
+}
+
+fn analog_trace_point_value(
+    signal: &TraceSignal,
+    exact: String,
+    lower: &Rational,
+    upper: &Rational,
+) -> Result<(TraceSeriesKind, TracePointValue), String> {
+    if lower > upper {
+        return Err(format!(
+            "{} trace has a reversed exact analog interval",
+            signal.label()
+        ));
+    }
+    let lower_enclosure = lower
+        .to_f64_enclosure()
+        .filter(|bounds| bounds.iter().all(|bound| bound.is_finite()))
+        .ok_or_else(|| format!("{} has no finite lower display enclosure", signal.label()))?;
+    let upper_enclosure = upper
+        .to_f64_enclosure()
+        .filter(|bounds| bounds.iter().all(|bound| bound.is_finite()))
+        .ok_or_else(|| format!("{} has no finite upper display enclosure", signal.label()))?;
+    let enclosure = [lower_enclosure[0], upper_enclosure[1]];
+    if enclosure[0] > enclosure[1] {
+        return Err(format!(
+            "{} trace has an inverted display enclosure",
+            signal.label()
+        ));
+    }
+    Ok((
+        TraceSeriesKind::Analog,
+        TracePointValue::Analog { exact, enclosure },
     ))
 }
 
@@ -5257,11 +5336,11 @@ fn paint_analog_trace_series(
     minimum_value: f64,
     maximum_value: f64,
 ) {
-    debug_assert_eq!(series.kind, TraceSeriesKind::ExactRational);
+    debug_assert_eq!(series.kind, TraceSeriesKind::Analog);
     let color = trace_signal_color(&series.signal);
     let mut line: Vec<egui::Pos2> = Vec::new();
     for point in &series.points {
-        let TracePointValue::ExactRational { enclosure, .. } = &point.value else {
+        let TracePointValue::Analog { enclosure, .. } = &point.value else {
             continue;
         };
         let Some(x) = time_axis.plot_x(rect, &point.root_tick) else {
@@ -5338,7 +5417,7 @@ fn paint_digital_trace_series(
 
 fn trace_cursor_label(signal: &TraceSignal, point: &TracePoint) -> String {
     match &point.value {
-        TracePointValue::ExactRational { exact, .. } => format!(
+        TracePointValue::Analog { exact, .. } => format!(
             "{} = {exact}{} @ c{}:t{}",
             signal.label(),
             signal
@@ -5465,7 +5544,7 @@ fn analog_trace_groups(traces: &[TraceSeries]) -> Result<Vec<AnalogTraceGroup<'_
     let mut by_type = BTreeMap::<GraphTypeId, Vec<&TraceSeries>>::new();
     for series in traces
         .iter()
-        .filter(|series| series.kind == TraceSeriesKind::ExactRational)
+        .filter(|series| series.kind == TraceSeriesKind::Analog)
     {
         by_type
             .entry(series.signal.sample_type)
@@ -5474,7 +5553,7 @@ fn analog_trace_groups(traces: &[TraceSeries]) -> Result<Vec<AnalogTraceGroup<'_
     }
     if by_type.len() > MAXIMUM_ANALOG_TRACE_GROUPS {
         return Err(format!(
-            "{} exact value types exceed the bounded {}-pane trace display policy",
+            "{} physical scalar value types exceed the bounded {}-pane trace display policy",
             by_type.len(),
             MAXIMUM_ANALOG_TRACE_GROUPS
         ));
@@ -5485,11 +5564,11 @@ fn analog_trace_groups(traces: &[TraceSeries]) -> Result<Vec<AnalogTraceGroup<'_
             let first = series
                 .first()
                 .copied()
-                .ok_or_else(|| "exact trace group is unexpectedly empty".to_owned())?;
+                .ok_or_else(|| "analog trace group is unexpectedly empty".to_owned())?;
             let sample_type_name = first.signal.sample_type_name.as_str();
             let unit_symbol = first.signal.unit_symbol.as_deref().ok_or_else(|| {
                 format!(
-                    "exact trace type t{} has no canonical unit",
+                    "physical scalar trace type t{} has no canonical unit",
                     sample_type.get()
                 )
             })?;
@@ -5499,7 +5578,7 @@ fn analog_trace_groups(traces: &[TraceSeries]) -> Result<Vec<AnalogTraceGroup<'_
                     || candidate.signal.unit_symbol.as_deref() != Some(unit_symbol)
             }) {
                 return Err(format!(
-                    "exact trace type t{} has inconsistent canonical metadata",
+                    "physical scalar trace type t{} has inconsistent canonical metadata",
                     sample_type.get()
                 ));
             }
@@ -5517,7 +5596,7 @@ fn trace_value_bounds(series: &[&TraceSeries]) -> (f64, f64) {
     let mut minimum = 0.0_f64;
     let mut maximum = 0.0_f64;
     for point in series.iter().flat_map(|series| &series.points) {
-        let TracePointValue::ExactRational { enclosure, .. } = &point.value else {
+        let TracePointValue::Analog { enclosure, .. } = &point.value else {
             continue;
         };
         minimum = minimum.min(enclosure[0]);
@@ -5752,7 +5831,7 @@ mod tests {
             workspace
                 .traces
                 .iter()
-                .filter(|series| series.kind == TraceSeriesKind::ExactRational)
+                .filter(|series| series.kind == TraceSeriesKind::Analog)
                 .count(),
             4
         );
@@ -5792,7 +5871,7 @@ mod tests {
                 .iter()
                 .map(|point| match &point.value {
                     TracePointValue::Boolean(value) => *value,
-                    TracePointValue::ExactRational { .. } => {
+                    TracePointValue::Analog { .. } => {
                         panic!("external permit trace changed value kind")
                     }
                 })
@@ -5813,7 +5892,7 @@ mod tests {
                 .iter()
                 .map(|point| match &point.value {
                     TracePointValue::Boolean(value) => *value,
-                    TracePointValue::ExactRational { .. } => {
+                    TracePointValue::Analog { .. } => {
                         panic!("range interlock trace changed value kind")
                     }
                 })
@@ -6716,7 +6795,7 @@ mod tests {
                 sample_type_name: name.to_owned(),
                 unit_symbol: unit.map(str::to_owned),
             },
-            kind: TraceSeriesKind::ExactRational,
+            kind: TraceSeriesKind::Analog,
             points: Vec::new(),
         };
         let traces = vec![
@@ -6766,6 +6845,133 @@ mod tests {
             analog_trace_groups(&excessive)
                 .unwrap_err()
                 .contains("bounded 32-pane trace display policy")
+        );
+    }
+
+    fn physical_trace_signal() -> TraceSignal {
+        TraceSignal {
+            probe: GraphProbeId::new(41),
+            name: "physical-sample".to_owned(),
+            source: RepresentativeControlSignal::Error.endpoint(),
+            representative: None,
+            sample_type: GraphTypeId::new(9),
+            sample_type_name: "physical.mm".to_owned(),
+            unit_symbol: Some("mm".to_owned()),
+        }
+    }
+
+    #[test]
+    fn physical_scalar_trace_values_retain_exact_intervals_counts_and_units() {
+        let unit = alumina_interface_core::graph::UnitId::new(1);
+        let signal = physical_trace_signal();
+        let analog = |sample_kind: &TypeKind, value: &GraphValue| {
+            let (kind, point) = trace_sample_value(&signal, sample_kind, value).unwrap();
+            assert_eq!(kind, TraceSeriesKind::Analog);
+            let TracePointValue::Analog { exact, enclosure } = point else {
+                panic!("physical scalar did not produce an analog point");
+            };
+            (exact, enclosure)
+        };
+
+        let one_third = Rational::from(1) / Rational::from(3);
+        let (exact, enclosure) = analog(
+            &TypeKind::ExactRational { unit },
+            &GraphValue::ExactRational(one_third.clone()),
+        );
+        assert_eq!(exact, "1/3");
+        assert_eq!(
+            enclosure.map(f64::to_bits),
+            one_third.to_f64_enclosure().unwrap().map(f64::to_bits)
+        );
+
+        let lower = -one_third;
+        let upper = Rational::from(2) / Rational::from(3);
+        let (exact, enclosure) = analog(
+            &TypeKind::MeasurementInterval { unit },
+            &GraphValue::MeasurementInterval {
+                lower: lower.clone(),
+                upper: upper.clone(),
+            },
+        );
+        assert_eq!(exact, "-1/3..2/3");
+        assert_eq!(
+            enclosure[0].to_bits(),
+            lower.to_f64_enclosure().unwrap()[0].to_bits()
+        );
+        assert_eq!(
+            enclosure[1].to_bits(),
+            upper.to_f64_enclosure().unwrap()[1].to_bits()
+        );
+
+        let signed_kind = TypeKind::CanonicalI64 {
+            unit,
+            quantum: Rational::from(1) / Rational::from(8),
+        };
+        let (exact, enclosure) = analog(&signed_kind, &GraphValue::CanonicalI64(-3));
+        let signed_exact = -Rational::from(3) / Rational::from(8);
+        assert_eq!(exact, "-3/8 [-3 lattice counts]");
+        assert_eq!(
+            enclosure.map(f64::to_bits),
+            signed_exact.to_f64_enclosure().unwrap().map(f64::to_bits)
+        );
+
+        let unsigned_kind = TypeKind::CanonicalU64 {
+            unit,
+            quantum: Rational::from(1) / Rational::from(4),
+        };
+        let (exact, enclosure) = analog(&unsigned_kind, &GraphValue::CanonicalU64(7));
+        let unsigned_exact = Rational::from(7) / Rational::from(4);
+        assert_eq!(exact, "1 3/4 [7 lattice counts]");
+        assert_eq!(
+            enclosure.map(f64::to_bits),
+            unsigned_exact.to_f64_enclosure().unwrap().map(f64::to_bits)
+        );
+
+        let point = TracePoint {
+            clock: GraphClockId::new(6),
+            tick: 19,
+            root_tick: Rational::from(38),
+            value: TracePointValue::Analog { exact, enclosure },
+        };
+        assert_eq!(
+            trace_cursor_label(&signal, &point),
+            "physical-sample = 1 3/4 [7 lattice counts] mm @ c6:t19"
+        );
+    }
+
+    #[test]
+    fn physical_scalar_trace_values_reject_mismatch_reversal_and_nonscalar_data() {
+        let unit = alumina_interface_core::graph::UnitId::new(1);
+        let signal = physical_trace_signal();
+        let unsigned_kind = TypeKind::CanonicalU64 {
+            unit,
+            quantum: Rational::from(1) / Rational::from(4),
+        };
+        assert!(
+            trace_sample_value(&signal, &unsigned_kind, &GraphValue::CanonicalI64(7),)
+                .unwrap_err()
+                .contains("does not admit a plotted CanonicalI64 value")
+        );
+        assert!(
+            trace_sample_value(
+                &signal,
+                &TypeKind::Text { maximum_bytes: 8 },
+                &GraphValue::Text("7/4".to_owned()),
+            )
+            .unwrap_err()
+            .contains("does not admit a plotted Text value")
+        );
+        assert!(
+            trace_sample_value(
+                &signal,
+                &TypeKind::MeasurementInterval { unit },
+                &GraphValue::MeasurementInterval {
+                    lower: Rational::from(2),
+                    upper: Rational::from(1),
+                },
+            )
+            .unwrap_err()
+            .contains("reversed exact analog interval")
         );
     }
 
