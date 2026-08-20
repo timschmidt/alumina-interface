@@ -254,8 +254,12 @@ prototype.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
-  into a separate Realtime draft; no broader pin/peripheral inventory is
-  inferred. A distinct board-name-independent explorer now decodes the complete
+  into a separate Realtime draft. Existing catalog-managed nodes can be
+  transactionally rebound among unused same-kind entries while retaining their
+  stable node/placement identity; current membership in the exact catalog is a
+  prerequisite, so raw handles, labels, and numeric GPIO text grant no
+  authority. No broader pin/peripheral inventory is inferred. A distinct
+  board-name-independent explorer now decodes the complete
   bounded capability ledger into 62 TinyBee resources, 51 aliases, ownership,
   safe/hazard facts and supporting-section counts while retaining that four-item
   graph access set as a visibly narrower authority. Search and filters separate

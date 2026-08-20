@@ -37,6 +37,7 @@ use alumina_interface_core::graph::{
     encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
     graph_component_instance_prototype, graph_resource_label, parse_graph_literal_text,
     project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
+    select_graph_capability_node_resource,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
@@ -418,6 +419,7 @@ struct TargetResourceProof {
     workspace: GraphWorkspaceDocument,
     encoding: CanonicalGraphWorkspaceEncoding,
     catalog_index: usize,
+    node_selection: Option<GraphNodeId>,
     status: String,
 }
 
@@ -1958,17 +1960,20 @@ impl ExactControlWorkspace {
 
     fn show_target_resources(&mut self, ui: &mut egui::Ui) {
         let proof = &mut self.target_resources;
-        let selected = proof.catalog.entries().get(proof.catalog_index).map_or(
-            "resource unavailable".to_owned(),
-            |entry| {
-                format!(
-                    "{} · {} v{}",
-                    graph_resource_label(entry.resource().resource),
-                    short_kind(entry.kind().name()),
-                    entry.kind().version()
-                )
-            },
-        );
+        let catalog_choices = proof.catalog_selection_choices();
+        let selected = catalog_choices
+            .get(proof.catalog_index)
+            .map_or("resource unavailable", |choice| choice.0.as_str());
+        let node_choices = proof.catalog_managed_node_choices();
+        let selected_node = proof
+            .node_selection
+            .and_then(|selected| {
+                node_choices
+                    .iter()
+                    .find(|(node, _)| *node == selected)
+                    .map(|(_, label)| label.as_str())
+            })
+            .unwrap_or("select a managed node");
         ui.horizontal_wrapped(|ui| {
             ui.heading("TinyBee target-I/O draft");
             ui.monospace(format!(
@@ -1995,16 +2000,16 @@ impl ExactControlWorkspace {
             egui::ComboBox::from_id_salt("tinybee_resource_catalog")
                 .selected_text(selected)
                 .show_ui(ui, |ui| {
-                    for (index, entry) in proof.catalog.entries().iter().enumerate() {
-                        ui.selectable_value(
-                            &mut proof.catalog_index,
-                            index,
-                            format!(
-                                "{} · {:?}",
-                                graph_resource_label(entry.resource().resource),
-                                entry.resource().support
-                            ),
-                        );
+                    for (index, (_, choice)) in catalog_choices.iter().enumerate() {
+                        ui.selectable_value(&mut proof.catalog_index, index, choice);
+                    }
+                });
+            egui::ComboBox::from_id_salt("tinybee_resource_node")
+                .selected_text(selected_node)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut proof.node_selection, None, "select a managed node");
+                    for (node, label) in &node_choices {
+                        ui.selectable_value(&mut proof.node_selection, Some(*node), label);
                     }
                 });
             let already_present = proof.selected_is_present();
@@ -2017,16 +2022,37 @@ impl ExactControlWorkspace {
             {
                 proof.add_selected();
             }
+            let target_is_current = proof.selected_node_uses_selected_entry();
+            let can_rebind = proof.node_selection.is_some()
+                && !target_is_current
+                && !proof.selected_is_present();
+            if ui
+                .add_enabled(can_rebind, egui::Button::new("rebind selected node"))
+                .on_disabled_hover_text(if proof.node_selection.is_none() {
+                    "select an existing catalog-managed node"
+                } else if target_is_current {
+                    "the node already carries this exact catalog entry"
+                } else {
+                    "another node already carries this exact resource identity"
+                })
+                .clicked()
+            {
+                proof.rebind_selected();
+            }
             if ui.small_button("reset target draft").clicked() {
                 proof.reset();
             }
         });
         ui.horizontal_wrapped(|ui| {
-            for node in proof.workspace.graph().nodes() {
-                ui.monospace(format!("#{} {}", node.id().get(), node.label()));
+            ui.strong("Selector-managed nodes");
+            for (_, label) in proof.catalog_managed_node_choices() {
+                ui.monospace(label);
             }
         });
         ui.label(&proof.status);
+        ui.label(
+            "Resource identities are selectable only from the digest-verified catalog: no label, device ID, digest, class, or numeric GPIO field is text-editable.",
+        );
         ui.colored_label(
             egui::Color32::YELLOW,
             "Only GPIO22/32/33/35 stable Boolean reads are creatable. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
@@ -3947,19 +3973,64 @@ impl ExactControlWorkspace {
 }
 
 impl TargetResourceProof {
+    fn catalog_selection_choices(&self) -> Vec<(String, String)> {
+        self.catalog
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    format!(
+                        "{} · {} v{}",
+                        graph_resource_label(entry.resource().resource),
+                        short_kind(entry.kind().name()),
+                        entry.kind().version()
+                    ),
+                    format!(
+                        "{} · {:?}",
+                        graph_resource_label(entry.resource().resource),
+                        entry.resource().support
+                    ),
+                )
+            })
+            .collect()
+    }
+
     fn selected_is_present(&self) -> bool {
-        let Some(entry) = self.catalog.entries().get(self.catalog_index) else {
-            return false;
-        };
-        let Some(expected) = entry.prototype().parameters().first() else {
-            return false;
-        };
-        self.workspace.graph().nodes().iter().any(|node| {
-            node.kind() == entry.kind()
-                && node.parameters().iter().any(|parameter| {
-                    parameter.id() == expected.id() && parameter.value() == expected.value()
-                })
-        })
+        self.workspace
+            .graph()
+            .nodes()
+            .iter()
+            .any(|node| self.catalog.entry_index_for_node(node) == Some(self.catalog_index))
+    }
+
+    fn selected_node_uses_selected_entry(&self) -> bool {
+        self.node_selection
+            .and_then(|node| self.workspace.graph().node(node))
+            .and_then(|node| self.catalog.entry_index_for_node(node))
+            == Some(self.catalog_index)
+    }
+
+    fn catalog_managed_node_choices(&self) -> Vec<(GraphNodeId, String)> {
+        self.workspace
+            .graph()
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let entry = self
+                    .catalog
+                    .entry_index_for_node(node)
+                    .and_then(|index| self.catalog.entries().get(index))?;
+                Some((
+                    node.id(),
+                    format!(
+                        "#{} {} · {}",
+                        node.id().get(),
+                        node.label(),
+                        graph_resource_label(entry.resource().resource)
+                    ),
+                ))
+            })
+            .collect()
     }
 
     fn add_selected(&mut self) {
@@ -4011,10 +4082,52 @@ impl TargetResourceProof {
         };
         self.workspace = candidate;
         self.encoding = encoding;
+        self.node_selection = Some(node);
         self.status = format!(
-            "created target-bound node {} from authenticated capability facts; deployment remains disabled",
+            "created target-bound node {} from digest-verified reference capability facts; deployment remains disabled",
             node.get()
         );
+    }
+
+    fn rebind_selected(&mut self) {
+        let Some(node) = self.node_selection else {
+            "target resource selection rejected without mutation: no managed node is selected"
+                .clone_into(&mut self.status);
+            return;
+        };
+        let previous = self
+            .workspace
+            .graph()
+            .node(node)
+            .and_then(|node| self.catalog.entry_index_for_node(node))
+            .and_then(|index| self.catalog.entries().get(index))
+            .map_or_else(
+                || "unresolved resource".to_owned(),
+                |entry| graph_resource_label(entry.resource().resource),
+            );
+        let selected = self.catalog.entries().get(self.catalog_index).map_or_else(
+            || "unavailable resource".to_owned(),
+            |entry| graph_resource_label(entry.resource().resource),
+        );
+        match select_graph_capability_node_resource(
+            &self.catalog,
+            &self.registry,
+            &mut self.workspace,
+            node,
+            self.catalog_index,
+        ) {
+            Ok(encoding) => {
+                self.encoding = encoding;
+                self.status = format!(
+                    "rebound node {} from {previous} to {selected} using exact catalog authority; deployment remains disabled",
+                    node.get()
+                );
+            }
+            Err(error) => {
+                self.status =
+                    format!("target resource selection rejected without mutation: {error}");
+            }
+        }
     }
 
     fn reset(&mut self) {
@@ -4025,6 +4138,7 @@ impl TargetResourceProof {
             Ok((workspace, encoding)) => {
                 self.workspace = workspace;
                 self.encoding = encoding;
+                self.node_selection = None;
                 "reset separate target-I/O draft; no identities were sent to firmware"
                     .clone_into(&mut self.status);
             }
@@ -4152,6 +4266,7 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
         workspace,
         encoding,
         catalog_index: 0,
+        node_selection: None,
         status: "digest-verified offline reference catalog ready; target draft is empty".to_owned(),
     })
 }
@@ -6225,6 +6340,60 @@ mod tests {
         proof.reset();
         assert!(proof.workspace.graph().nodes().is_empty());
         assert_eq!(proof.workspace.next_node_id(), 1);
+        assert_eq!(proof.node_selection, None);
+    }
+
+    #[test]
+    fn tinybee_reference_selector_rebinds_without_manufacturing_identity() {
+        let mut proof = tinybee_resource_proof().unwrap();
+        proof.catalog_index = 0;
+        proof.add_selected();
+        let node = GraphNodeId::new(1);
+        assert_eq!(proof.node_selection, Some(node));
+        let before = proof.encoding.clone();
+        let before_node_cursor = proof.workspace.next_node_id();
+        let before_wire_cursor = proof.workspace.next_wire_id();
+        let before_placement = proof.workspace.placement(node);
+
+        proof.catalog_index = 2;
+        assert!(!proof.selected_is_present());
+        assert!(!proof.selected_node_uses_selected_entry());
+        proof.rebind_selected();
+        assert!(proof.status.contains("GPIO 22 to GPIO 33"));
+        assert_ne!(proof.encoding, before);
+        assert_eq!(proof.workspace.next_node_id(), before_node_cursor);
+        assert_eq!(proof.workspace.next_wire_id(), before_wire_cursor);
+        assert_eq!(proof.workspace.placement(node), before_placement);
+        assert_eq!(
+            proof
+                .catalog
+                .entry_index_for_node(proof.workspace.graph().node(node).unwrap()),
+            Some(2)
+        );
+        assert!(proof.selected_is_present());
+        assert!(proof.selected_node_uses_selected_entry());
+
+        proof.catalog_index = 1;
+        proof.add_selected();
+        let second = GraphNodeId::new(2);
+        assert_eq!(proof.node_selection, Some(second));
+        let retained = proof.encoding.clone();
+        proof.node_selection = Some(node);
+        proof.rebind_selected();
+        assert_eq!(proof.encoding, retained);
+        assert!(proof.status.contains("already carried"));
+        assert_eq!(
+            proof
+                .catalog
+                .entry_index_for_node(proof.workspace.graph().node(node).unwrap()),
+            Some(2)
+        );
+        assert_eq!(
+            proof
+                .catalog
+                .entry_index_for_node(proof.workspace.graph().node(second).unwrap()),
+            Some(1)
+        );
     }
 
     #[test]

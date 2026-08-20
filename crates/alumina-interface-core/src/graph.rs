@@ -39,7 +39,9 @@ pub use analysis::{
 };
 pub use capability_catalog::{
     GraphCapabilityCatalogError, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
-    GraphCapabilityNodeEntry, derive_graph_capability_node_catalog, graph_resource_label,
+    GraphCapabilityNodeEntry, GraphCapabilityResourceSelectionError,
+    derive_graph_capability_node_catalog, graph_resource_label,
+    select_graph_capability_node_resource,
 };
 pub use component::{
     CanonicalGraphComponentEncoding, GRAPH_COMPONENT_MAGIC, GRAPH_COMPONENT_VERSION,

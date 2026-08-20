@@ -262,7 +262,11 @@ misordered, schema-contradicting, and trailing input cannot mutate the draft.
 One interactive field admits at most 2,097,158 UTF-8 bytes, enough for the
 complete one-MiB byte-literal ceiling. Resource/job handles, including ones
 nested in composites, remain read-only until an authenticated capability/cache
-selector supplies identity; Event/Stream types still have no literal. Seven
+selector supplies identity. The separate TinyBee target draft now implements
+that rule for root resource handles: an existing exact catalog member can be
+rebound only to an unused same-kind entry, while raw handle text stays closed.
+Cache-derived job handles and nested identity-bearing composite workflows
+remain open; Event/Stream types still have no literal. Seven
 mixed-signal traces show error, integral prior state,
 clamped controller, permit-gated output, external permit,
 measurement-within-range, and combined permit. The first four render as
@@ -492,8 +496,9 @@ flattens connector wiring to an ordinary workspace using fresh monotonic IDs.
 Nested package dependencies, general cycle/depth rules, editable instance and
 panel workflows remain open. Multi-value state records, queue timeouts and
 additional policies, cases/loops/state machines, capability-generated nodes
-beyond stable Boolean inputs, identity-bearing parameter selectors and
-label/domain editors, workspace collaboration/conflict handling, broader
+beyond stable Boolean inputs, cache-derived job-handle selectors and nested
+identity-bearing workflows, label/domain editors, workspace
+collaboration/conflict handling, broader
 resource claims, general host implementation admission, measured WCET/deadline
 analysis, physical HIL,
 output and motion opcodes, live capability/configuration discovery,

@@ -79,13 +79,15 @@ or port.
 
 Nodes can be created, selected, deleted, and dragged; an output then input can
 be clicked to connect, and an input can be secondary-clicked to disconnect.
-The first parameter surface accepts bounded Boolean, exact-rational,
-measurement-interval, canonical signed/unsigned lattice-count, and text
-literals. Every current representative-control parameter is exact rational.
-Hyperreal parses the bounded text exactly, the graph schema validates the
-result, and canonical `ALGR` encoding stores the normalized value without a
-floating-point conversion. Composite and identity-bearing literal shapes
-remain visibly read-only.
+The shared parameter surface accepts bounded schema-directed Boolean,
+exact-rational, measurement-interval, canonical signed/unsigned lattice-count,
+text, byte, array, record, option, and result literals. Every current
+representative-control parameter is exact rational. Hyperreal parses rational
+text exactly, composite parsing follows the registered schema, and canonical
+`ALGR` encoding stores the normalized value without a floating-point
+conversion. Resource/job handles and runtime Event/Stream shapes remain
+visibly read-only in the text editor. The separate capability-derived target
+draft can replace a resource handle only through exact catalog selection.
 
 The UI rebuilds semantic layering and reruns audited analysis after each
 candidate. A newly created or disconnected required input is retained as an
@@ -165,9 +167,9 @@ control UI never claims it can safely interpret or edit them.
 
 ## Current exclusions
 
-Node label/domain editing, composite and identity-bearing parameter editors,
-selection sets, groups/comments, collaborative diffs, and conflict-aware shared
-persistence remain later slices. The separate canonical
+Node label/domain editing, cache-derived job-handle selection, selection sets,
+groups/comments, collaborative diffs, and conflict-aware shared persistence
+remain later slices. The separate canonical
 [`ALGC` V1 component package](GRAPH-COMPONENT-V1.md) now embeds an unchanged
 `ALGW` and adds a connector pane plus exact front-panel bindings; those facts
 are deliberately not smuggled into this workspace format. `ALGW` grants no
