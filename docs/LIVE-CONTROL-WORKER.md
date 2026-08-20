@@ -474,6 +474,18 @@ flag. Fresh actors passed ordinary `complete` in 434 snapshots. See sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION.md`.
 This remains software-only evidence and does not make Wi-Fi a safety bus.
 
+The paired `cached-job-confirmed-safety-propagation-recovery` expectation makes
+the peer cleanup ambiguous without sending an operator stop command. Actor two
+applies its automatic `JobAbort` but drops the successful response. The worker
+retains exact `faulted`/`confirmed` state for one `fetch failed` observation,
+requires `JobStatus` before any later mutation, recovers the reported abort,
+and terminates zero-error global `faulted` with `faulted`/`aborted`
+participants. On 2026-08-20 the final production artifact passed in 391
+snapshots at epoch `43,730,200,001 ns` and local cycles `68,357,413` and
+`67,176,426`; fresh actors passed ordinary `complete` in 434 snapshots. See
+sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION-RECOVERY.md`.
+
 The fixture can deterministically add clock drift and request/response delay,
 drop one selected control request, drop an initial run of control requests, or
 reboot before a selected control request. It can also discard the first

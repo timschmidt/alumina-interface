@@ -269,6 +269,16 @@ sibling
 `alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION.md`.
 This changes no physical or Wi-Fi safety boundary.
 
+The paired `confirmed-safety-propagation-recovery` qualification drops the
+remaining peer's successful applied `JobAbort` response. The browser retains
+exact `faulted`/`confirmed` facts through one `fetch failed` observation,
+performs read-only status reconciliation, and accepts terminal global
+`faulted` with `faulted`/`aborted` participants only after the peer reports its
+applied abort. The production run passed in 391 snapshots and fresh actors
+passed ordinary `complete` in 434. See sibling
+`alumina-firmware/docs/evidence/M10-BROWSER-CACHED-JOB-SAFETY-FAULT-PROPAGATION-RECOVERY.md`.
+This closes no repeated-loss, physical-output, or Wi-Fi safety claim.
+
 Still open are hardened credential persistence, physical browser-to-ESP Wi-Fi,
 real SD media, background-tab qualification, nonterminal/crash reattachment and
 durable browser job persistence, indefinite schedule or total endpoint outage,
