@@ -16,7 +16,7 @@ use alumina_storage::sha256;
 use super::{
     CanonicalGraphComponentEncoding, CanonicalGraphWorkspaceEncoding, ExecutionDomain,
     GraphComponentDocument, GraphComponentError, GraphComponentInputId, GraphComponentLimits,
-    GraphComponentOutputId, GraphLimits, GraphNodeId, GraphNodePrototype, GraphPortId,
+    GraphComponentOutputId, GraphLimits, GraphNodeId, GraphNodePrototype, GraphPortId, GraphWireId,
     GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits, NodeKind, PortDefinition,
     WireEndpoint, encode_graph_component, encode_graph_workspace, replay_graph_component,
     replay_graph_workspace,
@@ -337,6 +337,96 @@ pub struct GraphFlattenedNode {
     flattened_node: GraphNodeId,
 }
 
+/// Stable authoring origin of one final flattened node.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GraphHierarchyNodeOrigin {
+    /// Ordinary node retained directly from the root workspace.
+    Root(GraphNodeId),
+    /// Surviving node copied from one exact component occurrence.
+    Component {
+        /// Root instance ID followed by nested component-local instance IDs.
+        source_path: Vec<GraphNodeId>,
+        /// Exact component definition containing `node`.
+        component: Digest,
+        /// Component-local node identity.
+        node: GraphNodeId,
+    },
+}
+
+impl GraphHierarchyNodeOrigin {
+    /// Borrow the component occurrence path, or return `None` for a root node.
+    pub fn source_path(&self) -> Option<&[GraphNodeId]> {
+        match self {
+            Self::Root(_) => None,
+            Self::Component { source_path, .. } => Some(source_path),
+        }
+    }
+}
+
+/// Total provenance record for one node in the final flattened workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFlattenedNodeProvenance {
+    origin: GraphHierarchyNodeOrigin,
+    flattened_node: GraphNodeId,
+}
+
+impl GraphFlattenedNodeProvenance {
+    /// Borrow the exact root or component authoring origin.
+    pub const fn origin(&self) -> &GraphHierarchyNodeOrigin {
+        &self.origin
+    }
+
+    /// Return the final monotonic root-workspace node identity.
+    pub const fn flattened_node(&self) -> GraphNodeId {
+        self.flattened_node
+    }
+}
+
+/// Stable authoring origin of one final flattened wire.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GraphHierarchyWireOrigin {
+    /// Wire authored directly in the root workspace.
+    Root(GraphWireId),
+    /// Wire copied from one exact component occurrence.
+    Component {
+        /// Root instance ID followed by nested component-local instance IDs.
+        source_path: Vec<GraphNodeId>,
+        /// Exact component definition containing `wire`.
+        component: Digest,
+        /// Component-local wire identity.
+        wire: GraphWireId,
+    },
+}
+
+impl GraphHierarchyWireOrigin {
+    /// Borrow the component occurrence path, or return `None` for a root wire.
+    pub fn source_path(&self) -> Option<&[GraphNodeId]> {
+        match self {
+            Self::Root(_) => None,
+            Self::Component { source_path, .. } => Some(source_path),
+        }
+    }
+}
+
+/// Total provenance record for one wire in the final flattened workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFlattenedWireProvenance {
+    origin: GraphHierarchyWireOrigin,
+    flattened_wire: GraphWireId,
+}
+
+impl GraphFlattenedWireProvenance {
+    /// Borrow the exact root or component authoring origin.
+    pub const fn origin(&self) -> &GraphHierarchyWireOrigin {
+        &self.origin
+    }
+
+    /// Return the final monotonic root-workspace wire identity.
+    pub const fn flattened_wire(&self) -> GraphWireId {
+        self.flattened_wire
+    }
+}
+
 impl GraphFlattenedNode {
     /// Return the node identity inside its source `ALGC`.
     pub const fn component_node(self) -> GraphNodeId {
@@ -388,6 +478,8 @@ pub struct GraphHierarchyFlattening {
     workspace: GraphWorkspaceDocument,
     encoding: CanonicalGraphWorkspaceEncoding,
     instances: Vec<GraphFlattenedInstance>,
+    node_provenance: Vec<GraphFlattenedNodeProvenance>,
+    wire_provenance: Vec<GraphFlattenedWireProvenance>,
 }
 
 impl GraphHierarchyFlattening {
@@ -409,6 +501,48 @@ impl GraphHierarchyFlattening {
     /// Borrow mappings in deterministic depth-first source-path order.
     pub fn instances(&self) -> &[GraphFlattenedInstance] {
         &self.instances
+    }
+
+    /// Borrow total node provenance in final flattened-node order.
+    pub fn node_provenance(&self) -> &[GraphFlattenedNodeProvenance] {
+        &self.node_provenance
+    }
+
+    /// Borrow total wire provenance in final flattened-wire order.
+    pub fn wire_provenance(&self) -> &[GraphFlattenedWireProvenance] {
+        &self.wire_provenance
+    }
+
+    /// Resolve one final node to its stable authoring origin.
+    pub fn node_origin(&self, node: GraphNodeId) -> Option<&GraphHierarchyNodeOrigin> {
+        self.node_provenance
+            .binary_search_by_key(&node, GraphFlattenedNodeProvenance::flattened_node)
+            .ok()
+            .map(|index| self.node_provenance[index].origin())
+    }
+
+    /// Resolve one final wire to its stable authoring origin.
+    pub fn wire_origin(&self, wire: GraphWireId) -> Option<&GraphHierarchyWireOrigin> {
+        self.wire_provenance
+            .binary_search_by_key(&wire, GraphFlattenedWireProvenance::flattened_wire)
+            .ok()
+            .map(|index| self.wire_provenance[index].origin())
+    }
+
+    /// Resolve one stable authoring origin to its final node identity.
+    pub fn flattened_node(&self, origin: &GraphHierarchyNodeOrigin) -> Option<GraphNodeId> {
+        self.node_provenance
+            .iter()
+            .find(|mapping| mapping.origin() == origin)
+            .map(GraphFlattenedNodeProvenance::flattened_node)
+    }
+
+    /// Resolve one stable authoring origin to its final wire identity.
+    pub fn flattened_wire(&self, origin: &GraphHierarchyWireOrigin) -> Option<GraphWireId> {
+        self.wire_provenance
+            .iter()
+            .find(|mapping| mapping.origin() == origin)
+            .map(GraphFlattenedWireProvenance::flattened_wire)
     }
 
     /// Consume the report and return the flattened workspace.
@@ -848,6 +982,12 @@ pub fn flatten_graph_hierarchy(
     let source_digest = encode_graph_hierarchy(hierarchy)?.digest();
     let mut workspace = hierarchy.root.clone();
     let mut reports = Vec::with_capacity(hierarchy.flattened_instances);
+    let mut wire_origins = workspace
+        .graph()
+        .wires()
+        .iter()
+        .map(|wire| (wire.id(), GraphHierarchyWireOrigin::Root(wire.id())))
+        .collect::<BTreeMap<_, _>>();
     for instance in hierarchy
         .instances
         .iter()
@@ -861,6 +1001,7 @@ pub fn flatten_graph_hierarchy(
             instance,
             vec![instance.node],
             &mut reports,
+            &mut wire_origins,
         )?;
     }
     if workspace.graph().nodes().len() != hierarchy.flattened_nodes {
@@ -880,12 +1021,71 @@ pub fn flatten_graph_hierarchy(
     if reports.len() != hierarchy.flattened_instances {
         return Err(GraphHierarchyError::NonCanonical);
     }
+    if wire_origins.len() != workspace.graph().wires().len()
+        || !workspace
+            .graph()
+            .wires()
+            .iter()
+            .all(|wire| wire_origins.contains_key(&wire.id()))
+    {
+        return Err(GraphHierarchyError::NonCanonical);
+    }
+    let mut node_origins = hierarchy
+        .root
+        .graph()
+        .nodes()
+        .iter()
+        .filter(|node| !has_component_instance_name(node))
+        .map(|node| (node.id(), GraphHierarchyNodeOrigin::Root(node.id())))
+        .collect::<BTreeMap<_, _>>();
+    for report in &reports {
+        for mapping in report.nodes() {
+            if node_origins
+                .insert(
+                    mapping.flattened_node(),
+                    GraphHierarchyNodeOrigin::Component {
+                        source_path: report.source_path.clone(),
+                        component: report.component,
+                        node: mapping.component_node(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(GraphHierarchyError::NonCanonical);
+            }
+        }
+    }
+    if node_origins.len() != workspace.graph().nodes().len()
+        || !workspace
+            .graph()
+            .nodes()
+            .iter()
+            .all(|node| node_origins.contains_key(&node.id()))
+    {
+        return Err(GraphHierarchyError::NonCanonical);
+    }
+    let node_provenance = node_origins
+        .into_iter()
+        .map(|(flattened_node, origin)| GraphFlattenedNodeProvenance {
+            origin,
+            flattened_node,
+        })
+        .collect();
+    let wire_provenance = wire_origins
+        .into_iter()
+        .map(|(flattened_wire, origin)| GraphFlattenedWireProvenance {
+            origin,
+            flattened_wire,
+        })
+        .collect();
     let encoding = encode_graph_workspace(&workspace)?;
     Ok(GraphHierarchyFlattening {
         source_digest,
         workspace,
         encoding,
         instances: reports,
+        node_provenance,
+        wire_provenance,
     })
 }
 
@@ -896,6 +1096,7 @@ fn flatten_instance_tree(
     binding: GraphComponentInstance,
     source_path: Vec<GraphNodeId>,
     reports: &mut Vec<GraphFlattenedInstance>,
+    wire_origins: &mut BTreeMap<GraphWireId, GraphHierarchyWireOrigin>,
 ) -> Result<(), GraphHierarchyError> {
     if source_path.len() > hierarchy.limits.maximum_nesting_depth {
         return Err(GraphHierarchyError::LimitExceeded("nesting depth"));
@@ -909,6 +1110,7 @@ fn flatten_instance_tree(
         binding.component,
         source_path.clone(),
         dependency.document(),
+        wire_origins,
     )?;
     let node_map = copied.node_map;
     reports.push(copied.report);
@@ -923,7 +1125,15 @@ fn flatten_instance_tree(
             .ok_or(GraphHierarchyError::NonCanonical)?;
         let mut nested_path = source_path.clone();
         nested_path.push(nested.node);
-        flatten_instance_tree(root, hierarchy, nested_node, nested, nested_path, reports)?;
+        flatten_instance_tree(
+            root,
+            hierarchy,
+            nested_node,
+            nested,
+            nested_path,
+            reports,
+            wire_origins,
+        )?;
     }
     Ok(())
 }
@@ -1285,17 +1495,25 @@ fn flatten_instance(
     component_digest: Digest,
     source_path: Vec<GraphNodeId>,
     component: &GraphComponentDocument,
+    wire_origins: &mut BTreeMap<GraphWireId, GraphHierarchyWireOrigin>,
 ) -> Result<FlattenedComponentCopy, GraphHierarchyError> {
     let placement = root
         .placement(instance_node)
         .ok_or(GraphHierarchyError::NonCanonical)?;
-    let incident = root
+    let incident_wires = root
         .graph()
         .wires()
         .iter()
         .copied()
         .filter(|wire| wire.source().node == instance_node || wire.target().node == instance_node)
         .collect::<Vec<_>>();
+    let mut incident = Vec::with_capacity(incident_wires.len());
+    for wire in incident_wires {
+        let origin = wire_origins
+            .remove(&wire.id())
+            .ok_or(GraphHierarchyError::NonCanonical)?;
+        incident.push((wire, origin));
+    }
     root.delete_node(instance_node)?;
 
     let component_workspace = component.workspace();
@@ -1349,12 +1567,25 @@ fn flatten_instance(
         }
     }
     for wire in component_workspace.graph().wires() {
-        root.connect(
+        let flattened_wire = root.connect(
             remap_component_endpoint(wire.source(), &node_map)?,
             remap_component_endpoint(wire.target(), &node_map)?,
         )?;
+        if wire_origins
+            .insert(
+                flattened_wire,
+                GraphHierarchyWireOrigin::Component {
+                    source_path: source_path.clone(),
+                    component: component_digest,
+                    wire: wire.id(),
+                },
+            )
+            .is_some()
+        {
+            return Err(GraphHierarchyError::NonCanonical);
+        }
     }
-    for wire in incident {
+    for (wire, origin) in incident {
         let source = if wire.source().node == instance_node {
             remap_public_output(component, wire.source(), &node_map)?
         } else {
@@ -1365,7 +1596,10 @@ fn flatten_instance(
         } else {
             wire.target()
         };
-        root.connect(source, target)?;
+        let flattened_wire = root.connect(source, target)?;
+        if wire_origins.insert(flattened_wire, origin).is_some() {
+            return Err(GraphHierarchyError::NonCanonical);
+        }
     }
     Ok(FlattenedComponentCopy {
         report: GraphFlattenedInstance {
@@ -1757,6 +1991,105 @@ mod tests {
         .unwrap()
     }
 
+    fn wired_wrapper_component(
+        child: &GraphComponentDocument,
+        name: &str,
+    ) -> GraphComponentDocument {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let nested_id = GraphNodeId::new(1);
+        let prototype = graph_component_instance_prototype(child, "Nested child").unwrap();
+        let nested = NodeDefinition::new(
+            nested_id,
+            prototype.kind().clone(),
+            "Nested child",
+            prototype.domain(),
+            prototype.inputs().to_vec(),
+            prototype.outputs().to_vec(),
+            Vec::new(),
+        );
+        let child_output = &child.outputs()[1];
+        let witness = fixture
+            .document()
+            .wires()
+            .iter()
+            .find(|wire| wire.source() == child_output.source())
+            .unwrap();
+        let witness_target = fixture.document().node(witness.target().node).unwrap();
+        let target_id = GraphNodeId::new(2);
+        let target = NodeDefinition::new(
+            target_id,
+            witness_target.kind().clone(),
+            "Wrapper-local sink",
+            witness_target.domain(),
+            witness_target.inputs().to_vec(),
+            witness_target.outputs().to_vec(),
+            witness_target.parameters().to_vec(),
+        );
+        let nested_output = graph_component_instance_output_port(child, child_output.id()).unwrap();
+        let graph = GraphDocument::try_new(
+            1,
+            child.workspace().graph().schema().clone(),
+            child.workspace().graph().clocks().to_vec(),
+            vec![nested, target],
+            vec![WireDefinition::new(
+                GraphWireId::new(1),
+                WireEndpoint {
+                    node: nested_id,
+                    port: nested_output,
+                },
+                WireEndpoint {
+                    node: target_id,
+                    port: witness.target().port,
+                },
+            )],
+        )
+        .unwrap();
+        let workspace = GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            1,
+            3,
+            2,
+            graph,
+            vec![
+                GraphNodePlacement::new(nested_id, 20, 20),
+                GraphNodePlacement::new(target_id, 400, 20),
+            ],
+        )
+        .unwrap();
+        GraphComponentDocument::try_new(
+            GraphComponentLimits::interactive(),
+            1,
+            1,
+            name,
+            2,
+            2,
+            1,
+            workspace,
+            vec![GraphComponentInput::new(
+                GraphComponentInputId::new(1),
+                "setpoint_samples",
+                WireEndpoint {
+                    node: nested_id,
+                    port: GraphPortId::new(1),
+                },
+            )],
+            vec![GraphComponentOutput::new(
+                GraphComponentOutputId::new(1),
+                "permitted_output",
+                WireEndpoint {
+                    node: nested_id,
+                    port: graph_component_instance_output_port(
+                        child,
+                        GraphComponentOutputId::new(1),
+                    )
+                    .unwrap(),
+                },
+            )],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn root(component: &GraphComponentDocument) -> GraphWorkspaceDocument {
         let fixture = compile_representative_exact_control_graph().unwrap();
         let source = fixture
@@ -1888,6 +2221,12 @@ mod tests {
         assert_eq!(flattened.workspace().graph().nodes().len(), 22);
         assert_eq!(flattened.workspace().graph().wires().len(), 26);
         assert_eq!(flattened.instances().len(), 1);
+        assert_eq!(flattened.node_provenance().len(), 22);
+        assert_eq!(flattened.wire_provenance().len(), 26);
+        assert_eq!(
+            flattened.node_origin(GraphNodeId::new(1)),
+            Some(&GraphHierarchyNodeOrigin::Root(GraphNodeId::new(1)))
+        );
         assert_eq!(
             flattened.instances()[0].source_path(),
             [GraphNodeId::new(2)]
@@ -1904,6 +2243,35 @@ mod tests {
             .find(|mapping| mapping.component_node() == GraphNodeId::new(18))
             .unwrap()
             .flattened_node();
+        let component_origin = GraphHierarchyNodeOrigin::Component {
+            source_path: vec![GraphNodeId::new(2)],
+            component: hierarchy.dependencies()[0].digest(),
+            node: GraphNodeId::new(4),
+        };
+        assert_eq!(
+            flattened.node_origin(remapped_four),
+            Some(&component_origin)
+        );
+        assert_eq!(
+            flattened.flattened_node(&component_origin),
+            Some(remapped_four)
+        );
+        let root_wire_origin = GraphHierarchyWireOrigin::Root(GraphWireId::new(1));
+        let flattened_root_wire = flattened.flattened_wire(&root_wire_origin).unwrap();
+        assert_eq!(
+            flattened.wire_origin(flattened_root_wire),
+            Some(&root_wire_origin)
+        );
+        let component_wire_origin = GraphHierarchyWireOrigin::Component {
+            source_path: vec![GraphNodeId::new(2)],
+            component: hierarchy.dependencies()[0].digest(),
+            wire: component.workspace().graph().wires()[0].id(),
+        };
+        let flattened_component_wire = flattened.flattened_wire(&component_wire_origin).unwrap();
+        assert_eq!(
+            flattened.wire_origin(flattened_component_wire),
+            Some(&component_wire_origin)
+        );
         assert!(flattened.workspace().graph().wires().iter().any(|wire| {
             wire.source() == endpoint(1, 1)
                 && wire.target()
@@ -2092,6 +2460,39 @@ mod tests {
             [GraphNodeId::new(2), GraphNodeId::new(1)]
         );
         assert_eq!(flattened.instances()[1].nodes().len(), 20);
+        assert_eq!(flattened.node_provenance().len(), 22);
+        assert_eq!(flattened.wire_provenance().len(), 26);
+        assert_eq!(
+            flattened
+                .node_provenance()
+                .iter()
+                .filter(|mapping| matches!(
+                    mapping.origin(),
+                    GraphHierarchyNodeOrigin::Component { source_path, .. }
+                        if source_path == &[GraphNodeId::new(2), GraphNodeId::new(1)]
+                ))
+                .count(),
+            20
+        );
+        assert_eq!(
+            flattened
+                .wire_provenance()
+                .iter()
+                .filter(|mapping| matches!(
+                    mapping.origin(),
+                    GraphHierarchyWireOrigin::Component { source_path, .. }
+                        if source_path == &[GraphNodeId::new(2), GraphNodeId::new(1)]
+                ))
+                .count(),
+            24
+        );
+        assert!(flattened.node_provenance().iter().all(|mapping| {
+            !matches!(
+                mapping.origin(),
+                GraphHierarchyNodeOrigin::Component { source_path, .. }
+                    if source_path == &[GraphNodeId::new(2)]
+            )
+        }));
         assert!(
             !flattened
                 .workspace()
@@ -2121,6 +2522,48 @@ mod tests {
             .unwrap()
             .document(),
             &left
+        );
+    }
+
+    #[test]
+    fn nested_reconnection_preserves_parent_component_wire_origin() {
+        let leaf = chain_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wired_wrapper_component(&leaf, "control.wired_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf, wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+
+        let flattened = flatten_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(flattened.node_provenance().len(), 23);
+        assert_eq!(flattened.wire_provenance().len(), 27);
+        let parent_origin = GraphHierarchyWireOrigin::Component {
+            source_path: vec![GraphNodeId::new(2)],
+            component: wrapper_digest,
+            wire: GraphWireId::new(1),
+        };
+        let final_wire = flattened.flattened_wire(&parent_origin).unwrap();
+        assert_eq!(flattened.wire_origin(final_wire), Some(&parent_origin));
+        assert_eq!(
+            flattened
+                .wire_provenance()
+                .iter()
+                .filter(|mapping| matches!(
+                    mapping.origin(),
+                    GraphHierarchyWireOrigin::Component { source_path, .. }
+                        if source_path == &[GraphNodeId::new(2)]
+                ))
+                .count(),
+            1
         );
     }
 

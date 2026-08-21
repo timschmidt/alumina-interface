@@ -263,10 +263,15 @@ prototype.
   exact replay indicators (four rational and three Boolean); invalidating a
   binding detaches the panel without
   weakening or rejecting the underlying workspace draft.
-  Canonical `ALGH` V1 then binds a collapsed authoring instance to that exact
-  component digest and deterministically flattens it to an ordinary audited
-  21-node/25-wire workspace with fresh monotonic identities. V1 rejects nested
-  instances outright until recursive depth/cycle authority is explicit.
+  Canonical `ALGH` V2 binds scoped root/component placeholders to exact
+  component digests, rejects recursive definition cycles, bounds depth and
+  expanded occurrences, and deterministically flattens the visible two-level
+  wrapper/PID hierarchy to an ordinary audited 21-node/25-wire workspace with
+  fresh monotonic identities. Canonical `ALGM` V1 then maps every final node
+  and wire back to one exact root or component-occurrence origin. Its import
+  path freshly flattens the complete `ALGH` and regenerates every byte before
+  the selected-node inspector or exact trace cursor displays source-path/final
+  endpoint correlation; it grants no execution or firmware authority.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
@@ -316,6 +321,8 @@ prototype.
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
   The component-instance/flattening boundary is in
   [`docs/GRAPH-HIERARCHY-V2.md`](docs/GRAPH-HIERARCHY-V2.md).
+  The canonical total hierarchy source-map boundary is in
+  [`docs/GRAPH-HIERARCHY-SOURCE-MAP-V1.md`](docs/GRAPH-HIERARCHY-SOURCE-MAP-V1.md).
   The authenticated resource-palette boundary is in
   [`docs/GRAPH-CAPABILITY-CATALOG-V1.md`](docs/GRAPH-CAPABILITY-CATALOG-V1.md).
   The descriptive-versus-operational board boundary is in
@@ -486,7 +493,8 @@ physical-browser/radio qualification, crash-durable cached-job history and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, editable nested-instance
-and component-library workflows, hierarchy-aware trace navigation,
+and component-library workflows, interactive traversal from flattened items
+into nested editable canvases,
 front-panel editing/execution, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared
 workspace persistence,

@@ -5,6 +5,7 @@
 //! projection into egui coordinates.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use alumina_board::{OwnerDomain, ResourceId, SafeValue};
 use alumina_capability::{
@@ -17,35 +18,38 @@ use alumina_diagnostics::{
 use alumina_graph_ir::{GraphIrOpcode, decode_graph_resource_pair_parameter};
 use alumina_interface_core::graph::{
     CanonicalGraphComponentEncoding, CanonicalGraphDeploymentReplayEvidence1,
-    CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding, CanonicalGraphWorkspaceEncoding,
-    CanonicalTypedGraphValueEncoding, ChannelFullPolicy, ClockDefinition, ClockKind,
-    ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
-    GraphCachedJobCatalog, GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits,
-    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInput,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    CanonicalGraphHierarchyEncoding, CanonicalGraphHierarchySourceMapEncoding,
+    CanonicalGraphProbeEncoding, CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding,
+    ChannelFullPolicy, ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet,
+    GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits, GraphCachedJobCatalog,
+    GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
+    GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInstance,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
     GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
     GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
-    GraphHierarchyLimits, GraphLimits, GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement,
-    GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
-    GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
-    GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment,
-    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
+    GraphHierarchyLimits, GraphHierarchyNodeOrigin, GraphHierarchySourceMapLimits, GraphLimits,
+    GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry,
+    GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge,
+    GraphProbeId, GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits,
+    GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry,
+    GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId,
+    GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
     GraphWorkspaceProbeHistory, InputConnectionRequirement,
-    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, NodeDefinition, NodeInputChannelContract,
-    NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
-    NodeSchema, PortDefinition, RecordField, RecordFieldId, RecordValueField,
-    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
-    ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
+    NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
+    NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
+    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
     analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
-    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
-    format_graph_literal_text, graph_component_instance_input_port,
-    graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
-    lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
+    encode_graph_hierarchy_source_map, encode_graph_probes, encode_graph_workspace,
+    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
+    graph_component_instance_input_port, graph_component_instance_output_port,
+    graph_component_instance_prototype, graph_resource_label, lower_graph_deployment,
+    parse_graph_literal_text, project_graph_probe_replay, replay_graph_hierarchy_source_map,
     replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
     select_graph_cached_job_handle, select_graph_capability_node_resource,
     verify_graph_deployment_evidence_bytes,
@@ -90,6 +94,7 @@ const MAXIMUM_PERSISTED_PROBE_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
+const ALGM_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGM source map", "algm");
 const ALGR_SUCCESS_REPLAY_FILE: BoundedFileSpec =
     BoundedFileSpec::new("success ALGRREP1 evidence", "algrrep");
 const ALGR_FAULT_REPLAY_FILE: BoundedFileSpec =
@@ -479,6 +484,7 @@ struct HierarchyPackage {
     document: GraphHierarchyDocument,
     encoding: CanonicalGraphHierarchyEncoding,
     flattening: GraphHierarchyFlattening,
+    source_map: CanonicalGraphHierarchySourceMapEncoding,
 }
 
 fn hierarchy_depth(flattening: &GraphHierarchyFlattening) -> usize {
@@ -488,6 +494,73 @@ fn hierarchy_depth(flattening: &GraphHierarchyFlattening) -> usize {
         .map(|instance| instance.source_path().len())
         .max()
         .unwrap_or(0)
+}
+
+fn hierarchy_source_path_label(path: &[GraphNodeId]) -> String {
+    let mut label = String::from("[");
+    for (index, node) in path.iter().enumerate() {
+        if index != 0 {
+            label.push('/');
+        }
+        label.push_str(&node.get().to_string());
+    }
+    label.push(']');
+    label
+}
+
+fn hierarchy_origin_correlation(
+    component: &ComponentPackage,
+    node: GraphNodeId,
+    port: Option<GraphPortId>,
+) -> Option<String> {
+    const MAXIMUM_VISIBLE_OCCURRENCES: usize = 4;
+
+    let mut total = 0_usize;
+    let mut visible = Vec::new();
+    for mapping in component.hierarchy.flattening.node_provenance() {
+        let GraphHierarchyNodeOrigin::Component {
+            source_path,
+            component: origin_component,
+            node: origin_node,
+        } = mapping.origin()
+        else {
+            continue;
+        };
+        if *origin_component != component.encoding.digest() || *origin_node != node {
+            continue;
+        }
+        total += 1;
+        if visible.len() < MAXIMUM_VISIBLE_OCCURRENCES {
+            let endpoint_suffix = port.map_or_else(String::new, |port| format!(".p{}", port.get()));
+            visible.push(format!(
+                "{}:n{}{} → flat n{}{}",
+                hierarchy_source_path_label(source_path),
+                node.get(),
+                endpoint_suffix,
+                mapping.flattened_node().get(),
+                endpoint_suffix,
+            ));
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    let mut label = visible.join(" · ");
+    if total > visible.len() {
+        let _ = write!(label, " · +{} occurrences", total - visible.len());
+    }
+    Some(label)
+}
+
+fn hierarchy_node_correlation(component: &ComponentPackage, node: GraphNodeId) -> Option<String> {
+    hierarchy_origin_correlation(component, node, None)
+}
+
+fn hierarchy_endpoint_correlation(
+    component: &ComponentPackage,
+    endpoint: WireEndpoint,
+) -> Option<String> {
+    hierarchy_origin_correlation(component, endpoint.node, Some(endpoint.port))
 }
 
 #[derive(Clone, Debug)]
@@ -2136,6 +2209,7 @@ pub(crate) struct ExactControlWorkspace {
     file_status: String,
     workspace_file_bridge: BoundedFileBridge,
     probe_file_bridge: BoundedFileBridge,
+    hierarchy_source_file_bridge: BoundedFileBridge,
     target_success_replay_file_bridge: BoundedFileBridge,
     target_fault_replay_file_bridge: BoundedFileBridge,
     trigger_pre_samples: u32,
@@ -2208,6 +2282,7 @@ impl ExactControlWorkspace {
             file_status: "canonical workspace has not been exported this session".to_owned(),
             workspace_file_bridge: BoundedFileBridge::default(),
             probe_file_bridge: BoundedFileBridge::default(),
+            hierarchy_source_file_bridge: BoundedFileBridge::default(),
             target_success_replay_file_bridge: BoundedFileBridge::default(),
             target_fault_replay_file_bridge: BoundedFileBridge::default(),
             trigger_pre_samples: trigger.pretrigger_samples(),
@@ -2314,6 +2389,11 @@ impl ExactControlWorkspace {
                 "hierarchy {}… → ALGW {}…",
                 digest_prefix(component.hierarchy.encoding.digest().0),
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
+            ));
+            ui.monospace(format!(
+                "source map {}… · {} bytes",
+                digest_prefix(component.hierarchy.source_map.digest().0),
+                component.hierarchy.source_map.bytes().len()
             ));
         }
         self.show_probe_sidebar(ui);
@@ -2844,6 +2924,61 @@ impl ExactControlWorkspace {
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
             ));
         });
+        ui.monospace(format!(
+            "ALGM {}… · {} total node origins / {} total wire origins",
+            digest_prefix(component.hierarchy.source_map.digest().0),
+            component.hierarchy.flattening.node_provenance().len(),
+            component.hierarchy.flattening.wire_provenance().len(),
+        ));
+        let source_map_name = format!(
+            "alumina-{}.algm",
+            digest_prefix(component.hierarchy.source_map.digest().0)
+        );
+        let source_map_events = self.hierarchy_source_file_bridge.show(
+            ui,
+            component.hierarchy.source_map.bytes(),
+            MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
+            &source_map_name,
+            ALGM_FILE,
+        );
+        for event in source_map_events {
+            match event {
+                BoundedFileEvent::Import(Ok(bytes)) => {
+                    match replay_graph_hierarchy_source_map(
+                        &bytes,
+                        &component.hierarchy.document,
+                        GraphHierarchySourceMapLimits::interactive(),
+                    ) {
+                        Ok(replay) if replay.encoding() == &component.hierarchy.source_map => {
+                            self.file_status = format!(
+                                "verified {} exact ALGM bytes by fresh hierarchy flattening",
+                                bytes.len()
+                            );
+                        }
+                        Ok(_) => {
+                            "ALGM import regenerated a different embedded-policy map without mutation"
+                                .clone_into(&mut self.file_status);
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "ALGM import rejected without graph or hierarchy mutation: {error}"
+                            );
+                        }
+                    }
+                }
+                BoundedFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("ALGM file read rejected: {error}");
+                }
+                BoundedFileEvent::Export(Ok(bytes)) => {
+                    self.file_status = format!(
+                        "exported {bytes} exact ALGM bytes bound to the current ALGH and ALGW"
+                    );
+                }
+                BoundedFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("ALGM export failed: {error}");
+                }
+            }
+        }
         let items = component
             .document
             .panel_items()
@@ -3964,6 +4099,14 @@ impl ExactControlWorkspace {
             .semantic_registry()
             .schema(node.kind());
         let state = schema.and_then(alumina_interface_core::graph::NodeSchema::state);
+        let hierarchy_correlation = self.component.as_ref().and_then(|component| {
+            hierarchy_node_correlation(component, id).map(|correlation| {
+                (
+                    digest_prefix(component.hierarchy.source_map.digest().0),
+                    correlation,
+                )
+            })
+        });
         let domain_choices = schema.map_or_else(Vec::new, |schema| {
             audited_domain_choices(&document, schema.allowed_domains())
         });
@@ -3998,6 +4141,11 @@ impl ExactControlWorkspace {
                     "canvas = ({}, {}) logical px · presentation only",
                     placement.x(),
                     placement.y()
+                ));
+            }
+            if let Some((source_map, correlation)) = &hierarchy_correlation {
+                ui.monospace(format!(
+                    "ALGM {source_map}… · hierarchy origin {correlation}"
                 ));
             }
             ui.horizontal_wrapped(|ui| {
@@ -4751,6 +4899,7 @@ impl ExactControlWorkspace {
             egui::Color32::GRAY,
         );
 
+        let hierarchy_component = self.component.as_ref();
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("root tick {}", self.cursor_root_tick));
             for series in analog_groups
@@ -4760,10 +4909,13 @@ impl ExactControlWorkspace {
                 .chain(state.iter().copied())
             {
                 if let Some(point) = trace_point_at_or_before(series, &self.cursor_root_tick) {
-                    ui.colored_label(
-                        trace_signal_color(&series.signal),
-                        trace_cursor_label(&series.signal, point),
-                    );
+                    let value = trace_cursor_label(&series.signal, point);
+                    let label = hierarchy_component
+                        .and_then(|component| {
+                            hierarchy_endpoint_correlation(component, series.signal.source)
+                        })
+                        .map_or(value.clone(), |origin| format!("{origin} · {value}"));
+                    ui.colored_label(trace_signal_color(&series.signal), label);
                 }
             }
         });
@@ -6545,6 +6697,11 @@ fn representative_hierarchy(
     .map_err(|error| error.to_string())?;
     let encoding = encode_graph_hierarchy(&document).map_err(|error| error.to_string())?;
     let flattening = flatten_graph_hierarchy(&document).map_err(|error| error.to_string())?;
+    let source_map = encode_graph_hierarchy_source_map(
+        &flattening,
+        GraphHierarchySourceMapLimits::interactive(),
+    )
+    .map_err(|error| error.to_string())?;
     analyze_graph_draft(
         flattening.workspace().graph(),
         fixture.registry().semantic_registry(),
@@ -6554,6 +6711,7 @@ fn representative_hierarchy(
         document,
         encoding,
         flattening,
+        source_map,
     })
 }
 
@@ -8562,6 +8720,43 @@ mod tests {
         assert!(!workspace.probes.as_ref().unwrap().document.observes(source));
     }
 
+    fn assert_hierarchy_source_map(initial: &ComponentPackage) {
+        assert_eq!(initial.hierarchy.flattening.node_provenance().len(), 21);
+        assert_eq!(initial.hierarchy.flattening.wire_provenance().len(), 25);
+        assert_eq!(
+            hierarchy_node_correlation(initial, GraphNodeId::new(8)).as_deref(),
+            Some("[1/1]:n8 → flat n10")
+        );
+        assert_eq!(
+            hierarchy_endpoint_correlation(
+                initial,
+                WireEndpoint {
+                    node: GraphNodeId::new(8),
+                    port: GraphPortId::new(1),
+                },
+            )
+            .as_deref(),
+            Some("[1/1]:n8.p1 → flat n10.p1")
+        );
+        assert_eq!(initial.hierarchy.source_map.bytes().len(), 2_550);
+        assert_eq!(
+            initial.hierarchy.source_map.digest().0,
+            [
+                0xdb, 0xfa, 0xf6, 0x92, 0x55, 0xa1, 0xa4, 0x15, 0x93, 0x29, 0x76, 0x15, 0x23, 0xfb,
+                0xe1, 0x20, 0xd8, 0xb9, 0x56, 0x54, 0x8a, 0xdb, 0x4b, 0xbf, 0x19, 0x58, 0xe7, 0x3a,
+                0xb0, 0x14, 0xbb, 0x77,
+            ]
+        );
+        let replay = replay_graph_hierarchy_source_map(
+            initial.hierarchy.source_map.bytes(),
+            &initial.hierarchy.document,
+            GraphHierarchySourceMapLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.encoding(), &initial.hierarchy.source_map);
+        assert_eq!(replay.flattening(), &initial.hierarchy.flattening);
+    }
+
     fn assert_recursive_hierarchy_package(initial: &ComponentPackage) {
         assert_eq!(initial.hierarchy.document.dependencies().len(), 2);
         assert_eq!(initial.hierarchy.document.instances().len(), 2);
@@ -8634,6 +8829,7 @@ mod tests {
         .unwrap();
         assert_eq!(hierarchy_replay.document(), &initial.hierarchy.document);
         assert_eq!(hierarchy_replay.encoding(), &initial.hierarchy.encoding);
+        assert_hierarchy_source_map(initial);
     }
 
     #[test]

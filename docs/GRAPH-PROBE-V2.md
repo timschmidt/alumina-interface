@@ -199,6 +199,14 @@ marker; none converts a retained value into a firmware command or physical
 observation. The unchanged reference policy projects five samples for each of
 seven probes (35 aggregate) inside ticks 1–5.
 
+When the reference component participates in the validated recursive `ALGH`,
+the UI also consults its canonical
+[`ALGM` source map](GRAPH-HIERARCHY-SOURCE-MAP-V1.md) for presentation. Cursor
+labels prefix a probed component-local endpoint with its stable occurrence path
+and final flattened endpoint, for example `[1/1]:n8.p1 → flat n10.p1`. This
+does not change `ALGP`, `ALGT`, the plotted exact value, or replay authority;
+the independently replayed source map is correlation metadata only.
+
 ## Closed device claims
 
 `ALGP` is not sent to the firmware graph interpreter—there is no arbitrary

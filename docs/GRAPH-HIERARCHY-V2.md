@@ -121,6 +121,16 @@ component-local instance nodes. Wrapper-only occurrences may therefore have an
 empty surviving-node map while retaining an unambiguous source path. The
 result also binds the source `ALGH` digest.
 
+The flattening additionally retains total provenance for every final node and
+wire. An ordinary root item maps to its original root ID. A copied item maps to
+its stable occurrence source path, exact component digest, and component-local
+ID. Wires retain that origin while public-connector replacement gives them
+fresh final IDs, including repeated root-wire replacement and a parent
+component wire crossing a nested child. Both final-to-origin and
+origin-to-final lookup are available. The separate canonical
+[`ALGM` V1 source map](GRAPH-HIERARCHY-SOURCE-MAP-V1.md) serializes those total
+mappings and admits them only by freshly flattening the exact complete `ALGH`.
+
 ## First visible recursive proof
 
 The control workspace constructs a root instance of
@@ -138,15 +148,22 @@ translated presentation positions are intentional flattened facts.
 
 The UI displays source hierarchy identity, expanded-occurrence count, actual
 depth, flattened counts, and flattened-workspace identity beside the live
-canonical component panel. It does not substitute a collapsed placeholder into
-the executable editor canvas or claim that an instance itself can run.
+canonical component panel. It also displays the 2,550-byte canonical `ALGM`,
+its SHA-256
+`dbfaf69255a1a4159329761523fbe120d8b956548adb4bbf1958e73ab014bb77`,
+and its 21 node/25 wire origins. The selected-node inspector and exact trace
+cursor correlate leaf-local endpoints such as `[1/1]:n8.p1` with the final
+`n10.p1`; bounded `.algm` import regenerates every byte without mutation. It
+does not substitute a collapsed placeholder into the executable editor canvas
+or claim that an instance itself can run.
 
 ## Deliberately open
 
 Editable component-instance creation/deletion on the main canvas,
 hierarchy-aware undo/redo and file/browser persistence, general library
 authoring, parameter promotion/overrides, package signatures and permissions,
-locked dependency manifests, incremental flattening, source-path-aware trace
-navigation, and executable front-panel inputs remain open. `ALGH` V2 grants no
+locked dependency manifests, incremental flattening, interactive traversal
+from final items into nested editable canvases, and executable front-panel
+inputs remain open. `ALGH` V2 and `ALGM` V1 grant no
 semantic, implementation, resource, timing, safety, firmware, or
 physical-output authority.

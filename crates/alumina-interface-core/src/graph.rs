@@ -19,6 +19,7 @@ mod control_fixture;
 mod deployment;
 mod document;
 mod hierarchy;
+mod hierarchy_source;
 mod job_catalog;
 mod literal_text;
 mod probe;
@@ -69,11 +70,20 @@ pub use document::{
 pub use hierarchy::{
     CanonicalGraphHierarchyEncoding, GRAPH_COMPONENT_INSTANCE_KIND,
     GRAPH_COMPONENT_INSTANCE_VERSION, GRAPH_HIERARCHY_MAGIC, GRAPH_HIERARCHY_VERSION,
-    GraphComponentInstance, GraphFlattenedInstance, GraphFlattenedNode, GraphHierarchyDependency,
+    GraphComponentInstance, GraphFlattenedInstance, GraphFlattenedNode,
+    GraphFlattenedNodeProvenance, GraphFlattenedWireProvenance, GraphHierarchyDependency,
     GraphHierarchyDocument, GraphHierarchyError, GraphHierarchyFlattening, GraphHierarchyLimits,
-    GraphHierarchyReplay, GraphInstanceScope, encode_graph_hierarchy, flatten_graph_hierarchy,
-    graph_component_instance_input_port, graph_component_instance_output_port,
-    graph_component_instance_prototype, replay_graph_hierarchy,
+    GraphHierarchyNodeOrigin, GraphHierarchyReplay, GraphHierarchyWireOrigin, GraphInstanceScope,
+    encode_graph_hierarchy, flatten_graph_hierarchy, graph_component_instance_input_port,
+    graph_component_instance_output_port, graph_component_instance_prototype,
+    replay_graph_hierarchy,
+};
+pub use hierarchy_source::{
+    CanonicalGraphHierarchySourceMapEncoding, GRAPH_HIERARCHY_SOURCE_MAP_MAGIC,
+    GRAPH_HIERARCHY_SOURCE_MAP_VERSION, GraphHierarchySourceMapError,
+    GraphHierarchySourceMapLimits, GraphHierarchySourceMapReplay,
+    MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, encode_graph_hierarchy_source_map,
+    replay_graph_hierarchy_source_map,
 };
 pub use job_catalog::{
     GraphCachedJobCatalog, GraphCachedJobCatalogEntry, GraphCachedJobCatalogError,
