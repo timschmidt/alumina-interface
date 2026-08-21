@@ -17,9 +17,9 @@ use crate::CanonicalGlobalJob2;
 
 use super::{
     CanonicalGraphWorkspaceEncoding, GraphAnalysisError, GraphNodeId, GraphNodeRegistry,
-    GraphSchema, GraphSchemaError, GraphTypeId, GraphValue, GraphWorkspaceDocument,
-    GraphWorkspaceError, JobGraphHandle, TypeKind, TypedGraphValue, analyze_graph_draft,
-    encode_graph_workspace,
+    GraphSchema, GraphSchemaError, GraphTypeId, GraphValue, GraphValuePathError,
+    GraphValuePathSegment, GraphWorkspaceDocument, GraphWorkspaceError, JobGraphHandle, TypeKind,
+    TypedGraphValue, analyze_graph_draft, encode_graph_workspace,
 };
 
 /// Caller-owned bound for one cache-derived job catalog.
@@ -308,8 +308,8 @@ pub enum GraphCachedJobHandleSelectionError {
         /// Node-local parameter ID.
         parameter: u32,
     },
-    /// The selected parameter is not a root job-handle value.
-    NotJobHandleParameter {
+    /// The selected exact value-path leaf is not a job-handle value.
+    NotJobHandleValue {
         /// Exact graph node.
         node: GraphNodeId,
         /// Node-local parameter ID.
@@ -331,8 +331,8 @@ pub enum GraphCachedJobHandleSelectionError {
         /// Exact catalog entry.
         entry: usize,
     },
-    /// Catalog value construction contradicted the workspace schema.
-    Catalog(GraphCachedJobCatalogError),
+    /// The bounded schema-aware leaf path was invalid or inactive.
+    ValuePath(GraphValuePathError),
     /// Structural workspace mutation or canonical encoding failed.
     Workspace(GraphWorkspaceError),
     /// The complete candidate failed reviewed graph semantics.
@@ -350,9 +350,9 @@ impl fmt::Display for GraphCachedJobHandleSelectionError {
                 formatter,
                 "graph node {node:?} has no parameter {parameter}"
             ),
-            Self::NotJobHandleParameter { node, parameter } => write!(
+            Self::NotJobHandleValue { node, parameter } => write!(
                 formatter,
-                "graph node {node:?} parameter {parameter} is not a job handle"
+                "graph node {node:?} parameter {parameter} path is not a job handle"
             ),
             Self::ParameterNotCatalogBound { node, parameter } => write!(
                 formatter,
@@ -366,7 +366,7 @@ impl fmt::Display for GraphCachedJobHandleSelectionError {
                 formatter,
                 "graph node {node:?} parameter {parameter} already carries cached-job entry {entry}"
             ),
-            Self::Catalog(error) => write!(formatter, "job selection failed: {error}"),
+            Self::ValuePath(error) => write!(formatter, "job selection path failed: {error}"),
             Self::Workspace(error) => write!(formatter, "job selection failed: {error}"),
             Self::Analysis(error) => {
                 write!(formatter, "job selection semantic analysis failed: {error}")
@@ -377,9 +377,9 @@ impl fmt::Display for GraphCachedJobHandleSelectionError {
 
 impl std::error::Error for GraphCachedJobHandleSelectionError {}
 
-impl From<GraphCachedJobCatalogError> for GraphCachedJobHandleSelectionError {
-    fn from(value: GraphCachedJobCatalogError) -> Self {
-        Self::Catalog(value)
+impl From<GraphValuePathError> for GraphCachedJobHandleSelectionError {
+    fn from(value: GraphValuePathError) -> Self {
+        Self::ValuePath(value)
     }
 }
 
@@ -502,13 +502,16 @@ pub fn derive_graph_cached_job_catalog(
 /// candidate is structurally validated, semantically analyzed, and canonically
 /// encoded before the caller's workspace changes. Duplicate references in
 /// other nodes are deliberately allowed because a job handle is inert data,
-/// not a resource lease or start capability.
+/// not a resource lease or start capability. `path` is empty for a root job
+/// parameter or explicitly traverses existing record/array/option/result
+/// structure; it never constructs an absent branch.
 pub fn select_graph_cached_job_handle(
     catalog: &GraphCachedJobCatalog,
     registry: &GraphNodeRegistry,
     workspace: &mut GraphWorkspaceDocument,
     node_id: GraphNodeId,
     parameter_id: u32,
+    path: &[GraphValuePathSegment],
     entry_index: usize,
 ) -> Result<CanonicalGraphWorkspaceEncoding, GraphCachedJobHandleSelectionError> {
     let entry = catalog.entries().get(entry_index).copied().ok_or(
@@ -526,8 +529,22 @@ pub fn select_graph_cached_job_handle(
             node: node_id,
             parameter: parameter_id,
         })?;
-    let GraphValue::JobHandle(current) = parameter.value().value() else {
-        return Err(GraphCachedJobHandleSelectionError::NotJobHandleParameter {
+    let (leaf_type, leaf) = parameter
+        .value()
+        .value_at_path(workspace.graph().schema(), path)?;
+    let Some(TypeKind::JobHandle) = workspace
+        .graph()
+        .schema()
+        .value_type(leaf_type)
+        .map(|definition| definition.kind())
+    else {
+        return Err(GraphCachedJobHandleSelectionError::NotJobHandleValue {
+            node: node_id,
+            parameter: parameter_id,
+        });
+    };
+    let GraphValue::JobHandle(current) = leaf else {
+        return Err(GraphCachedJobHandleSelectionError::NotJobHandleValue {
             node: node_id,
             parameter: parameter_id,
         });
@@ -547,7 +564,11 @@ pub fn select_graph_cached_job_handle(
             entry: entry_index,
         });
     }
-    let selected = entry.typed_value(workspace.graph().schema(), parameter.value().value_type())?;
+    let selected = parameter.value().replacing_value_at_path(
+        workspace.graph().schema(),
+        path,
+        GraphValue::JobHandle(entry.handle),
+    )?;
 
     let mut candidate = workspace.clone();
     candidate.set_parameter(node_id, parameter_id, selected)?;
@@ -583,12 +604,17 @@ mod tests {
     use super::super::{
         ExecutionDomain, ExecutionDomainSet, GraphAnalysisLimits, GraphDocument, GraphLimits,
         GraphNodePrototype, GraphSchema, GraphWorkspaceLimits, NodeKind, NodeParameter,
-        NodeParameterContract, NodeSchema, TypeDefinition,
+        NodeParameterContract, NodeSchema, RecordField, RecordFieldId, RecordValueField,
+        TypeDefinition,
     };
 
     const JOB: GraphTypeId = GraphTypeId::new(1);
     const BOOL: GraphTypeId = GraphTypeId::new(2);
+    const OPTIONAL_JOB: GraphTypeId = GraphTypeId::new(3);
+    const JOB_ARRAY: GraphTypeId = GraphTypeId::new(4);
+    const JOB_SET: GraphTypeId = GraphTypeId::new(5);
     const KIND_NAME: &str = "alumina.job.cached-reference";
+    const SET_KIND_NAME: &str = "alumina.job.cached-reference-set";
 
     fn canonical_job() -> CanonicalGlobalJob2 {
         let program = compile_representative_program().unwrap();
@@ -709,6 +735,144 @@ mod tests {
             .unwrap();
         analyze_graph_draft(workspace.graph(), registry).unwrap();
         (workspace, node)
+    }
+
+    fn nested_registry() -> GraphNodeRegistry {
+        let schema = GraphSchema::try_new(
+            GraphLimits::interactive(),
+            Vec::new(),
+            vec![
+                TypeDefinition::new(JOB, "job.cached", TypeKind::JobHandle),
+                TypeDefinition::new(
+                    OPTIONAL_JOB,
+                    "job.cached.optional",
+                    TypeKind::Option { value: JOB },
+                ),
+                TypeDefinition::new(
+                    JOB_ARRAY,
+                    "job.cached.array",
+                    TypeKind::Array {
+                        element: JOB,
+                        maximum_items: 4,
+                    },
+                ),
+                TypeDefinition::new(
+                    JOB_SET,
+                    "job.cached.reference-set",
+                    TypeKind::Record {
+                        fields: vec![
+                            RecordField::new(RecordFieldId::new(1), "primary", JOB),
+                            RecordField::new(RecordFieldId::new(2), "fallback", OPTIONAL_JOB),
+                            RecordField::new(RecordFieldId::new(3), "mirrors", JOB_ARRAY),
+                        ],
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        let context =
+            GraphDocument::try_new(0, schema, Vec::new(), Vec::new(), Vec::new()).unwrap();
+        GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &context,
+            vec![NodeSchema::new(
+                NodeKind::new(SET_KIND_NAME, 1),
+                ExecutionDomainSet::HOST_EXACT,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![NodeParameterContract::new(1, "references", JOB_SET)],
+                Vec::new(),
+                Vec::new(),
+                None,
+            )],
+        )
+        .unwrap()
+    }
+
+    fn nested_job_set_value(schema: &GraphSchema, handle: JobGraphHandle) -> TypedGraphValue {
+        TypedGraphValue::try_new(
+            schema,
+            JOB_SET,
+            GraphValue::Record(vec![
+                RecordValueField {
+                    field: RecordFieldId::new(1),
+                    value: GraphValue::JobHandle(handle),
+                },
+                RecordValueField {
+                    field: RecordFieldId::new(2),
+                    value: GraphValue::OptionSome(Box::new(GraphValue::JobHandle(handle))),
+                },
+                RecordValueField {
+                    field: RecordFieldId::new(3),
+                    value: GraphValue::Array(vec![GraphValue::JobHandle(handle)]),
+                },
+            ]),
+        )
+        .unwrap()
+    }
+
+    fn nested_workspace(
+        registry: &GraphNodeRegistry,
+        catalog: &GraphCachedJobCatalog,
+    ) -> (GraphWorkspaceDocument, GraphNodeId) {
+        let graph = GraphDocument::try_new(
+            0,
+            registry.context_schema().clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut workspace = GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            0,
+            1,
+            1,
+            graph,
+            Vec::new(),
+        )
+        .unwrap();
+        let node = workspace
+            .create_node(
+                GraphNodePrototype::new(
+                    NodeKind::new(SET_KIND_NAME, 1),
+                    "Cached reference set",
+                    ExecutionDomain::HostExact,
+                    Vec::new(),
+                    Vec::new(),
+                    vec![NodeParameter::new(
+                        1,
+                        "references",
+                        nested_job_set_value(
+                            registry.context_schema(),
+                            catalog.entries()[0].handle(),
+                        ),
+                    )],
+                ),
+                -19,
+                31,
+            )
+            .unwrap();
+        analyze_graph_draft(workspace.graph(), registry).unwrap();
+        (workspace, node)
+    }
+
+    fn selected_handle(
+        registry: &GraphNodeRegistry,
+        workspace: &GraphWorkspaceDocument,
+        node: GraphNodeId,
+        path: &[GraphValuePathSegment],
+    ) -> JobGraphHandle {
+        let parameter = &workspace.graph().node(node).unwrap().parameters()[0];
+        let (_, value) = parameter
+            .value()
+            .value_at_path(registry.context_schema(), path)
+            .unwrap();
+        let GraphValue::JobHandle(handle) = value else {
+            panic!("selected nested value was not a job handle")
+        };
+        *handle
     }
 
     #[test]
@@ -873,7 +1037,7 @@ mod tests {
         let wire_cursor = workspace.next_wire_id();
         let placement = workspace.placement(node);
         let selected =
-            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, 1)
+            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, &[], 1)
                 .unwrap();
         assert_ne!(selected, before);
         assert_eq!(selected, encode_graph_workspace(&workspace).unwrap());
@@ -900,6 +1064,157 @@ mod tests {
     }
 
     #[test]
+    fn selector_rebinds_only_explicit_catalog_bound_composite_leaves() {
+        let job = canonical_job();
+        let catalog = catalog(&job);
+        let registry = nested_registry();
+        let (mut workspace, node) = nested_workspace(&registry, &catalog);
+        let primary = [GraphValuePathSegment::RecordField(RecordFieldId::new(1))];
+        let fallback = [
+            GraphValuePathSegment::RecordField(RecordFieldId::new(2)),
+            GraphValuePathSegment::OptionSome,
+        ];
+        let mirror = [
+            GraphValuePathSegment::RecordField(RecordFieldId::new(3)),
+            GraphValuePathSegment::ArrayIndex(0),
+        ];
+        let placement = workspace.placement(node);
+        let node_cursor = workspace.next_node_id();
+        let wire_cursor = workspace.next_wire_id();
+
+        select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, &primary, 1)
+            .unwrap();
+        assert_eq!(
+            selected_handle(&registry, &workspace, node, &primary),
+            catalog.entries()[1].handle()
+        );
+        assert_eq!(
+            selected_handle(&registry, &workspace, node, &fallback),
+            catalog.entries()[0].handle()
+        );
+        assert_eq!(
+            selected_handle(&registry, &workspace, node, &mirror),
+            catalog.entries()[0].handle()
+        );
+        assert_eq!(workspace.placement(node), placement);
+        assert_eq!(workspace.next_node_id(), node_cursor);
+        assert_eq!(workspace.next_wire_id(), wire_cursor);
+
+        select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, &fallback, 1)
+            .unwrap();
+        select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, &mirror, 1)
+            .unwrap();
+        for path in [&primary[..], &fallback[..], &mirror[..]] {
+            assert_eq!(
+                selected_handle(&registry, &workspace, node, path),
+                catalog.entries()[1].handle()
+            );
+        }
+
+        let retained = encode_graph_workspace(&workspace).unwrap();
+        assert!(matches!(
+            select_graph_cached_job_handle(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &primary,
+                1,
+            ),
+            Err(GraphCachedJobHandleSelectionError::AlreadySelected { .. })
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+        assert!(matches!(
+            select_graph_cached_job_handle(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &[GraphValuePathSegment::RecordField(RecordFieldId::new(99))],
+                0,
+            ),
+            Err(GraphCachedJobHandleSelectionError::ValuePath(
+                GraphValuePathError::UnknownRecordField { .. }
+            ))
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+        assert!(matches!(
+            select_graph_cached_job_handle(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &[GraphValuePathSegment::RecordField(RecordFieldId::new(3))],
+                0,
+            ),
+            Err(GraphCachedJobHandleSelectionError::NotJobHandleValue { .. })
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+
+        let parameter = &workspace.graph().node(node).unwrap().parameters()[0];
+        let inactive = parameter
+            .value()
+            .replacing_value_at_path(
+                registry.context_schema(),
+                &[GraphValuePathSegment::RecordField(RecordFieldId::new(2))],
+                GraphValue::OptionNone,
+            )
+            .unwrap();
+        workspace.set_parameter(node, 1, inactive).unwrap();
+        let inactive_encoding = encode_graph_workspace(&workspace).unwrap();
+        assert!(matches!(
+            select_graph_cached_job_handle(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &fallback,
+                0,
+            ),
+            Err(GraphCachedJobHandleSelectionError::ValuePath(
+                GraphValuePathError::InactiveBranch { .. }
+            ))
+        ));
+        assert_eq!(
+            encode_graph_workspace(&workspace).unwrap(),
+            inactive_encoding
+        );
+
+        let parameter = &workspace.graph().node(node).unwrap().parameters()[0];
+        let raw = JobGraphHandle {
+            partition_digest: Digest([0x93; 32]),
+            ..catalog.entries()[1].handle()
+        };
+        let raw_parameter = parameter
+            .value()
+            .replacing_value_at_path(
+                registry.context_schema(),
+                &primary,
+                GraphValue::JobHandle(raw),
+            )
+            .unwrap();
+        workspace.set_parameter(node, 1, raw_parameter).unwrap();
+        let raw_encoding = encode_graph_workspace(&workspace).unwrap();
+        assert!(matches!(
+            select_graph_cached_job_handle(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &primary,
+                0,
+            ),
+            Err(GraphCachedJobHandleSelectionError::ParameterNotCatalogBound { .. })
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), raw_encoding);
+    }
+
+    #[test]
     fn selector_rejects_noop_raw_wrong_parameter_and_semantics_atomically() {
         let job = canonical_job();
         let catalog = catalog(&job);
@@ -913,13 +1228,13 @@ mod tests {
         );
 
         assert!(matches!(
-            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, 0),
+            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, &[], 0),
             Err(GraphCachedJobHandleSelectionError::AlreadySelected { .. })
         ));
         assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
         assert!(matches!(
-            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 2, 1),
-            Err(GraphCachedJobHandleSelectionError::NotJobHandleParameter { .. })
+            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 2, &[], 1),
+            Err(GraphCachedJobHandleSelectionError::NotJobHandleValue { .. })
         ));
         assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
 
@@ -941,7 +1256,7 @@ mod tests {
             .unwrap();
         let raw_encoding = encode_graph_workspace(&workspace).unwrap();
         assert!(matches!(
-            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, 1),
+            select_graph_cached_job_handle(&catalog, &registry, &mut workspace, node, 1, &[], 1),
             Err(GraphCachedJobHandleSelectionError::ParameterNotCatalogBound { .. })
         ));
         assert_eq!(encode_graph_workspace(&workspace).unwrap(), raw_encoding);
@@ -968,7 +1283,15 @@ mod tests {
             GraphNodeRegistry::try_new(GraphAnalysisLimits::interactive(), &context, Vec::new())
                 .unwrap();
         assert!(matches!(
-            select_graph_cached_job_handle(&catalog, &empty_registry, &mut workspace, node, 1, 1,),
+            select_graph_cached_job_handle(
+                &catalog,
+                &empty_registry,
+                &mut workspace,
+                node,
+                1,
+                &[],
+                1,
+            ),
             Err(GraphCachedJobHandleSelectionError::Analysis(_))
         ));
         assert_eq!(

@@ -39,24 +39,30 @@ the exact canonical comparison remains mandatory in either case.
 
 ## Transactional graph selection
 
-`GraphCachedJobCatalogEntry::typed_value` constructs a `JobHandle` only for a
-registered root `TypeKind::JobHandle`. `select_graph_cached_job_handle` then
-requires:
+`GraphCachedJobCatalogEntry::typed_value` constructs a root `JobHandle` only for
+a registered `TypeKind::JobHandle`. `select_graph_cached_job_handle` additionally
+accepts a borrowed bounded value path. An empty path selects that root; a
+nonempty path may use only stable record-field IDs, retained array indices, and
+explicit existing option/result branches. It never resolves a display name or
+constructs an absent branch. The selector then requires:
 
 - an existing node and parameter;
-- an existing root `JobHandle` value;
+- an exact schema-resolved `JobHandle` leaf;
 - exact membership of the current handle in the same catalog, closing raw,
   stale, and foreign values;
 - a different, in-range catalog choice; and
 - complete structural mutation, audited draft semantic analysis, and
   canonical `ALGW` encoding on a clone before commit.
 
-The operation preserves node identity, label, domain, ports, canvas placement,
-and both allocation cursors. An exact no-op creates no revision. Unlike a
-physical resource selector, it deliberately permits multiple nodes to retain
-the same handle: an immutable reference is data, and uniqueness would falsely
-suggest command ownership. A later prepare/start node or coordinator must
-enforce its own ownership, safety, cache, clock, and deterministic-start
+The complete root parameter is reconstructed and revalidated after one leaf is
+replaced. The operation preserves every sibling value, node identity, label,
+domain, ports, canvas placement, and both allocation cursors. An exact no-op
+creates no revision. Unknown fields, out-of-range indices, inactive branches,
+wrong leaf types, or structurally valid raw handles fail before mutation.
+Unlike a physical resource selector, it deliberately permits multiple nodes to
+retain the same handle: an immutable reference is data, and uniqueness would
+falsely suggest command ownership. A later prepare/start node or coordinator
+must enforce its own ownership, safety, cache, clock, and deterministic-start
 authority.
 
 ## Visible offline workflow
@@ -65,10 +71,12 @@ The Control workspace includes a separate offline cached-job authoring proof.
 It drives the deterministic two-MCU cache simulation through the real
 partition-then-manifest delivery state machines, derives the catalog from the
 resulting readiness tokens, and builds a minimal reviewed HostExact graph whose
-only parameter is a typed cached-job reference. The operator can select a
-catalog participant, add another inert reference, rebind a selected managed
-node, and undo or redo. There is no editable digest, device ID, partition ID,
-path, or command field.
+only parameter is an exact record containing a primary job, an optional
+fallback, and a bounded mirror array. The operator can select one of those
+three explicit leaves, select a catalog participant, add another inert
+reference set, rebind the selected leaf, and undo or redo. The UI displays the
+stable named projection of the fixed path, but there is no editable path,
+digest, device ID, partition ID, file path, or command field.
 
 The panel visibly reports that it is simulated and non-executing. It shows the
 global job and participant-set prefixes, canonical graph identity and byte
@@ -85,7 +93,8 @@ section has an independent 2 MiB ceiling. Restore replays and admits all three
 artifacts first; the cached-job graph must still resolve every handle against
 the catalog derived at this startup. Only then are any in-memory documents
 replaced. Missing, extra, uppercase, oversized, noncanonical, mismatched-probe,
-raw-handle, stale-handle, or foreign-job input rejects the complete bundle.
+raw-handle at any nested leaf, stale-handle, or foreign-job input rejects the
+complete bundle.
 History remains ephemeral and is cleared after restore.
 
 ## Closed claims

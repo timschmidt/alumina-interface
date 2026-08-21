@@ -272,8 +272,12 @@ nested in composites, remain read-only until an authenticated capability/cache
 selector supplies identity. The separate TinyBee target draft now implements
 that rule for root resource handles: an existing exact catalog member can be
 rebound only to an unused same-kind entry, while raw handle text stays closed.
-Cache-derived job handles and nested identity-bearing composite workflows
-remain open; Event/Stream types still have no literal. Seven
+The separate cached-job draft now extends that rule through bounded
+schema-aware paths: stable record-field IDs, existing option/result branches,
+and retained array indices can select a nested job leaf, while the current and
+replacement handles must both belong to the same exact cache-derived catalog.
+Nested physical-resource selection remains open; Event/Stream types still have
+no literal. Seven
 mixed-signal traces show error, integral prior state,
 clamped controller, permit-gated output, external permit,
 measurement-within-range, and combined permit. The first four render as
@@ -316,8 +320,9 @@ Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
 including the sidecar's exact external-workspace binding, before mutating
 navigation state. Graph, probe metadata, trigger, and ALGP-import changes share this
 history; exact no-ops do not consume a snapshot. Browser origin-local storage
-preserves only the current pair in one versioned lowercase-hex value, while
-history remains ephemeral. Browser `.algw`/`.algp` upload and download and the
+preserves the current control ALGW, bound ALGP, and catalog-bound composite
+cached-job ALGW in one greenfield `algwb1:` value, while history remains
+ephemeral. Browser `.algw`/`.algp` upload and download and the
 native explicit-path bridges exchange exact bytes under their independent
 20 MiB workspace and 2 MiB probe ceilings. ALGW imports additionally require
 layout admission and the fixed audited registry, allowing only a visible
@@ -503,8 +508,8 @@ flattens connector wiring to an ordinary workspace using fresh monotonic IDs.
 Nested package dependencies, general cycle/depth rules, editable instance and
 panel workflows remain open. Multi-value state records, queue timeouts and
 additional policies, cases/loops/state machines, capability-generated nodes
-beyond stable Boolean inputs, nested identity-bearing job workflows and
-prepare/start nodes, workspace collaboration/conflict handling, broader
+beyond stable Boolean inputs, multi-job prepare/start workflows and nested
+component execution, workspace collaboration/conflict handling, broader
 resource claims, general host implementation admission, measured WCET/deadline
 analysis, physical HIL,
 output and motion opcodes, live capability/configuration discovery,

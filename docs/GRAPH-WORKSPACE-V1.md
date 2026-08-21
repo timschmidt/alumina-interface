@@ -105,9 +105,9 @@ conversion. Resource/job handles and runtime Event/Stream shapes remain
 visibly read-only in the text editor. The separate capability-derived target
 draft can replace a resource handle only through exact catalog selection. The
 separate [cache-derived job draft](GRAPH-CACHED-JOB-CATALOG-V1.md) can add or
-replace an inert job handle only after canonical CAM artifacts and complete
-participant cache-ready observations match exactly; it accepts no raw identity
-text.
+replace an inert job handle at a bounded schema-aware composite path only after
+canonical CAM artifacts and complete participant cache-ready observations match
+exactly; it accepts no raw identity or path text.
 
 The UI rebuilds semantic layering and reruns audited analysis after each
 candidate. A newly created or disconnected required input is retained as an
@@ -191,7 +191,8 @@ control UI never claims it can safely interpret or edit them.
 Selection sets, groups/comments, collaborative diffs, and conflict-aware shared
 persistence remain later slices. The separate cache-derived job workspace now
 provides the first exact inert `JobHandle` selection path; prepare/start nodes,
-nested identity-bearing workflows, and live execution authority remain open.
+nested physical-resource selection, multi-job execution workflows, and live
+execution authority remain open.
 The separate canonical
 [`ALGC` V1 component package](GRAPH-COMPONENT-V1.md) now embeds an unchanged
 `ALGW` and adds a connector pane plus exact front-panel bindings; those facts

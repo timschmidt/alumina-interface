@@ -28,17 +28,18 @@ use alumina_interface_core::graph::{
     GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
     GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
+    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment,
+    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
     GraphWorkspaceProbeHistory, NodeDefinition, NodeKind, NodeOutputDependency, NodeParameter,
-    NodeParameterContract, NodeSchema, PortDefinition, RepresentativeControlSignal,
-    RepresentativeExactControlGraph, ResourceClassId, TypeDefinition, TypeKind, TypedGraphValue,
-    WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
-    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
-    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
-    format_graph_literal_text, graph_component_instance_prototype, graph_resource_label,
-    parse_graph_literal_text, project_graph_probe_replay, replay_graph_probes,
-    replay_graph_workspace, select_graph_cached_job_handle, select_graph_capability_node_resource,
+    NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
+    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    ResourceClassId, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
+    compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
+    encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
+    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
+    graph_component_instance_prototype, graph_resource_label, parse_graph_literal_text,
+    project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
+    select_graph_cached_job_handle, select_graph_capability_node_resource,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
@@ -105,9 +106,45 @@ const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::CombinedPermit,
     RepresentativeControlSignal::ExternalPermit,
 ];
-const CACHED_JOB_TYPE: GraphTypeId = GraphTypeId::new(1);
+const CACHED_JOB_HANDLE_TYPE: GraphTypeId = GraphTypeId::new(1);
+const CACHED_JOB_OPTION_TYPE: GraphTypeId = GraphTypeId::new(2);
+const CACHED_JOB_ARRAY_TYPE: GraphTypeId = GraphTypeId::new(3);
+const CACHED_JOB_REFERENCE_SET_TYPE: GraphTypeId = GraphTypeId::new(4);
 const CACHED_JOB_PARAMETER: u32 = 1;
-const CACHED_JOB_KIND_NAME: &str = "alumina.job.cached-reference";
+const CACHED_JOB_KIND_NAME: &str = "alumina.job.cached-reference-set";
+const CACHED_JOB_PRIMARY_FIELD: RecordFieldId = RecordFieldId::new(1);
+const CACHED_JOB_FALLBACK_FIELD: RecordFieldId = RecordFieldId::new(2);
+const CACHED_JOB_MIRRORS_FIELD: RecordFieldId = RecordFieldId::new(3);
+const CACHED_JOB_PRIMARY_PATH: [GraphValuePathSegment; 1] =
+    [GraphValuePathSegment::RecordField(CACHED_JOB_PRIMARY_FIELD)];
+const CACHED_JOB_FALLBACK_PATH: [GraphValuePathSegment; 2] = [
+    GraphValuePathSegment::RecordField(CACHED_JOB_FALLBACK_FIELD),
+    GraphValuePathSegment::OptionSome,
+];
+const CACHED_JOB_MIRROR_PATH: [GraphValuePathSegment; 2] = [
+    GraphValuePathSegment::RecordField(CACHED_JOB_MIRRORS_FIELD),
+    GraphValuePathSegment::ArrayIndex(0),
+];
+const CACHED_JOB_REFERENCE_SLOTS: [CachedJobReferenceSlot; 3] = [
+    CachedJobReferenceSlot {
+        label: "primary",
+        path: &CACHED_JOB_PRIMARY_PATH,
+    },
+    CachedJobReferenceSlot {
+        label: "fallback.some",
+        path: &CACHED_JOB_FALLBACK_PATH,
+    },
+    CachedJobReferenceSlot {
+        label: "mirrors[0]",
+        path: &CACHED_JOB_MIRROR_PATH,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CachedJobReferenceSlot {
+    label: &'static str,
+    path: &'static [GraphValuePathSegment],
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WirePresentation {
@@ -1402,6 +1439,7 @@ struct CachedJobGraphProof {
     encoding: CanonicalGraphWorkspaceEncoding,
     history: GraphWorkspaceHistory,
     selected_entry: usize,
+    selected_slot: usize,
     selected_node: Option<GraphNodeId>,
     status: String,
 }
@@ -1446,6 +1484,7 @@ impl CachedJobGraphProof {
             encoding,
             history: GraphWorkspaceHistory::default(),
             selected_entry: 0,
+            selected_slot: 0,
             selected_node: Some(selected_node),
             status:
                 "derived from complete simulated partition + global-manifest cache reconciliation"
@@ -1455,9 +1494,9 @@ impl CachedJobGraphProof {
 
     fn show(&mut self, ui: &mut egui::Ui) -> bool {
         let starting_digest = self.encoding.digest();
-        ui.heading("Cached job graph references");
+        ui.heading("Cached job composite references");
         ui.label(
-            "Offline proof only: choices come from canonically replayed CAM artifacts observed in each simulated MCU cache. A reference is inert data and does not prepare, arm, or start a job.",
+            "Offline proof only: one exact record retains primary, optional fallback, and bounded-array mirror references. Choices come from canonically replayed CAM artifacts observed in each simulated MCU cache. Every leaf is inert data and does not prepare, arm, or start a job.",
         );
         ui.label(format!(
             "{} participants · ALGW {} bytes · revision {} · {} undo / {} redo",
@@ -1516,7 +1555,7 @@ impl CachedJobGraphProof {
         }
         ui.label(&self.status);
         ui.weak(
-            "No digest, device-ID, partition-ID, path, or command text field is accepted here; deployment and deterministic start remain separate authorities.",
+            "The value path uses stable record-field IDs, explicit active branches, and bounded array indices. No digest, device-ID, partition-ID, file path, or command text is accepted; deployment and deterministic start remain separate authorities.",
         );
         self.encoding.digest() != starting_digest
     }
@@ -1538,17 +1577,20 @@ impl CachedJobGraphProof {
                 }
             });
 
+        let selected_slot = self.show_reference_slot_selection(ui);
+
         let node_choices: Vec<_> = self
             .workspace
             .graph()
             .nodes()
             .iter()
             .filter_map(|node| {
-                cached_job_parameter(node).and_then(|handle| {
-                    self.catalog
-                        .entry_index_for_handle(handle)
-                        .map(|entry| (node.id(), entry, node.label().to_owned()))
-                })
+                cached_job_handle_at_path(node, self.registry.context_schema(), selected_slot.path)
+                    .and_then(|handle| {
+                        self.catalog
+                            .entry_index_for_handle(handle)
+                            .map(|entry| (node.id(), entry, node.label().to_owned()))
+                    })
             })
             .collect();
         if self
@@ -1565,9 +1607,10 @@ impl CachedJobGraphProof {
                     .find(|choice| choice.0 == selected)
                     .map(|choice| {
                         format!(
-                            "#{} {} · participant {}",
+                            "#{} {} · {} participant {}",
                             selected.get(),
                             choice.2,
+                            selected_slot.label,
                             choice.1 + 1
                         )
                     })
@@ -1580,10 +1623,20 @@ impl CachedJobGraphProof {
                     ui.selectable_value(
                         &mut self.selected_node,
                         Some(*node),
-                        format!("#{} {label} · participant {}", node.get(), entry + 1),
+                        format!(
+                            "#{} {label} · {} participant {}",
+                            node.get(),
+                            selected_slot.label,
+                            entry + 1
+                        ),
                     );
                 }
             });
+        ui.monospace(format!(
+            "selected value path: references.{} · {} segment(s)",
+            selected_slot.label,
+            selected_slot.path.len()
+        ));
 
         if let Some(entry) = self.catalog.entries().get(self.selected_entry) {
             let participant = entry.participant();
@@ -1598,6 +1651,27 @@ impl CachedJobGraphProof {
                 digest_prefix(participant.partition_digest.0),
             ));
         }
+    }
+
+    fn show_reference_slot_selection(&mut self, ui: &mut egui::Ui) -> CachedJobReferenceSlot {
+        if self.selected_slot >= CACHED_JOB_REFERENCE_SLOTS.len() {
+            self.selected_slot = 0;
+        }
+        egui::ComboBox::from_id_salt("cached_job_reference_slot")
+            .selected_text(format!(
+                "composite leaf · {}",
+                CACHED_JOB_REFERENCE_SLOTS[self.selected_slot].label
+            ))
+            .show_ui(ui, |ui| {
+                for (index, slot) in CACHED_JOB_REFERENCE_SLOTS.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.selected_slot,
+                        index,
+                        format!("composite leaf · {}", slot.label),
+                    );
+                }
+            });
+        CACHED_JOB_REFERENCE_SLOTS[self.selected_slot]
     }
 
     fn add_selected_reference(&mut self) -> Result<(), String> {
@@ -1636,6 +1710,10 @@ impl CachedJobGraphProof {
         let node = self
             .selected_node
             .ok_or_else(|| "select a catalog-managed job node first".to_owned())?;
+        let slot = CACHED_JOB_REFERENCE_SLOTS
+            .get(self.selected_slot)
+            .copied()
+            .ok_or_else(|| "select a bounded cached-job composite leaf first".to_owned())?;
         let mut candidate = self.workspace.clone();
         let encoding = select_graph_cached_job_handle(
             &self.catalog,
@@ -1643,14 +1721,16 @@ impl CachedJobGraphProof {
             &mut candidate,
             node,
             CACHED_JOB_PARAMETER,
+            slot.path,
             self.selected_entry,
         )
         .map_err(|error| error.to_string())?;
         validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
         self.commit(candidate, encoding)?;
         self.status = format!(
-            "rebound inert reference #{} to audited catalog entry {}",
+            "rebound inert reference #{} at references.{} to audited catalog entry {}",
             node.get(),
+            slot.label,
             self.selected_entry + 1
         );
         Ok(())
@@ -1741,10 +1821,16 @@ impl CachedJobGraphProof {
             .nodes()
             .first()
             .map(NodeDefinition::id);
+        if self.selected_slot >= CACHED_JOB_REFERENCE_SLOTS.len() {
+            self.selected_slot = 0;
+        }
+        let slot = CACHED_JOB_REFERENCE_SLOTS[self.selected_slot];
         self.selected_entry = self
             .selected_node
             .and_then(|node| self.workspace.graph().node(node))
-            .and_then(cached_job_parameter)
+            .and_then(|node| {
+                cached_job_handle_at_path(node, self.registry.context_schema(), slot.path)
+            })
             .and_then(|handle| self.catalog.entry_index_for_handle(handle))
             .unwrap_or(0);
         "restored catalog-bound cached-job ALGW from application storage"
@@ -1764,11 +1850,51 @@ fn cached_job_registry() -> Result<GraphNodeRegistry, String> {
     let schema = GraphSchema::try_new(
         GraphLimits::interactive(),
         Vec::new(),
-        vec![TypeDefinition::new(
-            CACHED_JOB_TYPE,
-            "job.cached.participant",
-            TypeKind::JobHandle,
-        )],
+        vec![
+            TypeDefinition::new(
+                CACHED_JOB_HANDLE_TYPE,
+                "job.cached.participant",
+                TypeKind::JobHandle,
+            ),
+            TypeDefinition::new(
+                CACHED_JOB_OPTION_TYPE,
+                "job.cached.optional-participant",
+                TypeKind::Option {
+                    value: CACHED_JOB_HANDLE_TYPE,
+                },
+            ),
+            TypeDefinition::new(
+                CACHED_JOB_ARRAY_TYPE,
+                "job.cached.participant-array",
+                TypeKind::Array {
+                    element: CACHED_JOB_HANDLE_TYPE,
+                    maximum_items: 4,
+                },
+            ),
+            TypeDefinition::new(
+                CACHED_JOB_REFERENCE_SET_TYPE,
+                "job.cached.reference-set",
+                TypeKind::Record {
+                    fields: vec![
+                        RecordField::new(
+                            CACHED_JOB_PRIMARY_FIELD,
+                            "primary",
+                            CACHED_JOB_HANDLE_TYPE,
+                        ),
+                        RecordField::new(
+                            CACHED_JOB_FALLBACK_FIELD,
+                            "fallback",
+                            CACHED_JOB_OPTION_TYPE,
+                        ),
+                        RecordField::new(
+                            CACHED_JOB_MIRRORS_FIELD,
+                            "mirrors",
+                            CACHED_JOB_ARRAY_TYPE,
+                        ),
+                    ],
+                },
+            ),
+        ],
     )
     .map_err(|error| error.to_string())?;
     let context = GraphDocument::try_new(0, schema, Vec::new(), Vec::new(), Vec::new())
@@ -1784,8 +1910,8 @@ fn cached_job_registry() -> Result<GraphNodeRegistry, String> {
             Vec::new(),
             vec![NodeParameterContract::new(
                 CACHED_JOB_PARAMETER,
-                "job",
-                CACHED_JOB_TYPE,
+                "references",
+                CACHED_JOB_REFERENCE_SET_TYPE,
             )],
             Vec::new(),
             Vec::new(),
@@ -1806,26 +1932,53 @@ fn cached_job_prototype(
         .get(entry)
         .copied()
         .ok_or_else(|| "cached job catalog entry is unavailable".to_owned())?;
-    let value = entry
-        .typed_value(registry.context_schema(), CACHED_JOB_TYPE)
-        .map_err(|error| error.to_string())?;
+    let handle = entry.handle();
+    let value = TypedGraphValue::try_new(
+        registry.context_schema(),
+        CACHED_JOB_REFERENCE_SET_TYPE,
+        GraphValue::Record(vec![
+            RecordValueField {
+                field: CACHED_JOB_PRIMARY_FIELD,
+                value: GraphValue::JobHandle(handle),
+            },
+            RecordValueField {
+                field: CACHED_JOB_FALLBACK_FIELD,
+                value: GraphValue::OptionSome(Box::new(GraphValue::JobHandle(handle))),
+            },
+            RecordValueField {
+                field: CACHED_JOB_MIRRORS_FIELD,
+                value: GraphValue::Array(vec![GraphValue::JobHandle(handle)]),
+            },
+        ]),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(GraphNodePrototype::new(
         NodeKind::new(CACHED_JOB_KIND_NAME, 1),
         label,
         ExecutionDomain::HostExact,
         Vec::new(),
         Vec::new(),
-        vec![NodeParameter::new(CACHED_JOB_PARAMETER, "job", value)],
+        vec![NodeParameter::new(
+            CACHED_JOB_PARAMETER,
+            "references",
+            value,
+        )],
     ))
 }
 
-fn cached_job_parameter(node: &NodeDefinition) -> Option<alumina_interface_core::JobGraphHandle> {
-    let value = node
+fn cached_job_handle_at_path(
+    node: &NodeDefinition,
+    schema: &GraphSchema,
+    path: &[GraphValuePathSegment],
+) -> Option<alumina_interface_core::JobGraphHandle> {
+    let parameter = node
         .parameters()
         .iter()
-        .find(|parameter| parameter.id() == CACHED_JOB_PARAMETER)?
-        .value()
-        .value();
+        .find(|parameter| parameter.id() == CACHED_JOB_PARAMETER)?;
+    let (value_type, value) = parameter.value().value_at_path(schema, path).ok()?;
+    if !matches!(schema.value_type(value_type)?.kind(), TypeKind::JobHandle) {
+        return None;
+    }
     match value {
         GraphValue::JobHandle(handle) => Some(*handle),
         _ => None,
@@ -1839,17 +1992,22 @@ fn validate_cached_job_workspace(
 ) -> Result<(), String> {
     analyze_graph_draft(workspace.graph(), registry).map_err(|error| error.to_string())?;
     for node in workspace.graph().nodes() {
-        let handle = cached_job_parameter(node).ok_or_else(|| {
-            format!(
-                "cached job node #{} has no typed job parameter",
-                node.id().get()
-            )
-        })?;
-        if catalog.entry_index_for_handle(handle).is_none() {
-            return Err(format!(
-                "cached job node #{} carries a raw, stale, or foreign identity",
-                node.id().get()
-            ));
+        for slot in CACHED_JOB_REFERENCE_SLOTS {
+            let handle = cached_job_handle_at_path(node, registry.context_schema(), slot.path)
+                .ok_or_else(|| {
+                    format!(
+                        "cached job node #{} has no typed references.{} job leaf",
+                        node.id().get(),
+                        slot.label
+                    )
+                })?;
+            if catalog.entry_index_for_handle(handle).is_none() {
+                return Err(format!(
+                    "cached job node #{} references.{} carries a raw, stale, or foreign identity",
+                    node.id().get(),
+                    slot.label
+                ));
+            }
         }
     }
     Ok(())
@@ -6900,8 +7058,19 @@ mod tests {
         assert_eq!(proof.catalog.entries().len(), 2);
         assert_eq!(proof.workspace.graph().nodes().len(), 1);
         assert_eq!(proof.selected_node, Some(GraphNodeId::new(1)));
+        assert_eq!(proof.selected_slot, 0);
         assert!(proof.status.contains("cache reconciliation"));
         validate_cached_job_workspace(&proof.catalog, &proof.registry, &proof.workspace).unwrap();
+        for slot in CACHED_JOB_REFERENCE_SLOTS {
+            assert_eq!(
+                cached_job_handle_at_path(
+                    proof.workspace.graph().nodes().first().unwrap(),
+                    proof.registry.context_schema(),
+                    slot.path,
+                ),
+                Some(proof.catalog.entries()[0].handle())
+            );
+        }
         let replay = replay_graph_workspace(
             proof.encoding.bytes(),
             proof.workspace.limits(),
@@ -6927,13 +7096,32 @@ mod tests {
         assert_eq!(proof.history.undo_len(), 1);
         assert_eq!(proof.history.redo_len(), 0);
         assert_eq!(
-            cached_job_parameter(proof.workspace.graph().node(node).unwrap()),
+            cached_job_handle_at_path(
+                proof.workspace.graph().node(node).unwrap(),
+                proof.registry.context_schema(),
+                CACHED_JOB_REFERENCE_SLOTS[0].path,
+            ),
             Some(proof.catalog.entries()[1].handle())
         );
+        for selected_slot in 1..CACHED_JOB_REFERENCE_SLOTS.len() {
+            proof.selected_slot = selected_slot;
+            proof.rebind_selected_reference().unwrap();
+        }
+        assert_eq!(proof.history.undo_len(), 3);
+        for slot in CACHED_JOB_REFERENCE_SLOTS {
+            assert_eq!(
+                cached_job_handle_at_path(
+                    proof.workspace.graph().node(node).unwrap(),
+                    proof.registry.context_schema(),
+                    slot.path,
+                ),
+                Some(proof.catalog.entries()[1].handle())
+            );
+        }
 
         proof.add_selected_reference().unwrap();
         assert_eq!(proof.workspace.graph().nodes().len(), 2);
-        assert_eq!(proof.history.undo_len(), 2);
+        assert_eq!(proof.history.undo_len(), 4);
         let edited = proof.encoding.clone();
         let replay = replay_graph_workspace(
             edited.bytes(),
@@ -6957,17 +7145,16 @@ mod tests {
             global_job_digest: Digest([0x9a; 32]),
             ..proof.catalog.entries()[0].handle()
         };
-        raw.set_parameter(
-            raw_node,
-            CACHED_JOB_PARAMETER,
-            TypedGraphValue::try_new(
+        let parameter = raw.graph().node(raw_node).unwrap().parameters()[0]
+            .value()
+            .replacing_value_at_path(
                 proof.registry.context_schema(),
-                CACHED_JOB_TYPE,
+                CACHED_JOB_FALLBACK_PATH.as_slice(),
                 GraphValue::JobHandle(raw_handle),
             )
-            .unwrap(),
-        )
-        .unwrap();
+            .unwrap();
+        raw.set_parameter(raw_node, CACHED_JOB_PARAMETER, parameter)
+            .unwrap();
         assert!(
             validate_cached_job_workspace(&proof.catalog, &proof.registry, &raw)
                 .unwrap_err()
@@ -9075,17 +9262,20 @@ mod tests {
             global_job_digest: Digest([0x91; 32]),
             ..reference.cached_jobs.catalog.entries()[0].handle()
         };
-        foreign_job_workspace
-            .set_parameter(
-                foreign_node,
-                CACHED_JOB_PARAMETER,
-                TypedGraphValue::try_new(
-                    reference.cached_jobs.registry.context_schema(),
-                    CACHED_JOB_TYPE,
-                    GraphValue::JobHandle(foreign_handle),
-                )
-                .unwrap(),
+        let foreign_parameter = foreign_job_workspace
+            .graph()
+            .node(foreign_node)
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .replacing_value_at_path(
+                reference.cached_jobs.registry.context_schema(),
+                &CACHED_JOB_MIRROR_PATH,
+                GraphValue::JobHandle(foreign_handle),
             )
+            .unwrap();
+        foreign_job_workspace
+            .set_parameter(foreign_node, CACHED_JOB_PARAMETER, foreign_parameter)
             .unwrap();
         let foreign_job_encoding = encode_graph_workspace(&foreign_job_workspace).unwrap();
         let foreign_bundle = encode_persisted_workspace_bundle(

@@ -230,8 +230,12 @@ prototype.
   canonical global CAM manifest to exact partition-plus-manifest cache-ready
   observations, retains the precision-relevant participant record, and offers
   only those inert participant-local references in an offline graph selector.
-  Raw/stale/foreign identities reject; duplicate immutable references remain
-  legal data and grant no prepare/start authority. Every edit is
+  Its bounded value paths address stable record fields, existing option/result
+  branches, and retained array elements, so the visible proof can rebind exact
+  primary, optional fallback, or mirror leaves inside one composite parameter.
+  Raw/stale/foreign identities, absent branches, and malformed paths reject;
+  duplicate immutable references remain legal data and grant no prepare/start
+  authority. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
   Canonical replay-backed undo/redo retains bounded complete `ALGW`/`ALGP` pair
   snapshots across graph, probe, trigger, and sidecar-import edits. Per-probe
@@ -248,7 +252,8 @@ prototype.
   whitelist. Physical scalars with the same registered type share one scale;
   distinct types receive deterministic separate panes with their canonical type
   name and unit while retaining the shared exact-time axis and cursor. Browser
-  local storage atomically preserves only the exact current pair, and
+  local storage atomically preserves the control `ALGW`, bound `ALGP`, and
+  catalog-bound composite cached-job `ALGW` in one `algwb1:` bundle, and
   native/browser `.algw` plus `.algp` exchange imports only after bounded full
   replay, exact sidecar binding, and audited UI admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
@@ -467,8 +472,8 @@ nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, nested component
 dependency/cycle handling, editable instance
-and library workflows, front-panel editing/execution, identity-bearing
-parameter selectors, conflict-aware shared workspace persistence,
+and library workflows, front-panel editing/execution, nested physical-resource
+selectors, prepare/start job nodes, conflict-aware shared workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated
 Service/Realtime upload/core transfer and task
 composition, additional resource opcodes and capability-generated graph nodes,
