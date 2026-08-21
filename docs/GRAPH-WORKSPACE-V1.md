@@ -133,8 +133,9 @@ operations, or a subset of the visible state. One timeline therefore restores
 the control `ALGW`, bound `ALGP`, catalog-bound cached-job `ALGW`, selected
 `ALGC`, complete `ALGH`, and exact `ALGM` atomically. A successful graph,
 probe, trigger, sidecar-import, cached-job, component-library, or direct
-root-instance edit records the exact prior session and discards the abandoned
-redo branch. An exact no-op records nothing.
+root-instance edit—including root placement and typed root wiring—records the
+exact prior session and discards the abandoned redo branch. An exact no-op
+records nothing.
 
 Every navigation target first replays the complete `ALGS` and all nested
 artifacts. The UI then rebuilds layout, reruns audited semantic admission, and

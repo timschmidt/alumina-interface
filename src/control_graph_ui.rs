@@ -215,10 +215,11 @@ struct GraphPresentation {
     size: egui::Vec2,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct NodeDrag {
     node: GraphNodeId,
     origin: GraphNodePlacement,
+    delta: egui::Vec2,
 }
 
 #[derive(Clone, Debug)]
@@ -606,6 +607,16 @@ enum HierarchyUiAction {
     AddRoot(Digest),
     RemoveRoot(GraphNodeId),
     RemoveComponent(Digest),
+    MoveRoot {
+        node: GraphNodeId,
+        x: i32,
+        y: i32,
+    },
+    ConnectRoot {
+        source: WireEndpoint,
+        target: WireEndpoint,
+    },
+    DisconnectRoot(GraphWireId),
 }
 
 #[derive(Clone, Debug)]
@@ -2176,6 +2187,8 @@ pub(crate) struct ExactControlWorkspace {
     selected_node: Option<GraphNodeId>,
     selected_hierarchy_component: Option<Digest>,
     selected_hierarchy_instance: Option<GraphNodeId>,
+    pending_hierarchy_source: Option<WireEndpoint>,
+    hierarchy_drag: Option<NodeDrag>,
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
     edit_status: String,
@@ -2261,6 +2274,8 @@ impl ExactControlWorkspace {
             selected_node: None,
             selected_hierarchy_component,
             selected_hierarchy_instance,
+            pending_hierarchy_source: None,
+            hierarchy_drag: None,
             pending_source: None,
             drag: None,
             edit_status: "canonical workspace ready; no structural edits".to_owned(),
@@ -3056,12 +3071,233 @@ impl ExactControlWorkspace {
             component.hierarchy.document.root().next_node_id(),
         ));
         ui.label(&self.component_status);
+        let root = component.hierarchy.document.root().clone();
+        let root_instance_nodes = root_instances
+            .iter()
+            .map(|(node, _)| *node)
+            .collect::<BTreeSet<_>>();
+        if action.is_none() {
+            action = self.show_hierarchy_root_canvas(ui, &root, &root_instance_nodes);
+        }
         if let Some(action) = action {
             self.apply_hierarchy_action(action);
         }
         for event in component_file_events {
             self.handle_component_file_event(event);
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the structural root canvas keeps layered node/port interaction and one deferred canonical hierarchy action in one egui frame"
+    )]
+    fn show_hierarchy_root_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &GraphWorkspaceDocument,
+        root_instance_nodes: &BTreeSet<GraphNodeId>,
+    ) -> Option<HierarchyUiAction> {
+        ui.strong("Canonical hierarchy root canvas");
+        ui.weak(
+            "Drag a component header to an exact integer placement. Select an output, then a typed input, to connect; secondary-click an owned input to disconnect. Every accepted edit freshly flattens and commits one complete ALGS session.",
+        );
+        let presentation = match structural_workspace_presentation(root) {
+            Ok(presentation) => presentation,
+            Err(error) => {
+                self.component_status =
+                    format!("hierarchy root canvas rejected without mutation: {error}");
+                return None;
+            }
+        };
+        let nodes = root.graph().nodes().to_vec();
+        let wires = root.graph().wires().to_vec();
+        let mut action = None;
+        let mut clicked_instance = None;
+        egui::ScrollArea::both()
+            .id_salt("hierarchy_root_canvas")
+            .auto_shrink([false, false])
+            .min_scrolled_height(260.0)
+            .max_height(340.0)
+            .show(ui, |ui| {
+                let canvas_size = egui::vec2(
+                    presentation.size.x.max(ui.available_width()),
+                    presentation.size.y.max(260.0),
+                );
+                let (canvas, painter) = ui.allocate_painter(canvas_size, egui::Sense::click());
+                painter.rect_filled(canvas.rect, 0.0, egui::Color32::from_rgb(17, 21, 29));
+                paint_grid(&painter, canvas.rect);
+                let origin = canvas.rect.min.to_vec2();
+                for wire in &wires {
+                    paint_hierarchy_root_wire(
+                        &painter,
+                        origin,
+                        root.graph(),
+                        &presentation,
+                        self.selected_hierarchy_instance,
+                        wire.source(),
+                        wire.target(),
+                    );
+                }
+                for node in &nodes {
+                    let Some(node_presentation) = presentation.nodes.get(&node.id()) else {
+                        continue;
+                    };
+                    let rect = node_presentation.rect.translate(origin);
+                    let header = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
+                    );
+                    let bound_instance = root_instance_nodes.contains(&node.id());
+                    let response = ui.interact(
+                        header,
+                        egui::Id::new(("hierarchy_root_node", node.id().get())),
+                        if bound_instance {
+                            egui::Sense::click_and_drag()
+                        } else {
+                            egui::Sense::click()
+                        },
+                    );
+                    if response.drag_started()
+                        && bound_instance
+                        && let Some(placement) = root.placement(node.id())
+                    {
+                        self.hierarchy_drag = Some(NodeDrag {
+                            node: node.id(),
+                            origin: placement,
+                            delta: egui::Vec2::ZERO,
+                        });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.hierarchy_drag.as_mut()
+                        && drag.node == node.id()
+                    {
+                        drag.delta += response.drag_delta();
+                    }
+                    let dragging = self
+                        .hierarchy_drag
+                        .filter(|drag| drag.node == node.id())
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let painted_rect = dragging.map_or(rect, |drag| rect.translate(drag.delta));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        match (
+                            quantized_canvas_coordinate(drag.origin.x(), drag.delta.x),
+                            quantized_canvas_coordinate(drag.origin.y(), drag.delta.y),
+                        ) {
+                            (Ok(x), Ok(y)) => {
+                                action = Some(HierarchyUiAction::MoveRoot {
+                                    node: drag.node,
+                                    x,
+                                    y,
+                                });
+                            }
+                            (Err(error), _) | (_, Err(error)) => {
+                                self.component_status = format!(
+                                    "hierarchy root move rejected without mutation: {error}"
+                                );
+                            }
+                        }
+                        self.hierarchy_drag = None;
+                    }
+                    if response.clicked() && bound_instance {
+                        clicked_instance = Some(node.id());
+                    }
+                    for (index, port) in node.inputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, false);
+                        let port_response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "hierarchy_root_input",
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        let target = WireEndpoint {
+                            node: node.id(),
+                            port: port.id(),
+                        };
+                        if port_response.secondary_clicked() {
+                            if let Some(wire) = wires
+                                .iter()
+                                .find(|wire| wire.target() == target)
+                                .map(|wire| wire.id())
+                            {
+                                action = Some(HierarchyUiAction::DisconnectRoot(wire));
+                            } else {
+                                self.component_status = format!(
+                                    "hierarchy root input #{}.{} is already disconnected",
+                                    target.node.get(),
+                                    target.port.get()
+                                );
+                            }
+                        } else if port_response.clicked() {
+                            if let Some(source) = self.pending_hierarchy_source {
+                                action = Some(HierarchyUiAction::ConnectRoot { source, target });
+                            } else {
+                                self.component_status = format!(
+                                    "hierarchy root input #{}.{} selected; choose an output first",
+                                    target.node.get(),
+                                    target.port.get()
+                                );
+                            }
+                        }
+                    }
+                    for (index, port) in node.outputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, true);
+                        let port_response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "hierarchy_root_output",
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        if port_response.clicked() {
+                            let source = WireEndpoint {
+                                node: node.id(),
+                                port: port.id(),
+                            };
+                            if self.pending_hierarchy_source == Some(source) {
+                                self.pending_hierarchy_source = None;
+                                "pending hierarchy root wire cancelled"
+                                    .clone_into(&mut self.component_status);
+                            } else {
+                                self.pending_hierarchy_source = Some(source);
+                                self.component_status = format!(
+                                    "selected hierarchy root output #{}.{}; choose one typed input",
+                                    source.node.get(),
+                                    source.port.get()
+                                );
+                            }
+                        }
+                    }
+                    paint_hierarchy_root_node(
+                        &painter,
+                        painted_rect,
+                        node,
+                        self.selected_hierarchy_instance == Some(node.id()),
+                        bound_instance,
+                        root.placement(node.id()),
+                    );
+                }
+                if let Some(source) = self.pending_hierarchy_source
+                    && let Some(source_anchor) =
+                        port_anchor(root.graph(), &presentation, source, true)
+                    && let Some(pointer) = ui.ctx().pointer_hover_pos()
+                {
+                    painter.line_segment(
+                        [source_anchor + origin, pointer],
+                        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    );
+                }
+            });
+        if let Some(node) = clicked_instance {
+            self.selected_hierarchy_instance = Some(node);
+        }
+        action
     }
 
     #[allow(
@@ -3075,6 +3311,10 @@ impl ExactControlWorkspace {
             return;
         };
         let mut document = current.hierarchy.document.clone();
+        let clears_pending_source = matches!(
+            action,
+            HierarchyUiAction::ConnectRoot { .. } | HierarchyUiAction::DisconnectRoot(_)
+        );
         let (status, selected_component, selected_instance) = match action {
             HierarchyUiAction::AddRoot(component) => {
                 let maximum_x = document
@@ -3153,15 +3393,69 @@ impl ExactControlWorkspace {
                     self.selected_hierarchy_instance,
                 )
             }
+            HierarchyUiAction::MoveRoot { node, x, y } => {
+                if let Err(error) = document.move_root_instance(node, x, y) {
+                    self.component_status =
+                        format!("hierarchy edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!(
+                        "moved root instance #{} to canonical canvas ({x}, {y})",
+                        node.get()
+                    ),
+                    self.selected_hierarchy_component,
+                    Some(node),
+                )
+            }
+            HierarchyUiAction::ConnectRoot { source, target } => {
+                let wire = match document.connect_root_wire(source, target) {
+                    Ok(wire) => wire,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "connected root wire {} from #{}.{} to #{}.{}",
+                        wire.get(),
+                        source.node.get(),
+                        source.port.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                    self.selected_hierarchy_component,
+                    Some(target.node),
+                )
+            }
+            HierarchyUiAction::DisconnectRoot(wire) => {
+                if let Err(error) = document.disconnect_root_wire(wire) {
+                    self.component_status =
+                        format!("hierarchy edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("disconnected root wire {}", wire.get()),
+                    self.selected_hierarchy_component,
+                    self.selected_hierarchy_instance,
+                )
+            }
         };
-        if let Err(error) = self.commit_hierarchy_document(
+        match self.commit_hierarchy_document(
             current,
             document,
             &status,
             selected_component,
             selected_instance,
         ) {
-            self.component_status = format!("hierarchy edit rejected without mutation: {error}");
+            Ok(_) if clears_pending_source => self.pending_hierarchy_source = None,
+            Ok(_) => {}
+            Err(error) => {
+                self.component_status =
+                    format!("hierarchy edit rejected without mutation: {error}");
+            }
         }
     }
 
@@ -3274,6 +3568,8 @@ impl ExactControlWorkspace {
         let Some(component) = self.component.as_ref() else {
             self.selected_hierarchy_component = None;
             self.selected_hierarchy_instance = None;
+            self.pending_hierarchy_source = None;
+            self.hierarchy_drag = None;
             return;
         };
         let mut selected_component = self.selected_hierarchy_component;
@@ -3320,6 +3616,29 @@ impl ExactControlWorkspace {
         }
         self.selected_hierarchy_component = selected_component;
         self.selected_hierarchy_instance = selected_instance;
+        if self.pending_hierarchy_source.is_some_and(|source| {
+            component
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .node(source.node)
+                .is_none_or(|node| node.outputs().iter().all(|port| port.id() != source.port))
+        }) {
+            self.pending_hierarchy_source = None;
+        }
+        if self.hierarchy_drag.is_some_and(|drag| {
+            !component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root && instance.node() == drag.node
+                })
+        }) {
+            self.hierarchy_drag = None;
+        }
     }
 
     #[allow(
@@ -3683,18 +4002,24 @@ impl ExactControlWorkspace {
                         self.drag = Some(NodeDrag {
                             node: node.id(),
                             origin: placement,
+                            delta: egui::Vec2::ZERO,
                         });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.drag.as_mut()
+                        && drag.node == node.id()
+                    {
+                        drag.delta += response.drag_delta();
                     }
                     let dragging = self
                         .drag
                         .filter(|drag| drag.node == node.id())
                         .filter(|_| response.dragged() || response.drag_stopped());
-                    let painted_rect =
-                        dragging.map_or(rect, |_| rect.translate(response.drag_delta()));
+                    let painted_rect = dragging.map_or(rect, |drag| rect.translate(drag.delta));
                     if response.drag_stopped()
                         && let Some(drag) = dragging
                     {
-                        move_request = Some((drag, response.drag_delta()));
+                        move_request = Some((drag, drag.delta));
                         self.drag = None;
                     }
                     if response.clicked() {
@@ -4442,6 +4767,8 @@ impl ExactControlWorkspace {
         self.selected_hierarchy_instance = None;
         self.reconcile_hierarchy_selection(None);
         self.selected_node = None;
+        self.pending_hierarchy_source = None;
+        self.hierarchy_drag = None;
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
@@ -7358,6 +7685,80 @@ fn analyze_component_library_drafts(
     Ok(())
 }
 
+fn structural_workspace_presentation(
+    workspace: &GraphWorkspaceDocument,
+) -> Result<GraphPresentation, String> {
+    let document = workspace.graph();
+    if document.nodes().is_empty() {
+        return Ok(GraphPresentation {
+            nodes: BTreeMap::new(),
+            wires: BTreeMap::new(),
+            size: egui::vec2(EMPTY_CANVAS_WIDTH, EMPTY_CANVAS_HEIGHT),
+        });
+    }
+    if document.nodes().len() > MAXIMUM_VISIBLE_NODES {
+        return Err("hierarchy root exceeds the visible-node limit".to_owned());
+    }
+    if document.wires().len() > MAXIMUM_VISIBLE_WIRES {
+        return Err("hierarchy root exceeds the visible-wire limit".to_owned());
+    }
+    if workspace.placements().len() != document.nodes().len() {
+        return Err("hierarchy root canvas does not cover every node".to_owned());
+    }
+    let minimum_x = workspace
+        .placements()
+        .iter()
+        .map(|placement| display_coordinate(placement.x()))
+        .fold(f32::INFINITY, f32::min);
+    let minimum_y = workspace
+        .placements()
+        .iter()
+        .map(|placement| display_coordinate(placement.y()))
+        .fold(f32::INFINITY, f32::min);
+    let offset = egui::vec2(
+        (CANVAS_MARGIN - minimum_x).max(0.0),
+        (CANVAS_MARGIN - minimum_y).max(0.0),
+    );
+    let mut nodes = BTreeMap::new();
+    let mut maximum_bottom = 0.0_f32;
+    let mut maximum_right = 0.0_f32;
+    for placement in workspace.placements() {
+        let node = document
+            .node(placement.node())
+            .ok_or_else(|| format!("hierarchy root node {} is missing", placement.node().get()))?;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(
+                display_coordinate(placement.x()) + offset.x,
+                display_coordinate(placement.y()) + offset.y,
+            ),
+            egui::vec2(NODE_WIDTH, node_height(node)),
+        );
+        maximum_bottom = maximum_bottom.max(rect.bottom());
+        maximum_right = maximum_right.max(rect.right());
+        nodes.insert(placement.node(), NodePresentation { rect, rank: 0 });
+    }
+    let wires = document
+        .wires()
+        .iter()
+        .map(|wire| {
+            (
+                wire.id(),
+                WirePresentation {
+                    feedback_lane: None,
+                },
+            )
+        })
+        .collect();
+    Ok(GraphPresentation {
+        nodes,
+        wires,
+        size: egui::vec2(
+            maximum_right + CANVAS_MARGIN,
+            maximum_bottom + CANVAS_MARGIN + 36.0,
+        ),
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "layout admission, state-edge classification, ranking, and bounded placement stay together for auditability"
@@ -7960,6 +8361,139 @@ fn wire_color(document: &GraphDocument, source: WireEndpoint) -> egui::Color32 {
     } else {
         egui::Color32::from_rgb(96, 169, 232)
     }
+}
+
+fn paint_hierarchy_root_wire(
+    painter: &egui::Painter,
+    origin: egui::Vec2,
+    document: &GraphDocument,
+    presentation: &GraphPresentation,
+    selected_instance: Option<GraphNodeId>,
+    source: WireEndpoint,
+    target: WireEndpoint,
+) {
+    let (Some(source_anchor), Some(target_anchor)) = (
+        port_anchor(document, presentation, source, true),
+        port_anchor(document, presentation, target, false),
+    ) else {
+        return;
+    };
+    let source_anchor = source_anchor + origin;
+    let target_anchor = target_anchor + origin;
+    let selected = selected_instance.is_some_and(|node| node == source.node || node == target.node);
+    let color = if selected {
+        egui::Color32::WHITE
+    } else {
+        wire_color(document, source)
+    };
+    let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
+    let middle_x = (source_anchor.x + target_anchor.x) * 0.5;
+    painter.add(egui::Shape::line(
+        vec![
+            source_anchor,
+            egui::pos2(middle_x, source_anchor.y),
+            egui::pos2(middle_x, target_anchor.y),
+            target_anchor,
+        ],
+        stroke,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            target_anchor,
+            target_anchor + egui::vec2(-7.0, -4.0),
+            target_anchor + egui::vec2(-7.0, 4.0),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+fn paint_hierarchy_root_node(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    node: &NodeDefinition,
+    selected: bool,
+    bound_instance: bool,
+    placement: Option<GraphNodePlacement>,
+) {
+    let fill = if selected {
+        egui::Color32::from_rgb(53, 76, 108)
+    } else if bound_instance {
+        egui::Color32::from_rgb(44, 50, 73)
+    } else {
+        egui::Color32::from_rgb(34, 43, 56)
+    };
+    let border = if selected {
+        egui::Color32::from_rgb(126, 195, 255)
+    } else if bound_instance {
+        egui::Color32::from_rgb(184, 153, 244)
+    } else {
+        egui::Color32::from_rgb(89, 111, 139)
+    };
+    painter.rect_filled(rect, 6.0, fill);
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, border),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.top() + NODE_HEADER_HEIGHT),
+            egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
+        ],
+        egui::Stroke::new(1.0_f32, border.gamma_multiply(0.65)),
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 9.0),
+        egui::Align2::LEFT_TOP,
+        node.label(),
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 28.0),
+        egui::Align2::LEFT_TOP,
+        if bound_instance {
+            "root ALGC instance"
+        } else {
+            "root structural node"
+        },
+        egui::FontId::monospace(10.5),
+        egui::Color32::GRAY,
+    );
+    for (index, port) in node.inputs().iter().enumerate() {
+        let anchor = port_anchor_for_rect(rect, index, false);
+        painter.circle_filled(anchor, 4.0, egui::Color32::from_rgb(136, 171, 211));
+        painter.text(
+            anchor + egui::vec2(9.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            port.name(),
+            egui::FontId::proportional(11.0),
+            egui::Color32::LIGHT_GRAY,
+        );
+    }
+    for (index, port) in node.outputs().iter().enumerate() {
+        let anchor = port_anchor_for_rect(rect, index, true);
+        painter.circle_filled(anchor, 4.0, egui::Color32::from_rgb(122, 211, 185));
+        painter.text(
+            anchor + egui::vec2(-9.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            port.name(),
+            egui::FontId::proportional(11.0),
+            egui::Color32::LIGHT_GRAY,
+        );
+    }
+    let footer = placement.map_or_else(
+        || "placement unavailable".to_owned(),
+        |placement| format!("exact ({}, {})", placement.x(), placement.y()),
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(10.0, -8.0),
+        egui::Align2::LEFT_BOTTOM,
+        footer,
+        egui::FontId::monospace(9.5),
+        egui::Color32::from_rgb(170, 180, 194),
+    );
 }
 
 fn typed_value_text(
@@ -8741,10 +9275,10 @@ fn digest_prefix16(identity: [u8; 16]) -> String {
 mod tests {
     use super::*;
     use alumina_interface_core::graph::{
-        BaseDimensions, GraphLimits, GraphPortId, JobGraphHandle, NodeKind, RecordField,
-        RecordFieldId, RecordValueField, ResourceGraphHandle, TypeDefinition, UnitDefinition,
-        UnitId, replay_graph_component, replay_graph_hierarchy, replay_graph_probes,
-        replay_graph_workspace,
+        BaseDimensions, GraphComponentInputId, GraphLimits, GraphPortId, JobGraphHandle, NodeKind,
+        RecordField, RecordFieldId, RecordValueField, ResourceGraphHandle, TypeDefinition,
+        UnitDefinition, UnitId, replay_graph_component, replay_graph_hierarchy,
+        replay_graph_probes, replay_graph_workspace,
     };
 
     struct AlgsHierarchyOffsets {
@@ -8818,6 +9352,36 @@ mod tests {
         assert_eq!(actual.hierarchy.encoding, expected.hierarchy.encoding);
         assert_eq!(actual.hierarchy.flattening, expected.hierarchy.flattening);
         assert_eq!(actual.hierarchy.source_map, expected.hierarchy.source_map);
+    }
+
+    fn root_input_component(
+        base: &GraphComponentDocument,
+    ) -> (GraphComponentDocument, CanonicalGraphComponentEncoding) {
+        let mut workspace = base.workspace().clone();
+        workspace.disconnect(GraphWireId::new(6)).unwrap();
+        let document = GraphComponentDocument::try_new(
+            base.limits(),
+            base.revision(),
+            base.component_version(),
+            "control.root_wired_pid",
+            2,
+            base.next_output_id(),
+            base.next_panel_item_id(),
+            workspace,
+            vec![GraphComponentInput::new(
+                GraphComponentInputId::new(1),
+                "error_samples",
+                WireEndpoint {
+                    node: GraphNodeId::new(8),
+                    port: GraphPortId::new(1),
+                },
+            )],
+            base.outputs().to_vec(),
+            base.panel_items().to_vec(),
+        )
+        .unwrap();
+        let encoding = encode_graph_component(&document).unwrap();
+        (document, encoding)
     }
 
     #[test]
@@ -9750,6 +10314,201 @@ mod tests {
     #[test]
     #[allow(
         clippy::too_many_lines,
+        reason = "one root-canvas lifecycle proves exact placement, typed wiring, monotonic identity, history, branch isolation, and persistence"
+    )]
+    fn root_canvas_placement_and_typed_wiring_are_exact_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_control_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root_digest = initial_component.hierarchy.document.root().graph_digest();
+        let initial_revision = initial_component.hierarchy.document.revision();
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::MoveRoot {
+            node: GraphNodeId::new(1),
+            x: 173,
+            y: -42,
+        });
+        let moved_session = workspace.authoring_session_encoding().unwrap();
+        let moved = workspace.component.as_ref().unwrap();
+        assert_ne!(moved_session, initial_session);
+        assert_eq!(
+            moved
+                .hierarchy
+                .document
+                .root()
+                .placement(GraphNodeId::new(1)),
+            Some(GraphNodePlacement::new(GraphNodeId::new(1), 173, -42))
+        );
+        assert_eq!(
+            moved.hierarchy.document.root().graph_digest(),
+            initial_root_digest
+        );
+        assert_eq!(moved.hierarchy.document.revision(), initial_revision + 1);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(moved.document, initial_component.document);
+        assert_eq!(moved.encoding, initial_component.encoding);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.mark_persisted();
+        let moved_history = workspace.history.clone();
+        workspace.apply_hierarchy_action(HierarchyUiAction::MoveRoot {
+            node: GraphNodeId::new(1),
+            x: 173,
+            y: -42,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            moved_session
+        );
+        assert_eq!(workspace.history, moved_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            moved_session
+        );
+
+        let (_, input_encoding) = root_input_component(&initial_component.document);
+        let input_digest = input_encoding.digest();
+        assert!(
+            workspace
+                .import_component_dependency(input_encoding.bytes())
+                .unwrap()
+        );
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(input_digest));
+        let source = WireEndpoint {
+            node: GraphNodeId::new(1),
+            port: GraphPortId::new(1),
+        };
+        let target = WireEndpoint {
+            node: GraphNodeId::new(2),
+            port: GraphPortId::new(1),
+        };
+        workspace.pending_hierarchy_source = Some(source);
+        workspace.apply_hierarchy_action(HierarchyUiAction::ConnectRoot { source, target });
+        let connected_session = workspace.authoring_session_encoding().unwrap();
+        let connected = workspace.component.as_ref().unwrap();
+        assert_eq!(workspace.pending_hierarchy_source, None);
+        assert_eq!(connected.hierarchy.document.root().next_wire_id(), 2);
+        assert!(
+            connected
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .any(|wire| wire.id() == GraphWireId::new(1)
+                    && wire.source() == source
+                    && wire.target() == target)
+        );
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(connected.document, initial_component.document);
+        assert_eq!(connected.encoding, initial_component.encoding);
+        assert_eq!(workspace.history.undo_len(), 4);
+
+        workspace.navigate_history(false);
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .is_empty()
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            connected_session
+        );
+
+        workspace.pending_hierarchy_source = Some(source);
+        workspace.apply_hierarchy_action(HierarchyUiAction::DisconnectRoot(GraphWireId::new(1)));
+        let disconnected = workspace.component.as_ref().unwrap();
+        assert_eq!(workspace.pending_hierarchy_source, None);
+        assert!(
+            disconnected
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .is_empty()
+        );
+        assert_eq!(disconnected.hierarchy.document.root().next_wire_id(), 2);
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::ConnectRoot { source, target });
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        assert!(
+            final_component
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .any(|wire| wire.id() == GraphWireId::new(2)
+                    && wire.source() == source
+                    && wire.target() == target)
+        );
+        assert_eq!(final_component.hierarchy.document.root().next_wire_id(), 3);
+
+        workspace.mark_persisted();
+        let retained_history = workspace.history.clone();
+        workspace.pending_hierarchy_source = Some(source);
+        workspace.apply_hierarchy_action(HierarchyUiAction::ConnectRoot { source, target });
+        workspace.apply_hierarchy_action(HierarchyUiAction::DisconnectRoot(GraphWireId::new(99)));
+        workspace.apply_hierarchy_action(HierarchyUiAction::MoveRoot {
+            node: GraphNodeId::new(99),
+            x: 0,
+            y: 0,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert_eq!(workspace.pending_hierarchy_source, Some(source));
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
         reason = "the regression keeps the pre-edit hierarchy and every remapped binding visible in one exact preservation proof"
     )]
     fn control_edits_remap_selected_component_without_losing_root_authoring() {
@@ -10129,6 +10888,7 @@ mod tests {
             NodeDrag {
                 node: GraphNodeId::new(1),
                 origin,
+                delta: egui::Vec2::ZERO,
             },
             egui::vec2(17.4, -9.6),
         );
@@ -10275,6 +11035,7 @@ mod tests {
             NodeDrag {
                 node: GraphNodeId::new(1),
                 origin,
+                delta: egui::Vec2::ZERO,
             },
             egui::vec2(20.0, 30.0),
         );
@@ -10305,6 +11066,7 @@ mod tests {
             NodeDrag {
                 node: GraphNodeId::new(2),
                 origin: second_origin,
+                delta: egui::Vec2::ZERO,
             },
             egui::vec2(-11.0, 7.0),
         );

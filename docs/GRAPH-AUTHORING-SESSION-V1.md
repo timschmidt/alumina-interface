@@ -112,8 +112,9 @@ The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
 Control-workspace, probe/trigger, focused import, cached-job,
 selected-component, component-library, direct root-instance, hierarchy, and
-source-map state therefore share one timeline rather than independent histories
-that could be navigated into a mismatched combination.
+source-map state—including root instance placement and typed root wiring—share
+one timeline rather than independent histories that could be navigated into a
+mismatched combination.
 
 The first interactive policy retains at most 16 snapshots in each direction
 and 64 MiB of canonical `ALGS` bytes across both stacks. The current session is
@@ -167,6 +168,7 @@ binding, exact UI hierarchy/source-map preservation, retired-prefix rejection,
 foreign cached-job rejection, atomic failure for corrupted `ALGH`/`ALGM`,
 bounded complete-session history eviction, mixed graph/probe/cached-job
 navigation, exact component-library import/no-op/in-use/remove/persistence,
+root placement and typed disconnect/reconnect with monotonic wire identity,
 abandoned-redo clearing, and transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 

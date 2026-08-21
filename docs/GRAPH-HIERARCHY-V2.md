@@ -74,7 +74,7 @@ substitute a different connector shape.
 
 ## Transactional authoring operations
 
-`GraphHierarchyDocument` exposes five bounded clone-and-validate mutations:
+`GraphHierarchyDocument` exposes eight bounded clone-and-validate mutations:
 
 - `add_component` canonically encodes one standalone definition and adds its
   exact digest to the dependency library; an already-present byte-identical
@@ -86,7 +86,15 @@ substitute a different connector shape.
   monotonic cursor;
 - `remove_root_instance` deletes one exact root binding, its placeholder, and
   all incident root wires without removing dependencies or rewinding node and
-  wire cursors; and
+  wire cursors;
+- `move_root_instance` changes only the exact integer root-workspace placement
+  of a known bound root placeholder and treats an identical placement as a
+  no-op;
+- `connect_root_wire` delegates exact direction, type, and single-input
+  ownership checks to the cloned root `ALGW` and consumes its monotonic wire
+  identity only in the accepted candidate;
+- `disconnect_root_wire` removes one known root wire without rewinding the
+  root wire cursor; and
 - `replace_component` substitutes one exact library dependency and remaps both
   child-component references and parent-scope references from the old digest
   to the replacement digest.
@@ -202,6 +210,33 @@ direct occurrence authoring therefore participate in the same exact undo/redo
 and persistence timeline as control, probe, and cached-job edits. An exact
 duplicate import changes only the transient selection and records no history.
 
+The adjacent structural root canvas projects only the root `ALGW`'s bounded
+integer placements, placeholder connectors, and wires. A bound component
+header can be dragged; the pointer delta is rounded once and committed through
+`move_root_instance`. Selecting an output and then a type-compatible input
+calls `connect_root_wire`; secondary-clicking an owned input calls
+`disconnect_root_wire`. Ordinary unbound structural nodes cannot be moved by
+the hierarchy operation. Every accepted canvas action reruns complete `ALGH`
+validation, recursive flattening, `ALGM` regeneration, ordinary-node semantic
+admission, and canonical `ALGS` history/persistence before any visible state
+changes. A rejected or exact no-op action retains the complete prior session.
+
+Optimized Chromium qualification dragged root wrapper `n1` by exactly
+`(+130, +60)` logical pixels, changing its canonical placement from `(28, 28)`
+to `(158, 88)`. The root `ALGW` identity changed from
+`3d7775b323bfa9442ba5eee800cf0020eac3e3f046f67693dc7154359fbe0fd6`
+to
+`01a7ff6369a960824e090e4a8cd7d33093620f3fba8cfb365cbe5b76d58be82a`;
+the complete `ALGH` changed from
+`f9751073015828f20154a5536d8b217a7d3843e2d63d3b5689fcfb8c2379806a`
+to
+`02eed6a0b7d8b2c8b29b1af3f25bc37bb9cb612798a4a49ba2087831c680d405`.
+The control `ALGW`, bound `ALGP`, cached-job `ALGW`, selected `ALGC`, and both
+dependency encodings remained byte-identical. Visible Undo restored the exact
+14,770-byte reference `ALGS`; visible Redo and a fresh page reload restored the
+exact moved `ALGS` with SHA-256
+`90167e8ee1e404caa24b4827d05bd9b6959f5196168ee980ed75bf1701937ac5`.
+
 When an attached control workspace changes compatibly, the UI constructs the
 replacement selected `ALGC` and calls `replace_component`; authored root
 instances, root IDs/placements/wires, and unrelated dependency encodings remain
@@ -212,12 +247,12 @@ path and remains recoverable through complete-session undo.
 ## Deliberately open
 
 Direct root-instance creation/deletion is implemented through the dedicated
-library panel. Main-canvas instance wiring and movement, nested definition
-editing and import with separately supplied nested bindings, general library
-creation, parameter promotion/overrides, package signatures and permissions,
-locked dependency manifests, incremental flattening, interactive traversal
-from final items into nested editable canvases, and executable front-panel
-inputs remain open.
+library panel, and exact root placement/wiring is implemented on its structural
+canvas. Nested definition editing and import with separately supplied nested
+bindings, general library creation, parameter promotion/overrides, package
+signatures and permissions, locked dependency manifests, incremental
+flattening, interactive traversal from final items into nested editable
+canvases, and executable front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2

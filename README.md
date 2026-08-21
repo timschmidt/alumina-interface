@@ -285,7 +285,14 @@ prototype.
   can add or delete root occurrences directly. Each action edits a cloned
   hierarchy, retains monotonic identities, regenerates and admits the complete
   `ALGH`/flattened `ALGW`/`ALGM` branch, and records the prior complete `ALGS`
-  before committing. Exact duplicate imports are selection-only no-ops.
+  before committing. A structural root canvas renders the canonical root
+  `ALGW` without assigning behavior to placeholders. Bound component headers
+  drag onto the exact integer presentation lattice; selecting an output and a
+  type-compatible input creates one monotonic root wire, while secondary-click
+  disconnects an owned input without rewinding the wire cursor. Placement and
+  wiring candidates pass the same complete flatten/source-map/semantic/session
+  transaction, and exact duplicate imports or placements are selection-only
+  no-ops.
   Compatible control edits replace the selected `ALGC` dependency and remap
   every exact binding while preserving the authored root workspace and stable
   library entries; invalid imports, removals, replacements, or selections

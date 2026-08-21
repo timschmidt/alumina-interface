@@ -454,6 +454,79 @@ impl GraphHierarchyDocument {
         Ok(removed_wires)
     }
 
+    /// Transactionally move one bound root component placeholder on the exact
+    /// integer authoring canvas.
+    pub fn move_root_instance(
+        &mut self,
+        node: GraphNodeId,
+        x: i32,
+        y: i32,
+    ) -> Result<(), GraphHierarchyError> {
+        if !self
+            .instances
+            .iter()
+            .any(|instance| instance.scope == GraphInstanceScope::Root && instance.node == node)
+        {
+            return Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Root,
+                node,
+            });
+        }
+        if self
+            .root
+            .placement(node)
+            .is_some_and(|placement| placement.x() == x && placement.y() == y)
+        {
+            return Ok(());
+        }
+        let mut root = self.root.clone();
+        root.move_node(node, x, y)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally add one typed wire inside the root authoring workspace.
+    pub fn connect_root_wire(
+        &mut self,
+        source: WireEndpoint,
+        target: WireEndpoint,
+    ) -> Result<GraphWireId, GraphHierarchyError> {
+        let mut root = self.root.clone();
+        let wire = root.connect(source, target)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(wire)
+    }
+
+    /// Transactionally remove one exact wire from the root authoring
+    /// workspace without rewinding its monotonic wire cursor.
+    pub fn disconnect_root_wire(&mut self, wire: GraphWireId) -> Result<(), GraphHierarchyError> {
+        let mut root = self.root.clone();
+        root.disconnect(wire)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
     fn component_documents(&self) -> Vec<GraphComponentDocument> {
         self.dependencies
             .iter()
@@ -2547,6 +2620,86 @@ mod tests {
         assert_eq!(hierarchy, retained);
         assert_eq!(
             hierarchy.remove_root_instance(GraphNodeId::new(1)),
+            Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn root_instance_placement_and_typed_wires_are_transactional_and_monotonic() {
+        let mut hierarchy = hierarchy();
+        let original_revision = hierarchy.revision();
+        let original_graph_digest = hierarchy.root().graph_digest();
+        let instance = GraphNodeId::new(2);
+
+        hierarchy.move_root_instance(instance, 450, 175).unwrap();
+        assert_eq!(hierarchy.revision(), original_revision + 1);
+        assert_eq!(
+            hierarchy.root().placement(instance),
+            Some(GraphNodePlacement::new(instance, 450, 175))
+        );
+        assert_eq!(hierarchy.root().graph_digest(), original_graph_digest);
+        let moved = hierarchy.clone();
+        hierarchy.move_root_instance(instance, 450, 175).unwrap();
+        assert_eq!(hierarchy, moved, "exact placement no-op advanced state");
+
+        hierarchy.disconnect_root_wire(GraphWireId::new(1)).unwrap();
+        assert_eq!(hierarchy.revision(), original_revision + 2);
+        assert_eq!(hierarchy.root().next_wire_id(), 3);
+        assert_eq!(hierarchy.flattened_wire_count(), 25);
+        assert!(
+            hierarchy
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .all(|wire| wire.id() != GraphWireId::new(1))
+        );
+
+        let replacement = hierarchy
+            .connect_root_wire(endpoint(1, 1), endpoint(2, 1))
+            .unwrap();
+        assert_eq!(replacement, GraphWireId::new(3));
+        assert_eq!(hierarchy.revision(), original_revision + 3);
+        assert_eq!(hierarchy.root().next_wire_id(), 4);
+        assert_eq!(hierarchy.flattened_wire_count(), 26);
+        assert!(hierarchy.root().graph().wires().iter().any(|wire| {
+            wire.id() == replacement
+                && wire.source() == endpoint(1, 1)
+                && wire.target() == endpoint(2, 1)
+        }));
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+
+        let retained = hierarchy.clone();
+        assert!(
+            hierarchy
+                .connect_root_wire(endpoint(1, 1), endpoint(2, 1))
+                .is_err()
+        );
+        assert_eq!(hierarchy, retained);
+        assert!(
+            hierarchy
+                .disconnect_root_wire(GraphWireId::new(99))
+                .is_err()
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.move_root_instance(GraphNodeId::new(1), 0, 0),
             Err(GraphHierarchyError::UnknownInstanceNode {
                 scope: GraphInstanceScope::Root,
                 node: GraphNodeId::new(1),
