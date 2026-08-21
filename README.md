@@ -270,11 +270,12 @@ prototype.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
-  into a separate mixed HostExact/Realtime draft. Its non-deployable reference
-  set retains primary, active optional fallback, and bounded-array mirror
-  handles. A bounded schema-aware path can transactionally rebind one root or
-  nested leaf to an unused exact catalog entry while preserving siblings,
-  stable node/placement identity, and whole-workspace resource uniqueness.
+  into a separate Realtime draft. Its executable paired-input node initially
+  binds GPIO22 permit and GPIO32 interlock fields and feeds a required sink.
+  Every bounded schema-aware rebind to an unused exact catalog entry preserves
+  its sibling and stable node/placement identity, reruns complete semantic and
+  capability admission, and independently decodes a fresh fixed 4 KiB firmware
+  package before committing either ALGW or ALGR identity.
   Current membership in the exact catalog is a prerequisite, so raw handles,
   labels, and numeric GPIO text grant no authority. No broader pin/peripheral
   inventory is inferred. A distinct
@@ -343,6 +344,11 @@ prototype.
   types. GPIO34 and a mismatched target capability digest fail before package
   authority; runtime admission rechecks the same exact opcode/class/access/
   selector palette. This is host functional evidence, not physical input HIL.
+- A paired-resource fixture lowers ordered TinyBee GPIO22/GPIO35 handles into
+  one Realtime conjunction opcode and required sink. The permanent firmware
+  actor types read both resources in order on every release—even when the first
+  is false—and emit only after both are present. Duplicate or unadvertised
+  selectors reject before execution.
 - The headless and WASM clients publish that fixed package, reconcile independent
   dual-core installation, and drive exact future start/stop epochs. Running is
   reported only after both permanent actors and the shared bridge agree; the

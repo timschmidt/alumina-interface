@@ -19,7 +19,8 @@ use alumina_graph_ir::{
     BOOLEAN_LATEST_STATE_BYTES, GRAPH_IR_PACKAGE_BYTES, GRAPH_IR_VERSION, GraphIrChannel,
     GraphIrChannelOwner, GraphIrDomain, GraphIrError, GraphIrFullPolicy, GraphIrHeader,
     GraphIrNode, GraphIrOpcode, GraphIrPackage, GraphIrSchedule, MAX_GRAPH_IR_CHANNELS,
-    MAX_GRAPH_IR_NODES, MAX_GRAPH_IR_QUEUE_ITEMS, encode_graph_resource_parameter,
+    MAX_GRAPH_IR_NODES, MAX_GRAPH_IR_QUEUE_ITEMS, decode_graph_resource_pair_parameter,
+    encode_graph_resource_pair_parameter, encode_graph_resource_parameter,
 };
 use alumina_protocol::{DeviceId, Digest};
 use alumina_storage::sha256;
@@ -29,7 +30,8 @@ use super::{
     GraphAnalysisError, GraphAnalysisLimits, GraphClockId, GraphDocument, GraphNodeId,
     GraphNodeRegistry, GraphPortId, GraphTypeId, GraphValue, GraphWireError,
     InputConnectionRequirement, NodeInputChannelKind, NodeKind, NodeRateTransitionContract,
-    NodeSchema, RateTransitionKind, TypeKind, WireDefinition, analyze_graph, encode_graph_document,
+    NodeSchema, RateTransitionKind, RecordFieldId, TypeKind, WireDefinition, analyze_graph,
+    encode_graph_document,
 };
 
 /// First fixed firmware behavior selected for one exact audited node kind.
@@ -60,6 +62,17 @@ pub enum GraphDeploymentNodeKind {
         output: GraphPortId,
         /// Required capability-bound [`GraphValue::ResourceHandle`] parameter.
         resource_parameter: u32,
+    },
+    /// Read two ordered capability-bound stable inputs and emit their conjunction.
+    StableBooleanPairAll {
+        /// Sole Stream output.
+        output: GraphPortId,
+        /// Required two-field record parameter.
+        resource_parameter: u32,
+        /// Stable field ID for the first ordered resource handle.
+        first_field: RecordFieldId,
+        /// Stable field ID for the second ordered resource handle.
+        second_field: RecordFieldId,
     },
 }
 
@@ -892,6 +905,100 @@ fn lower_node(
                 encode_graph_resource_parameter(resource),
             ))
         }
+        GraphDeploymentNodeKind::StableBooleanPairAll {
+            resource_parameter,
+            first_field,
+            second_field,
+            ..
+        } => {
+            let parameter = node
+                .parameters()
+                .iter()
+                .find(|candidate| candidate.id() == resource_parameter)
+                .ok_or(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "paired safety-input resource parameter",
+                })?;
+            let GraphValue::Record(fields) = parameter.value().value() else {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "paired safety-input resource record",
+                });
+            };
+            let handle = |field| {
+                fields
+                    .iter()
+                    .find(|candidate| candidate.field == field)
+                    .and_then(|candidate| match &candidate.value {
+                        GraphValue::ResourceHandle(handle) => Some(handle),
+                        _ => None,
+                    })
+                    .ok_or(GraphDeploymentError::InvalidNode {
+                        node: node.id(),
+                        aspect: "paired safety-input resource field",
+                    })
+            };
+            let first_handle = handle(first_field)?;
+            let second_handle = handle(second_field)?;
+            if first_handle.device_id != target.device_id
+                || second_handle.device_id != target.device_id
+                || first_handle.board_package_digest != target.capability_digest
+                || second_handle.board_package_digest != target.capability_digest
+            {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "paired resource-handle target identity",
+                });
+            }
+            let first = decode_resource_id(&first_handle.resource_selector.to_le_bytes()).map_err(
+                |_| GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "first canonical typed resource selector",
+                },
+            )?;
+            let second = decode_resource_id(&second_handle.resource_selector.to_le_bytes())
+                .map_err(|_| GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "second canonical typed resource selector",
+                })?;
+            let class = GraphResourceClass::new(first_handle.class.get());
+            if first == second || second_handle.class != first_handle.class {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "distinct same-class paired resources",
+                });
+            }
+            let descriptor = unique_opcode(
+                limits,
+                GraphIrOpcode::StableBooleanPairAll,
+                GraphIrDomain::Realtime,
+            )
+            .ok_or(GraphDeploymentError::InvalidNode {
+                node: node.id(),
+                aspect: "capability opcode palette",
+            })?;
+            if descriptor.resource_class != Some(class)
+                || descriptor.resource_access != Some(GraphResourceAccess::StableBooleanInput)
+                || [first, second].into_iter().any(|resource| {
+                    !limits.resources.iter().any(|candidate| {
+                        candidate.resource == resource
+                            && candidate.class == class
+                            && candidate.access == GraphResourceAccess::StableBooleanInput
+                            && candidate.support >= SupportLevel::Compiles
+                    })
+                })
+            {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node: node.id(),
+                    aspect: "capability paired-resource palette",
+                });
+            }
+            Ok((
+                GraphIrOpcode::StableBooleanPairAll,
+                0,
+                encode_graph_resource_pair_parameter(first, second),
+            ))
+        }
     }
 }
 
@@ -933,6 +1040,36 @@ fn admit_opcode(
                 return Err(GraphDeploymentError::InvalidNode {
                     node,
                     aspect: "capability resource palette",
+                });
+            }
+        }
+        GraphIrOpcode::StableBooleanPairAll => {
+            let (first, second) =
+                decode_graph_resource_pair_parameter(parameter).map_err(|_| {
+                    GraphDeploymentError::InvalidNode {
+                        node,
+                        aspect: "canonical typed resource pair",
+                    }
+                })?;
+            let Some(class) = descriptor.resource_class else {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node,
+                    aspect: "capability resource class",
+                });
+            };
+            if descriptor.resource_access != Some(GraphResourceAccess::StableBooleanInput)
+                || [first, second].into_iter().any(|resource| {
+                    !limits.resources.iter().any(|candidate| {
+                        candidate.resource == resource
+                            && candidate.class == class
+                            && candidate.access == GraphResourceAccess::StableBooleanInput
+                            && candidate.support >= SupportLevel::Compiles
+                    })
+                })
+            {
+                return Err(GraphDeploymentError::InvalidNode {
+                    node,
+                    aspect: "capability paired-resource palette",
                 });
             }
         }
@@ -1263,6 +1400,65 @@ fn validate_implementation(
                 return Err(invalid("stable Boolean input shape"));
             }
         }
+        GraphDeploymentNodeKind::StableBooleanPairAll {
+            output,
+            resource_parameter,
+            first_field,
+            second_field,
+        } => {
+            let parameter = schema
+                .parameters()
+                .iter()
+                .find(|candidate| candidate.id() == resource_parameter);
+            let fields = parameter.and_then(|parameter| {
+                match values
+                    .value_type(parameter.value_type())
+                    .map(super::TypeDefinition::kind)
+                {
+                    Some(TypeKind::Record { fields }) => Some(fields),
+                    _ => None,
+                }
+            });
+            let first =
+                fields.and_then(|fields| fields.iter().find(|field| field.id() == first_field));
+            let second =
+                fields.and_then(|fields| fields.iter().find(|field| field.id() == second_field));
+            let same_resource_class = matches!(
+                (first, second),
+                (Some(first), Some(second))
+                    if matches!(
+                        (
+                            values
+                                .value_type(first.value_type())
+                                .map(super::TypeDefinition::kind),
+                            values
+                                .value_type(second.value_type())
+                                .map(super::TypeDefinition::kind),
+                        ),
+                        (
+                            Some(TypeKind::ResourceHandle { class: first }),
+                            Some(TypeKind::ResourceHandle { class: second }),
+                        ) if first == second
+                    )
+            );
+            if !allows_domain(schema.allowed_domains(), ExecutionDomainSet::REALTIME)
+                || !schema.inputs().is_empty()
+                || schema.outputs().len() != 1
+                || schema.outputs()[0].id() != output
+                || boolean_stream_clock(values, schema.outputs()[0].value_type())
+                    != Some(implementation.schedule_clock)
+                || schema.parameters().len() != 1
+                || parameter.is_none()
+                || fields.is_none_or(|fields| fields.len() != 2)
+                || first_field == second_field
+                || !same_resource_class
+                || schema.output_dependencies().len() != 1
+                || !schema.output_dependencies()[0].inputs().is_empty()
+                || !schema.rate_transitions().is_empty()
+            {
+                return Err(invalid("stable Boolean pair-all shape"));
+            }
+        }
     }
     Ok(())
 }
@@ -1327,7 +1523,8 @@ const fn implementation_domain(behavior: GraphDeploymentNodeKind) -> GraphIrDoma
         GraphDeploymentNodeKind::BooleanStreamConstant { .. } => GraphIrDomain::Service,
         GraphDeploymentNodeKind::BooleanLatest { .. }
         | GraphDeploymentNodeKind::BooleanStreamSink { .. }
-        | GraphDeploymentNodeKind::StableBooleanInput { .. } => GraphIrDomain::Realtime,
+        | GraphDeploymentNodeKind::StableBooleanInput { .. }
+        | GraphDeploymentNodeKind::StableBooleanPairAll { .. } => GraphIrDomain::Realtime,
     }
 }
 
@@ -1446,6 +1643,18 @@ fn deployment_digest(
                 bytes.push(3);
                 put_u32(&mut bytes, output.get());
                 put_u32(&mut bytes, resource_parameter);
+            }
+            GraphDeploymentNodeKind::StableBooleanPairAll {
+                output,
+                resource_parameter,
+                first_field,
+                second_field,
+            } => {
+                bytes.push(4);
+                put_u32(&mut bytes, output.get());
+                put_u32(&mut bytes, resource_parameter);
+                put_u32(&mut bytes, first_field.get());
+                put_u32(&mut bytes, second_field.get());
             }
         }
     }
@@ -1634,21 +1843,25 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use alumina_graph_ir::graph_ir_content_digest;
     use alumina_graph_ir::{
-        BOOLEAN_STREAM_ITEM_BYTES, GraphIrChannelOwner, decode_graph_resource_parameter,
+        BOOLEAN_STREAM_ITEM_BYTES, GraphIrChannelOwner, decode_graph_resource_pair_parameter,
+        decode_graph_resource_parameter,
     };
 
     use super::*;
     use crate::graph::{
         ClockDefinition, GraphLimits, GraphPortId, GraphSchema, GraphTypeId, GraphValue,
         GraphWireId, NodeDefinition, NodeInputChannelContract, NodeOutputDependency, NodeParameter,
-        NodeParameterContract, PortDefinition, ResourceClassId, ResourceGraphHandle,
-        TypeDefinition, TypedGraphValue, WireEndpoint,
+        NodeParameterContract, PortDefinition, RecordField, RecordValueField, ResourceClassId,
+        ResourceGraphHandle, TypeDefinition, TypedGraphValue, WireEndpoint,
     };
 
     const BOOL: GraphTypeId = GraphTypeId::new(1);
     const SOURCE_STREAM: GraphTypeId = GraphTypeId::new(2);
     const TARGET_STREAM: GraphTypeId = GraphTypeId::new(3);
     const RESOURCE: GraphTypeId = GraphTypeId::new(4);
+    const RESOURCE_PAIR: GraphTypeId = GraphTypeId::new(5);
+    const FIRST_RESOURCE_FIELD: RecordFieldId = RecordFieldId::new(1);
+    const SECOND_RESOURCE_FIELD: RecordFieldId = RecordFieldId::new(2);
     const SAFETY_INPUT_CLASS: ResourceClassId = ResourceClassId::new(1);
     const ROOT: GraphClockId = GraphClockId::new(1);
     const SOURCE_CLOCK: GraphClockId = GraphClockId::new(2);
@@ -2049,6 +2262,179 @@ mod tests {
         (document, registry)
     }
 
+    fn paired_input_fixture(
+        first: ResourceId,
+        second: ResourceId,
+    ) -> (GraphDocument, GraphDeploymentRegistry) {
+        let schema = GraphSchema::try_new(
+            GraphLimits::interactive(),
+            Vec::new(),
+            vec![
+                TypeDefinition::new(BOOL, "core.bool", TypeKind::Boolean),
+                TypeDefinition::new(
+                    TARGET_STREAM,
+                    "stream.target",
+                    TypeKind::Stream {
+                        sample: BOOL,
+                        clock: TARGET_CLOCK,
+                        capacity: 1,
+                    },
+                ),
+                TypeDefinition::new(
+                    RESOURCE,
+                    "resource.safety-input",
+                    TypeKind::ResourceHandle {
+                        class: SAFETY_INPUT_CLASS,
+                    },
+                ),
+                TypeDefinition::new(
+                    RESOURCE_PAIR,
+                    "resource.safety-input-pair",
+                    TypeKind::Record {
+                        fields: vec![
+                            RecordField::new(FIRST_RESOURCE_FIELD, "first", RESOURCE),
+                            RecordField::new(SECOND_RESOURCE_FIELD, "second", RESOURCE),
+                        ],
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        let handle = |resource| {
+            GraphValue::ResourceHandle(ResourceGraphHandle {
+                device_id: DEVICE,
+                board_package_digest: board_mks_tinybee::PACKAGE.board.capability_digest,
+                class: SAFETY_INPUT_CLASS,
+                resource_selector: u32::from_le_bytes(encode_resource_id(resource)),
+            })
+        };
+        let resources = TypedGraphValue::try_new(
+            &schema,
+            RESOURCE_PAIR,
+            GraphValue::Record(vec![
+                RecordValueField {
+                    field: FIRST_RESOURCE_FIELD,
+                    value: handle(first),
+                },
+                RecordValueField {
+                    field: SECOND_RESOURCE_FIELD,
+                    value: handle(second),
+                },
+            ]),
+        )
+        .unwrap();
+        let clocks = vec![
+            ClockDefinition::new(
+                ROOT,
+                "device.root",
+                ClockKind::DeviceCycle {
+                    device_id: DEVICE,
+                    ticks_per_second: 1_000_000,
+                },
+            ),
+            ClockDefinition::new(
+                TARGET_CLOCK,
+                "device.target",
+                ClockKind::Derived {
+                    source: ROOT,
+                    numerator: 1,
+                    denominator: 2_000,
+                },
+            ),
+        ];
+        let input = NodeDefinition::new(
+            GraphNodeId::new(10),
+            NodeKind::new("deploy.safety-pair-all", 1),
+            "paired safety inputs",
+            ExecutionDomain::Realtime { device_id: DEVICE },
+            Vec::new(),
+            vec![port(1, "all", TARGET_STREAM)],
+            vec![NodeParameter::new(1, "resources", resources)],
+        );
+        let sink = NodeDefinition::new(
+            GraphNodeId::new(20),
+            NodeKind::new("deploy.sink", 1),
+            "sink",
+            ExecutionDomain::Realtime { device_id: DEVICE },
+            vec![port(1, "samples", TARGET_STREAM)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let document = GraphDocument::try_new(
+            12,
+            schema,
+            clocks,
+            vec![sink, input],
+            vec![WireDefinition::new(
+                GraphWireId::new(1),
+                endpoint(10, 1),
+                endpoint(20, 1),
+            )],
+        )
+        .unwrap();
+        let input_schema = NodeSchema::new(
+            NodeKind::new("deploy.safety-pair-all", 1),
+            ExecutionDomainSet::REALTIME,
+            Vec::new(),
+            Vec::new(),
+            vec![port(1, "all", TARGET_STREAM)],
+            vec![NodeParameterContract::new(1, "resources", RESOURCE_PAIR)],
+            vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
+            Vec::new(),
+            None,
+        );
+        let sink_schema = NodeSchema::new(
+            NodeKind::new("deploy.sink", 1),
+            ExecutionDomainSet::REALTIME,
+            vec![port(1, "samples", TARGET_STREAM)],
+            vec![NodeInputChannelContract::new(
+                GraphPortId::new(1),
+                InputConnectionRequirement::Required,
+                NodeInputChannelKind::StreamQueue {
+                    capacity: 1,
+                    full_policy: ChannelFullPolicy::Fault,
+                },
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let semantic = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &document,
+            vec![sink_schema, input_schema],
+        )
+        .unwrap();
+        let registry = GraphDeploymentRegistry::try_new(
+            semantic,
+            vec![
+                GraphDeploymentImplementation::new(
+                    NodeKind::new("deploy.sink", 1),
+                    GraphDeploymentNodeKind::BooleanStreamSink {
+                        input: GraphPortId::new(1),
+                    },
+                    TARGET_CLOCK,
+                    20,
+                ),
+                GraphDeploymentImplementation::new(
+                    NodeKind::new("deploy.safety-pair-all", 1),
+                    GraphDeploymentNodeKind::StableBooleanPairAll {
+                        output: GraphPortId::new(1),
+                        resource_parameter: 1,
+                        first_field: FIRST_RESOURCE_FIELD,
+                        second_field: SECOND_RESOURCE_FIELD,
+                    },
+                    TARGET_CLOCK,
+                    30,
+                ),
+            ],
+        )
+        .unwrap();
+        (document, registry)
+    }
+
     fn tinybee_limits() -> GraphDeploymentLimits {
         GraphDeploymentLimits::from_capability_document(
             &tinybee_capability_document(),
@@ -2117,6 +2503,54 @@ mod tests {
         assert_eq!(
             lower_graph_deployment(&document, &registry, wrong_target, &limits),
             Err(GraphDeploymentError::InvalidLimits)
+        );
+    }
+
+    #[test]
+    fn paired_tinybee_resources_lower_in_stable_field_order_and_fail_atomically() {
+        let limits = tinybee_limits();
+        let (document, registry) = paired_input_fixture(ResourceId::Gpio(22), ResourceId::Gpio(35));
+        let report =
+            lower_graph_deployment(&document, &registry, tinybee_target(), &limits).unwrap();
+        assert_eq!(
+            report
+                .package()
+                .nodes()
+                .map(|node| node.opcode)
+                .collect::<Vec<_>>(),
+            vec![
+                GraphIrOpcode::StableBooleanPairAll,
+                GraphIrOpcode::BooleanStreamSink,
+            ]
+        );
+        assert_eq!(
+            decode_graph_resource_pair_parameter(report.package().node(0).unwrap().parameter),
+            Ok((ResourceId::Gpio(22), ResourceId::Gpio(35)))
+        );
+
+        let (duplicate, duplicate_registry) =
+            paired_input_fixture(ResourceId::Gpio(22), ResourceId::Gpio(22));
+        assert_eq!(
+            lower_graph_deployment(&duplicate, &duplicate_registry, tinybee_target(), &limits,),
+            Err(GraphDeploymentError::InvalidNode {
+                node: GraphNodeId::new(10),
+                aspect: "distinct same-class paired resources",
+            })
+        );
+
+        let (unadvertised, unadvertised_registry) =
+            paired_input_fixture(ResourceId::Gpio(22), ResourceId::Gpio(34));
+        assert_eq!(
+            lower_graph_deployment(
+                &unadvertised,
+                &unadvertised_registry,
+                tinybee_target(),
+                &limits,
+            ),
+            Err(GraphDeploymentError::InvalidNode {
+                node: GraphNodeId::new(10),
+                aspect: "capability paired-resource palette",
+            })
         );
     }
 
@@ -2195,6 +2629,90 @@ mod tests {
             .unwrap();
         assert_eq!(released.nodes_executed, 2);
         assert_eq!(released.last_sink_value, Some(false));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lowered_tinybee_pair_executes_both_reads_in_the_firmware_actor_types() {
+        use alumina_protocol::DeviceCycle;
+        use alumina_runtime::graph::{
+            FixedGraphRealtimeActor, FixedGraphServiceActor, GraphRunIdentity,
+            GraphRuntimeAuthority, GraphRuntimeLimits, ReloadableGraphBridge,
+        };
+
+        let limits = tinybee_limits();
+        let target = tinybee_target();
+        let (document, registry) = paired_input_fixture(ResourceId::Gpio(22), ResourceId::Gpio(35));
+        let report = lower_graph_deployment(&document, &registry, target, &limits).unwrap();
+        let package = report.package();
+        let bridge = ReloadableGraphBridge::<4_096>::new();
+        let mut service = FixedGraphServiceActor::<2_048, 4_096, 4_096>::new(&bridge);
+        let mut realtime = FixedGraphRealtimeActor::<2_048, 4_096, 4_096>::new(&bridge);
+        let runtime_limits =
+            GraphRuntimeLimits::fixed_with_capabilities::<2_048, 2_048, 4_096, 4_096, 4_096>(
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+            );
+        let authority = GraphRuntimeAuthority {
+            device_id: target.device_id,
+            capability_digest: target.capability_digest,
+            config_digest: target.config_digest,
+            implementation_digest: report.implementation_digest(),
+        };
+        let content_digest = graph_ir_content_digest(package.bytes());
+        service
+            .install(
+                package.bytes(),
+                2,
+                content_digest,
+                package.digest(),
+                authority,
+                runtime_limits,
+                true,
+            )
+            .unwrap();
+        realtime
+            .install(
+                package.bytes(),
+                2,
+                content_digest,
+                package.digest(),
+                authority,
+                runtime_limits,
+                true,
+            )
+            .unwrap();
+        let run = GraphRunIdentity {
+            transaction_id: 2,
+            run_id: 1,
+            content_digest,
+            package_digest: package.digest(),
+            start_cycle: DeviceCycle(10_000),
+        };
+        service.prepare_start(run, true).unwrap();
+        realtime.prepare_start(run, true).unwrap();
+        realtime.activate(run).unwrap();
+        service.observe_realtime_started(run).unwrap();
+
+        let mut reads = Vec::new();
+        let false_report = realtime
+            .release(DeviceCycle(10_000), true, |resource| {
+                reads.push(resource);
+                Some(resource == ResourceId::Gpio(22))
+            })
+            .unwrap();
+        assert_eq!(reads, [ResourceId::Gpio(22), ResourceId::Gpio(35)]);
+        assert_eq!(false_report.last_sink_value, Some(false));
+
+        reads.clear();
+        let true_report = realtime
+            .release(DeviceCycle(12_000), true, |resource| {
+                reads.push(resource);
+                Some(true)
+            })
+            .unwrap();
+        assert_eq!(reads, [ResourceId::Gpio(22), ResourceId::Gpio(35)]);
+        assert_eq!(true_report.last_sink_value, Some(true));
     }
 
     #[test]

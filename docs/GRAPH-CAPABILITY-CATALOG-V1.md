@@ -77,9 +77,9 @@ admission.
 ## TinyBee offline proof
 
 The browser/native UI builds the exact MKS TinyBee V1 8 MiB capability bytes
-from the sibling `board-mks-tinybee` package. Its 3,531-byte document has
-SHA-256
-`27dcdd9ea4a1f9fcb1a4aeefb34984a4e4a0ca146c660f669bf632f98cac74af`.
+from the sibling `board-mks-tinybee` package. Its current 3,607-byte document
+has SHA-256
+`24c011c210b7a7efc3a027c926053b9ac1090f49b79b510487328887ceae5cfd`.
 The reviewed intersection exposes exactly four read-only resources, in
 canonical order:
 
@@ -88,23 +88,35 @@ canonical order:
 3. GPIO33; and
 4. GPIO35.
 
-The visible target-I/O surface uses a separate mixed HostExact/Realtime
-workspace with an explicit 240 MHz reference device-cycle clock and a derived
-1 kHz input clock. One HostExact node has no deployment implementation and
-retains a reviewed record with three unique identities:
+The visible target-I/O surface uses a separate Realtime workspace with an
+explicit 240 MHz reference device-cycle clock and a derived 1 kHz input clock.
+One reviewed `StableBooleanPairAll` node retains exactly two unique identities:
 
-- `references.primary` initially carries GPIO22;
-- `references.fallback.some` initially carries GPIO32; and
-- `references.mirrors[0]` initially carries GPIO33.
+- stable field ID 1, `resources.permit`, initially carries GPIO22; and
+- stable field ID 2, `resources.interlock`, initially carries GPIO32.
 
-GPIO35 is initially free. The UI exposes exactly those stable value paths and
-can rebind one selected composite leaf to the free exact catalog entry. The
-released resource can then create one concrete Realtime stable-input node.
-Root and nested selectors share whole-workspace uniqueness, so the same
-physical identity cannot occur in two nodes, parameters, or sibling leaves.
-Raw resource identities remain visibly non-editable. This separate proof does
-not add physical handles to the authoritative HostExact PID/interlock
-workspace.
+GPIO33 and GPIO35 are initially free. The paired node feeds one required
+Realtime Boolean Stream sink, so every accepted draft is executable rather
+than an inert reference container. Each selection transaction reruns semantic
+analysis, derives limits from the complete capability document, lowers the
+complete graph into the fixed 4,096-byte `ALGRIR02` package, independently
+decodes the pair immediate, and requires the decoded selectors to match stable
+field order. Root and nested selectors still share whole-workspace uniqueness,
+so the same physical identity cannot occur twice. Raw resource identities
+remain visibly non-editable. This separate proof does not add physical handles
+to the authoritative HostExact PID/interlock workspace.
+
+The default GPIO22/GPIO32 draft has `ALGW` identity
+`33a0fcb7e3d35c38f6119c8e173e1a3a0a935a8019f5ff9c617a639177fe58c6` and
+lowered package identity
+`8139f4816581007d762fe48e90a1a821d9f350e3508ccebd156b4cc21c9a64d5`.
+Its exact Realtime period is 240,000 device cycles and its reviewed pair-plus-
+sink WCET total is 160 cycles. Rebinding only `resources.interlock` to GPIO35
+produces `ALGW`
+`7e4a90577c9ab9864a782ccc1b4a4f738a585746d04728930bce37a6266e866f`
+and package
+`5a7adc0101bfe25aa9ee26772268dac8e0e7504ddf647fa6956740141d92e14c`,
+while `resources.permit` remains GPIO22.
 
 The proof deliberately uses a conspicuous offline reference `DeviceId` and
 configuration digest. It cannot identify or deploy to the connected TinyBee.
@@ -129,16 +141,19 @@ context, and rerun audited draft analysis. Root selection still proves an exact
 GPIO22-to-GPIO33 replacement, retained node/placement/cursors, changed
 canonical identity, and no-op stability.
 
-Composite tests prove fallback-only GPIO32-to-GPIO35 replacement with exact
-primary/mirror sibling preservation. Same-node sibling duplication, a raw but
+Composite core tests prove fallback-only replacement with exact sibling
+preservation. Same-node sibling duplication, a raw but
 structurally valid current handle, an inactive option, wrong root/segment,
 out-of-bounds array index, missing parameter, foreign-device catalog,
 duplicate root node, and an unreviewed semantic registry all reject without
 mutation. A wrong capability digest, over-limit document, and entry-count
-ceiling fail without returning a partial catalog. UI tests exercise the same
-nested selector, prove one initially free resource, add the released resource
-as a concrete node, reject a cross-root/composite duplicate without changing
-canonical bytes, and reset to the exact initial composite draft.
+ceiling fail without returning a partial catalog. UI tests prove the executable
+pair/sink shape, stable GPIO22/GPIO32 lowering order, 4 KiB package replay,
+GPIO32-to-GPIO35 sibling-preserving re-lowering, changed ALGW/implementation/
+package identities, duplicate rejection without either identity changing, and
+reset to the exact initial executable draft. A native cross-repository test
+executes the lowered GPIO22/GPIO35 pair through the permanent firmware actor
+types and observes both reads in order on both a false and a true release.
 
 This is offline functional evidence. No Wi-Fi interface, connected board,
 motor, output, or analyzer was contacted or driven.

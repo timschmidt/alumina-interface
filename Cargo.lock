@@ -118,6 +118,7 @@ dependencies = [
  "alumina-clock",
  "alumina-config",
  "alumina-diagnostics",
+ "alumina-graph-ir",
  "alumina-interface-client",
  "alumina-interface-core",
  "alumina-job",

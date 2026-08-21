@@ -274,14 +274,16 @@ that rule for root and nested resource handles. Stable record-field IDs,
 existing option/result branches, and retained bounded-array indices select an
 existing leaf; its current and replacement handles must belong to the same
 exact capability-derived catalog, and the replacement must remain unique
-across every root or composite parameter in the workspace. Raw handle text
-stays closed.
+across every root or composite parameter in the workspace. Its current
+two-field record is also an executable Realtime consumer: each accepted edit
+must lower to an independently decoded capability-admitted pair opcode and
+required sink. Raw handle text stays closed.
 The separate cached-job draft now extends that rule through bounded
 schema-aware paths: stable record-field IDs, existing option/result branches,
 and retained array indices can select a nested job leaf, while the current and
 replacement handles must both belong to the same exact cache-derived catalog.
-Executable composite resource behavior remains open; Event/Stream types still
-have no literal. Seven
+Broader executable composite resource behavior remains open; Event/Stream types
+still have no literal. Seven
 mixed-signal traces show error, integral prior state,
 clamped controller, permit-gated output, external permit,
 measurement-within-range, and combined permit. The first four render as
@@ -362,15 +364,21 @@ The deployed V2 subset is intentionally smaller than the future graph system:
 
 - a Service-domain Boolean Stream constant with one exact Boolean parameter;
 - a Realtime Boolean `LatestAtOrBeforeSourceFirst` transition; and
-- a Realtime Boolean Stream sink with no side effect; and
-- a Realtime stable Boolean input whose parameter is one typed resource handle.
+- a Realtime Boolean Stream sink with no side effect;
+- a Realtime stable Boolean input whose parameter is one typed resource handle;
+  and
+- a Realtime stable Boolean pair conjunction whose parameter is one exact
+  two-field record of distinct, same-class resource handles.
 
 Every structural node must have one reviewed implementation, and every node
 must target the same nonzero `DeviceId`. HostExact nodes, foreign devices,
 explicit graph state, Event/synchronous channels, Realtime-to-Service edges,
-and lossy realtime queues reject. The one admitted resource operation requires
-the handle's exact device ID, board-package digest, class, and selector to match
-an authenticated target capability entry with `StableBooleanInput` access. The
+and lossy realtime queues reject. The admitted resource operations require each
+handle's exact device ID, board-package digest, class, and selector to match an
+authenticated target capability entry with `StableBooleanInput` access. The
+pair immediate carries both canonical 32-bit selectors in stable field order;
+runtime admission and execution validate/read both even when the first value is
+false, and absence of either faults before emission. The
 structural wires must topologically order; firmware never receives `ALGR` bytes.
 
 `GraphDeploymentLimits::from_capability_document` is the production authority
@@ -423,7 +431,10 @@ first fault report across firmware-latch reset. The pinned Embassy tasks enforce
 the declared release reserve as a lateness boundary. A second cross-repository
 fixture builds the complete TinyBee 8 MiB capability document, lowers a typed
 GPIO33 handle to `StableBooleanInput`, and executes the emitted package through
-the firmware's permanent actor types with a supplied debounced value. GPIO34,
+the firmware's permanent actor types with a supplied debounced value. A second
+fixture lowers ordered GPIO22/GPIO35 handles to `StableBooleanPairAll`, observes
+both runtime reads on every release, and proves false then true conjunction
+results. Duplicate pair members, GPIO34,
 which is a general board resource but not in the graph palette, and a foreign
 capability digest reject before deployment. Firmware runtime admission rechecks
 the exact opcode, resource class, access, and selector. The physical read path
@@ -442,10 +453,12 @@ already present in the read-only parameter. Structural insertion and every
 later semantic/deployment proof still run normally.
 
 The visible TinyBee 8 MiB reference catalog therefore exposes only
-GPIO22/32/33/35 with `StableBooleanInput` access. It creates them in a separate
-Realtime workspace with explicit offline reference device/configuration
-identities. ADC, UART, timer, shifted-output, storage, other GPIO, and raw pin
-access remain closed even though the broader board descriptor knows about them.
+GPIO22/32/33/35 with `StableBooleanInput` access. Its separate Realtime
+workspace starts with an executable GPIO22/GPIO32 pair feeding a required sink,
+uses explicit offline reference device/configuration identities, and shows both
+canonical ALGW and lowered fixed-package identities. ADC, UART, timer,
+shifted-output, storage, other GPIO, and raw pin access remain closed even though
+the broader board descriptor knows about them.
 See [`GRAPH-CAPABILITY-CATALOG-V1.md`](GRAPH-CAPABILITY-CATALOG-V1.md).
 
 Canonical `ALGP` V2 is a bounded presentation sidecar. It binds stable probe
