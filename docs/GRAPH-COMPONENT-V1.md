@@ -121,10 +121,10 @@ a later UI slice.
 
 ## Deliberately open
 
-The separate canonical [`ALGH` V1 hierarchy](GRAPH-HIERARCHY-V1.md) now binds
-leaf component instances by exact digest and deterministically flattens them to
-ordinary `ALGW`/`ALGR`. Nested dependencies and general recursive cycle/depth
-rules, editable instance workflows, component libraries, package
+The separate canonical [`ALGH` V2 hierarchy](GRAPH-HIERARCHY-V2.md) now binds
+scoped component instances by exact digest, rejects dependency cycles, bounds
+recursive expansion, and deterministically flattens a component DAG to ordinary
+`ALGW`/`ALGR`. Editable instance workflows, component libraries, package
 signatures/permissions, locked dependency manifests, connector editing,
 arbitrary panel editing, panel value injection during simulation, probes,
 groups/comments, and `ALGC` persistence or file exchange remain open. `ALGC` V1

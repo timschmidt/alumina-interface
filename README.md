@@ -315,7 +315,7 @@ prototype.
   The component/front-panel boundary is in
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
   The component-instance/flattening boundary is in
-  [`docs/GRAPH-HIERARCHY-V1.md`](docs/GRAPH-HIERARCHY-V1.md).
+  [`docs/GRAPH-HIERARCHY-V2.md`](docs/GRAPH-HIERARCHY-V2.md).
   The authenticated resource-palette boundary is in
   [`docs/GRAPH-CAPABILITY-CATALOG-V1.md`](docs/GRAPH-CAPABILITY-CATALOG-V1.md).
   The descriptive-versus-operational board boundary is in
@@ -485,9 +485,9 @@ complete public device/security/machine-membership discovery,
 physical-browser/radio qualification, crash-durable cached-job history and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
-logic-analyzer acquisition, analog telemetry, groups, nested component
-dependency/cycle handling, editable instance
-and library workflows, front-panel editing/execution, executable composite
+logic-analyzer acquisition, analog telemetry, groups, editable nested-instance
+and component-library workflows, hierarchy-aware trace navigation,
+front-panel editing/execution, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared
 workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated

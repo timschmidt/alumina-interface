@@ -21,8 +21,8 @@ use alumina_interface_core::graph::{
     CanonicalTypedGraphValueEncoding, ChannelFullPolicy, ClockDefinition, ClockKind,
     ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
     GraphCachedJobCatalog, GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits,
-    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInstance,
-    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInput,
+    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
@@ -43,7 +43,8 @@ use alumina_interface_core::graph::{
     analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
     encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
-    format_graph_literal_text, graph_component_instance_prototype, graph_resource_label,
+    format_graph_literal_text, graph_component_instance_input_port,
+    graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
     lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
     replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
     select_graph_cached_job_handle, select_graph_capability_node_resource,
@@ -478,6 +479,15 @@ struct HierarchyPackage {
     document: GraphHierarchyDocument,
     encoding: CanonicalGraphHierarchyEncoding,
     flattening: GraphHierarchyFlattening,
+}
+
+fn hierarchy_depth(flattening: &GraphHierarchyFlattening) -> usize {
+    flattening
+        .instances()
+        .iter()
+        .map(|instance| instance.source_path().len())
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Debug)]
@@ -2293,8 +2303,9 @@ impl ExactControlWorkspace {
                 digest_prefix(component.encoding.digest().0)
             ));
             ui.label(format!(
-                "Hierarchy: {} instance → {} nodes / {} wires · {} bytes",
-                component.hierarchy.document.instances().len(),
+                "Hierarchy: {} expanded / depth {} → {} nodes / {} wires · {} bytes",
+                component.hierarchy.document.flattened_instance_count(),
+                hierarchy_depth(&component.hierarchy.flattening),
                 component.hierarchy.document.flattened_node_count(),
                 component.hierarchy.document.flattened_wire_count(),
                 component.hierarchy.encoding.bytes().len()
@@ -2820,12 +2831,14 @@ impl ExactControlWorkspace {
             ui.colored_label(egui::Color32::YELLOW, &self.component_status);
             return;
         };
+        let hierarchy_depth = hierarchy_depth(&component.hierarchy.flattening);
         ui.horizontal_wrapped(|ui| {
             ui.strong("Reusable instance proof");
             ui.monospace(format!(
-                "ALGH {}… · {} collapsed instance → {} ordinary ALGR nodes / {} wires · flattened ALGW {}…",
+                "ALGH {}… · {} collapsed instances / depth {} → {} ordinary ALGR nodes / {} wires · flattened ALGW {}…",
                 digest_prefix(component.hierarchy.encoding.digest().0),
-                component.hierarchy.document.instances().len(),
+                component.hierarchy.document.flattened_instance_count(),
+                hierarchy_depth,
                 component.hierarchy.document.flattened_node_count(),
                 component.hierarchy.document.flattened_wire_count(),
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
@@ -6392,18 +6405,111 @@ fn representative_component(
     })
 }
 
+fn representative_wrapper_component(
+    component: &GraphComponentDocument,
+) -> Result<(GraphComponentDocument, Digest), String> {
+    let nested_id = GraphNodeId::new(1);
+    let nested_prototype = graph_component_instance_prototype(component, "Reference PID leaf")
+        .map_err(|error| error.to_string())?;
+    let nested_instance = NodeDefinition::new(
+        nested_id,
+        nested_prototype.kind().clone(),
+        "Reference PID leaf",
+        nested_prototype.domain(),
+        nested_prototype.inputs().to_vec(),
+        nested_prototype.outputs().to_vec(),
+        nested_prototype.parameters().to_vec(),
+    );
+    let wrapper_graph = GraphDocument::try_new(
+        1,
+        component.workspace().graph().schema().clone(),
+        component.workspace().graph().clocks().to_vec(),
+        vec![nested_instance],
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let wrapper_workspace = GraphWorkspaceDocument::try_new(
+        GraphWorkspaceLimits::interactive(),
+        1,
+        2,
+        1,
+        wrapper_graph,
+        vec![GraphNodePlacement::new(nested_id, 28, 28)],
+    )
+    .map_err(|error| error.to_string())?;
+    let wrapper_inputs = component
+        .inputs()
+        .iter()
+        .map(|input| {
+            let port =
+                graph_component_instance_input_port(component, input.id()).ok_or_else(|| {
+                    format!("component input {} has no instance port", input.id().get())
+                })?;
+            Ok(GraphComponentInput::new(
+                input.id(),
+                input.name(),
+                WireEndpoint {
+                    node: nested_id,
+                    port,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let wrapper_outputs = component
+        .outputs()
+        .iter()
+        .map(|output| {
+            let port =
+                graph_component_instance_output_port(component, output.id()).ok_or_else(|| {
+                    format!(
+                        "component output {} has no instance port",
+                        output.id().get()
+                    )
+                })?;
+            Ok(GraphComponentOutput::new(
+                output.id(),
+                output.name(),
+                WireEndpoint {
+                    node: nested_id,
+                    port,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let wrapper = GraphComponentDocument::try_new(
+        GraphComponentLimits::interactive(),
+        component.revision(),
+        1,
+        "control.reference_pid_wrapper",
+        component.next_input_id(),
+        component.next_output_id(),
+        1,
+        wrapper_workspace,
+        wrapper_inputs,
+        wrapper_outputs,
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let wrapper_digest = encode_graph_component(&wrapper)
+        .map_err(|error| error.to_string())?
+        .digest();
+    Ok((wrapper, wrapper_digest))
+}
+
 fn representative_hierarchy(
     component: &GraphComponentDocument,
-    component_digest: alumina_protocol::Digest,
+    component_digest: Digest,
     fixture: &RepresentativeExactControlGraph,
 ) -> Result<HierarchyPackage, String> {
-    let prototype = graph_component_instance_prototype(component, "Reference PID component")
+    let nested_id = GraphNodeId::new(1);
+    let (wrapper, wrapper_digest) = representative_wrapper_component(component)?;
+    let prototype = graph_component_instance_prototype(&wrapper, "Reference PID wrapper")
         .map_err(|error| error.to_string())?;
     let instance_id = GraphNodeId::new(1);
     let instance = NodeDefinition::new(
         instance_id,
         prototype.kind().clone(),
-        "Reference PID component",
+        "Reference PID wrapper",
         prototype.domain(),
         prototype.inputs().to_vec(),
         prototype.outputs().to_vec(),
@@ -6430,8 +6536,11 @@ fn representative_hierarchy(
         GraphHierarchyLimits::interactive(),
         component.revision(),
         root,
-        vec![component.clone()],
-        vec![GraphComponentInstance::new(instance_id, component_digest)],
+        vec![component.clone(), wrapper],
+        vec![
+            GraphComponentInstance::root(instance_id, wrapper_digest),
+            GraphComponentInstance::nested(wrapper_digest, nested_id, component_digest),
+        ],
     )
     .map_err(|error| error.to_string())?;
     let encoding = encode_graph_hierarchy(&document).map_err(|error| error.to_string())?;
@@ -8453,52 +8562,44 @@ mod tests {
         assert!(!workspace.probes.as_ref().unwrap().document.observes(source));
     }
 
-    #[test]
-    fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
-        let mut workspace = ExactControlWorkspace::try_new().unwrap();
-        let initial = workspace.component.as_ref().unwrap();
-        assert_eq!(initial.encoding.bytes().len(), 4_815);
+    fn assert_recursive_hierarchy_package(initial: &ComponentPackage) {
+        assert_eq!(initial.hierarchy.document.dependencies().len(), 2);
+        assert_eq!(initial.hierarchy.document.instances().len(), 2);
+        assert_eq!(initial.hierarchy.document.flattened_instance_count(), 2);
+        assert_eq!(initial.hierarchy.flattening.instances().len(), 2);
         assert_eq!(
-            initial.encoding.digest().0,
-            [
-                0x10, 0xe6, 0x49, 0x8e, 0xc3, 0x6a, 0xfc, 0x37, 0x7f, 0x13, 0x8c, 0xac, 0xb5, 0xc6,
-                0xaf, 0xe2, 0x09, 0x1c, 0x40, 0x74, 0x9e, 0xa3, 0xc9, 0xe9, 0xd4, 0xbb, 0xa8, 0x92,
-                0x5a, 0x4f, 0x02, 0x28,
-            ]
+            initial.hierarchy.flattening.instances()[0].source_path(),
+            [GraphNodeId::new(1)]
         );
-        assert!(initial.document.inputs().is_empty());
-        assert_eq!(initial.document.outputs().len(), 7);
-        assert_eq!(initial.document.panel_items().len(), 15);
+        assert!(
+            initial.hierarchy.flattening.instances()[0]
+                .nodes()
+                .is_empty()
+        );
         assert_eq!(
-            initial.document.workspace_digest(),
-            workspace.workspace_encoding.digest()
+            initial.hierarchy.flattening.instances()[1].source_path(),
+            [GraphNodeId::new(1), GraphNodeId::new(1)]
         );
-        let replay = replay_graph_component(
-            initial.encoding.bytes(),
-            GraphComponentLimits::interactive(),
-            GraphWorkspaceLimits::interactive(),
-            GraphLimits::interactive(),
-        )
-        .unwrap();
-        assert_eq!(replay.document(), &initial.document);
-        assert_eq!(replay.encoding(), &initial.encoding);
-        assert_eq!(initial.hierarchy.document.instances().len(), 1);
-        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_814);
+        assert_eq!(
+            initial.hierarchy.flattening.instances()[1].nodes().len(),
+            21
+        );
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 7_124);
         assert_eq!(
             initial.hierarchy.encoding.digest().0,
             [
-                0x23, 0x26, 0x03, 0xde, 0x0d, 0x4a, 0x17, 0xff, 0x45, 0xb7, 0xbd, 0xa1, 0xc3, 0x63,
-                0x74, 0x5b, 0x31, 0x64, 0x05, 0xc9, 0x9f, 0xbd, 0xbd, 0xc4, 0x43, 0x47, 0xfa, 0x12,
-                0xbd, 0x00, 0xe0, 0xc8,
+                0xf9, 0x75, 0x10, 0x73, 0x01, 0x58, 0x28, 0xf2, 0x01, 0x54, 0xa5, 0x53, 0x6d, 0x8b,
+                0x21, 0x7a, 0x7d, 0x38, 0x43, 0xe2, 0xd6, 0x3d, 0x3b, 0x56, 0x89, 0xfc, 0xfb, 0x8c,
+                0x23, 0x79, 0x80, 0x6a,
             ]
         );
         assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_755);
         assert_eq!(
             initial.hierarchy.flattening.encoding().digest().0,
             [
-                0xe3, 0x9c, 0x53, 0x96, 0x53, 0x96, 0x89, 0xb8, 0xb5, 0x63, 0xa7, 0x22, 0x0e, 0x11,
-                0x80, 0xd7, 0x71, 0x7e, 0x70, 0x89, 0x3b, 0x71, 0x58, 0x0e, 0xbb, 0xe5, 0x18, 0x73,
-                0xfa, 0x13, 0xb6, 0x8f,
+                0x68, 0x04, 0xb9, 0x64, 0x53, 0x5d, 0x08, 0xb9, 0xce, 0xea, 0xd3, 0xd4, 0x38, 0x91,
+                0xc3, 0xae, 0x4c, 0x5a, 0xa5, 0xce, 0x38, 0xb0, 0x15, 0xc3, 0x4b, 0x4b, 0x38, 0x5b,
+                0xfa, 0x32, 0x57, 0xd4,
             ]
         );
         assert_eq!(initial.hierarchy.document.flattened_node_count(), 21);
@@ -8533,6 +8634,38 @@ mod tests {
         .unwrap();
         assert_eq!(hierarchy_replay.document(), &initial.hierarchy.document);
         assert_eq!(hierarchy_replay.encoding(), &initial.hierarchy.encoding);
+    }
+
+    #[test]
+    fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap();
+        assert_eq!(initial.encoding.bytes().len(), 4_815);
+        assert_eq!(
+            initial.encoding.digest().0,
+            [
+                0x10, 0xe6, 0x49, 0x8e, 0xc3, 0x6a, 0xfc, 0x37, 0x7f, 0x13, 0x8c, 0xac, 0xb5, 0xc6,
+                0xaf, 0xe2, 0x09, 0x1c, 0x40, 0x74, 0x9e, 0xa3, 0xc9, 0xe9, 0xd4, 0xbb, 0xa8, 0x92,
+                0x5a, 0x4f, 0x02, 0x28,
+            ]
+        );
+        assert!(initial.document.inputs().is_empty());
+        assert_eq!(initial.document.outputs().len(), 7);
+        assert_eq!(initial.document.panel_items().len(), 15);
+        assert_eq!(
+            initial.document.workspace_digest(),
+            workspace.workspace_encoding.digest()
+        );
+        let replay = replay_graph_component(
+            initial.encoding.bytes(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &initial.document);
+        assert_eq!(replay.encoding(), &initial.encoding);
+        assert_recursive_hierarchy_package(initial);
 
         let initial_digest = initial.encoding.digest();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "201");
