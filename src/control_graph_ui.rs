@@ -16,12 +16,13 @@ use alumina_diagnostics::{
 };
 use alumina_graph_ir::{GraphIrOpcode, decode_graph_resource_pair_parameter};
 use alumina_interface_core::graph::{
-    CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
-    CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ChannelFullPolicy,
-    ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES,
-    GraphAnalysisLimits, GraphCachedJobCatalog, GraphCachedJobCatalogLimits,
-    GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    CanonicalGraphComponentEncoding, CanonicalGraphDeploymentReplayEvidence1,
+    CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding, CanonicalGraphWorkspaceEncoding,
+    CanonicalTypedGraphValueEncoding, ChannelFullPolicy, ClockDefinition, ClockKind,
+    ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
+    GraphCachedJobCatalog, GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits,
+    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInstance,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
@@ -33,11 +34,12 @@ use alumina_interface_core::graph::{
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
     GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment,
     GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
-    GraphWorkspaceProbeHistory, InputConnectionRequirement, NodeDefinition,
-    NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter,
-    NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
-    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
-    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
+    GraphWorkspaceProbeHistory, InputConnectionRequirement,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, NodeDefinition, NodeInputChannelContract,
+    NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
+    NodeSchema, PortDefinition, RecordField, RecordFieldId, RecordValueField,
+    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
+    ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
     analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
     encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
@@ -45,6 +47,7 @@ use alumina_interface_core::graph::{
     lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
     replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
     select_graph_cached_job_handle, select_graph_capability_node_resource,
+    verify_graph_deployment_evidence_bytes,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
@@ -86,6 +89,10 @@ const MAXIMUM_PERSISTED_PROBE_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
+const ALGR_SUCCESS_REPLAY_FILE: BoundedFileSpec =
+    BoundedFileSpec::new("success ALGRREP1 evidence", "algrrep");
+const ALGR_FAULT_REPLAY_FILE: BoundedFileSpec =
+    BoundedFileSpec::new("fault ALGRREP1 evidence", "algrrep");
 const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(96, 169, 232),
     egui::Color32::from_rgb(241, 178, 84),
@@ -517,8 +524,9 @@ struct TargetResourceProof {
     status: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct TargetResourceDeployment {
+    report: GraphDeploymentReport,
     package_digest: Digest,
     implementation_digest: Digest,
     package_bytes: usize,
@@ -529,10 +537,10 @@ struct TargetResourceDeployment {
     actor_replay: TargetResourceActorReplay,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TargetResourceActorReplay {
-    success_evidence_digest: Digest,
-    fault_evidence_digest: Digest,
+    success_evidence: CanonicalGraphDeploymentReplayEvidence1,
+    fault_evidence: CanonicalGraphDeploymentReplayEvidence1,
     truth_table: [bool; 4],
     ordered_reads: [ResourceId; 2],
     fault_reads: [ResourceId; 2],
@@ -2118,6 +2126,8 @@ pub(crate) struct ExactControlWorkspace {
     file_status: String,
     workspace_file_bridge: BoundedFileBridge,
     probe_file_bridge: BoundedFileBridge,
+    target_success_replay_file_bridge: BoundedFileBridge,
+    target_fault_replay_file_bridge: BoundedFileBridge,
     trigger_pre_samples: u32,
     trigger_post_samples: u32,
     cursor_root_tick: Rational,
@@ -2188,6 +2198,8 @@ impl ExactControlWorkspace {
             file_status: "canonical workspace has not been exported this session".to_owned(),
             workspace_file_bridge: BoundedFileBridge::default(),
             probe_file_bridge: BoundedFileBridge::default(),
+            target_success_replay_file_bridge: BoundedFileBridge::default(),
+            target_fault_replay_file_bridge: BoundedFileBridge::default(),
             trigger_pre_samples: trigger.pretrigger_samples(),
             trigger_post_samples: trigger.posttrigger_samples(),
             cursor_root_tick,
@@ -2706,7 +2718,12 @@ impl ExactControlWorkspace {
     }
 
     fn show_target_resources(&mut self, ui: &mut egui::Ui) {
-        let proof = &mut self.target_resources;
+        let Self {
+            target_resources: proof,
+            target_success_replay_file_bridge: success_bridge,
+            target_fault_replay_file_bridge: fault_bridge,
+            ..
+        } = self;
         ui.horizontal_wrapped(|ui| {
             ui.heading("TinyBee executable target-I/O draft");
             ui.monospace(format!(
@@ -2746,7 +2763,7 @@ impl ExactControlWorkspace {
             proof.deployment.realtime_period_cycles,
             proof.deployment.realtime_wcet_cycles,
         ));
-        let actor_replay = proof.deployment.actor_replay;
+        let actor_replay = &proof.deployment.actor_replay;
         ui.horizontal_wrapped(|ui| {
             ui.strong("Portable firmware-actor replay");
             ui.monospace(format!(
@@ -2761,15 +2778,16 @@ impl ExactControlWorkspace {
             "actual provider order {} → {} · success evidence {}…",
             graph_resource_label(actor_replay.ordered_reads[0]),
             graph_resource_label(actor_replay.ordered_reads[1]),
-            digest_prefix(actor_replay.success_evidence_digest.0),
+            digest_prefix(actor_replay.success_evidence.digest().0),
         ));
         ui.monospace(format!(
             "unavailable first input → {:?} · retained reads {} → {} · no completed sink report · fault evidence {}…",
             actor_replay.terminal_fault,
             graph_resource_label(actor_replay.fault_reads[0]),
             graph_resource_label(actor_replay.fault_reads[1]),
-            digest_prefix(actor_replay.fault_evidence_digest.0),
+            digest_prefix(actor_replay.fault_evidence.digest().0),
         ));
+        proof.show_replay_evidence_files(ui, success_bridge, fault_bridge);
         ui.label(&proof.status);
         ui.label(
             "Both resource identities are selectable only from the digest-verified scalar catalog. Stable record-field IDs determine ordered lowering and provider calls. Candidate edits commit ALGW, ALGR, and replay evidence together only after the actual fixed-memory firmware actors reproduce the four-case conjunction and the ordered unavailable-resource fault. Duplicate physical identities and capability-unadvertised resources fail without changing that transaction.",
@@ -4867,6 +4885,65 @@ impl TargetResourceProof {
         }
     }
 
+    fn show_replay_evidence_files(
+        &mut self,
+        ui: &mut egui::Ui,
+        success_bridge: &mut BoundedFileBridge,
+        fault_bridge: &mut BoundedFileBridge,
+    ) {
+        let actor = &self.deployment.actor_replay;
+        let success_name = format!(
+            "alumina-{}-success.algrrep",
+            digest_prefix(actor.success_evidence.digest().0)
+        );
+        let success_events = success_bridge.show(
+            ui,
+            actor.success_evidence.encoded(),
+            MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+            &success_name,
+            ALGR_SUCCESS_REPLAY_FILE,
+        );
+        let fault_name = format!(
+            "alumina-{}-fault.algrrep",
+            digest_prefix(actor.fault_evidence.digest().0)
+        );
+        let fault_events = fault_bridge.show(
+            ui,
+            actor.fault_evidence.encoded(),
+            MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+            &fault_name,
+            ALGR_FAULT_REPLAY_FILE,
+        );
+
+        let mut file_status = None;
+        for event in success_events {
+            file_status = Some(target_replay_file_event_status(
+                event,
+                "success",
+                &actor.success_evidence,
+                &self.deployment.report,
+                self.catalog.target(),
+            ));
+        }
+        for event in fault_events {
+            file_status = Some(target_replay_file_event_status(
+                event,
+                "fault",
+                &actor.fault_evidence,
+                &self.deployment.report,
+                self.catalog.target(),
+            ));
+        }
+        if let Some(status) = file_status {
+            self.status = status;
+        }
+        ui.weak(format!(
+            "canonical actor transcripts · success {} bytes · fault {} bytes · imports rerun fresh actors and mutate no draft",
+            actor.success_evidence.encoded().len(),
+            actor.fault_evidence.encoded().len(),
+        ));
+    }
+
     fn rebind_reference(&mut self) {
         let slot = TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot];
         let previous = self
@@ -4934,6 +5011,46 @@ impl TargetResourceProof {
             Err(error) => {
                 self.status = format!("target-I/O reset failed without mutation: {error}");
             }
+        }
+    }
+}
+
+fn target_replay_file_event_status(
+    event: BoundedFileEvent,
+    kind: &str,
+    expected: &CanonicalGraphDeploymentReplayEvidence1,
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+) -> String {
+    match event {
+        BoundedFileEvent::Import(Ok(bytes)) => {
+            match verify_graph_deployment_evidence_bytes(
+                &bytes,
+                expected.digest(),
+                report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ) {
+                Ok(replay) if replay.evidence() == expected => format!(
+                    "imported {} canonical {kind} ALGRREP1 bytes after fresh fixed-memory firmware-actor replay; no draft or session changed",
+                    bytes.len()
+                ),
+                Ok(_) => format!(
+                    "{kind} ALGRREP1 import rejected without mutation: fresh replay did not reproduce the current artifact"
+                ),
+                Err(error) => format!("{kind} ALGRREP1 import rejected without mutation: {error}"),
+            }
+        }
+        BoundedFileEvent::Import(Err(error)) => {
+            format!("{kind} ALGRREP1 file read rejected: {error}")
+        }
+        BoundedFileEvent::Export(Ok(bytes)) => {
+            format!("exported {bytes} exact canonical {kind} ALGRREP1 bytes")
+        }
+        BoundedFileEvent::Export(Err(error)) => {
+            format!("{kind} ALGRREP1 export failed: {error}")
         }
     }
 }
@@ -5511,6 +5628,7 @@ fn lower_target_resource_workspace(
         realtime_period_cycles: realtime.period_cycles,
         realtime_wcet_cycles: realtime.total_wcet_cycles,
         actor_replay,
+        report,
     })
 }
 
@@ -5524,13 +5642,13 @@ fn replay_target_resource_deployment(
         return Err("target resource package has a zero Realtime period".to_owned());
     }
     let start = DeviceCycle(period_cycles);
-    let (success_evidence_digest, truth_table, ordered_reads) =
+    let (success_evidence, truth_table, ordered_reads) =
         replay_target_resource_success(report, target, pair, period_cycles, start)?;
-    let (fault_evidence_digest, fault_reads, terminal_fault) =
+    let (fault_evidence, fault_reads, terminal_fault) =
         replay_target_resource_fault(report, target, pair, start)?;
     Ok(TargetResourceActorReplay {
-        success_evidence_digest,
-        fault_evidence_digest,
+        success_evidence,
+        fault_evidence,
         truth_table,
         ordered_reads,
         fault_reads,
@@ -5544,7 +5662,14 @@ fn replay_target_resource_success(
     pair: (ResourceId, ResourceId),
     period_cycles: u64,
     start: DeviceCycle,
-) -> Result<(Digest, [bool; 4], [ResourceId; 2]), String> {
+) -> Result<
+    (
+        CanonicalGraphDeploymentReplayEvidence1,
+        [bool; 4],
+        [ResourceId; 2],
+    ),
+    String,
+> {
     let truth_inputs = [(false, false), (false, true), (true, false), (true, true)]
         .into_iter()
         .enumerate()
@@ -5614,7 +5739,7 @@ fn replay_target_resource_success(
             "target resource firmware actor produced an invalid conjunction table {truth_table:?}"
         ));
     }
-    Ok((success.evidence_digest(), truth_table, expected_reads))
+    Ok((success.evidence().clone(), truth_table, expected_reads))
 }
 
 fn replay_target_resource_fault(
@@ -5622,7 +5747,14 @@ fn replay_target_resource_fault(
     target: GraphDeploymentTarget,
     pair: (ResourceId, ResourceId),
     start: DeviceCycle,
-) -> Result<(Digest, [ResourceId; 2], GraphExecutionFault), String> {
+) -> Result<
+    (
+        CanonicalGraphDeploymentReplayEvidence1,
+        [ResourceId; 2],
+        GraphExecutionFault,
+    ),
+    String,
+> {
     let expected_reads = [pair.0, pair.1];
     let fault_input = [GraphDeploymentReplayInput::new(
         start,
@@ -5678,7 +5810,7 @@ fn replay_target_resource_fault(
             );
         }
     };
-    Ok((fault.evidence_digest(), fault_reads, terminal_fault))
+    Ok((fault.evidence().clone(), fault_reads, terminal_fault))
 }
 
 fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
@@ -8014,15 +8146,15 @@ mod tests {
             GraphExecutionFault::ResourceUnavailable
         );
         assert_ne!(
-            proof.deployment.actor_replay.success_evidence_digest,
-            proof.deployment.actor_replay.fault_evidence_digest
+            proof.deployment.actor_replay.success_evidence.digest(),
+            proof.deployment.actor_replay.fault_evidence.digest()
         );
         assert_eq!(
-            digest_hex(proof.deployment.actor_replay.success_evidence_digest),
+            digest_hex(proof.deployment.actor_replay.success_evidence.digest()),
             "a26b41965997461d109d2aeec4b562eb0d2c7c3dfe61870139c2bd2293f12147"
         );
         assert_eq!(
-            digest_hex(proof.deployment.actor_replay.fault_evidence_digest),
+            digest_hex(proof.deployment.actor_replay.fault_evidence.digest()),
             "5e122937631516da3b57fd9f3e1f1d39a473ada6bf7dbad9c04b5121a4b89f6c"
         );
         assert_eq!(
@@ -8037,7 +8169,7 @@ mod tests {
             }
         );
         let initial_encoding = proof.encoding.clone();
-        let initial_deployment = proof.deployment;
+        let initial_deployment = proof.deployment.clone();
         proof.reset();
         assert_eq!(proof.workspace.graph().nodes().len(), 2);
         assert_eq!(proof.workspace.graph().wires().len(), 1);
@@ -8051,6 +8183,52 @@ mod tests {
     }
 
     #[test]
+    fn tinybee_replay_files_require_the_current_artifact_and_never_mutate_the_draft() {
+        let proof = tinybee_resource_proof().unwrap();
+        let retained = proof.deployment.clone();
+        let success = &proof.deployment.actor_replay.success_evidence;
+        let fault = &proof.deployment.actor_replay.fault_evidence;
+
+        assert_eq!(success.encoded().len(), 528);
+        assert_eq!(fault.encoded().len(), 278);
+        assert!(
+            target_replay_file_event_status(
+                BoundedFileEvent::Import(Ok(success.encoded().to_vec())),
+                "success",
+                success,
+                &proof.deployment.report,
+                proof.catalog.target(),
+            )
+            .contains("after fresh fixed-memory firmware-actor replay")
+        );
+        assert!(
+            target_replay_file_event_status(
+                BoundedFileEvent::Import(Ok(fault.encoded().to_vec())),
+                "fault",
+                fault,
+                &proof.deployment.report,
+                proof.catalog.target(),
+            )
+            .contains("after fresh fixed-memory firmware-actor replay")
+        );
+
+        let mut tampered = success.encoded().to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(
+            target_replay_file_event_status(
+                BoundedFileEvent::Import(Ok(tampered)),
+                "success",
+                success,
+                &proof.deployment.report,
+                proof.catalog.target(),
+            )
+            .contains("digest does not match its bytes")
+        );
+        assert_eq!(proof.deployment, retained);
+    }
+
+    #[test]
     fn tinybee_executable_pair_selector_preserves_sibling_and_relowers_atomically() {
         let mut proof = tinybee_resource_proof().unwrap();
         let node = GraphNodeId::new(1);
@@ -8058,7 +8236,7 @@ mod tests {
         assert_eq!(proof.selected_reference_entry(), Some(1));
         proof.catalog_index = 3;
         let before_encoding = proof.encoding.clone();
-        let before_deployment = proof.deployment;
+        let before_deployment = proof.deployment.clone();
         let before_node_cursor = proof.workspace.next_node_id();
         let before_wire_cursor = proof.workspace.next_wire_id();
         let before_placement = proof.workspace.placement(node);
@@ -8080,12 +8258,12 @@ mod tests {
             before_deployment.implementation_digest
         );
         assert_ne!(
-            proof.deployment.actor_replay.success_evidence_digest,
-            before_deployment.actor_replay.success_evidence_digest
+            proof.deployment.actor_replay.success_evidence.digest(),
+            before_deployment.actor_replay.success_evidence.digest()
         );
         assert_ne!(
-            proof.deployment.actor_replay.fault_evidence_digest,
-            before_deployment.actor_replay.fault_evidence_digest
+            proof.deployment.actor_replay.fault_evidence.digest(),
+            before_deployment.actor_replay.fault_evidence.digest()
         );
         assert_eq!(proof.deployment.first, ResourceId::Gpio(22));
         assert_eq!(proof.deployment.second, ResourceId::Gpio(35));
@@ -8106,11 +8284,11 @@ mod tests {
             GraphExecutionFault::ResourceUnavailable
         );
         assert_eq!(
-            digest_hex(proof.deployment.actor_replay.success_evidence_digest),
+            digest_hex(proof.deployment.actor_replay.success_evidence.digest()),
             "cf2215451f222f8b402b85285ae889ffd67c06e7de8eb3d9c03c8d075dc2a8df"
         );
         assert_eq!(
-            digest_hex(proof.deployment.actor_replay.fault_evidence_digest),
+            digest_hex(proof.deployment.actor_replay.fault_evidence.digest()),
             "e99110e8980e319389b8fe7731a6087375a465e4151289c37edaec0ed133b176"
         );
         assert_eq!(proof.workspace.next_node_id(), before_node_cursor);
@@ -8124,7 +8302,7 @@ mod tests {
         }
 
         let retained_encoding = proof.encoding.clone();
-        let retained_deployment = proof.deployment;
+        let retained_deployment = proof.deployment.clone();
         proof.catalog_index = 3;
         proof.reference_slot = 0;
         proof.rebind_reference();

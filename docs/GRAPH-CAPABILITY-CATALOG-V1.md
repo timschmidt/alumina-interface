@@ -111,12 +111,30 @@ The default GPIO22/GPIO32 draft has `ALGW` identity
 lowered package identity
 `8139f4816581007d762fe48e90a1a821d9f350e3508ccebd156b4cc21c9a64d5`.
 Its exact Realtime period is 240,000 device cycles and its reviewed pair-plus-
-sink WCET total is 160 cycles. Rebinding only `resources.interlock` to GPIO35
+sink WCET total is 160 cycles. Its four-case actor transcript is 528 bytes with
+digest
+`a26b41965997461d109d2aeec4b562eb0d2c7c3dfe61870139c2bd2293f12147`;
+its 278-byte unavailable-input transcript has digest
+`5e122937631516da3b57fd9f3e1f1d39a473ada6bf7dbad9c04b5121a4b89f6c`.
+Rebinding only `resources.interlock` to GPIO35
 produces `ALGW`
 `7e4a90577c9ab9864a782ccc1b4a4f738a585746d04728930bce37a6266e866f`
 and package
 `5a7adc0101bfe25aa9ee26772268dac8e0e7504ddf647fa6956740141d92e14c`,
-while `resources.permit` remains GPIO22.
+while `resources.permit` remains GPIO22. Its success and fault replay identities
+become
+`cf2215451f222f8b402b85285ae889ffd67c06e7de8eb3d9c03c8d075dc2a8df`
+and
+`e99110e8980e319389b8fe7731a6087375a465e4151289c37edaec0ed133b176`.
+
+Each accepted edit now runs the actual portable fixed-memory Service/Realtime
+actors across all four conjunction inputs and an unavailable-first-input fault,
+then commits both complete canonical `ALGRREP1` artifacts with the workspace and
+lowered package. The UI exports the exact artifacts and accepts an import only
+after its current digest, identities, declared bounds, canonical input records,
+and a fresh byte-for-byte actor replay all agree. Import mutates no draft or
+session. The format and verification sequence are specified in
+[`GRAPH-DEPLOYMENT-REPLAY-V1.md`](GRAPH-DEPLOYMENT-REPLAY-V1.md).
 
 The proof deliberately uses a conspicuous offline reference `DeviceId` and
 configuration digest. It cannot identify or deploy to the connected TinyBee.
@@ -151,7 +169,10 @@ ceiling fail without returning a partial catalog. UI tests prove the executable
 pair/sink shape, stable GPIO22/GPIO32 lowering order, 4 KiB package replay,
 GPIO32-to-GPIO35 sibling-preserving re-lowering, changed ALGW/implementation/
 package identities, duplicate rejection without either identity changing, and
-reset to the exact initial executable draft. A native cross-repository test
+reset to the exact initial executable draft. They also pin both artifact sizes
+and all four default/rebound replay identities, accept exact imports through a
+fresh actor run, reject tamper, and prove the verification-only path leaves the
+deployment unchanged. A native cross-repository test
 executes the lowered GPIO22/GPIO35 pair through the permanent firmware actor
 types and observes both reads in order on both a false and a true release.
 

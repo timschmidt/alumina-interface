@@ -94,11 +94,13 @@ pub use probe::{
     project_graph_probe_replay, replay_graph_probes, resolve_graph_probe_trigger,
 };
 pub use realtime_replay::{
-    GRAPH_DEPLOYMENT_REPLAY_MAGIC, GraphDeploymentReplay, GraphDeploymentReplayError,
-    GraphDeploymentReplayInput, GraphDeploymentReplayLimits, GraphDeploymentReplayRelease,
-    GraphDeploymentReplayReleaseOutcome, GraphDeploymentResourceSample,
+    CanonicalGraphDeploymentReplayEvidence1, GRAPH_DEPLOYMENT_REPLAY_MAGIC, GraphDeploymentReplay,
+    GraphDeploymentReplayError, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
+    GraphDeploymentReplayRelease, GraphDeploymentReplayReleaseOutcome,
+    GraphDeploymentResourceSample, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
     MAX_GRAPH_DEPLOYMENT_REPLAY_INPUTS_PER_RELEASE, MAX_GRAPH_DEPLOYMENT_REPLAY_READS_PER_RELEASE,
-    MAX_GRAPH_DEPLOYMENT_REPLAY_RELEASES, replay_realtime_graph_deployment,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_RELEASES, replay_graph_deployment_evidence,
+    replay_realtime_graph_deployment, verify_graph_deployment_evidence_bytes,
 };
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,

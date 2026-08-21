@@ -348,7 +348,13 @@ prototype.
   one Realtime conjunction opcode and required sink. The permanent firmware
   actor types read both resources in order on every release—even when the first
   is false—and emit only after both are present. Duplicate or unadvertised
-  selectors reject before execution.
+  selectors reject before execution. Canonical bounded `ALGRREP1` artifacts
+  retain the exact input frames, actual provider-call order, completion/fault
+  reports, run identity, target tuple, implementation, and package. Imports
+  rebuild fresh firmware actors and must reproduce every byte; the TinyBee UI
+  exports both its four-case success transcript and unavailable-input fault
+  transcript without acquiring device authority. See
+  [`docs/GRAPH-DEPLOYMENT-REPLAY-V1.md`](docs/GRAPH-DEPLOYMENT-REPLAY-V1.md).
 - The headless and WASM clients publish that fixed package, reconcile independent
   dual-core installation, and drive exact future start/stop epochs. Running is
   reported only after both permanent actors and the shared bridge agree; the

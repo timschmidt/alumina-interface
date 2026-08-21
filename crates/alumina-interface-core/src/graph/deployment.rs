@@ -1852,10 +1852,11 @@ mod tests {
         ClockDefinition, GraphDeploymentReplayError, GraphDeploymentReplayInput,
         GraphDeploymentReplayLimits, GraphDeploymentReplayReleaseOutcome,
         GraphDeploymentResourceSample, GraphLimits, GraphPortId, GraphSchema, GraphTypeId,
-        GraphValue, GraphWireId, NodeDefinition, NodeInputChannelContract, NodeOutputDependency,
-        NodeParameter, NodeParameterContract, PortDefinition, RecordField, RecordValueField,
-        ResourceClassId, ResourceGraphHandle, TypeDefinition, TypedGraphValue, WireEndpoint,
-        replay_realtime_graph_deployment,
+        GraphValue, GraphWireId, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, NodeDefinition,
+        NodeInputChannelContract, NodeOutputDependency, NodeParameter, NodeParameterContract,
+        PortDefinition, RecordField, RecordValueField, ResourceClassId, ResourceGraphHandle,
+        TypeDefinition, TypedGraphValue, WireEndpoint, replay_graph_deployment_evidence,
+        replay_realtime_graph_deployment, verify_graph_deployment_evidence_bytes,
     };
 
     const BOOL: GraphTypeId = GraphTypeId::new(1);
@@ -2602,9 +2603,38 @@ mod tests {
         assert_eq!(replay.releases().len(), 4);
         assert_eq!(replay.terminal_fault(), None);
         assert_eq!(replay.run().start_cycle, start);
+        assert_eq!(MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, 6_525_156);
         assert_eq!(
             replay.implementation_digest(),
             report.implementation_digest()
+        );
+        assert_eq!(&replay.evidence().encoded()[..8], b"ALGRREP1".as_slice());
+        assert!(replay.evidence().encoded().len() <= MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES);
+        assert_eq!(replay.evidence().digest(), replay.evidence_digest());
+        assert_eq!(
+            replay_graph_deployment_evidence(
+                replay.evidence(),
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            )
+            .unwrap(),
+            replay
+        );
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                replay.evidence().encoded(),
+                replay.evidence_digest(),
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            )
+            .unwrap(),
+            replay
         );
         for release in replay.releases() {
             assert_eq!(release.reads(), [pair.0, pair.1]);
@@ -2667,6 +2697,58 @@ mod tests {
             GraphExecutionFault::ResourceUnavailable
         );
         assert_ne!(fault.evidence_digest(), replay.evidence_digest());
+
+        let mut tampered = replay.evidence().encoded().to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                &tampered,
+                replay.evidence_digest(),
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::EvidenceDigestMismatch)
+        );
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                &tampered,
+                alumina_storage::sha256(&tampered).digest,
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::EvidenceReplayMismatch)
+        );
+
+        let mut unsorted = replay.evidence().encoded().to_vec();
+        let first_sample = 224 + 13;
+        let second_sample = first_sample + 5;
+        let first: [u8; 5] = unsorted[first_sample..second_sample].try_into().unwrap();
+        let second: [u8; 5] = unsorted[second_sample..second_sample + 5]
+            .try_into()
+            .unwrap();
+        unsorted[first_sample..second_sample].copy_from_slice(&second);
+        unsorted[second_sample..second_sample + 5].copy_from_slice(&first);
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                &unsorted,
+                alumina_storage::sha256(&unsorted).digest,
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::EvidenceMalformed(
+                "resource order"
+            ))
+        );
 
         let duplicate = vec![GraphDeploymentReplayInput::new(
             start,
@@ -2776,7 +2858,7 @@ mod tests {
         );
         assert_eq!(
             replay(
-                &[input],
+                std::slice::from_ref(&input),
                 GraphDeploymentReplayLimits {
                     maximum_releases: 1,
                     maximum_inputs_per_release: 2,
@@ -2787,6 +2869,72 @@ mod tests {
                 aspect: "resource-read count",
                 release: Some(0),
             })
+        );
+
+        let retained = replay(
+            std::slice::from_ref(&input),
+            GraphDeploymentReplayLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(
+            replay_graph_deployment_evidence(
+                retained.evidence(),
+                &report,
+                tinybee_target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits {
+                    maximum_releases: 1,
+                    maximum_inputs_per_release: 2,
+                    maximum_reads_per_release: 2,
+                },
+            ),
+            Err(GraphDeploymentReplayError::EvidenceLimitEscalation(
+                "release-count"
+            ))
+        );
+
+        let mut foreign = retained.evidence().encoded().to_vec();
+        foreign[8] ^= 1;
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                &foreign,
+                alumina_storage::sha256(&foreign).digest,
+                &report,
+                tinybee_target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::EvidenceIdentityMismatch(
+                "device"
+            ))
+        );
+        let truncated = &retained.evidence().encoded()[..16];
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                truncated,
+                alumina_storage::sha256(truncated).digest,
+                &report,
+                tinybee_target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::EvidenceMalformed("length"))
+        );
+        let oversized = vec![0_u8; MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES + 1];
+        assert_eq!(
+            verify_graph_deployment_evidence_bytes(
+                &oversized,
+                alumina_protocol::Digest([0_u8; 32]),
+                &report,
+                tinybee_target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::EvidenceTooLarge)
         );
 
         let (service_document, service_registry) = fixture(1, 1_000, 2, 40);
