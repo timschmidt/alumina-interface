@@ -270,11 +270,14 @@ prototype.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
-  into a separate Realtime draft. Existing catalog-managed nodes can be
-  transactionally rebound among unused same-kind entries while retaining their
-  stable node/placement identity; current membership in the exact catalog is a
-  prerequisite, so raw handles, labels, and numeric GPIO text grant no
-  authority. No broader pin/peripheral inventory is inferred. A distinct
+  into a separate mixed HostExact/Realtime draft. Its non-deployable reference
+  set retains primary, active optional fallback, and bounded-array mirror
+  handles. A bounded schema-aware path can transactionally rebind one root or
+  nested leaf to an unused exact catalog entry while preserving siblings,
+  stable node/placement identity, and whole-workspace resource uniqueness.
+  Current membership in the exact catalog is a prerequisite, so raw handles,
+  labels, and numeric GPIO text grant no authority. No broader pin/peripheral
+  inventory is inferred. A distinct
   board-name-independent explorer now decodes the complete
   bounded capability ledger into 62 TinyBee resources, 51 aliases, ownership,
   safe/hazard facts and supporting-section counts while retaining that four-item
@@ -472,8 +475,9 @@ nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, nested component
 dependency/cycle handling, editable instance
-and library workflows, front-panel editing/execution, nested physical-resource
-selectors, prepare/start job nodes, conflict-aware shared workspace persistence,
+and library workflows, front-panel editing/execution, executable composite
+physical-resource consumers, prepare/start job nodes, conflict-aware shared
+workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated
 Service/Realtime upload/core transfer and task
 composition, additional resource opcodes and capability-generated graph nodes,

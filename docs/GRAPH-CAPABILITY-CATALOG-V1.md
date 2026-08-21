@@ -45,21 +45,29 @@ binding, and firmware package replay. The catalog is not deployment authority.
 ## Selector-managed rebinding
 
 `select_graph_capability_node_resource` is the only V1 parameter-edit path for
-one of these physical handles. It accepts a node ID and catalog index, never a
-device ID, digest, class, label, or numeric pin selector. The existing node
-must first resolve byte-exactly to an entry in the supplied catalog: reviewed kind,
-Realtime device owner, port shape, parameter ID/name/type, and the complete
-typed handle all participate. A merely well-typed raw handle that is not one of
-those offered values therefore cannot bootstrap itself into selector authority.
+one of these physical handles. It accepts a node ID, stable parameter ID,
+bounded schema-aware value path, and catalog index, never a device ID, digest,
+class, label, field name, or numeric pin selector. Stable record-field IDs,
+checked retained-array indices, and explicit already-active option/result
+branches identify one existing leaf.
 
-The replacement must retain the same reviewed node kind. Another node may not
-already hold the selected resource identity, even through a different graph
-type ID. A no-op, unknown node/entry, foreign catalog, kind change, duplicate,
-malformed entry, workspace failure, or semantic-registry rejection leaves the
-prior workspace byte-for-byte unchanged. On success the function edits a
+That leaf's registered type must be the exact catalog resource-handle type, and
+its current complete handle must already occur in the supplied catalog. A
+merely well-typed raw handle that is not one of those offered values therefore
+cannot bootstrap itself into selector authority. The selected replacement must
+also come from that catalog. The path API never creates a branch, grows an
+array, or resolves a display label.
+
+No other root or composite parameter leaf in the complete workspace may
+already hold the selected physical identity. A no-op, unknown
+node/parameter/entry, foreign catalog, wrong leaf type, invalid or inactive
+path, duplicate, malformed entry, workspace failure, or semantic-registry
+rejection leaves the prior workspace byte-for-byte unchanged. On success the
+function reconstructs and validates the complete root value, edits a workspace
 clone, reruns draft semantic analysis, canonically encodes it, and only then
 commits. The graph/workspace revisions and digest advance, while the node ID,
-placement, and both monotonic allocation cursors remain unchanged.
+placement, unrelated composite siblings, and both monotonic allocation cursors
+remain unchanged.
 
 This is still authoring assistance. The caller remains responsible for
 authenticating the capability/session that supplied a production catalog, and
@@ -80,13 +88,23 @@ canonical order:
 3. GPIO33; and
 4. GPIO35.
 
-The visible target-I/O surface uses a separate Realtime workspace with an
-explicit 240 MHz reference device-cycle clock and a derived 1 kHz input clock.
-Each catalog choice can create at most one concrete resource node in that
-draft. The UI can then select one existing catalog-managed node and rebind it
-to any unused same-kind entry. Raw resource identities remain visibly
-non-editable. The HostExact PID/interlock workspace has a different type/clock
-context and is never polluted with a physical handle.
+The visible target-I/O surface uses a separate mixed HostExact/Realtime
+workspace with an explicit 240 MHz reference device-cycle clock and a derived
+1 kHz input clock. One HostExact node has no deployment implementation and
+retains a reviewed record with three unique identities:
+
+- `references.primary` initially carries GPIO22;
+- `references.fallback.some` initially carries GPIO32; and
+- `references.mirrors[0]` initially carries GPIO33.
+
+GPIO35 is initially free. The UI exposes exactly those stable value paths and
+can rebind one selected composite leaf to the free exact catalog entry. The
+released resource can then create one concrete Realtime stable-input node.
+Root and nested selectors share whole-workspace uniqueness, so the same
+physical identity cannot occur in two nodes, parameters, or sibling leaves.
+Raw resource identities remain visibly non-editable. This separate proof does
+not add physical handles to the authoritative HostExact PID/interlock
+workspace.
 
 The proof deliberately uses a conspicuous offline reference `DeviceId` and
 configuration digest. It cannot identify or deploy to the connected TinyBee.
@@ -106,16 +124,21 @@ firmware admission/execution path, and appropriate safety evidence.
 
 Tests reconstruct the complete TinyBee capability document through its bounded
 range API, prove the exact four-entry order, inspect every target-bound resource
-handle, insert all four prototypes transactionally into the matching context,
-and rerun audited draft analysis. Selection tests prove an exact GPIO22 to
-GPIO33 replacement, retained node/placement/cursors, changed canonical
-identity, and no-op stability. Duplicate resources, raw but structurally valid
-handles, a foreign-device catalog, cross-kind selection, missing IDs, and an
-unreviewed semantic registry all reject without mutation. A wrong capability
-digest, over-limit document, and entry-count ceiling fail without returning a
-partial catalog. UI tests exercise the same selector, add all four concrete
-nodes, reject a duplicate selection without changing canonical bytes, and
-reset the separate draft.
+handle, insert all four root prototypes transactionally into the matching
+context, and rerun audited draft analysis. Root selection still proves an exact
+GPIO22-to-GPIO33 replacement, retained node/placement/cursors, changed
+canonical identity, and no-op stability.
+
+Composite tests prove fallback-only GPIO32-to-GPIO35 replacement with exact
+primary/mirror sibling preservation. Same-node sibling duplication, a raw but
+structurally valid current handle, an inactive option, wrong root/segment,
+out-of-bounds array index, missing parameter, foreign-device catalog,
+duplicate root node, and an unreviewed semantic registry all reject without
+mutation. A wrong capability digest, over-limit document, and entry-count
+ceiling fail without returning a partial catalog. UI tests exercise the same
+nested selector, prove one initially free resource, add the released resource
+as a concrete node, reject a cross-root/composite duplicate without changing
+canonical bytes, and reset to the exact initial composite draft.
 
 This is offline functional evidence. No Wi-Fi interface, connected board,
 motor, output, or analyzer was contacted or driven.

@@ -270,14 +270,18 @@ One interactive field admits at most 2,097,158 UTF-8 bytes, enough for the
 complete one-MiB byte-literal ceiling. Resource/job handles, including ones
 nested in composites, remain read-only until an authenticated capability/cache
 selector supplies identity. The separate TinyBee target draft now implements
-that rule for root resource handles: an existing exact catalog member can be
-rebound only to an unused same-kind entry, while raw handle text stays closed.
+that rule for root and nested resource handles. Stable record-field IDs,
+existing option/result branches, and retained bounded-array indices select an
+existing leaf; its current and replacement handles must belong to the same
+exact capability-derived catalog, and the replacement must remain unique
+across every root or composite parameter in the workspace. Raw handle text
+stays closed.
 The separate cached-job draft now extends that rule through bounded
 schema-aware paths: stable record-field IDs, existing option/result branches,
 and retained array indices can select a nested job leaf, while the current and
 replacement handles must both belong to the same exact cache-derived catalog.
-Nested physical-resource selection remains open; Event/Stream types still have
-no literal. Seven
+Executable composite resource behavior remains open; Event/Stream types still
+have no literal. Seven
 mixed-signal traces show error, integral prior state,
 clamped controller, permit-gated output, external permit,
 measurement-within-range, and combined permit. The first four render as

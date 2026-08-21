@@ -33,13 +33,13 @@ use alumina_interface_core::graph::{
     GraphWorkspaceProbeHistory, NodeDefinition, NodeKind, NodeOutputDependency, NodeParameter,
     NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
     RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
-    ResourceClassId, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
-    compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
-    encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
-    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
-    graph_component_instance_prototype, graph_resource_label, parse_graph_literal_text,
-    project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
-    select_graph_cached_job_handle, select_graph_capability_node_resource,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
+    analyze_graph_draft, compile_representative_exact_control_graph,
+    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
+    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
+    format_graph_literal_text, graph_component_instance_prototype, graph_resource_label,
+    parse_graph_literal_text, project_graph_probe_replay, replay_graph_probes,
+    replay_graph_workspace, select_graph_cached_job_handle, select_graph_capability_node_resource,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
@@ -142,6 +142,50 @@ const CACHED_JOB_REFERENCE_SLOTS: [CachedJobReferenceSlot; 3] = [
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CachedJobReferenceSlot {
+    label: &'static str,
+    path: &'static [GraphValuePathSegment],
+}
+
+const TARGET_RESOURCE_BOOL_TYPE: GraphTypeId = GraphTypeId::new(1);
+const TARGET_RESOURCE_STREAM_TYPE: GraphTypeId = GraphTypeId::new(2);
+const TARGET_RESOURCE_HANDLE_TYPE: GraphTypeId = GraphTypeId::new(3);
+const TARGET_RESOURCE_OPTION_TYPE: GraphTypeId = GraphTypeId::new(4);
+const TARGET_RESOURCE_ARRAY_TYPE: GraphTypeId = GraphTypeId::new(5);
+const TARGET_RESOURCE_REFERENCE_SET_TYPE: GraphTypeId = GraphTypeId::new(6);
+const TARGET_RESOURCE_PARAMETER: u32 = 1;
+const TARGET_RESOURCE_REFERENCE_KIND_NAME: &str = "alumina.io.capability-reference-set";
+const TARGET_RESOURCE_PRIMARY_FIELD: RecordFieldId = RecordFieldId::new(1);
+const TARGET_RESOURCE_FALLBACK_FIELD: RecordFieldId = RecordFieldId::new(2);
+const TARGET_RESOURCE_MIRRORS_FIELD: RecordFieldId = RecordFieldId::new(3);
+const TARGET_RESOURCE_PRIMARY_PATH: [GraphValuePathSegment; 1] =
+    [GraphValuePathSegment::RecordField(
+        TARGET_RESOURCE_PRIMARY_FIELD,
+    )];
+const TARGET_RESOURCE_FALLBACK_PATH: [GraphValuePathSegment; 2] = [
+    GraphValuePathSegment::RecordField(TARGET_RESOURCE_FALLBACK_FIELD),
+    GraphValuePathSegment::OptionSome,
+];
+const TARGET_RESOURCE_MIRROR_PATH: [GraphValuePathSegment; 2] = [
+    GraphValuePathSegment::RecordField(TARGET_RESOURCE_MIRRORS_FIELD),
+    GraphValuePathSegment::ArrayIndex(0),
+];
+const TARGET_RESOURCE_REFERENCE_SLOTS: [TargetResourceReferenceSlot; 3] = [
+    TargetResourceReferenceSlot {
+        label: "primary",
+        path: &TARGET_RESOURCE_PRIMARY_PATH,
+    },
+    TargetResourceReferenceSlot {
+        label: "fallback.some",
+        path: &TARGET_RESOURCE_FALLBACK_PATH,
+    },
+    TargetResourceReferenceSlot {
+        label: "mirrors[0]",
+        path: &TARGET_RESOURCE_MIRROR_PATH,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TargetResourceReferenceSlot {
     label: &'static str,
     path: &'static [GraphValuePathSegment],
 }
@@ -471,6 +515,8 @@ struct TargetResourceProof {
     encoding: CanonicalGraphWorkspaceEncoding,
     catalog_index: usize,
     node_selection: Option<GraphNodeId>,
+    reference_node: GraphNodeId,
+    reference_slot: usize,
     status: String,
 }
 
@@ -2642,20 +2688,6 @@ impl ExactControlWorkspace {
 
     fn show_target_resources(&mut self, ui: &mut egui::Ui) {
         let proof = &mut self.target_resources;
-        let catalog_choices = proof.catalog_selection_choices();
-        let selected = catalog_choices
-            .get(proof.catalog_index)
-            .map_or("resource unavailable", |choice| choice.0.as_str());
-        let node_choices = proof.catalog_managed_node_choices();
-        let selected_node = proof
-            .node_selection
-            .and_then(|selected| {
-                node_choices
-                    .iter()
-                    .find(|(node, _)| *node == selected)
-                    .map(|(_, label)| label.as_str())
-            })
-            .unwrap_or("select a managed node");
         ui.horizontal_wrapped(|ui| {
             ui.heading("TinyBee target-I/O draft");
             ui.monospace(format!(
@@ -2665,7 +2697,7 @@ impl ExactControlWorkspace {
                 proof.catalog.entries().len()
             ));
             ui.monospace(format!(
-                "ALGW {}… · {} concrete nodes",
+                "ALGW {}… · {} draft nodes",
                 digest_prefix(proof.encoding.digest().0),
                 proof.workspace.graph().nodes().len()
             ));
@@ -2676,64 +2708,14 @@ impl ExactControlWorkspace {
             ));
         });
         ui.label(
-            "This separate Realtime draft is derived from the exact MKS TinyBee V1 8 MiB board package and a reviewed stable-input implementation. Its device/configuration identities are explicit offline reference values, so it cannot be deployed to the connected board.",
+            "This separate mixed HostExact/Realtime draft is derived from the exact MKS TinyBee V1 8 MiB board package. One non-deployable reference set holds primary, optional fallback, and bounded-array mirror identities; concrete stable-input nodes retain the existing reviewed read behavior. Its explicit offline device/configuration values cannot authenticate or deploy to the connected board.",
         );
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("tinybee_resource_catalog")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    for (index, (_, choice)) in catalog_choices.iter().enumerate() {
-                        ui.selectable_value(&mut proof.catalog_index, index, choice);
-                    }
-                });
-            egui::ComboBox::from_id_salt("tinybee_resource_node")
-                .selected_text(selected_node)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut proof.node_selection, None, "select a managed node");
-                    for (node, label) in &node_choices {
-                        ui.selectable_value(&mut proof.node_selection, Some(*node), label);
-                    }
-                });
-            let already_present = proof.selected_is_present();
-            if ui
-                .add_enabled(
-                    !already_present,
-                    egui::Button::new("add concrete input node"),
-                )
-                .clicked()
-            {
-                proof.add_selected();
-            }
-            let target_is_current = proof.selected_node_uses_selected_entry();
-            let can_rebind = proof.node_selection.is_some()
-                && !target_is_current
-                && !proof.selected_is_present();
-            if ui
-                .add_enabled(can_rebind, egui::Button::new("rebind selected node"))
-                .on_disabled_hover_text(if proof.node_selection.is_none() {
-                    "select an existing catalog-managed node"
-                } else if target_is_current {
-                    "the node already carries this exact catalog entry"
-                } else {
-                    "another node already carries this exact resource identity"
-                })
-                .clicked()
-            {
-                proof.rebind_selected();
-            }
-            if ui.small_button("reset target draft").clicked() {
-                proof.reset();
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("Selector-managed nodes");
-            for (_, label) in proof.catalog_managed_node_choices() {
-                ui.monospace(label);
-            }
-        });
+        proof.show_catalog_selector(ui);
+        proof.show_reference_selector(ui);
+        proof.show_concrete_selector(ui);
         ui.label(&proof.status);
         ui.label(
-            "Resource identities are selectable only from the digest-verified catalog: no label, device ID, digest, class, or numeric GPIO field is text-editable.",
+            "Root and composite resource identities are selectable only from the digest-verified catalog. Value paths use stable record-field IDs, explicit active branches, and bounded array indices; no label, device ID, digest, class, or numeric GPIO field is text-editable.",
         );
         ui.colored_label(
             egui::Color32::YELLOW,
@@ -4723,12 +4705,165 @@ impl TargetResourceProof {
             .collect()
     }
 
+    fn show_catalog_selector(&mut self, ui: &mut egui::Ui) {
+        let choices = self.catalog_selection_choices();
+        let selected = choices
+            .get(self.catalog_index)
+            .map_or("resource unavailable", |choice| choice.0.as_str());
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("tinybee_resource_catalog")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (index, (_, choice)) in choices.iter().enumerate() {
+                        ui.selectable_value(&mut self.catalog_index, index, choice);
+                    }
+                });
+            if ui.small_button("reset target draft").clicked() {
+                self.reset();
+            }
+        });
+    }
+
+    fn show_concrete_selector(&mut self, ui: &mut egui::Ui) {
+        let node_choices = self.catalog_managed_node_choices();
+        let selected_node = self
+            .node_selection
+            .and_then(|selected| {
+                node_choices
+                    .iter()
+                    .find(|(node, _)| *node == selected)
+                    .map(|(_, label)| label.as_str())
+            })
+            .unwrap_or("select a managed node");
+        let already_present = self.selected_is_present();
+        let target_is_current = self.selected_node_uses_selected_entry();
+        let can_rebind = self.node_selection.is_some() && !target_is_current && !already_present;
+        let mut add = false;
+        let mut rebind = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Concrete stable-input nodes");
+            egui::ComboBox::from_id_salt("tinybee_resource_node")
+                .selected_text(selected_node)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.node_selection, None, "select a managed node");
+                    for (node, label) in &node_choices {
+                        ui.selectable_value(&mut self.node_selection, Some(*node), label);
+                    }
+                });
+            add = ui
+                .add_enabled(
+                    !already_present,
+                    egui::Button::new("add concrete input node"),
+                )
+                .clicked();
+            rebind = ui
+                .add_enabled(can_rebind, egui::Button::new("rebind selected node"))
+                .on_disabled_hover_text(if self.node_selection.is_none() {
+                    "select an existing catalog-managed node"
+                } else if target_is_current {
+                    "the node already carries this exact catalog entry"
+                } else {
+                    "another root or composite leaf already carries this resource identity"
+                })
+                .clicked();
+        });
+        if add {
+            self.add_selected();
+        } else if rebind {
+            self.rebind_selected();
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Selector-managed concrete nodes");
+            for (_, label) in self.catalog_managed_node_choices() {
+                ui.monospace(label);
+            }
+        });
+    }
+
     fn selected_is_present(&self) -> bool {
         self.workspace
             .graph()
             .nodes()
             .iter()
-            .any(|node| self.catalog.entry_index_for_node(node) == Some(self.catalog_index))
+            .flat_map(NodeDefinition::parameters)
+            .any(|parameter| {
+                graph_value_contains_catalog_resource(
+                    &self.catalog,
+                    parameter.value().value(),
+                    self.catalog_index,
+                )
+            })
+    }
+
+    fn selected_reference_entry(&self) -> Option<usize> {
+        let slot = TARGET_RESOURCE_REFERENCE_SLOTS.get(self.reference_slot)?;
+        self.workspace
+            .graph()
+            .node(self.reference_node)
+            .and_then(|node| {
+                target_resource_handle_at_path(
+                    node,
+                    self.registry.semantic_registry().context_schema(),
+                    slot.path,
+                )
+            })
+            .and_then(|handle| self.catalog.entry_index_for_handle(handle))
+    }
+
+    fn show_reference_selector(&mut self, ui: &mut egui::Ui) {
+        if self.reference_slot >= TARGET_RESOURCE_REFERENCE_SLOTS.len() {
+            self.reference_slot = 0;
+        }
+        egui::ComboBox::from_id_salt("tinybee_resource_reference_slot")
+            .selected_text(format!(
+                "composite leaf · {}",
+                TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot].label
+            ))
+            .show_ui(ui, |ui| {
+                for (index, slot) in TARGET_RESOURCE_REFERENCE_SLOTS.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.reference_slot,
+                        index,
+                        format!("composite leaf · {}", slot.label),
+                    );
+                }
+            });
+        let slot = TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot];
+        let current_entry = self.selected_reference_entry();
+        let current = current_entry
+            .and_then(|entry| self.catalog.entries().get(entry))
+            .map_or_else(
+                || "unresolved catalog identity".to_owned(),
+                |entry| graph_resource_label(entry.resource().resource),
+            );
+        ui.monospace(format!(
+            "#{} capability references · {} = {} · {} segment(s)",
+            self.reference_node.get(),
+            slot.label,
+            current,
+            slot.path.len()
+        ));
+        let target_is_current = current_entry == Some(self.catalog_index);
+        let target_is_present = self.selected_is_present();
+        let can_rebind = current_entry.is_some() && !target_is_current && !target_is_present;
+        let mut rebind = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Non-deployable composite resource references");
+            rebind = ui
+                .add_enabled(can_rebind, egui::Button::new("rebind composite leaf"))
+                .on_disabled_hover_text(if current_entry.is_none() {
+                    "the reviewed composite leaf is unavailable"
+                } else if target_is_current {
+                    "the leaf already carries this exact catalog entry"
+                } else {
+                    "another root or composite leaf already carries this resource identity"
+                })
+                .clicked();
+            ui.monospace(format!("value path: references.{}", slot.label));
+        });
+        if rebind {
+            self.rebind_reference();
+        }
     }
 
     fn selected_node_uses_selected_entry(&self) -> bool {
@@ -4768,7 +4903,7 @@ impl TargetResourceProof {
             return;
         };
         if self.selected_is_present() {
-            "target resource already has one concrete node in this draft"
+            "target resource identity is already retained by a root or composite leaf in this draft"
                 .clone_into(&mut self.status);
             return;
         }
@@ -4795,7 +4930,7 @@ impl TargetResourceProof {
             }
         };
         if let Err(error) =
-            analyze_graph_draft(candidate.graph(), self.registry.semantic_registry())
+            validate_target_resource_workspace(&self.catalog, &self.registry, &candidate)
         {
             self.status = format!("target resource semantics rejected without mutation: {error}");
             return;
@@ -4837,14 +4972,25 @@ impl TargetResourceProof {
             || "unavailable resource".to_owned(),
             |entry| graph_resource_label(entry.resource().resource),
         );
+        let mut candidate = self.workspace.clone();
         match select_graph_capability_node_resource(
             &self.catalog,
             &self.registry,
-            &mut self.workspace,
+            &mut candidate,
             node,
+            TARGET_RESOURCE_PARAMETER,
+            &[],
             self.catalog_index,
         ) {
             Ok(encoding) => {
+                if let Err(error) =
+                    validate_target_resource_workspace(&self.catalog, &self.registry, &candidate)
+                {
+                    self.status =
+                        format!("target resource selection rejected without mutation: {error}");
+                    return;
+                }
+                self.workspace = candidate;
                 self.encoding = encoding;
                 self.status = format!(
                     "rebound node {} from {previous} to {selected} using exact catalog authority; deployment remains disabled",
@@ -4858,15 +5004,61 @@ impl TargetResourceProof {
         }
     }
 
+    fn rebind_reference(&mut self) {
+        let slot = TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot];
+        let previous = self
+            .selected_reference_entry()
+            .and_then(|index| self.catalog.entries().get(index))
+            .map_or_else(
+                || "unresolved resource".to_owned(),
+                |entry| graph_resource_label(entry.resource().resource),
+            );
+        let selected = self.catalog.entries().get(self.catalog_index).map_or_else(
+            || "unavailable resource".to_owned(),
+            |entry| graph_resource_label(entry.resource().resource),
+        );
+        let mut candidate = self.workspace.clone();
+        match select_graph_capability_node_resource(
+            &self.catalog,
+            &self.registry,
+            &mut candidate,
+            self.reference_node,
+            TARGET_RESOURCE_PARAMETER,
+            slot.path,
+            self.catalog_index,
+        ) {
+            Ok(encoding) => {
+                if let Err(error) =
+                    validate_target_resource_workspace(&self.catalog, &self.registry, &candidate)
+                {
+                    self.status =
+                        format!("composite resource selection rejected without mutation: {error}");
+                    return;
+                }
+                self.workspace = candidate;
+                self.encoding = encoding;
+                self.status = format!(
+                    "rebound non-deployable resource reference #{} at references.{} from {previous} to {selected}; firmware authority remains closed",
+                    self.reference_node.get(),
+                    slot.label,
+                );
+            }
+            Err(error) => {
+                self.status =
+                    format!("composite resource selection rejected without mutation: {error}");
+            }
+        }
+    }
+
     fn reset(&mut self) {
-        match empty_target_workspace(&self.registry).and_then(|workspace| {
-            let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
-            Ok((workspace, encoding))
-        }) {
-            Ok((workspace, encoding)) => {
+        match initial_target_resource_workspace(&self.catalog, &self.registry) {
+            Ok((workspace, encoding, reference_node)) => {
                 self.workspace = workspace;
                 self.encoding = encoding;
                 self.node_selection = None;
+                self.reference_node = reference_node;
+                self.reference_slot = 0;
+                self.catalog_index = 3;
                 "reset separate target-I/O draft; no identities were sent to firmware"
                     .clone_into(&mut self.status);
             }
@@ -4879,13 +5071,10 @@ impl TargetResourceProof {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the offline proof keeps its exact target schema, clocks, reviewed implementation, capability derivation, and empty draft visibly co-located"
+    reason = "the offline proof keeps its exact target schema, clocks, reviewed implementation, capability derivation, and initial composite reference set visibly co-located"
 )]
 fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
     const DEVICE: DeviceId = DeviceId([0x54; 16]);
-    const BOOL: GraphTypeId = GraphTypeId::new(1);
-    const STREAM: GraphTypeId = GraphTypeId::new(2);
-    const RESOURCE: GraphTypeId = GraphTypeId::new(3);
     const ROOT: GraphClockId = GraphClockId::new(1);
     const INPUT_CLOCK: GraphClockId = GraphClockId::new(2);
 
@@ -4895,21 +5084,59 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
         GraphLimits::interactive(),
         Vec::new(),
         vec![
-            TypeDefinition::new(BOOL, "core.bool", TypeKind::Boolean),
+            TypeDefinition::new(TARGET_RESOURCE_BOOL_TYPE, "core.bool", TypeKind::Boolean),
             TypeDefinition::new(
-                STREAM,
+                TARGET_RESOURCE_STREAM_TYPE,
                 "tinybee.stream.stable-bool",
                 TypeKind::Stream {
-                    sample: BOOL,
+                    sample: TARGET_RESOURCE_BOOL_TYPE,
                     clock: INPUT_CLOCK,
                     capacity: 1,
                 },
             ),
             TypeDefinition::new(
-                RESOURCE,
+                TARGET_RESOURCE_HANDLE_TYPE,
                 "tinybee.resource.stable-bool",
                 TypeKind::ResourceHandle {
                     class: resource_class,
+                },
+            ),
+            TypeDefinition::new(
+                TARGET_RESOURCE_OPTION_TYPE,
+                "tinybee.resource.optional-stable-bool",
+                TypeKind::Option {
+                    value: TARGET_RESOURCE_HANDLE_TYPE,
+                },
+            ),
+            TypeDefinition::new(
+                TARGET_RESOURCE_ARRAY_TYPE,
+                "tinybee.resource.stable-bool-array",
+                TypeKind::Array {
+                    element: TARGET_RESOURCE_HANDLE_TYPE,
+                    maximum_items: 4,
+                },
+            ),
+            TypeDefinition::new(
+                TARGET_RESOURCE_REFERENCE_SET_TYPE,
+                "tinybee.resource.reference-set",
+                TypeKind::Record {
+                    fields: vec![
+                        RecordField::new(
+                            TARGET_RESOURCE_PRIMARY_FIELD,
+                            "primary",
+                            TARGET_RESOURCE_HANDLE_TYPE,
+                        ),
+                        RecordField::new(
+                            TARGET_RESOURCE_FALLBACK_FIELD,
+                            "fallback",
+                            TARGET_RESOURCE_OPTION_TYPE,
+                        ),
+                        RecordField::new(
+                            TARGET_RESOURCE_MIRRORS_FIELD,
+                            "mirrors",
+                            TARGET_RESOURCE_ARRAY_TYPE,
+                        ),
+                    ],
                 },
             ),
         ],
@@ -4937,21 +5164,42 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
     let context = GraphDocument::try_new(0, schema, clocks, Vec::new(), Vec::new())
         .map_err(|error| error.to_string())?;
     let kind = alumina_interface_core::graph::NodeKind::new("alumina.io.stable-boolean-input", 1);
-    let output = PortDefinition::new(GraphPortId::new(1), "samples", STREAM);
+    let output = PortDefinition::new(GraphPortId::new(1), "samples", TARGET_RESOURCE_STREAM_TYPE);
     let semantic = GraphNodeRegistry::try_new(
         GraphAnalysisLimits::interactive(),
         &context,
-        vec![NodeSchema::new(
-            kind.clone(),
-            ExecutionDomainSet::REALTIME,
-            Vec::new(),
-            Vec::new(),
-            vec![output],
-            vec![NodeParameterContract::new(1, "resource", RESOURCE)],
-            vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
-            Vec::new(),
-            None,
-        )],
+        vec![
+            NodeSchema::new(
+                kind.clone(),
+                ExecutionDomainSet::REALTIME,
+                Vec::new(),
+                Vec::new(),
+                vec![output],
+                vec![NodeParameterContract::new(
+                    TARGET_RESOURCE_PARAMETER,
+                    "resource",
+                    TARGET_RESOURCE_HANDLE_TYPE,
+                )],
+                vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
+                Vec::new(),
+                None,
+            ),
+            NodeSchema::new(
+                NodeKind::new(TARGET_RESOURCE_REFERENCE_KIND_NAME, 1),
+                ExecutionDomainSet::HOST_EXACT,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![NodeParameterContract::new(
+                    TARGET_RESOURCE_PARAMETER,
+                    "references",
+                    TARGET_RESOURCE_REFERENCE_SET_TYPE,
+                )],
+                Vec::new(),
+                Vec::new(),
+                None,
+            ),
+        ],
     )
     .map_err(|error| error.to_string())?;
     let registry = GraphDeploymentRegistry::try_new(
@@ -4960,7 +5208,7 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
             kind,
             GraphDeploymentNodeKind::StableBooleanInput {
                 output: GraphPortId::new(1),
-                resource_parameter: 1,
+                resource_parameter: TARGET_RESOURCE_PARAMETER,
             },
             INPUT_CLOCK,
             100,
@@ -4986,16 +5234,20 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
             catalog.entries().len()
         ));
     }
-    let workspace = empty_target_workspace(&registry)?;
-    let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+    let (workspace, encoding, reference_node) =
+        initial_target_resource_workspace(&catalog, &registry)?;
     Ok(TargetResourceProof {
         catalog,
         registry,
         workspace,
         encoding,
-        catalog_index: 0,
+        catalog_index: 3,
         node_selection: None,
-        status: "digest-verified offline reference catalog ready; target draft is empty".to_owned(),
+        reference_node,
+        reference_slot: 0,
+        status:
+            "digest-verified offline catalog ready; composite references retain three unique reviewed resources"
+                .to_owned(),
     })
 }
 
@@ -5025,6 +5277,219 @@ fn tinybee_capability_document() -> Result<Vec<u8>, String> {
             .ok_or_else(|| "TinyBee capability offset overflowed".to_owned())?;
     }
     Ok(document)
+}
+
+fn target_catalog_resource_handle(
+    catalog: &GraphCapabilityNodeCatalog,
+    entry: usize,
+) -> Result<ResourceGraphHandle, String> {
+    let parameter = catalog
+        .entries()
+        .get(entry)
+        .and_then(|entry| entry.resource_parameter())
+        .ok_or_else(|| format!("TinyBee resource catalog entry {entry} is unavailable"))?;
+    match parameter.value().value() {
+        GraphValue::ResourceHandle(handle) => Ok(*handle),
+        _ => Err(format!(
+            "TinyBee resource catalog entry {entry} is not a resource handle"
+        )),
+    }
+}
+
+fn target_resource_reference_prototype(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+) -> Result<GraphNodePrototype, String> {
+    let value = TypedGraphValue::try_new(
+        registry.semantic_registry().context_schema(),
+        TARGET_RESOURCE_REFERENCE_SET_TYPE,
+        GraphValue::Record(vec![
+            RecordValueField {
+                field: TARGET_RESOURCE_PRIMARY_FIELD,
+                value: GraphValue::ResourceHandle(target_catalog_resource_handle(catalog, 0)?),
+            },
+            RecordValueField {
+                field: TARGET_RESOURCE_FALLBACK_FIELD,
+                value: GraphValue::OptionSome(Box::new(GraphValue::ResourceHandle(
+                    target_catalog_resource_handle(catalog, 1)?,
+                ))),
+            },
+            RecordValueField {
+                field: TARGET_RESOURCE_MIRRORS_FIELD,
+                value: GraphValue::Array(vec![GraphValue::ResourceHandle(
+                    target_catalog_resource_handle(catalog, 2)?,
+                )]),
+            },
+        ]),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(GraphNodePrototype::new(
+        NodeKind::new(TARGET_RESOURCE_REFERENCE_KIND_NAME, 1),
+        "Capability resource references",
+        ExecutionDomain::HostExact,
+        Vec::new(),
+        Vec::new(),
+        vec![NodeParameter::new(
+            TARGET_RESOURCE_PARAMETER,
+            "references",
+            value,
+        )],
+    ))
+}
+
+fn initial_target_resource_workspace(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+) -> Result<
+    (
+        GraphWorkspaceDocument,
+        CanonicalGraphWorkspaceEncoding,
+        GraphNodeId,
+    ),
+    String,
+> {
+    let mut workspace = empty_target_workspace(registry)?;
+    let reference_node = workspace
+        .create_node(
+            target_resource_reference_prototype(catalog, registry)?,
+            28,
+            28,
+        )
+        .map_err(|error| error.to_string())?;
+    validate_target_resource_workspace(catalog, registry, &workspace)?;
+    let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+    Ok((workspace, encoding, reference_node))
+}
+
+fn target_resource_handle_at_path(
+    node: &NodeDefinition,
+    schema: &GraphSchema,
+    path: &[GraphValuePathSegment],
+) -> Option<ResourceGraphHandle> {
+    let parameter = node
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.id() == TARGET_RESOURCE_PARAMETER)?;
+    let (value_type, value) = parameter.value().value_at_path(schema, path).ok()?;
+    if !matches!(
+        schema.value_type(value_type)?.kind(),
+        TypeKind::ResourceHandle { .. }
+    ) {
+        return None;
+    }
+    match value {
+        GraphValue::ResourceHandle(handle) => Some(*handle),
+        _ => None,
+    }
+}
+
+fn collect_resource_handles(value: &GraphValue, handles: &mut Vec<ResourceGraphHandle>) {
+    match value {
+        GraphValue::Array(values) => {
+            for value in values {
+                collect_resource_handles(value, handles);
+            }
+        }
+        GraphValue::Record(fields) => {
+            for field in fields {
+                collect_resource_handles(&field.value, handles);
+            }
+        }
+        GraphValue::OptionSome(value)
+        | GraphValue::ResultOk(value)
+        | GraphValue::ResultError(value) => collect_resource_handles(value, handles),
+        GraphValue::ResourceHandle(handle) => handles.push(*handle),
+        GraphValue::Boolean(_)
+        | GraphValue::ExactRational(_)
+        | GraphValue::MeasurementInterval { .. }
+        | GraphValue::CanonicalI64(_)
+        | GraphValue::CanonicalU64(_)
+        | GraphValue::Text(_)
+        | GraphValue::Bytes(_)
+        | GraphValue::OptionNone
+        | GraphValue::JobHandle(_) => {}
+    }
+}
+
+fn graph_value_contains_catalog_resource(
+    catalog: &GraphCapabilityNodeCatalog,
+    value: &GraphValue,
+    entry: usize,
+) -> bool {
+    let Ok(selected) = target_catalog_resource_handle(catalog, entry) else {
+        return false;
+    };
+    let mut handles = Vec::new();
+    collect_resource_handles(value, &mut handles);
+    handles.contains(&selected)
+}
+
+fn validate_target_resource_workspace(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+    workspace: &GraphWorkspaceDocument,
+) -> Result<(), String> {
+    analyze_graph_draft(workspace.graph(), registry.semantic_registry())
+        .map_err(|error| error.to_string())?;
+    let reference_nodes = workspace
+        .graph()
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind().name() == TARGET_RESOURCE_REFERENCE_KIND_NAME && node.kind().version() == 1
+        })
+        .collect::<Vec<_>>();
+    if reference_nodes.len() != 1 {
+        return Err(format!(
+            "target resource draft has {} composite reference sets instead of one",
+            reference_nodes.len()
+        ));
+    }
+    for slot in TARGET_RESOURCE_REFERENCE_SLOTS {
+        let handle = target_resource_handle_at_path(
+            reference_nodes[0],
+            registry.semantic_registry().context_schema(),
+            slot.path,
+        )
+        .ok_or_else(|| {
+            format!(
+                "target resource reference set has no typed references.{} leaf",
+                slot.label
+            )
+        })?;
+        if catalog.entry_index_for_handle(handle).is_none() {
+            return Err(format!(
+                "target resource references.{} carries a raw or foreign identity",
+                slot.label
+            ));
+        }
+    }
+
+    let mut retained = Vec::new();
+    for node in workspace.graph().nodes() {
+        for parameter in node.parameters() {
+            let mut handles = Vec::new();
+            collect_resource_handles(parameter.value().value(), &mut handles);
+            for handle in handles {
+                if catalog.entry_index_for_handle(handle).is_none() {
+                    return Err(format!(
+                        "target resource node #{} parameter {} carries a raw or foreign identity",
+                        node.id().get(),
+                        parameter.id()
+                    ));
+                }
+                if retained.contains(&handle) {
+                    return Err(format!(
+                        "target resource node #{} parameter {} duplicates a physical identity",
+                        node.id().get(),
+                        parameter.id()
+                    ));
+                }
+                retained.push(handle);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
@@ -7325,88 +7790,99 @@ mod tests {
     }
 
     #[test]
-    fn tinybee_reference_catalog_creates_only_four_concrete_resource_nodes() {
+    fn tinybee_reference_catalog_builds_one_composite_and_one_free_resource() {
         let mut proof = tinybee_resource_proof().unwrap();
         assert_eq!(proof.catalog.advertised_resource_count(), 4);
         assert_eq!(proof.catalog.entries().len(), 4);
-        assert!(proof.workspace.graph().nodes().is_empty());
-        for index in 0..proof.catalog.entries().len() {
-            proof.catalog_index = index;
-            assert!(!proof.selected_is_present());
-            proof.add_selected();
-            assert!(proof.selected_is_present());
+        assert_eq!(proof.workspace.graph().nodes().len(), 1);
+        assert_eq!(proof.reference_node, GraphNodeId::new(1));
+        for (slot, entry) in [0, 1, 2].into_iter().enumerate() {
+            proof.reference_slot = slot;
+            assert_eq!(proof.selected_reference_entry(), Some(entry));
         }
-        assert_eq!(proof.workspace.graph().nodes().len(), 4);
+        assert_eq!(proof.catalog_index, 3);
+        assert!(!proof.selected_is_present());
+        proof.add_selected();
+        assert!(proof.selected_is_present());
+        assert_eq!(proof.workspace.graph().nodes().len(), 2);
+        let concrete = GraphNodeId::new(2);
+        assert_eq!(proof.node_selection, Some(concrete));
+        assert_eq!(
+            proof
+                .catalog
+                .entry_index_for_node(proof.workspace.graph().node(concrete).unwrap()),
+            Some(3)
+        );
         let retained = proof.encoding.clone();
         proof.add_selected();
         assert_eq!(proof.encoding, retained);
         assert!(proof.status.contains("already"));
-        assert!(proof.workspace.graph().nodes().iter().all(|node| {
-            node.domain()
-                == ExecutionDomain::Realtime {
-                    device_id: DeviceId([0x54; 16]),
-                }
-                && matches!(
-                    node.parameters()[0].value().value(),
-                    GraphValue::ResourceHandle(_)
-                )
-        }));
+        assert_eq!(
+            proof.workspace.graph().node(concrete).unwrap().domain(),
+            ExecutionDomain::Realtime {
+                device_id: DeviceId([0x54; 16]),
+            }
+        );
         proof.reset();
-        assert!(proof.workspace.graph().nodes().is_empty());
-        assert_eq!(proof.workspace.next_node_id(), 1);
+        assert_eq!(proof.workspace.graph().nodes().len(), 1);
+        assert_eq!(proof.reference_node, GraphNodeId::new(1));
+        assert_eq!(proof.workspace.next_node_id(), 2);
         assert_eq!(proof.node_selection, None);
+        assert_eq!(proof.catalog_index, 3);
+        assert_eq!(proof.reference_slot, 0);
     }
 
     #[test]
-    fn tinybee_reference_selector_rebinds_without_manufacturing_identity() {
+    fn tinybee_composite_resource_selector_preserves_siblings_and_uniqueness() {
         let mut proof = tinybee_resource_proof().unwrap();
-        proof.catalog_index = 0;
-        proof.add_selected();
         let node = GraphNodeId::new(1);
-        assert_eq!(proof.node_selection, Some(node));
+        proof.reference_slot = 1;
+        assert_eq!(proof.selected_reference_entry(), Some(1));
+        proof.catalog_index = 3;
         let before = proof.encoding.clone();
         let before_node_cursor = proof.workspace.next_node_id();
         let before_wire_cursor = proof.workspace.next_wire_id();
         let before_placement = proof.workspace.placement(node);
 
-        proof.catalog_index = 2;
         assert!(!proof.selected_is_present());
-        assert!(!proof.selected_node_uses_selected_entry());
-        proof.rebind_selected();
-        assert!(proof.status.contains("GPIO 22 to GPIO 33"));
+        proof.rebind_reference();
+        assert!(
+            proof
+                .status
+                .contains("references.fallback.some from GPIO 32 to GPIO 35")
+        );
         assert_ne!(proof.encoding, before);
         assert_eq!(proof.workspace.next_node_id(), before_node_cursor);
         assert_eq!(proof.workspace.next_wire_id(), before_wire_cursor);
         assert_eq!(proof.workspace.placement(node), before_placement);
-        assert_eq!(
-            proof
-                .catalog
-                .entry_index_for_node(proof.workspace.graph().node(node).unwrap()),
-            Some(2)
-        );
         assert!(proof.selected_is_present());
-        assert!(proof.selected_node_uses_selected_entry());
+        assert_eq!(proof.selected_reference_entry(), Some(3));
+        for (slot, entry) in [(0, 0), (1, 3), (2, 2)] {
+            proof.reference_slot = slot;
+            assert_eq!(proof.selected_reference_entry(), Some(entry));
+        }
 
         proof.catalog_index = 1;
+        assert!(!proof.selected_is_present());
         proof.add_selected();
         let second = GraphNodeId::new(2);
         assert_eq!(proof.node_selection, Some(second));
         let retained = proof.encoding.clone();
-        proof.node_selection = Some(node);
-        proof.rebind_selected();
+        proof.reference_slot = 0;
+        proof.rebind_reference();
         assert_eq!(proof.encoding, retained);
         assert!(proof.status.contains("already carried"));
         assert_eq!(
             proof
                 .catalog
-                .entry_index_for_node(proof.workspace.graph().node(node).unwrap()),
-            Some(2)
-        );
-        assert_eq!(
-            proof
-                .catalog
                 .entry_index_for_node(proof.workspace.graph().node(second).unwrap()),
             Some(1)
+        );
+        proof.reference_slot = 0;
+        assert_eq!(
+            proof.selected_reference_entry(),
+            Some(0),
+            "duplicate rejection changed the selected composite sibling"
         );
     }
 

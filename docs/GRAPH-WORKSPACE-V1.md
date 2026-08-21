@@ -103,7 +103,8 @@ text exactly, composite parsing follows the registered schema, and canonical
 `ALGR` encoding stores the normalized value without a floating-point
 conversion. Resource/job handles and runtime Event/Stream shapes remain
 visibly read-only in the text editor. The separate capability-derived target
-draft can replace a resource handle only through exact catalog selection. The
+draft can replace a root or nested resource handle only through exact catalog
+selection and a bounded schema-aware path. The
 separate [cache-derived job draft](GRAPH-CACHED-JOB-CATALOG-V1.md) can add or
 replace an inert job handle at a bounded schema-aware composite path only after
 canonical CAM artifacts and complete participant cache-ready observations match
@@ -191,8 +192,8 @@ control UI never claims it can safely interpret or edit them.
 Selection sets, groups/comments, collaborative diffs, and conflict-aware shared
 persistence remain later slices. The separate cache-derived job workspace now
 provides the first exact inert `JobHandle` selection path; prepare/start nodes,
-nested physical-resource selection, multi-job execution workflows, and live
-execution authority remain open.
+executable composite physical-resource consumers, multi-job execution
+workflows, and live execution authority remain open.
 The separate canonical
 [`ALGC` V1 component package](GRAPH-COMPONENT-V1.md) now embeds an unchanged
 `ALGW` and adds a connector pane plus exact front-panel bindings; those facts
