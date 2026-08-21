@@ -222,6 +222,13 @@ struct NodeDrag {
     delta: egui::Vec2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PanelItemDrag {
+    item: GraphFrontPanelItemId,
+    origin: GraphFrontPanelRect,
+    delta: egui::Vec2,
+}
+
 #[derive(Clone, Debug)]
 struct NodePaletteEntry {
     display_name: String,
@@ -619,6 +626,48 @@ enum HierarchyUiAction {
     DisconnectRoot(GraphWireId),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PanelItemDraft {
+    name: String,
+    binding: GraphFrontPanelBinding,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl PanelItemDraft {
+    fn from_item(item: &GraphFrontPanelItem) -> Self {
+        let rect = item.rect();
+        Self {
+            name: item.name().to_owned(),
+            binding: item.binding(),
+            x: rect.x(),
+            y: rect.y(),
+            width: rect.width(),
+            height: rect.height(),
+        }
+    }
+
+    const fn rect(&self) -> GraphFrontPanelRect {
+        GraphFrontPanelRect::new(self.x, self.y, self.width, self.height)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PanelUiAction {
+    Add {
+        name: String,
+        binding: GraphFrontPanelBinding,
+        rect: GraphFrontPanelRect,
+    },
+    Update {
+        item: GraphFrontPanelItemId,
+        draft: PanelItemDraft,
+    },
+    Remove(GraphFrontPanelItemId),
+}
+
 #[derive(Clone, Debug)]
 struct TargetResourceProof {
     catalog: GraphCapabilityNodeCatalog,
@@ -711,6 +760,7 @@ struct BoardExplorerPanel {
 
 #[derive(Clone, Debug)]
 struct ComponentPanelItem {
+    id: GraphFrontPanelItemId,
     name: String,
     binding: GraphFrontPanelBinding,
     rect: GraphFrontPanelRect,
@@ -2184,7 +2234,12 @@ pub(crate) struct ExactControlWorkspace {
     parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
     node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
+    panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
     selected_node: Option<GraphNodeId>,
+    selected_panel_item: Option<GraphFrontPanelItemId>,
+    new_panel_item_name: String,
+    new_panel_binding: Option<GraphFrontPanelBinding>,
+    panel_drag: Option<PanelItemDrag>,
     selected_hierarchy_component: Option<Digest>,
     selected_hierarchy_instance: Option<GraphNodeId>,
     pending_hierarchy_source: Option<WireEndpoint>,
@@ -2238,6 +2293,11 @@ impl ExactControlWorkspace {
             .iter()
             .find(|instance| instance.scope() == GraphInstanceScope::Root)
             .map(|instance| instance.node());
+        let selected_panel_item = component
+            .document
+            .panel_items()
+            .first()
+            .map(GraphFrontPanelItem::id);
         let probes = representative_probes(&workspace)?;
         let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
@@ -2271,7 +2331,12 @@ impl ExactControlWorkspace {
             parameter_drafts: BTreeMap::new(),
             node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
+            panel_item_drafts: BTreeMap::new(),
             selected_node: None,
+            selected_panel_item,
+            new_panel_item_name: String::new(),
+            new_panel_binding: None,
+            panel_drag: None,
             selected_hierarchy_component,
             selected_hierarchy_instance,
             pending_hierarchy_source: None,
@@ -3504,6 +3569,137 @@ impl ExactControlWorkspace {
         Ok(true)
     }
 
+    fn apply_panel_action(&mut self, action: PanelUiAction) {
+        let Some(current) = self.component.clone() else {
+            "front-panel edit rejected without mutation: no selected component is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = current.document.clone();
+        let (status, selected, clears_new_item) = match action {
+            PanelUiAction::Add {
+                name,
+                binding,
+                rect,
+            } => {
+                let item = match document.add_panel_item(name, binding, rect) {
+                    Ok(item) => item,
+                    Err(error) => {
+                        self.component_status =
+                            format!("front-panel edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added front-panel item #{} bound to {}",
+                        item.get(),
+                        panel_binding_label(&document, binding)
+                    ),
+                    Some(item),
+                    true,
+                )
+            }
+            PanelUiAction::Update { item, draft } => {
+                let rect = draft.rect();
+                if let Err(error) =
+                    document.update_panel_item(item, draft.name, draft.binding, rect)
+                {
+                    self.component_status =
+                        format!("front-panel edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("updated exact front-panel item #{}", item.get()),
+                    Some(item),
+                    false,
+                )
+            }
+            PanelUiAction::Remove(item) => {
+                if let Err(error) = document.remove_panel_item(item) {
+                    self.component_status =
+                        format!("front-panel edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("removed front-panel item #{}", item.get()),
+                    None,
+                    false,
+                )
+            }
+        };
+        match self.commit_component_document(&current, document, &status, selected) {
+            Ok(_) if clears_new_item => {
+                self.new_panel_item_name.clear();
+                self.new_panel_binding = None;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.component_status =
+                    format!("front-panel edit rejected without mutation: {error}");
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ALGC replacement, recursive hierarchy remap, flattening, complete-session admission, history, and UI reconciliation are one transaction"
+    )]
+    fn commit_component_document(
+        &mut self,
+        current: &ComponentPackage,
+        document: GraphComponentDocument,
+        status: &str,
+        selected_panel_item: Option<GraphFrontPanelItemId>,
+    ) -> Result<bool, String> {
+        if document == current.document {
+            self.reconcile_panel_selection(selected_panel_item);
+            self.component_status = format!("{status}; canonical component already matched");
+            self.edit_status.clone_from(&self.component_status);
+            return Ok(false);
+        }
+        let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
+        let original = current.encoding.digest();
+        let replacement = encoding.digest();
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let remapped = hierarchy_document
+            .replace_component(original, document.clone())
+            .map_err(|error| error.to_string())?;
+        if remapped != replacement {
+            return Err("hierarchy replacement returned a foreign ALGC identity".to_owned());
+        }
+        let hierarchy = hierarchy_package(hierarchy_document, &self.fixture)?;
+        let candidate = ComponentPackage {
+            document,
+            encoding,
+            hierarchy,
+        };
+        let Some(probes) = self.probes.as_ref() else {
+            return Err("canonical ALGP sidecar is unavailable".to_owned());
+        };
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            Some(&candidate),
+        )
+        .map_err(|error| format!("complete-session candidate rejected: {error}"))?;
+        let history = self.history_with_current_recorded()?;
+        self.component = Some(candidate);
+        self.history = history;
+        self.panel_item_drafts.clear();
+        self.reconcile_hierarchy_selection(Some((original, replacement)));
+        self.reconcile_panel_selection(selected_panel_item);
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
+        self.component_status = format!(
+            "{status}; exact ALGC {}… and complete ALGS history recorded",
+            digest_prefix(replacement.0)
+        );
+        self.edit_status.clone_from(&self.component_status);
+        Ok(true)
+    }
+
     fn handle_component_file_event(&mut self, event: BoundedFileEvent) {
         match event {
             BoundedFileEvent::Import(Ok(bytes)) => match self.import_component_dependency(&bytes) {
@@ -3641,6 +3837,43 @@ impl ExactControlWorkspace {
         }
     }
 
+    fn reconcile_panel_selection(&mut self, preferred: Option<GraphFrontPanelItemId>) {
+        let Some(component) = self.component.as_ref() else {
+            self.selected_panel_item = None;
+            self.panel_item_drafts.clear();
+            self.panel_drag = None;
+            self.new_panel_binding = None;
+            return;
+        };
+        let items = component.document.panel_items();
+        self.panel_item_drafts.retain(|item, _| {
+            items
+                .binary_search_by_key(item, GraphFrontPanelItem::id)
+                .is_ok()
+        });
+        let preferred = preferred.filter(|item| {
+            items
+                .binary_search_by_key(item, GraphFrontPanelItem::id)
+                .is_ok()
+        });
+        self.selected_panel_item = preferred
+            .or_else(|| {
+                self.selected_panel_item.filter(|item| {
+                    items
+                        .binary_search_by_key(item, GraphFrontPanelItem::id)
+                        .is_ok()
+                })
+            })
+            .or_else(|| items.first().map(GraphFrontPanelItem::id));
+        if self.panel_drag.is_some_and(|drag| {
+            items
+                .binary_search_by_key(&drag.item, GraphFrontPanelItem::id)
+                .is_err()
+        }) {
+            self.panel_drag = None;
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "canonical panel layout, exact control editing, and replay-only indicators remain one auditable egui frame operation"
@@ -3659,7 +3892,7 @@ impl ExactControlWorkspace {
         ui.label(
             "This first canonical component wraps the autonomous reference controller: exact parameter controls write ALGW through the normal transactional boundary, and output indicators read only the attached exact replay.",
         );
-        let Some(component) = &self.component else {
+        let Some(component) = self.component.clone() else {
             ui.colored_label(egui::Color32::YELLOW, &self.component_status);
             return;
         };
@@ -3731,6 +3964,168 @@ impl ExactControlWorkspace {
                 }
             }
         }
+        self.reconcile_panel_selection(None);
+        let binding_choices = panel_binding_choices(&component.document);
+        let used_bindings = component
+            .document
+            .panel_items()
+            .iter()
+            .map(GraphFrontPanelItem::binding)
+            .collect::<BTreeSet<_>>();
+        let available_bindings = binding_choices
+            .iter()
+            .filter(|(binding, _)| !used_bindings.contains(binding))
+            .cloned()
+            .collect::<Vec<_>>();
+        if self
+            .new_panel_binding
+            .is_none_or(|binding| used_bindings.contains(&binding))
+        {
+            self.new_panel_binding = available_bindings.first().map(|(binding, _)| *binding);
+        }
+        let mut panel_action = None;
+        ui.separator();
+        ui.strong("Canonical front-panel authoring");
+        ui.weak(
+            "Choose one unbound exact input, parameter, or output; add it with a fresh monotonic identity. Select an item to edit its stable metadata, or drag its header to an integer position. All changes replace the selected ALGC through complete ALGH/ALGM/ALGS admission.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("new stable name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_panel_item_name)
+                    .char_limit(64)
+                    .desired_width(180.0),
+            );
+            let selected_binding_label = self.new_panel_binding.map_or_else(
+                || "no unbound exact binding".to_owned(),
+                |binding| panel_binding_label(&component.document, binding),
+            );
+            egui::ComboBox::from_id_salt("new_component_panel_binding")
+                .selected_text(selected_binding_label)
+                .show_ui(ui, |ui| {
+                    for (binding, label) in &available_bindings {
+                        ui.selectable_value(&mut self.new_panel_binding, Some(*binding), label);
+                    }
+                });
+            if ui
+                .add_enabled(
+                    !self.new_panel_item_name.is_empty() && self.new_panel_binding.is_some(),
+                    egui::Button::new("add bound item"),
+                )
+                .clicked()
+                && let Some(binding) = self.new_panel_binding
+            {
+                match next_panel_item_rect(&component.document) {
+                    Ok(rect) => {
+                        panel_action = Some(PanelUiAction::Add {
+                            name: self.new_panel_item_name.clone(),
+                            binding,
+                            rect,
+                        });
+                    }
+                    Err(error) => {
+                        self.component_status =
+                            format!("front-panel edit rejected without mutation: {error}");
+                    }
+                }
+            }
+        });
+
+        let mut selected_panel_item = self.selected_panel_item;
+        let selected_panel_label = selected_panel_item
+            .and_then(|id| component.document.panel_item(id))
+            .map_or_else(
+                || "no panel item".to_owned(),
+                |item| format!("#{} {}", item.id().get(), item.name()),
+            );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("selected item");
+            egui::ComboBox::from_id_salt("selected_component_panel_item")
+                .selected_text(selected_panel_label)
+                .show_ui(ui, |ui| {
+                    for item in component.document.panel_items() {
+                        ui.selectable_value(
+                            &mut selected_panel_item,
+                            Some(item.id()),
+                            format!("#{} {}", item.id().get(), item.name()),
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    selected_panel_item.is_some(),
+                    egui::Button::new("remove selected item"),
+                )
+                .clicked()
+                && let Some(item) = selected_panel_item
+            {
+                panel_action = Some(PanelUiAction::Remove(item));
+            }
+        });
+        self.selected_panel_item = selected_panel_item;
+
+        if let Some(item_id) = selected_panel_item
+            && let Some(item) = component.document.panel_item(item_id)
+        {
+            let mut draft = self
+                .panel_item_drafts
+                .get(&item_id)
+                .cloned()
+                .unwrap_or_else(|| PanelItemDraft::from_item(item));
+            let selectable_bindings = binding_choices
+                .iter()
+                .filter(|(binding, _)| {
+                    *binding == draft.binding
+                        || !component.document.panel_items().iter().any(|candidate| {
+                            candidate.id() != item_id && candidate.binding() == *binding
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .char_limit(64)
+                        .desired_width(170.0),
+                );
+                egui::ComboBox::from_id_salt("selected_component_panel_binding")
+                    .selected_text(panel_binding_label(&component.document, draft.binding))
+                    .show_ui(ui, |ui| {
+                        for (binding, label) in &selectable_bindings {
+                            ui.selectable_value(&mut draft.binding, *binding, label);
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                let maximum = i32::try_from(component.document.limits().maximum_panel_coordinate)
+                    .unwrap_or(i32::MAX);
+                ui.label("x");
+                ui.add(egui::DragValue::new(&mut draft.x).range(0..=maximum));
+                ui.label("y");
+                ui.add(egui::DragValue::new(&mut draft.y).range(0..=maximum));
+                ui.label("width");
+                ui.add(
+                    egui::DragValue::new(&mut draft.width)
+                        .range(1..=component.document.limits().maximum_panel_coordinate),
+                );
+                ui.label("height");
+                ui.add(
+                    egui::DragValue::new(&mut draft.height)
+                        .range(1..=component.document.limits().maximum_panel_coordinate),
+                );
+                if ui.button("apply exact metadata").clicked() {
+                    panel_action = Some(PanelUiAction::Update {
+                        item: item_id,
+                        draft: draft.clone(),
+                    });
+                }
+                if ui.button("reset draft").clicked() {
+                    draft = PanelItemDraft::from_item(item);
+                }
+            });
+            self.panel_item_drafts.insert(item_id, draft);
+        }
         let items = component
             .document
             .panel_items()
@@ -3745,6 +4140,7 @@ impl ExactControlWorkspace {
                     | GraphFrontPanelBinding::ParameterControl { .. } => None,
                 };
                 Some(ComponentPanelItem {
+                    id: item.id(),
                     name: item.name().to_owned(),
                     binding: item.binding(),
                     rect: item.rect(),
@@ -3774,6 +4170,7 @@ impl ExactControlWorkspace {
             display_panel_coordinate(maximum_bottom.saturating_add(20)).max(120.0),
         );
         let mut parameter_request = None;
+        let mut clicked_panel_item = None;
         egui::ScrollArea::both()
             .id_salt("exact_control_component_front_panel")
             .auto_shrink([false, false])
@@ -3783,7 +4180,7 @@ impl ExactControlWorkspace {
                 painter.rect_filled(surface.rect, 5.0, egui::Color32::from_rgb(21, 25, 34));
                 paint_grid(&painter, surface.rect);
                 for item in &items {
-                    let rect = egui::Rect::from_min_size(
+                    let canonical_rect = egui::Rect::from_min_size(
                         surface.rect.min
                             + egui::vec2(
                                 display_coordinate(item.rect.x()),
@@ -3794,11 +4191,80 @@ impl ExactControlWorkspace {
                             display_panel_coordinate(item.rect.height()),
                         ),
                     );
+                    let header = egui::Rect::from_min_max(
+                        canonical_rect.min,
+                        egui::pos2(canonical_rect.right(), canonical_rect.top() + 22.0),
+                    );
+                    let response = ui.interact(
+                        header,
+                        egui::Id::new(("component_panel_item", item.id.get())),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if response.drag_started() {
+                        self.panel_drag = Some(PanelItemDrag {
+                            item: item.id,
+                            origin: item.rect,
+                            delta: egui::Vec2::ZERO,
+                        });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.panel_drag.as_mut()
+                        && drag.item == item.id
+                    {
+                        drag.delta += response.drag_delta();
+                    }
+                    let dragging = self
+                        .panel_drag
+                        .filter(|drag| drag.item == item.id)
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let rect = dragging
+                        .map_or(canonical_rect, |drag| canonical_rect.translate(drag.delta));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        match (
+                            quantized_canvas_coordinate(drag.origin.x(), drag.delta.x),
+                            quantized_canvas_coordinate(drag.origin.y(), drag.delta.y),
+                        ) {
+                            (Ok(x), Ok(y)) => {
+                                panel_action = Some(PanelUiAction::Update {
+                                    item: item.id,
+                                    draft: PanelItemDraft {
+                                        name: item.name.clone(),
+                                        binding: item.binding,
+                                        x,
+                                        y,
+                                        width: item.rect.width(),
+                                        height: item.rect.height(),
+                                    },
+                                });
+                            }
+                            (Err(error), _) | (_, Err(error)) => {
+                                self.component_status =
+                                    format!("front-panel move rejected without mutation: {error}");
+                            }
+                        }
+                        self.panel_drag = None;
+                    }
+                    if response.clicked() {
+                        clicked_panel_item = Some(item.id);
+                    }
                     painter.rect_filled(rect, 5.0, egui::Color32::from_rgb(35, 44, 57));
                     painter.rect_stroke(
                         rect,
                         5.0,
-                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 119, 151)),
+                        egui::Stroke::new(
+                            if self.selected_panel_item == Some(item.id) {
+                                2.0_f32
+                            } else {
+                                1.0_f32
+                            },
+                            if self.selected_panel_item == Some(item.id) {
+                                egui::Color32::from_rgb(122, 211, 185)
+                            } else {
+                                egui::Color32::from_rgb(90, 119, 151)
+                            },
+                        ),
                     );
                     painter.text(
                         rect.left_top() + egui::vec2(8.0, 6.0),
@@ -3887,8 +4353,13 @@ impl ExactControlWorkspace {
                     }
                 }
             });
+        if let Some(item) = clicked_panel_item {
+            self.selected_panel_item = Some(item);
+        }
         ui.weak(&self.component_status);
-        if let Some((node, parameter, text)) = parameter_request {
+        if let Some(action) = panel_action {
+            self.apply_panel_action(action);
+        } else if let Some((node, parameter, text)) = parameter_request {
             self.commit_parameter_text(node, parameter, &text);
         }
     }
@@ -4587,6 +5058,7 @@ impl ExactControlWorkspace {
         self.reconcile_hierarchy_selection(
             prior_component_digest.zip(replacement_component_digest),
         );
+        self.reconcile_panel_selection(self.selected_panel_item);
         self.replace_probe_package(probes);
         self.probe_status = probe_status;
         self.history = history;
@@ -4774,6 +5246,15 @@ impl ExactControlWorkspace {
         self.parameter_drafts.clear();
         self.node_label_drafts.clear();
         self.probe_drafts.clear();
+        self.panel_item_drafts.clear();
+        self.selected_panel_item = self
+            .component
+            .as_ref()
+            .and_then(|component| component.document.panel_items().first())
+            .map(GraphFrontPanelItem::id);
+        self.new_panel_item_name.clear();
+        self.new_panel_binding = None;
+        self.panel_drag = None;
         self.replace_probe_package(prepared.probes);
         self.cached_jobs.restore_persisted_workspace(
             prepared.cached_job_workspace,
@@ -4860,9 +5341,14 @@ impl ExactControlWorkspace {
         &self,
         workspace: &GraphWorkspaceDocument,
     ) -> (Option<ComponentPackage>, String) {
-        let prepared =
-            representative_component_document(workspace).and_then(|(document, encoding)| {
-                let hierarchy = if let Some(current) = &self.component {
+        let prepared = if let Some(current) = &self.component {
+            let mut document = current.document.clone();
+            document
+                .replace_workspace(workspace.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    let encoding =
+                        encode_graph_component(&document).map_err(|error| error.to_string())?;
                     let mut hierarchy = current.hierarchy.document.clone();
                     let remapped = hierarchy
                         .replace_component(current.encoding.digest(), document.clone())
@@ -4873,16 +5359,24 @@ impl ExactControlWorkspace {
                                 .to_owned(),
                         );
                     }
-                    hierarchy_package(hierarchy, &self.fixture)?
-                } else {
-                    representative_hierarchy(&document, encoding.digest(), &self.fixture)?
-                };
+                    let hierarchy = hierarchy_package(hierarchy, &self.fixture)?;
+                    Ok(ComponentPackage {
+                        document,
+                        encoding,
+                        hierarchy,
+                    })
+                })
+        } else {
+            representative_component_document(workspace).and_then(|(document, encoding)| {
+                let hierarchy =
+                    representative_hierarchy(&document, encoding.digest(), &self.fixture)?;
                 Ok(ComponentPackage {
                     document,
                     encoding,
                     hierarchy,
                 })
-            });
+            })
+        };
         match prepared {
             Ok(component) => {
                 let status = if self.component.is_some() {
@@ -8558,6 +9052,107 @@ fn panel_item_label(name: &str) -> String {
     name.replace('_', " ")
 }
 
+fn panel_binding_label(
+    component: &GraphComponentDocument,
+    binding: GraphFrontPanelBinding,
+) -> String {
+    match binding {
+        GraphFrontPanelBinding::InputControl(input) => component.input(input).map_or_else(
+            || format!("missing input {}", input.get()),
+            |input| format!("input {} · {}", input.id().get(), input.name()),
+        ),
+        GraphFrontPanelBinding::ParameterControl { node, parameter } => component
+            .workspace()
+            .graph()
+            .node(node)
+            .and_then(|definition| {
+                definition
+                    .parameters()
+                    .iter()
+                    .find(|candidate| candidate.id() == parameter)
+                    .map(|parameter_definition| {
+                        format!(
+                            "parameter #{}.{} · {}.{}",
+                            node.get(),
+                            parameter,
+                            definition.label(),
+                            parameter_definition.name()
+                        )
+                    })
+            })
+            .unwrap_or_else(|| format!("missing parameter #{}.{}", node.get(), parameter)),
+        GraphFrontPanelBinding::OutputIndicator(output) => component.output(output).map_or_else(
+            || format!("missing output {}", output.get()),
+            |output| format!("output {} · {}", output.id().get(), output.name()),
+        ),
+    }
+}
+
+fn panel_binding_choices(
+    component: &GraphComponentDocument,
+) -> Vec<(GraphFrontPanelBinding, String)> {
+    let mut choices = Vec::new();
+    choices.extend(component.inputs().iter().map(|input| {
+        let binding = GraphFrontPanelBinding::InputControl(input.id());
+        (binding, panel_binding_label(component, binding))
+    }));
+    for node in component.workspace().graph().nodes() {
+        choices.extend(node.parameters().iter().map(|parameter| {
+            let binding = GraphFrontPanelBinding::ParameterControl {
+                node: node.id(),
+                parameter: parameter.id(),
+            };
+            (binding, panel_binding_label(component, binding))
+        }));
+    }
+    choices.extend(component.outputs().iter().map(|output| {
+        let binding = GraphFrontPanelBinding::OutputIndicator(output.id());
+        (binding, panel_binding_label(component, binding))
+    }));
+    choices
+}
+
+fn next_panel_item_rect(component: &GraphComponentDocument) -> Result<GraphFrontPanelRect, String> {
+    const X: i32 = 20;
+    const GAP: u32 = 20;
+    const WIDTH: u32 = 220;
+    const HEIGHT: u32 = 54;
+    let bottom = component
+        .panel_items()
+        .iter()
+        .map(|item| {
+            u32::try_from(item.rect().y())
+                .ok()
+                .and_then(|y| y.checked_add(item.rect().height()))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "validated panel rectangle could not be projected".to_owned())?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let y = bottom
+        .checked_add(GAP)
+        .ok_or_else(|| "front-panel placement overflowed".to_owned())?;
+    let right = u32::try_from(X)
+        .ok()
+        .and_then(|x| x.checked_add(WIDTH))
+        .ok_or_else(|| "front-panel placement overflowed".to_owned())?;
+    let lower = y
+        .checked_add(HEIGHT)
+        .ok_or_else(|| "front-panel placement overflowed".to_owned())?;
+    if right > component.limits().maximum_panel_coordinate
+        || lower > component.limits().maximum_panel_coordinate
+    {
+        return Err("front-panel has no bounded space for another default item".to_owned());
+    }
+    Ok(GraphFrontPanelRect::new(
+        X,
+        i32::try_from(y).map_err(|_| "front-panel y coordinate exceeds i32".to_owned())?,
+        WIDTH,
+        HEIGHT,
+    ))
+}
+
 fn paint_analog_trace_series(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -10185,6 +10780,189 @@ mod tests {
                 .workspace_digest(),
             workspace.workspace_encoding.digest()
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one panel lifecycle proves monotonic identity, recursive component replacement, complete-session isolation/history, workspace-edit retention, and persistence"
+    )]
+    fn front_panel_authoring_is_exact_historical_monotonic_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_flattened = initial_component.hierarchy.flattening.encoding().clone();
+        let removed_item = GraphFrontPanelItemId::new(15);
+        let binding = GraphFrontPanelBinding::OutputIndicator(GraphComponentOutputId::new(7));
+
+        workspace.apply_panel_action(PanelUiAction::Remove(removed_item));
+        let removed_session = workspace.authoring_session_encoding().unwrap();
+        let removed = workspace.component.as_ref().unwrap();
+        assert_ne!(removed_session, initial_session);
+        assert_eq!(removed.document.panel_items().len(), 14);
+        assert_eq!(removed.document.next_panel_item_id(), 16);
+        assert_eq!(removed.document.workspace(), &initial_workspace);
+        assert_eq!(
+            removed.hierarchy.document.root(),
+            initial_component.hierarchy.document.root()
+        );
+        assert_eq!(removed.hierarchy.flattening.encoding(), &initial_flattened);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+
+        workspace.apply_panel_action(PanelUiAction::Add {
+            name: "external_permit_live".to_owned(),
+            binding,
+            rect: GraphFrontPanelRect::new(20, 480, 220, 54),
+        });
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_item = GraphFrontPanelItemId::new(16);
+        let added = workspace.component.as_ref().unwrap();
+        assert_ne!(added_session, removed_session);
+        assert_eq!(added.document.next_panel_item_id(), 17);
+        assert_eq!(workspace.selected_panel_item, Some(added_item));
+        assert_eq!(
+            added.document.panel_item(added_item).unwrap().binding(),
+            binding
+        );
+        assert_eq!(added.hierarchy.flattening.encoding(), &initial_flattened);
+
+        let edited_draft = PanelItemDraft {
+            name: "external_permit_scope".to_owned(),
+            binding,
+            x: 57,
+            y: 511,
+            width: 260,
+            height: 64,
+        };
+        workspace.apply_panel_action(PanelUiAction::Update {
+            item: added_item,
+            draft: edited_draft.clone(),
+        });
+        let edited_session = workspace.authoring_session_encoding().unwrap();
+        let edited = workspace.component.as_ref().unwrap();
+        let item = edited.document.panel_item(added_item).unwrap();
+        assert_eq!(item.name(), "external_permit_scope");
+        assert_eq!(item.rect(), edited_draft.rect());
+        assert_eq!(edited.document.next_panel_item_id(), 17);
+        assert_eq!(edited.hierarchy.flattening.encoding(), &initial_flattened);
+
+        let history_lengths = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.apply_panel_action(PanelUiAction::Update {
+            item: added_item,
+            draft: edited_draft.clone(),
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+
+        let retained_status = workspace.component_status.clone();
+        let invalid = PanelItemDraft {
+            binding: GraphFrontPanelBinding::OutputIndicator(GraphComponentOutputId::new(1)),
+            ..edited_draft.clone()
+        };
+        workspace.apply_panel_action(PanelUiAction::Update {
+            item: added_item,
+            draft: invalid,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+        assert_ne!(workspace.component_status, retained_status);
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.apply_panel_action(PanelUiAction::Remove(added_item));
+        let removed_again_session = workspace.authoring_session_encoding().unwrap();
+        workspace.apply_panel_action(PanelUiAction::Add {
+            name: "external_permit_final".to_owned(),
+            binding,
+            rect: GraphFrontPanelRect::new(64, 520, 260, 64),
+        });
+        let final_item = GraphFrontPanelItemId::new(17);
+        let panel_session = workspace.authoring_session_encoding().unwrap();
+        let panel_component = workspace.component.as_ref().unwrap();
+        assert_eq!(panel_component.document.next_panel_item_id(), 18);
+        assert!(panel_component.document.panel_item(added_item).is_none());
+        assert_eq!(workspace.selected_panel_item, Some(final_item));
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            removed_again_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            panel_session
+        );
+        assert_eq!(
+            workspace.selected_panel_item,
+            Some(GraphFrontPanelItemId::new(1))
+        );
+
+        let mut moved_workspace = workspace.workspace.clone();
+        let placement = moved_workspace.placement(GraphNodeId::new(1)).unwrap();
+        moved_workspace
+            .move_node(
+                placement.node(),
+                placement.x().checked_add(1).unwrap(),
+                placement.y(),
+            )
+            .unwrap();
+        assert!(workspace.commit_candidate(
+            moved_workspace,
+            "moved control node while retaining authored front panel"
+        ));
+        let moved_session = workspace.authoring_session_encoding().unwrap();
+        let moved_component = workspace.component.as_ref().unwrap();
+        let retained_item = moved_component.document.panel_item(final_item).unwrap();
+        assert_eq!(retained_item.name(), "external_permit_final");
+        assert_eq!(
+            retained_item.rect(),
+            GraphFrontPanelRect::new(64, 520, 260, 64)
+        );
+        assert_eq!(moved_component.document.next_panel_item_id(), 18);
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            moved_session
+        );
+        assert_eq!(
+            restored
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .panel_item(final_item)
+                .unwrap()
+                .name(),
+            "external_permit_final"
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
     }
 
     #[test]

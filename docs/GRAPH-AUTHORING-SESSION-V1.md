@@ -169,6 +169,8 @@ foreign cached-job rejection, atomic failure for corrupted `ALGH`/`ALGM`,
 bounded complete-session history eviction, mixed graph/probe/cached-job
 navigation, exact component-library import/no-op/in-use/remove/persistence,
 root placement and typed disconnect/reconnect with monotonic wire identity,
+front-panel add/update/remove with monotonic item identity and exact layout
+history, authored-panel retention across later workspace edits,
 abandoned-redo clearing, and transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 

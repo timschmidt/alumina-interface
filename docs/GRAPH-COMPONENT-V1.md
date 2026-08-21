@@ -96,6 +96,14 @@ a mapped port, internally wiring a public input, or invalidating any panel
 binding rejects the replacement and preserves the prior component byte for
 byte.
 
+`add_panel_item`, `update_panel_item`, and `remove_panel_item` apply the same
+clone-and-reconstruct rule to panel metadata. Addition allocates only from the
+monotonic panel-item cursor. Deletion never rewinds it. Update replaces the
+stable name, exact binding, and integer rectangle together; a byte-identical
+replacement is an exact no-op. Unknown items, exhausted identity space,
+duplicate names/bindings, unresolved targets, negative/empty/overflowing
+rectangles, and document-limit failures retain the complete prior `ALGC`.
+
 ## First editor workflow
 
 The native/WASM control workspace constructs `control.reference_pid` version 1
@@ -117,8 +125,23 @@ validation. Indicators never relabel stale trace bytes: once the embedded graph
 digest differs from the reference replay, they report that the exact replay is
 detached.
 
-This initial panel metadata is reconstructed from the reviewed fixture rather
-than persisted separately by the `.algw` bridge. The component-library panel
+The visible panel editor lists every exact public input, retained parameter,
+and public output not already owned by another item. It can add one binding
+under a validated stable name, select/remove an item, replace its name,
+binding, and integer x/y/width/height, or drag its header with one cumulative
+pointer delta rounded only at commit. Every accepted edit replaces the selected
+`ALGC` dependency, remaps its exact hierarchy bindings, freshly validates and
+flattens `ALGH`, regenerates `ALGM`, reruns ordinary-node semantic admission,
+and records the prior complete `ALGS` before committing. Panel-only changes
+retain the embedded control `ALGW`, connector pane, root workspace, unrelated
+dependencies, probes, and cached-job workspace exactly. Exact no-ops record no
+history.
+
+The reviewed fixture supplies the initial panel metadata. Once edited, the
+canonical `ALGC` inside `ALGS` and `.algc` exchange is authoritative; later
+compatible `ALGW` edits replace its embedded workspace while retaining the
+authored panel metadata. A standalone `.algw` file has no panel metadata and
+cannot silently reconstruct or overwrite it. The component-library panel
 exports the exact selected `ALGC` and imports a bounded canonical standalone
 leaf after full component/workspace/graph replay, exact re-encoding, audited
 ordinary-node semantics, and current `ALGH` context validation. Importing an
@@ -126,6 +149,24 @@ exact duplicate is a no-op; importing a new identity or later removing that
 unreferenced identity is a complete-session historical edit. Nested
 definitions require scoped `ALGH` bindings that standalone `ALGC` does not
 carry, so this first file workflow deliberately admits leaf packages only.
+
+Optimized Chromium qualification dragged panel item `#14`
+`combined_permit_indicator` by exactly `(+80, +30)` logical pixels, from
+`(460, 404, 240, 54)` to `(540, 434, 240, 54)`. The selected `ALGC` identity
+changed from
+`10e6498ec36afc377f138cacb5c6afe2091c40749ea3c9e9d4bba8925a4f0228`
+to
+`c607de51199369cc1ff7fb40b377309511d5fcee07df1822475efe4c0383c2fd`;
+the complete `ALGH` changed to
+`93567a3cf1b27c6c14acb6ef95eeb37d16fc1aab8a62e69900ad5ccca214bcb6`
+and `ALGM` changed to
+`2bd200edb3f2be3a84e0c6b5251f0043a2be0a0f4da8dce293b02c262e4ffbd8`.
+The embedded control workspace, connector pane, root workspace, wrapper
+dependency, other fourteen panel items, probes, and cached-job workspace
+remained byte-identical. Visible Undo restored the exact reference `ALGS`;
+visible Redo and a fresh reload restored the exact 14,770-byte moved `ALGS`
+with SHA-256
+`530db6a4d7cec74fcb3d36736c8de51cd024b4ed70b3b9c282234c48b5eaf666`.
 
 ## Deliberately open
 
@@ -136,7 +177,7 @@ recursive expansion, and deterministically flattens a component DAG to ordinary
 from the embedded dependency library and preserves them across compatible
 selected-component edits. Nested instance-definition/import workflows,
 general component-library creation, package signatures/permissions, locked
-dependency manifests, connector editing, arbitrary panel editing, panel value
-injection during simulation, probes, and groups/comments remain open. `ALGC`
-V1 grants no semantic, implementation, resource, timing, safety, firmware, or
-physical-output authority.
+dependency manifests, connector editing, overlapping/grouped/responsive panel
+layout policies, panel value injection during simulation or execution, probes,
+and groups/comments remain open. `ALGC` V1 grants no semantic, implementation,
+resource, timing, safety, firmware, or physical-output authority.

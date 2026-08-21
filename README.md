@@ -267,8 +267,14 @@ prototype.
   integer front panel to exact parameters and public outputs. The visible
   reference component supplies eight exact PID/interlock controls and seven
   exact replay indicators (four rational and three Boolean); invalidating a
-  binding detaches the panel without
-  weakening or rejecting the underlying workspace draft.
+  binding detaches the panel without weakening or rejecting the underlying
+  workspace draft. A canonical panel editor now adds any unowned exact
+  input/parameter/output binding with a fresh monotonic identity, edits stable
+  name/binding/integer rectangle metadata, removes items without rewinding the
+  cursor, and drags headers with one cumulative exact-coordinate commit. Every
+  accepted change replaces `ALGC` through complete `ALGH`/`ALGM`/`ALGS`
+  admission and unified history while retaining the embedded workspace,
+  connector pane, root hierarchy, probes, and cached-job workspace.
   Canonical `ALGH` V2 binds scoped root/component placeholders to exact
   component digests, rejects recursive definition cycles, bounds depth and
   expanded occurrences, and deterministically flattens the visible two-level
@@ -520,7 +526,8 @@ annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, editable nested-instance
 definition canvases and general component-library creation, interactive
 traversal from flattened items into nested editable canvases,
-front-panel editing/execution, executable composite
+connector-shape authoring/remapping, front-panel runtime injection/execution,
+responsive/grouped panel layout, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared
 workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated

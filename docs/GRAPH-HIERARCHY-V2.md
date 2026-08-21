@@ -244,6 +244,13 @@ unchanged while every old selected-component binding moves to the new digest.
 An incompatible component edit follows the existing visible detached-hierarchy
 path and remains recoverable through complete-session undo.
 
+Front-panel-only edits use that same replacement path while retaining the
+selected component's embedded workspace and connector pane exactly. Because
+placeholder shape is unchanged, root and nested instance nodes/wires remain
+byte-identical. The replacement `ALGC`, complete `ALGH`, and source-bound
+`ALGM` identities change together and enter the ordinary complete-session
+history; the flattened ordinary `ALGW` remains identical.
+
 ## Deliberately open
 
 Direct root-instance creation/deletion is implemented through the dedicated
@@ -252,7 +259,8 @@ canvas. Nested definition editing and import with separately supplied nested
 bindings, general library creation, parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
 flattening, interactive traversal from final items into nested editable
-canvases, and executable front-panel inputs remain open.
+canvases, connector-shape remapping, and executable front-panel inputs remain
+open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2
