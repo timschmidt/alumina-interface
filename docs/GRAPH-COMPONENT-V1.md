@@ -118,9 +118,14 @@ digest differs from the reference replay, they report that the exact replay is
 detached.
 
 This initial panel metadata is reconstructed from the reviewed fixture rather
-than persisted separately by the current `.algw` bridge. Canonical `ALGC` core
-bytes and replay are implemented and tested; general component file exchange is
-a later UI slice.
+than persisted separately by the `.algw` bridge. The component-library panel
+exports the exact selected `ALGC` and imports a bounded canonical standalone
+leaf after full component/workspace/graph replay, exact re-encoding, audited
+ordinary-node semantics, and current `ALGH` context validation. Importing an
+exact duplicate is a no-op; importing a new identity or later removing that
+unreferenced identity is a complete-session historical edit. Nested
+definitions require scoped `ALGH` bindings that standalone `ALGC` does not
+carry, so this first file workflow deliberately admits leaf packages only.
 
 ## Deliberately open
 
@@ -129,9 +134,9 @@ scoped component instances by exact digest, rejects dependency cycles, bounds
 recursive expansion, and deterministically flattens a component DAG to ordinary
 `ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
 from the embedded dependency library and preserves them across compatible
-selected-component edits. Nested instance-definition workflows, general
-component-library import/creation, package signatures/permissions, locked
+selected-component edits. Nested instance-definition/import workflows,
+general component-library creation, package signatures/permissions, locked
 dependency manifests, connector editing, arbitrary panel editing, panel value
-injection during simulation, probes, groups/comments, and standalone `ALGC`
-file exchange remain open. `ALGC` V1 grants no semantic, implementation,
-resource, timing, safety, firmware, or physical-output authority.
+injection during simulation, probes, and groups/comments remain open. `ALGC`
+V1 grants no semantic, implementation, resource, timing, safety, firmware, or
+physical-output authority.

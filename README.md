@@ -259,9 +259,9 @@ prototype.
   `ALGW`, bound `ALGP`, catalog-bound composite cached-job `ALGW`, selected
   `ALGC`, complete `ALGH`, and freshly replayed `ALGM`. The `algs1:` wrapper has
   one lowercase-hex payload; the retired `algwb1:` format is unsupported.
-  Native/browser `.algs`, `.algw`, `.algp`, and `.algm` exchange imports only
-  after bounded full replay, identity binding, catalog checks, and audited UI
-  admission.
+  Native/browser `.algs`, `.algw`, `.algp`, `.algc`, and `.algm` exchange
+  imports only after the artifact's bounded full replay plus every applicable
+  identity, catalog, hierarchy-context, and audited UI admission check.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible
@@ -278,14 +278,18 @@ prototype.
   path freshly flattens the complete `ALGH` and regenerates every byte before
   the selected-node inspector or exact trace cursor displays source-path/final
   endpoint correlation; it grants no execution or firmware authority.
-  The component-library panel now lists only exact dependencies already
-  admitted by that `ALGH`, and can add or delete root occurrences directly.
-  Each action edits a cloned hierarchy, retains monotonic root identities,
-  regenerates and admits the complete `ALGH`/flattened `ALGW`/`ALGM` branch,
-  and records the prior complete `ALGS` before committing. Compatible control
-  edits replace the selected `ALGC` dependency and remap every exact binding
-  while preserving the authored root workspace and stable library entries;
-  invalid replacements or selections leave the prior session unchanged.
+  The component-library panel lists exact dependencies already admitted by
+  that `ALGH`, exchanges the selected dependency as canonical `.algc`, imports
+  a bounded standalone leaf only after exact replay and audited graph
+  admission, removes only an unreferenced non-authoritative dependency, and
+  can add or delete root occurrences directly. Each action edits a cloned
+  hierarchy, retains monotonic identities, regenerates and admits the complete
+  `ALGH`/flattened `ALGW`/`ALGM` branch, and records the prior complete `ALGS`
+  before committing. Exact duplicate imports are selection-only no-ops.
+  Compatible control edits replace the selected `ALGC` dependency and remap
+  every exact binding while preserving the authored root workspace and stable
+  library entries; invalid imports, removals, replacements, or selections
+  leave the prior session unchanged.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
@@ -507,7 +511,7 @@ physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, editable nested-instance
-definition canvases and general component-library import/creation, interactive
+definition canvases and general component-library creation, interactive
 traversal from flattened items into nested editable canvases,
 front-panel editing/execution, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared

@@ -21,12 +21,13 @@ use alumina_interface_core::graph::{
     CanonicalGraphDeploymentReplayEvidence1, CanonicalGraphHierarchyEncoding,
     CanonicalGraphHierarchySourceMapEncoding, CanonicalGraphProbeEncoding,
     CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ChannelFullPolicy,
-    ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES,
-    GraphAnalysisLimits, GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument,
-    GraphAuthoringSessionHistory, GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits,
-    GraphCachedJobCatalog, GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits,
-    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInput,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet, GRAPH_COMPONENT_INSTANCE_KIND,
+    GRAPH_COMPONENT_INSTANCE_VERSION, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
+    GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument, GraphAuthoringSessionHistory,
+    GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog,
+    GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
+    GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInstance,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
@@ -52,9 +53,10 @@ use alumina_interface_core::graph::{
     format_graph_literal_text, graph_component_instance_input_port,
     graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
     lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
-    replay_graph_authoring_session, replay_graph_hierarchy_source_map, replay_graph_probes,
-    replay_graph_workspace, replay_realtime_graph_deployment, select_graph_cached_job_handle,
-    select_graph_capability_node_resource, verify_graph_deployment_evidence_bytes,
+    replay_graph_authoring_session, replay_graph_component, replay_graph_hierarchy_source_map,
+    replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
+    select_graph_cached_job_handle, select_graph_capability_node_resource,
+    verify_graph_deployment_evidence_bytes,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
@@ -93,6 +95,7 @@ const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
 const PERSISTED_AUTHORING_SESSION_PREFIX: &str = "algs1:";
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
+const ALGC_FILE: BoundedFileSpec = BoundedFileSpec::new("selected ALGC dependency", "algc");
 const ALGM_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGM source map", "algm");
 const ALGS_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGS authoring session", "algs");
 const ALGR_SUCCESS_REPLAY_FILE: BoundedFileSpec =
@@ -602,6 +605,7 @@ enum ProbeUiAction {
 enum HierarchyUiAction {
     AddRoot(Digest),
     RemoveRoot(GraphNodeId),
+    RemoveComponent(Digest),
 }
 
 #[derive(Clone, Debug)]
@@ -2181,6 +2185,7 @@ pub(crate) struct ExactControlWorkspace {
     authoring_session_file_bridge: BoundedFileBridge,
     workspace_file_bridge: BoundedFileBridge,
     probe_file_bridge: BoundedFileBridge,
+    component_file_bridge: BoundedFileBridge,
     hierarchy_source_file_bridge: BoundedFileBridge,
     target_success_replay_file_bridge: BoundedFileBridge,
     target_fault_replay_file_bridge: BoundedFileBridge,
@@ -2265,6 +2270,7 @@ impl ExactControlWorkspace {
             authoring_session_file_bridge: BoundedFileBridge::default(),
             workspace_file_bridge: BoundedFileBridge::default(),
             probe_file_bridge: BoundedFileBridge::default(),
+            component_file_bridge: BoundedFileBridge::default(),
             hierarchy_source_file_bridge: BoundedFileBridge::default(),
             target_success_replay_file_bridge: BoundedFileBridge::default(),
             target_fault_replay_file_bridge: BoundedFileBridge::default(),
@@ -2968,6 +2974,39 @@ impl ExactControlWorkspace {
                 action = Some(HierarchyUiAction::AddRoot(digest));
             }
         });
+        let selected_dependency = self.selected_hierarchy_component;
+        let selected_dependency_in_use = selected_dependency.is_some_and(|digest| {
+            component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.component() == digest
+                        || instance.scope() == GraphInstanceScope::Component(digest)
+                })
+        });
+        let selected_dependency_is_authoritative =
+            selected_dependency == Some(component.encoding.digest());
+        ui.horizontal_wrapped(|ui| {
+            let removable = selected_dependency.is_some()
+                && !selected_dependency_in_use
+                && !selected_dependency_is_authoritative;
+            if ui
+                .add_enabled(removable, egui::Button::new("remove library component"))
+                .clicked()
+                && let Some(digest) = selected_dependency
+            {
+                action = Some(HierarchyUiAction::RemoveComponent(digest));
+            }
+            ui.weak(if selected_dependency_is_authoritative {
+                "the selected ALGC is the complete-session control authority"
+            } else if selected_dependency_in_use {
+                "remove every root/nested reference before removing this dependency"
+            } else {
+                "only exact unreferenced non-authoritative dependencies are removable"
+            });
+        });
         ui.horizontal_wrapped(|ui| {
             ui.strong("Root occurrence");
             egui::ComboBox::from_id_salt("hierarchy_root_instance")
@@ -2992,6 +3031,24 @@ impl ExactControlWorkspace {
                 action = Some(HierarchyUiAction::RemoveRoot(node));
             }
         });
+        let component_file_events = selected_dependency
+            .and_then(|digest| component.hierarchy.document.dependency(digest))
+            .map_or_else(Vec::new, |dependency| {
+                let download_name = format!(
+                    "alumina-component-{}.algc",
+                    digest_prefix(dependency.digest().0)
+                );
+                self.component_file_bridge.show(
+                    ui,
+                    dependency.encoding().bytes(),
+                    GraphComponentLimits::interactive().maximum_component_bytes,
+                    &download_name,
+                    ALGC_FILE,
+                )
+            });
+        ui.weak(
+            "ALGC import accepts a bounded canonical leaf component only after exact replay, audited graph admission, and current hierarchy-context validation.",
+        );
         ui.monospace(format!(
             "{} exact dependencies · {} root bindings · next root node {}",
             dependencies.len(),
@@ -3001,6 +3058,9 @@ impl ExactControlWorkspace {
         ui.label(&self.component_status);
         if let Some(action) = action {
             self.apply_hierarchy_action(action);
+        }
+        for event in component_file_events {
+            self.handle_component_file_event(event);
         }
     }
 
@@ -3073,43 +3133,71 @@ impl ExactControlWorkspace {
                     None,
                 )
             }
-        };
-        let hierarchy = match hierarchy_package(document, &self.fixture) {
-            Ok(hierarchy) => hierarchy,
-            Err(error) => {
-                self.component_status =
-                    format!("hierarchy edit rejected without mutation: {error}");
-                return;
+            HierarchyUiAction::RemoveComponent(component) => {
+                if component == current.encoding.digest() {
+                    "hierarchy edit rejected without mutation: the selected ALGC is complete-session control authority"
+                        .clone_into(&mut self.component_status);
+                    return;
+                }
+                if let Err(error) = document.remove_component(component) {
+                    self.component_status =
+                        format!("hierarchy edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!(
+                        "removed unreferenced library ALGC {}…",
+                        digest_prefix(component.0)
+                    ),
+                    None,
+                    self.selected_hierarchy_instance,
+                )
             }
         };
+        if let Err(error) = self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            selected_component,
+            selected_instance,
+        ) {
+            self.component_status = format!("hierarchy edit rejected without mutation: {error}");
+        }
+    }
+
+    fn commit_hierarchy_document(
+        &mut self,
+        current: ComponentPackage,
+        document: GraphHierarchyDocument,
+        status: &str,
+        selected_component: Option<Digest>,
+        selected_instance: Option<GraphNodeId>,
+    ) -> Result<bool, String> {
+        if document == current.hierarchy.document {
+            self.selected_hierarchy_component = selected_component;
+            self.selected_hierarchy_instance = selected_instance;
+            self.reconcile_hierarchy_selection(None);
+            self.component_status = format!("{status}; canonical hierarchy already matched");
+            self.edit_status.clone_from(&self.component_status);
+            return Ok(false);
+        }
+        let hierarchy = hierarchy_package(document, &self.fixture)?;
         let candidate = ComponentPackage {
             document: current.document,
             encoding: current.encoding,
             hierarchy,
         };
         let Some(probes) = self.probes.as_ref() else {
-            "hierarchy edit rejected without mutation: canonical ALGP sidecar is unavailable"
-                .clone_into(&mut self.component_status);
-            return;
+            return Err("canonical ALGP sidecar is unavailable".to_owned());
         };
-        if let Err(error) = Self::authoring_session_document_from_parts(
+        Self::authoring_session_document_from_parts(
             &self.workspace,
             &probes.document,
             &self.cached_jobs.workspace,
             Some(&candidate),
-        ) {
-            self.component_status =
-                format!("hierarchy complete-session candidate rejected without mutation: {error}");
-            return;
-        }
-        let history = match self.history_with_current_recorded() {
-            Ok(history) => history,
-            Err(error) => {
-                self.component_status =
-                    format!("hierarchy authoring-session history rejected: {error}");
-                return;
-            }
-        };
+        )
+        .map_err(|error| format!("complete-session candidate rejected: {error}"))?;
+        let history = self.history_with_current_recorded()?;
         self.component = Some(candidate);
         self.history = history;
         self.selected_hierarchy_component = selected_component;
@@ -3119,6 +3207,67 @@ impl ExactControlWorkspace {
         self.persistence_attempted = false;
         self.component_status = format!("{status}; complete ALGS history recorded");
         self.edit_status.clone_from(&self.component_status);
+        Ok(true)
+    }
+
+    fn handle_component_file_event(&mut self, event: BoundedFileEvent) {
+        match event {
+            BoundedFileEvent::Import(Ok(bytes)) => match self.import_component_dependency(&bytes) {
+                Ok(_) => self.file_status.clone_from(&self.component_status),
+                Err(error) => {
+                    self.file_status =
+                        format!("ALGC import rejected without authoring mutation: {error}");
+                    self.component_status.clone_from(&self.file_status);
+                }
+            },
+            BoundedFileEvent::Import(Err(error)) => {
+                self.file_status = format!("ALGC file read rejected: {error}");
+            }
+            BoundedFileEvent::Export(Ok(bytes)) => {
+                self.file_status = format!("exported {bytes} exact selected ALGC dependency bytes");
+            }
+            BoundedFileEvent::Export(Err(error)) => {
+                self.file_status = format!("ALGC export failed: {error}");
+            }
+        }
+    }
+
+    fn import_component_dependency(&mut self, bytes: &[u8]) -> Result<bool, String> {
+        let replay = replay_graph_component(
+            bytes,
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        analyze_graph_draft(
+            replay.document().workspace().graph(),
+            self.fixture.registry().semantic_registry(),
+        )
+        .map_err(|error| format!("imported ALGC graph semantics rejected: {error}"))?;
+        let digest = replay.encoding().digest();
+        let Some(current) = self.component.clone() else {
+            return Err("no selected component hierarchy is attached".to_owned());
+        };
+        let mut document = current.hierarchy.document.clone();
+        let admitted = document
+            .add_component(replay.into_document())
+            .map_err(|error| error.to_string())?;
+        if admitted != digest {
+            return Err("component-library admission returned a foreign ALGC identity".to_owned());
+        }
+        let status = format!(
+            "imported {} canonical ALGC bytes as library dependency {}…",
+            bytes.len(),
+            digest_prefix(digest.0)
+        );
+        self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            Some(digest),
+            self.selected_hierarchy_instance,
+        )
     }
 
     fn reconcile_hierarchy_selection(&mut self, component_remap: Option<(Digest, Digest)>) {
@@ -4237,6 +4386,7 @@ impl ExactControlWorkspace {
         let component = session
             .hierarchy()
             .map(|hierarchy| {
+                analyze_component_library_drafts(hierarchy.document(), &self.fixture)?;
                 analyze_graph_draft(
                     hierarchy.flattening().workspace().graph(),
                     self.fixture.registry().semantic_registry(),
@@ -7154,6 +7304,7 @@ fn hierarchy_package(
     document: GraphHierarchyDocument,
     fixture: &RepresentativeExactControlGraph,
 ) -> Result<HierarchyPackage, String> {
+    analyze_component_library_drafts(&document, fixture)?;
     let encoding = encode_graph_hierarchy(&document).map_err(|error| error.to_string())?;
     let flattening = flatten_graph_hierarchy(&document).map_err(|error| error.to_string())?;
     let source_map = encode_graph_hierarchy_source_map(
@@ -7172,6 +7323,39 @@ fn hierarchy_package(
         flattening,
         source_map,
     })
+}
+
+fn analyze_component_library_drafts(
+    document: &GraphHierarchyDocument,
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<(), String> {
+    for dependency in document.dependencies() {
+        let mut workspace = dependency.document().workspace().clone();
+        let placeholders = workspace
+            .graph()
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
+                    && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION
+            })
+            .map(NodeDefinition::id)
+            .collect::<Vec<_>>();
+        for placeholder in placeholders {
+            workspace
+                .delete_node(placeholder)
+                .map_err(|error| error.to_string())?;
+        }
+        analyze_graph_draft(workspace.graph(), fixture.registry().semantic_registry()).map_err(
+            |error| {
+                format!(
+                    "component library ALGC {}… draft semantics rejected: {error}",
+                    digest_prefix(dependency.digest().0)
+                )
+            },
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(
@@ -9708,6 +9892,231 @@ mod tests {
                 .component_status
                 .contains("rejected without mutation")
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exact library lifecycle proves import isolation, no-op behavior, in-use rejection, removal, history, and persistence"
+    )]
+    fn component_library_import_remove_history_and_persistence_are_exact() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let mut imported = initial_component.document.clone();
+        let mut imported_workspace = imported.workspace().clone();
+        let node = imported_workspace.graph().nodes()[0].id();
+        let placement = imported_workspace.placement(node).unwrap();
+        imported_workspace
+            .move_node(node, placement.x() + 19, placement.y() + 23)
+            .unwrap();
+        imported.replace_workspace(imported_workspace).unwrap();
+        let imported_encoding = encode_graph_component(&imported).unwrap();
+        let imported_digest = imported_encoding.digest();
+
+        workspace.mark_persisted();
+        assert!(
+            workspace
+                .import_component_dependency(imported_encoding.bytes())
+                .unwrap()
+        );
+        let imported_session = workspace.authoring_session_encoding().unwrap();
+        let component = workspace.component.as_ref().unwrap();
+        assert_ne!(imported_session, initial_session);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(component.document, initial_component.document);
+        assert_eq!(component.encoding, initial_component.encoding);
+        assert_eq!(component.hierarchy.document.root(), &initial_root);
+        assert_eq!(component.hierarchy.document.dependencies().len(), 3);
+        assert_eq!(
+            component
+                .hierarchy
+                .document
+                .dependency(imported_digest)
+                .unwrap()
+                .encoding(),
+            &imported_encoding
+        );
+        assert_eq!(component.hierarchy.document.flattened_instance_count(), 2);
+        assert_eq!(component.hierarchy.document.flattened_node_count(), 21);
+        assert_eq!(
+            workspace.selected_hierarchy_component,
+            Some(imported_digest)
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.mark_persisted();
+        let imported_history = workspace.history.clone();
+        assert!(
+            !workspace
+                .import_component_dependency(imported_encoding.bytes())
+                .unwrap()
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        assert_eq!(workspace.history, imported_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("already matched"));
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(imported_digest));
+        let referenced_session = workspace.authoring_session_encoding().unwrap();
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(2)
+                        && instance.component() == imported_digest
+                })
+        );
+        assert_eq!(workspace.history.undo_len(), 2);
+
+        workspace.mark_persisted();
+        let referenced_history = workspace.history.clone();
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveComponent(imported_digest));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            referenced_session
+        );
+        assert_eq!(workspace.history, referenced_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("still referenced"));
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveRoot(GraphNodeId::new(2)));
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveComponent(imported_digest));
+        let removed_session = workspace.authoring_session_encoding().unwrap();
+        let component = workspace.component.as_ref().unwrap();
+        assert!(
+            component
+                .hierarchy
+                .document
+                .dependency(imported_digest)
+                .is_none()
+        );
+        assert_eq!(component.hierarchy.document.root().next_node_id(), 3);
+        assert_eq!(
+            workspace.selected_hierarchy_component,
+            Some(component.encoding.digest())
+        );
+        assert_eq!(workspace.history.undo_len(), 4);
+
+        workspace.navigate_history(false);
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependency(imported_digest)
+                .is_some()
+        );
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            referenced_session
+        );
+        workspace.navigate_history(true);
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            removed_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            removed_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn invalid_or_authoritative_component_library_edits_are_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+        let authoritative = workspace.component.as_ref().unwrap().encoding.digest();
+
+        let mut corrupt = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .encoding
+            .bytes()
+            .to_vec();
+        corrupt[0] ^= 0xff;
+        assert!(workspace.import_component_dependency(&corrupt).is_err());
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        let mut unreviewed = workspace.component.as_ref().unwrap().document.clone();
+        let mut unreviewed_workspace = unreviewed.workspace().clone();
+        let exemplar = unreviewed_workspace.graph().nodes()[0].clone();
+        unreviewed_workspace
+            .create_node(
+                GraphNodePrototype::new(
+                    NodeKind::new("control.unreviewed-component", 1),
+                    "Unreviewed component behavior",
+                    exemplar.domain(),
+                    exemplar.inputs().to_vec(),
+                    exemplar.outputs().to_vec(),
+                    exemplar.parameters().to_vec(),
+                ),
+                9_000,
+                100,
+            )
+            .unwrap();
+        unreviewed.replace_workspace(unreviewed_workspace).unwrap();
+        let unreviewed = encode_graph_component(&unreviewed).unwrap();
+        assert!(
+            workspace
+                .import_component_dependency(unreviewed.bytes())
+                .unwrap_err()
+                .contains("semantics rejected")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveComponent(authoritative));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("control authority"));
     }
 
     #[test]

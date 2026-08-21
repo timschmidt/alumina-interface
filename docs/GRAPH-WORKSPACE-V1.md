@@ -132,9 +132,9 @@ sessions](GRAPH-AUTHORING-SESSION-V1.md), not mutable UI deltas, inverse
 operations, or a subset of the visible state. One timeline therefore restores
 the control `ALGW`, bound `ALGP`, catalog-bound cached-job `ALGW`, selected
 `ALGC`, complete `ALGH`, and exact `ALGM` atomically. A successful graph,
-probe, trigger, sidecar-import, cached-job, or direct root-instance edit records
-the exact prior session and discards the abandoned redo branch. An exact no-op
-records nothing.
+probe, trigger, sidecar-import, cached-job, component-library, or direct
+root-instance edit records the exact prior session and discards the abandoned
+redo branch. An exact no-op records nothing.
 
 Every navigation target first replays the complete `ALGS` and all nested
 artifacts. The UI then rebuilds layout, reruns audited semantic admission, and
@@ -168,13 +168,14 @@ not compatibility inputs.
 Restore replays the complete outer artifact and every nested canonical
 artifact, proves the ALGP/control binding and selected-component/control
 binding, freshly flattens ALGH to regenerate ALGM, admits both visible graphs
-through the fixed UI registry, and checks every cached-job handle against the
+through the fixed UI registry, audits every dependency's ordinary-node draft
+through that same registry, and checks every cached-job handle against the
 newly derived exact catalog. Only after all checks succeed does any in-memory
 state change. Malformed, mismatched, stale, foreign, or substituted input thus
 rejects the complete session atomically.
 
-Browser download writes byte-for-byte canonical `.algs`, `.algw`, `.algp`, or
-`.algm` content. Browser upload
+Browser download writes byte-for-byte canonical `.algs`, `.algw`, `.algp`,
+`.algc`, or `.algm` content. Browser upload
 checks the advertised file size, bounds the materialized `ArrayBuffer`, and
 forwards only bytes within that artifact's policy. The native shell exposes
 independent explicit paths with bounded reads and exact, synchronized writes.
@@ -185,6 +186,14 @@ against the exact current workspace and cannot mutate the graph; an identity
 mismatch leaves both graph and prior sidecar unchanged. Explicit ALGW files
 retain the 20 MiB workspace admission ceiling; ALGP files use their canonical
 2 MiB document ceiling; complete ALGS files use the 8 MiB session ceiling.
+
+A focused `.algc` import admits one standalone leaf into the current hierarchy
+library only after bounded component/workspace/graph replay, exact re-encoding,
+audited ordinary-node semantics, and complete hierarchy-context validation.
+Successful add/remove changes are ordinary complete-session edits; an exact
+duplicate import is a no-op. A dependency cannot be removed while named by a
+child or parent-scope binding, and the selected control-authority component is
+never removable through this workflow.
 
 All opened ALGW bytes first pass canonical replay, embedded-limit checks, exact
 re-encoding, UI layout admission, and the fixed audited semantic registry. A

@@ -96,21 +96,24 @@ Any nested corruption, foreign probe binding, missing selected component,
 workspace substitution, stale source map, policy widening, or noncanonical
 outer encoding rejects the whole session.
 
-The application adds two semantic gates after core replay and before mutation:
-the control and flattened hierarchy graphs must use the audited UI registry,
-and every cached-job handle leaf must be a member of the freshly reconciled
-catalog. Only after every check succeeds does it replace the control workspace,
-probe package, cached-job workspace, selected component, complete hierarchy,
-and source map together. Failed restore leaves all prior authoring state intact.
+The application adds semantic gates after core replay and before mutation: the
+control graph, every dependency's ordinary-node draft, and the flattened
+hierarchy graph must use the audited UI registry, while every cached-job handle
+leaf must be a member of the freshly reconciled catalog. Structural component
+placeholders remain the responsibility of `ALGH` validation and are removed
+from the per-definition ordinary-node audit. Only after every check succeeds
+does the application replace the control workspace, probe package, cached-job
+workspace, selected component, complete hierarchy, and source map together.
+Failed restore leaves all prior authoring state intact.
 
 ## Ephemeral complete-session history
 
 The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
-Control-workspace, probe/trigger, focused import, cached-job, selected-component,
-direct root-instance, hierarchy, and source-map state therefore share one
-timeline rather than independent histories that could be navigated into a
-mismatched combination.
+Control-workspace, probe/trigger, focused import, cached-job,
+selected-component, component-library, direct root-instance, hierarchy, and
+source-map state therefore share one timeline rather than independent histories
+that could be navigated into a mismatched combination.
 
 The first interactive policy retains at most 16 snapshots in each direction
 and 64 MiB of canonical `ALGS` bytes across both stacks. The current session is
@@ -141,8 +144,13 @@ session and marks persistence pending.
 
 Native and browser UI expose the same complete bytes as `.algs`. Import is
 bounded at 8 MiB and uses the same atomic replay/admission transaction. The
-separate `.algw`, `.algp`, and `.algm` tools remain useful for focused artifact
-inspection, but they are not substitutes for complete-session persistence.
+separate `.algw`, `.algp`, `.algc`, and `.algm` tools remain useful for focused
+artifact inspection, but they are not substitutes for complete-session
+persistence. A valid new `.algc` leaf is inserted into the embedded hierarchy
+library only after exact replay and semantic/context admission, then commits a
+new complete `ALGS`; a byte-identical duplicate records no history. Removal is
+available only for an unreferenced non-authoritative dependency and likewise
+commits through complete-session history.
 
 ## Golden fixture
 
@@ -158,8 +166,9 @@ round trips, limit and structural corruption rejection, selected-workspace
 binding, exact UI hierarchy/source-map preservation, retired-prefix rejection,
 foreign cached-job rejection, atomic failure for corrupted `ALGH`/`ALGM`,
 bounded complete-session history eviction, mixed graph/probe/cached-job
-navigation, abandoned-redo clearing, and transactional failure for corrupt or
-catalog-inadmissible history targets.
+navigation, exact component-library import/no-op/in-use/remove/persistence,
+abandoned-redo clearing, and transactional failure for corrupt,
+semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 
 The complete browser reference session is 14,770 bytes with SHA-256
 `d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`.

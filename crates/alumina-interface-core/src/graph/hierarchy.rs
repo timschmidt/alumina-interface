@@ -281,6 +281,60 @@ impl GraphHierarchyDocument {
             .map(|index| &self.dependencies[index])
     }
 
+    /// Transactionally retain one additional exact component dependency. An
+    /// encoding already present in the library is an exact no-op.
+    pub fn add_component(
+        &mut self,
+        component: GraphComponentDocument,
+    ) -> Result<Digest, GraphHierarchyError> {
+        let encoding = encode_graph_component(&component)?;
+        let digest = encoding.digest();
+        if let Some(existing) = self.dependency(digest) {
+            if existing.encoding == encoding {
+                return Ok(digest);
+            }
+            return Err(GraphHierarchyError::NonCanonical);
+        }
+        let mut components = self.component_documents();
+        components.push(component);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.root.clone(),
+            components,
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(digest)
+    }
+
+    /// Transactionally remove one unreferenced exact dependency. A component
+    /// remains in use when any binding names it as either containing scope or
+    /// child component.
+    pub fn remove_component(&mut self, component: Digest) -> Result<(), GraphHierarchyError> {
+        let index = self
+            .dependencies
+            .binary_search_by_key(&component, GraphHierarchyDependency::digest)
+            .map_err(|_| GraphHierarchyError::UnknownComponent(component))?;
+        if self.instances.iter().any(|instance| {
+            instance.component == component
+                || instance.scope == GraphInstanceScope::Component(component)
+        }) {
+            return Err(GraphHierarchyError::ComponentInUse(component));
+        }
+        let mut components = self.component_documents();
+        components.remove(index);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.root.clone(),
+            components,
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Transactionally replace one exact component dependency and remap every
     /// binding that names its old digest. Existing placeholder shapes must
     /// remain valid under the replacement's public connector pane.
@@ -708,6 +762,8 @@ pub enum GraphHierarchyError {
     DuplicateComponent(Digest),
     /// An instance referenced a dependency absent from the library.
     UnknownComponent(Digest),
+    /// A requested dependency removal still had a parent-scope or child binding.
+    ComponentInUse(Digest),
     /// A nested binding named a parent component absent from the library.
     UnknownInstanceScope(Digest),
     /// Two bindings referenced the same node in one scope.
@@ -825,6 +881,10 @@ impl fmt::Display for GraphHierarchyError {
             Self::UnknownComponent(digest) => {
                 write!(formatter, "graph hierarchy component {digest:?} is unknown")
             }
+            Self::ComponentInUse(digest) => write!(
+                formatter,
+                "graph hierarchy component {digest:?} is still referenced"
+            ),
             Self::UnknownInstanceScope(component) => write!(
                 formatter,
                 "graph hierarchy instance scope component {component:?} is unknown"
@@ -2541,6 +2601,89 @@ mod tests {
         assert_eq!(
             hierarchy.replace_component(Digest([0x72; 32]), component()),
             Err(GraphHierarchyError::UnknownComponent(Digest([0x72; 32])))
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn unreferenced_component_library_lifecycle_is_transactional_and_exact() {
+        let mut hierarchy = hierarchy();
+        let original_root = hierarchy.root().clone();
+        let original_counts = (
+            hierarchy.flattened_instance_count(),
+            hierarchy.flattened_node_count(),
+            hierarchy.flattened_wire_count(),
+        );
+        let original_revision = hierarchy.revision();
+        let mut extra = component();
+        let mut workspace = extra.workspace().clone();
+        let node = workspace.graph().nodes()[0].id();
+        let placement = workspace.placement(node).unwrap();
+        workspace
+            .move_node(node, placement.x() + 31, placement.y() + 17)
+            .unwrap();
+        extra.replace_workspace(workspace).unwrap();
+        let digest = encode_graph_component(&extra).unwrap().digest();
+
+        assert_eq!(hierarchy.add_component(extra.clone()).unwrap(), digest);
+        assert_eq!(hierarchy.revision(), original_revision + 1);
+        assert_eq!(hierarchy.dependencies().len(), 2);
+        assert_eq!(hierarchy.dependency(digest).unwrap().document(), &extra);
+        assert_eq!(hierarchy.root(), &original_root);
+        assert_eq!(
+            (
+                hierarchy.flattened_instance_count(),
+                hierarchy.flattened_node_count(),
+                hierarchy.flattened_wire_count(),
+            ),
+            original_counts
+        );
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+
+        let added = hierarchy.clone();
+        assert_eq!(hierarchy.add_component(extra).unwrap(), digest);
+        assert_eq!(hierarchy, added, "exact duplicate import advanced state");
+
+        hierarchy.remove_component(digest).unwrap();
+        assert_eq!(hierarchy.revision(), original_revision + 2);
+        assert_eq!(hierarchy.dependencies().len(), 1);
+        assert!(hierarchy.dependency(digest).is_none());
+        assert_eq!(hierarchy.root(), &original_root);
+        assert_eq!(
+            (
+                hierarchy.flattened_instance_count(),
+                hierarchy.flattened_node_count(),
+                hierarchy.flattened_wire_count(),
+            ),
+            original_counts
+        );
+    }
+
+    #[test]
+    fn referenced_and_unknown_component_removal_preserve_the_library() {
+        let mut hierarchy = hierarchy();
+        let referenced = hierarchy.dependencies()[0].digest();
+        let retained = hierarchy.clone();
+        assert_eq!(
+            hierarchy.remove_component(referenced),
+            Err(GraphHierarchyError::ComponentInUse(referenced))
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.remove_component(Digest([0xb4; 32])),
+            Err(GraphHierarchyError::UnknownComponent(Digest([0xb4; 32])))
         );
         assert_eq!(hierarchy, retained);
     }

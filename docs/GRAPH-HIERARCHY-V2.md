@@ -74,8 +74,13 @@ substitute a different connector shape.
 
 ## Transactional authoring operations
 
-`GraphHierarchyDocument` exposes three bounded clone-and-validate mutations:
+`GraphHierarchyDocument` exposes five bounded clone-and-validate mutations:
 
+- `add_component` canonically encodes one standalone definition and adds its
+  exact digest to the dependency library; an already-present byte-identical
+  encoding is a no-op;
+- `remove_component` removes only a known dependency that is named by neither
+  a child binding nor a component parent scope;
 - `add_root_instance` resolves an existing exact dependency, derives its
   placeholder shape, and allocates the root node through the root `ALGW`'s
   monotonic cursor;
@@ -178,15 +183,24 @@ cursor correlate leaf-local endpoints such as `[1/1]:n8.p1` with the final
 does not substitute a collapsed placeholder into the executable editor canvas
 or claim that an instance itself can run.
 
-The adjacent component-library panel selects only dependencies already present
-in the canonical hierarchy. Adding a selected dependency places a new root
-placeholder to the right of the current root layout; deleting a selected root
-occurrence also deletes only its incident root wires. The UI then freshly
-encodes `ALGH`, flattens it, regenerates `ALGM`, admits the flattened draft
-through the audited semantic registry, constructs the complete `ALGS`, records
-the previous complete session, and commits all artifacts together. Direct
-authoring therefore participates in the same exact undo/redo and persistence
-timeline as control, probe, and cached-job edits.
+The adjacent component-library panel selects dependencies already present in
+the canonical hierarchy. It exports the selected dependency byte for byte,
+imports a bounded canonical standalone leaf only after replay and audited
+ordinary-node semantic admission, and removes only an unreferenced dependency
+that is not the selected control authority. Every complete hierarchy admission
+also audits the ordinary-node draft of every dependency, including
+unreferenced definitions; structural instance placeholders are validated by
+`ALGH` and do not acquire semantic authority from that audit.
+
+Adding a selected dependency places a new root placeholder to the right of the
+current root layout; deleting a selected root occurrence also deletes only its
+incident root wires. The UI then freshly encodes `ALGH`, flattens it,
+regenerates `ALGM`, admits the flattened draft through the audited semantic
+registry, constructs the complete `ALGS`, records the previous complete
+session, and commits all artifacts together. Library imports/removals and
+direct occurrence authoring therefore participate in the same exact undo/redo
+and persistence timeline as control, probe, and cached-job edits. An exact
+duplicate import changes only the transient selection and records no history.
 
 When an attached control workspace changes compatibly, the UI constructs the
 replacement selected `ALGC` and calls `replace_component`; authored root
@@ -199,10 +213,11 @@ path and remains recoverable through complete-session undo.
 
 Direct root-instance creation/deletion is implemented through the dedicated
 library panel. Main-canvas instance wiring and movement, nested definition
-editing, general library import/creation/removal, parameter promotion/overrides,
-package signatures and permissions, locked dependency manifests, incremental
-flattening, interactive traversal from final items into nested editable
-canvases, and executable front-panel inputs remain open.
+editing and import with separately supplied nested bindings, general library
+creation, parameter promotion/overrides, package signatures and permissions,
+locked dependency manifests, incremental flattening, interactive traversal
+from final items into nested editable canvases, and executable front-panel
+inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2
