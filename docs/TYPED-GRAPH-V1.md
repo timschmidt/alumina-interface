@@ -503,8 +503,8 @@ flattens connector wiring to an ordinary workspace using fresh monotonic IDs.
 Nested package dependencies, general cycle/depth rules, editable instance and
 panel workflows remain open. Multi-value state records, queue timeouts and
 additional policies, cases/loops/state machines, capability-generated nodes
-beyond stable Boolean inputs, cache-derived job-handle selectors and nested
-identity-bearing workflows, workspace collaboration/conflict handling, broader
+beyond stable Boolean inputs, nested identity-bearing job workflows and
+prepare/start nodes, workspace collaboration/conflict handling, broader
 resource claims, general host implementation admission, measured WCET/deadline
 analysis, physical HIL,
 output and motion opcodes, live capability/configuration discovery,

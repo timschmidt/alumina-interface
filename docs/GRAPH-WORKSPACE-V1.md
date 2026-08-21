@@ -188,8 +188,10 @@ control UI never claims it can safely interpret or edit them.
 
 ## Current exclusions
 
-Cache-derived job-handle selection, selection sets, groups/comments,
-collaborative diffs, and conflict-aware shared persistence remain later slices.
+Selection sets, groups/comments, collaborative diffs, and conflict-aware shared
+persistence remain later slices. The separate cache-derived job workspace now
+provides the first exact inert `JobHandle` selection path; prepare/start nodes,
+nested identity-bearing workflows, and live execution authority remain open.
 The separate canonical
 [`ALGC` V1 component package](GRAPH-COMPONENT-V1.md) now embeds an unchanged
 `ALGW` and adds a connector pane plus exact front-panel bindings; those facts
