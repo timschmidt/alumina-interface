@@ -103,6 +103,29 @@ catalog. Only after every check succeeds does it replace the control workspace,
 probe package, cached-job workspace, selected component, complete hierarchy,
 and source map together. Failed restore leaves all prior authoring state intact.
 
+## Ephemeral complete-session history
+
+The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
+byte strings. It is not a second wire format and is never nested into `ALGS`.
+Control-workspace, probe/trigger, focused import, cached-job, selected-component,
+hierarchy, and source-map state therefore share one timeline rather than
+independent histories that could be navigated into a mismatched combination.
+
+The first interactive policy retains at most 16 snapshots in each direction
+and 64 MiB of canonical `ALGS` bytes across both stacks. The current session is
+held separately and does not count against that budget. A successful canonical
+change records its exact prior session and clears the abandoned redo branch;
+an exact no-op records nothing. Oldest complete snapshots are evicted until
+both bounds hold, without splitting any nested artifact.
+
+Undo and redo replay the target through the complete core boundary, then rerun
+the application's audited graph and cached-job catalog admission before
+changing either authoring state or history stacks. Byte corruption, tighter
+replay limits, unknown semantics, or stale/foreign cached-job identities fail
+without mutation. Navigation restores all six bound artifact roles together
+and clears only transient UI selections and text/drag drafts. Fresh startup,
+complete-session import, and persistence restore begin with empty history.
+
 ## Browser persistence and file exchange
 
 Browser local storage uses the greenfield key
@@ -131,7 +154,10 @@ provenance. Its canonical `ALGS` is 14,794 bytes with SHA-256:
 Tests require byte-for-byte replay, hierarchy-present and hierarchy-absent
 round trips, limit and structural corruption rejection, selected-workspace
 binding, exact UI hierarchy/source-map preservation, retired-prefix rejection,
-foreign cached-job rejection, and atomic failure for corrupted `ALGH`/`ALGM`.
+foreign cached-job rejection, atomic failure for corrupted `ALGH`/`ALGM`,
+bounded complete-session history eviction, mixed graph/probe/cached-job
+navigation, abandoned-redo clearing, and transactional failure for corrupt or
+catalog-inadmissible history targets.
 
 The complete browser reference session is 14,770 bytes with SHA-256
 `d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`.

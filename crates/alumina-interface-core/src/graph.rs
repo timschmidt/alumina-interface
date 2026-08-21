@@ -14,6 +14,7 @@ use hyperreal::Rational;
 
 mod analysis;
 mod authoring_session;
+mod authoring_session_history;
 mod capability_catalog;
 mod component;
 mod control_fixture;
@@ -30,7 +31,6 @@ mod storage;
 mod trace;
 mod wire;
 mod workspace;
-mod workspace_probe_history;
 
 pub use analysis::{
     ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
@@ -48,6 +48,10 @@ pub use authoring_session::{
     GraphAuthoringSessionReplay, GraphAuthoringSessionReplayLimits,
     MAX_GRAPH_AUTHORING_SESSION_BYTES, encode_graph_authoring_session,
     replay_graph_authoring_session,
+};
+pub use authoring_session_history::{
+    GraphAuthoringSessionHistory, GraphAuthoringSessionHistoryError,
+    GraphAuthoringSessionHistoryLimits,
 };
 pub use capability_catalog::{
     GraphCapabilityCatalogError, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
@@ -141,10 +145,6 @@ pub use workspace::{
     GraphNodePlacement, GraphNodePrototype, GraphWorkspaceDocument, GraphWorkspaceError,
     GraphWorkspaceHistory, GraphWorkspaceHistoryError, GraphWorkspaceHistoryLimits,
     GraphWorkspaceLimits, GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
-};
-pub use workspace_probe_history::{
-    GraphWorkspaceProbeHistory, GraphWorkspaceProbeHistoryError, GraphWorkspaceProbeHistoryLimits,
-    GraphWorkspaceProbeHistoryReplay,
 };
 
 /// Stable identifier for one registered physical unit.

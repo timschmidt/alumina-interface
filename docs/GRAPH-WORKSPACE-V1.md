@@ -127,30 +127,31 @@ reference graph and layout.
 
 ## Canonical history
 
-Undo and redo retain complete pairs of independent canonical `ALGW` and bound
-`ALGP` encodings, not mutable UI deltas, inverse operations, or the browser text
-envelope. The default policy keeps at most 32 pair snapshots in each direction
-and at most 64 MiB of combined ALGW-plus-ALGP bytes across both stacks; the
-separately held current pair does not count against that budget. Both artifacts
-in the oldest snapshot are evicted together. A successful graph, probe
-name/capture-policy, trigger, or ALGP-import edit records the exact prior pair
-and discards the abandoned redo branch. An exact no-op records nothing.
+Undo and redo retain complete canonical [`ALGS` V1 authoring
+sessions](GRAPH-AUTHORING-SESSION-V1.md), not mutable UI deltas, inverse
+operations, or a subset of the visible state. One timeline therefore restores
+the control `ALGW`, bound `ALGP`, catalog-bound cached-job `ALGW`, selected
+`ALGC`, complete `ALGH`, and exact `ALGM` atomically. A successful graph,
+probe, trigger, sidecar-import, or cached-job edit records the exact prior
+session and discards the abandoned redo branch. An exact no-op records nothing.
 
-Every navigation target first replays ALGW under the same 20 MiB workspace and
-interactive graph limits used for an imported file, then replays ALGP against
-that reconstructed workspace under its 2 MiB policy. The UI also rebuilds its
-layout and reruns audited semantic admission before history state changes. A
-corrupt, noncanonical, unregistered, unbound, or otherwise inadmissible target
-leaves both current documents and both history stacks unchanged. Navigation
-clears transient wire, drag, parameter-text, and probe-metadata fields, but
-preserves a selection only when that node still exists and resets the cursor
-from the restored trigger resolution.
+Every navigation target first replays the complete `ALGS` and all nested
+artifacts. The UI then rebuilds layout, reruns audited semantic admission, and
+checks every cached-job leaf against the freshly derived catalog before
+history state changes. A corrupt, noncanonical, unregistered, unbound, stale,
+foreign, or otherwise inadmissible target leaves the current authoring session
+and both history stacks unchanged. Navigation clears transient selection,
+wire, drag, parameter-text, and probe-metadata state and resets the cursor from
+the restored trigger resolution.
 
-History is intentionally ephemeral and is not nested inside `ALGW`, `ALGP`, or
-browser storage. This avoids recursive snapshots, keeps both document
-identities independent of an editing session, and means a restored or freshly
-opened pair begins with empty undo and redo stacks. Importing a different valid
-workspace or bound sidecar is itself one undoable pair edit.
+The default policy keeps at most 16 complete sessions in each direction and at
+most 64 MiB of combined canonical `ALGS` bytes across both stacks; the
+separately held current session does not count against that budget. Oldest
+complete sessions are evicted without splitting nested artifacts. History is
+ephemeral and is not nested inside `ALGS` or browser storage, avoiding
+recursive snapshots. A freshly opened, persisted, or imported complete
+session therefore begins with empty undo and redo stacks. Focused valid
+`ALGW`/`ALGP` imports are ordinary undoable complete-session edits.
 
 ## Persistence and file exchange
 

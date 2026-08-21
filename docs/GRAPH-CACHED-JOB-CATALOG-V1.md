@@ -80,9 +80,11 @@ digest, device ID, partition ID, file path, or command field.
 
 The panel visibly reports that it is simulated and non-executing. It shows the
 global job and participant-set prefixes, canonical graph identity and byte
-length, exact participant cache facts, and bounded history state. Every undo
-or redo target replays canonical `ALGW` bytes and reruns both semantic and
-catalog-membership admission before it replaces current state.
+length, exact participant cache facts, and the shared complete-session history
+state. Cached-job edits participate in the same bounded canonical `ALGS`
+timeline as control, probe, component, hierarchy, and source-map state. Every
+undo or redo target replays the complete session and reruns both semantic and
+catalog-membership admission before it replaces any current state.
 
 ## Origin-local persistence
 

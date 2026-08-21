@@ -23,10 +23,10 @@ use alumina_interface_core::graph::{
     CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ChannelFullPolicy,
     ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES,
     GraphAnalysisLimits, GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument,
-    GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog,
-    GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
-    GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInstance,
-    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    GraphAuthoringSessionHistory, GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits,
+    GraphCachedJobCatalog, GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits,
+    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInput,
+    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
@@ -38,13 +38,13 @@ use alumina_interface_core::graph::{
     GraphProbeId, GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits,
     GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry,
     GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
-    GraphWorkspaceProbeHistory, InputConnectionRequirement, MAX_GRAPH_AUTHORING_SESSION_BYTES,
-    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
-    NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
-    NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
-    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
-    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
+    GraphWorkspaceDocument, GraphWorkspaceLimits, InputConnectionRequirement,
+    MAX_GRAPH_AUTHORING_SESSION_BYTES, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+    MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, NodeDefinition, NodeInputChannelContract,
+    NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
+    NodeSchema, PortDefinition, RecordField, RecordFieldId, RecordValueField,
+    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
+    ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
     analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
     encode_graph_hierarchy, encode_graph_hierarchy_source_map, encode_graph_probes,
@@ -561,6 +561,16 @@ fn hierarchy_endpoint_correlation(
 struct ProbePackage {
     document: GraphProbeDocument,
     encoding: CanonicalGraphProbeEncoding,
+}
+
+struct PreparedAuthoringSession {
+    workspace: GraphWorkspaceDocument,
+    workspace_encoding: CanonicalGraphWorkspaceEncoding,
+    presentation: GraphPresentation,
+    component: Option<ComponentPackage>,
+    probes: ProbePackage,
+    cached_job_workspace: GraphWorkspaceDocument,
+    cached_job_encoding: CanonicalGraphWorkspaceEncoding,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1587,7 +1597,6 @@ struct CachedJobGraphProof {
     registry: GraphNodeRegistry,
     workspace: GraphWorkspaceDocument,
     encoding: CanonicalGraphWorkspaceEncoding,
-    history: GraphWorkspaceHistory,
     selected_entry: usize,
     selected_slot: usize,
     selected_node: Option<GraphNodeId>,
@@ -1632,7 +1641,6 @@ impl CachedJobGraphProof {
             registry,
             workspace,
             encoding,
-            history: GraphWorkspaceHistory::default(),
             selected_entry: 0,
             selected_slot: 0,
             selected_node: Some(selected_node),
@@ -1642,19 +1650,16 @@ impl CachedJobGraphProof {
         })
     }
 
-    fn show(&mut self, ui: &mut egui::Ui) -> bool {
-        let starting_digest = self.encoding.digest();
+    fn show(&mut self, ui: &mut egui::Ui) -> Option<CachedJobGraphAction> {
         ui.heading("Cached job composite references");
         ui.label(
             "Offline proof only: one exact record retains primary, optional fallback, and bounded-array mirror references. Choices come from canonically replayed CAM artifacts observed in each simulated MCU cache. Every leaf is inert data and does not prepare, arm, or start a job.",
         );
         ui.label(format!(
-            "{} participants · ALGW {} bytes · revision {} · {} undo / {} redo",
+            "{} participants · ALGW {} bytes · revision {} · unified ALGS history",
             self.catalog.entries().len(),
             self.encoding.bytes().len(),
             self.workspace.revision(),
-            self.history.undo_len(),
-            self.history.redo_len(),
         ));
         ui.monospace(format!(
             "global job {}… · participant set {}… · graph {}…",
@@ -1679,35 +1684,12 @@ impl CachedJobGraphProof {
             {
                 action = Some(CachedJobGraphAction::Rebind);
             }
-            if ui
-                .add_enabled(self.history.can_undo(), egui::Button::new("undo job edit"))
-                .clicked()
-            {
-                action = Some(CachedJobGraphAction::Undo);
-            }
-            if ui
-                .add_enabled(self.history.can_redo(), egui::Button::new("redo job edit"))
-                .clicked()
-            {
-                action = Some(CachedJobGraphAction::Redo);
-            }
         });
-        if let Some(action) = action {
-            let result = match action {
-                CachedJobGraphAction::Add => self.add_selected_reference(),
-                CachedJobGraphAction::Rebind => self.rebind_selected_reference(),
-                CachedJobGraphAction::Undo => self.navigate_history(false),
-                CachedJobGraphAction::Redo => self.navigate_history(true),
-            };
-            if let Err(error) = result {
-                self.status = error;
-            }
-        }
         ui.label(&self.status);
         ui.weak(
             "The value path uses stable record-field IDs, explicit active branches, and bounded array indices. No digest, device-ID, partition-ID, file path, or command text is accepted; deployment and deterministic start remain separate authorities.",
         );
-        self.encoding.digest() != starting_digest
+        action
     }
 
     fn show_selection(&mut self, ui: &mut egui::Ui) {
@@ -1824,7 +1806,7 @@ impl CachedJobGraphProof {
         CACHED_JOB_REFERENCE_SLOTS[self.selected_slot]
     }
 
-    fn add_selected_reference(&mut self) -> Result<(), String> {
+    fn prepare_add_selected_reference(&self) -> Result<CachedJobGraphUpdate, String> {
         let index = self.workspace.graph().nodes().len();
         let ordinal = index
             .checked_add(1)
@@ -1846,17 +1828,19 @@ impl CachedJobGraphProof {
             .map_err(|error| error.to_string())?;
         validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
         let encoding = encode_graph_workspace(&candidate).map_err(|error| error.to_string())?;
-        self.commit(candidate, encoding)?;
-        self.selected_node = Some(node);
-        self.status = format!(
-            "added inert cached-job reference #{} from audited catalog entry {}",
-            node.get(),
-            self.selected_entry + 1
-        );
-        Ok(())
+        Ok(CachedJobGraphUpdate {
+            workspace: candidate,
+            encoding,
+            selected_node: Some(node),
+            status: format!(
+                "added inert cached-job reference #{} from audited catalog entry {}",
+                node.get(),
+                self.selected_entry + 1
+            ),
+        })
     }
 
-    fn rebind_selected_reference(&mut self) -> Result<(), String> {
+    fn prepare_rebind_selected_reference(&self) -> Result<CachedJobGraphUpdate, String> {
         let node = self
             .selected_node
             .ok_or_else(|| "select a catalog-managed job node first".to_owned())?;
@@ -1864,6 +1848,27 @@ impl CachedJobGraphProof {
             .get(self.selected_slot)
             .copied()
             .ok_or_else(|| "select a bounded cached-job composite leaf first".to_owned())?;
+        let current_entry = self
+            .workspace
+            .graph()
+            .node(node)
+            .and_then(|node| {
+                cached_job_handle_at_path(node, self.registry.context_schema(), slot.path)
+            })
+            .and_then(|handle| self.catalog.entry_index_for_handle(handle));
+        if current_entry == Some(self.selected_entry) {
+            return Ok(CachedJobGraphUpdate {
+                workspace: self.workspace.clone(),
+                encoding: self.encoding.clone(),
+                selected_node: self.selected_node,
+                status: format!(
+                    "retained inert reference #{} at references.{} on audited catalog entry {}",
+                    node.get(),
+                    slot.label,
+                    self.selected_entry + 1
+                ),
+            });
+        }
         let mut candidate = self.workspace.clone();
         let encoding = select_graph_cached_job_handle(
             &self.catalog,
@@ -1876,71 +1881,31 @@ impl CachedJobGraphProof {
         )
         .map_err(|error| error.to_string())?;
         validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
-        self.commit(candidate, encoding)?;
-        self.status = format!(
-            "rebound inert reference #{} at references.{} to audited catalog entry {}",
-            node.get(),
-            slot.label,
-            self.selected_entry + 1
-        );
-        Ok(())
+        Ok(CachedJobGraphUpdate {
+            workspace: candidate,
+            encoding,
+            selected_node: self.selected_node,
+            status: format!(
+                "rebound inert reference #{} at references.{} to audited catalog entry {}",
+                node.get(),
+                slot.label,
+                self.selected_entry + 1
+            ),
+        })
     }
 
-    fn navigate_history(&mut self, redo: bool) -> Result<(), String> {
-        let mut history = self.history.clone();
-        let replay = if redo {
-            history.redo(
-                &self.workspace,
-                self.workspace.limits(),
-                self.workspace.graph().schema().limits(),
-            )
-        } else {
-            history.undo(
-                &self.workspace,
-                self.workspace.limits(),
-                self.workspace.graph().schema().limits(),
-            )
+    fn prepare_action(&self, action: CachedJobGraphAction) -> Result<CachedJobGraphUpdate, String> {
+        match action {
+            CachedJobGraphAction::Add => self.prepare_add_selected_reference(),
+            CachedJobGraphAction::Rebind => self.prepare_rebind_selected_reference(),
         }
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "cached job history has no requested target".to_owned())?;
-        validate_cached_job_workspace(&self.catalog, &self.registry, replay.document())?;
-        let encoding = replay.encoding().clone();
-        let workspace = replay.into_document();
-        self.history = history;
-        self.workspace = workspace;
-        self.encoding = encoding;
-        self.selected_node = self
-            .selected_node
-            .filter(|selected| self.workspace.graph().node(*selected).is_some())
-            .or_else(|| {
-                self.workspace
-                    .graph()
-                    .nodes()
-                    .first()
-                    .map(NodeDefinition::id)
-            });
-        if redo {
-            "replayed later canonical cached-job ALGW snapshot"
-        } else {
-            "replayed prior canonical cached-job ALGW snapshot"
-        }
-        .clone_into(&mut self.status);
-        Ok(())
     }
 
-    fn commit(
-        &mut self,
-        workspace: GraphWorkspaceDocument,
-        encoding: CanonicalGraphWorkspaceEncoding,
-    ) -> Result<(), String> {
-        let mut history = self.history.clone();
-        history
-            .record(self.encoding.clone())
-            .map_err(|error| error.to_string())?;
-        self.history = history;
-        self.workspace = workspace;
-        self.encoding = encoding;
-        Ok(())
+    fn commit_update(&mut self, update: CachedJobGraphUpdate) {
+        self.workspace = update.workspace;
+        self.encoding = update.encoding;
+        self.selected_node = update.selected_node;
+        self.status = update.status;
     }
 
     fn replay_persisted_workspace(
@@ -1964,7 +1929,6 @@ impl CachedJobGraphProof {
     ) {
         self.workspace = workspace;
         self.encoding = encoding;
-        self.history.clear();
         self.selected_node = self
             .workspace
             .graph()
@@ -1992,8 +1956,13 @@ impl CachedJobGraphProof {
 enum CachedJobGraphAction {
     Add,
     Rebind,
-    Undo,
-    Redo,
+}
+
+struct CachedJobGraphUpdate {
+    workspace: GraphWorkspaceDocument,
+    encoding: CanonicalGraphWorkspaceEncoding,
+    selected_node: Option<GraphNodeId>,
+    status: String,
 }
 
 fn cached_job_registry() -> Result<GraphNodeRegistry, String> {
@@ -2186,7 +2155,7 @@ pub(crate) struct ExactControlWorkspace {
     board_explorer: BoardExplorerPanel,
     target_resources: TargetResourceProof,
     cached_jobs: CachedJobGraphProof,
-    history: GraphWorkspaceProbeHistory,
+    history: GraphAuthoringSessionHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
     palette: Vec<NodePaletteEntry>,
@@ -2260,7 +2229,7 @@ impl ExactControlWorkspace {
             board_explorer,
             target_resources,
             cached_jobs,
-            history: GraphWorkspaceProbeHistory::default(),
+            history: GraphAuthoringSessionHistory::default(),
             presentation,
             traces,
             palette,
@@ -2378,7 +2347,7 @@ impl ExactControlWorkspace {
         }
         self.show_probe_sidebar(ui);
         ui.label(format!(
-            "Pair history: {} undo / {} redo · {} bytes",
+            "Authoring-session history: {} undo / {} redo · {} ALGS bytes",
             self.history.undo_len(),
             self.history.redo_len(),
             self.history.retained_bytes()
@@ -2504,9 +2473,8 @@ impl ExactControlWorkspace {
         self.show_target_resources(ui);
         ui.separator();
 
-        if self.cached_jobs.show(ui) {
-            self.persistence_dirty = true;
-            self.persistence_attempted = false;
+        if let Some(action) = self.cached_jobs.show(ui) {
+            self.apply_cached_job_action(action);
         }
         ui.separator();
 
@@ -2564,7 +2532,7 @@ impl ExactControlWorkspace {
                 navigate = Some(true);
             }
             ui.weak(format!(
-                "{} back / {} forward · {} retained pair bytes",
+                "{} back / {} forward · {} retained ALGS bytes",
                 self.history.undo_len(),
                 self.history.redo_len(),
                 self.history.retained_bytes()
@@ -2727,64 +2695,28 @@ impl ExactControlWorkspace {
     }
 
     fn navigate_history(&mut self, redo: bool) {
-        let admission = GraphWorkspaceLimits::interactive();
-        let graph_admission = GraphLimits::interactive();
-        let probe_admission = GraphProbeLimits::interactive();
-        let preview = if redo {
-            self.history
-                .preview_redo(admission, graph_admission, probe_admission)
-        } else {
-            self.history
-                .preview_undo(admission, graph_admission, probe_admission)
-        };
-        let Some(preview) = (match preview {
-            Ok(preview) => preview,
+        let current = match self.authoring_session_encoding() {
+            Ok(current) => current,
             Err(error) => {
-                self.edit_status = format!("history replay rejected without mutation: {error}");
-                return;
-            }
-        }) else {
-            self.edit_status = if redo {
-                "no later canonical workspace/probe pair is retained".to_owned()
-            } else {
-                "no prior canonical workspace/probe pair is retained".to_owned()
-            };
-            return;
-        };
-        let candidate = preview.workspace().clone();
-        let (encoding, presentation, semantic) = match self.prepare_candidate(&candidate) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.edit_status = format!("history target rejected without mutation: {error}");
+                self.edit_status =
+                    format!("history current session rejected without mutation: {error}");
                 return;
             }
         };
-        let Some(current_probes) = self.probes.as_ref() else {
-            "history navigation rejected without mutation: no canonical ALGP sidecar is attached"
-                .clone_into(&mut self.edit_status);
-            return;
-        };
+        let mut history = self.history.clone();
         let navigation = if redo {
-            self.history.redo(
-                &self.workspace,
-                &current_probes.document,
-                admission,
-                graph_admission,
-                probe_admission,
-            )
+            history.redo(current, GraphAuthoringSessionReplayLimits::interactive())
         } else {
-            self.history.undo(
-                &self.workspace,
-                &current_probes.document,
-                admission,
-                graph_admission,
-                probe_admission,
-            )
+            history.undo(current, GraphAuthoringSessionReplayLimits::interactive())
         };
         let replay = match navigation {
             Ok(Some(replay)) => replay,
             Ok(None) => {
-                "history target disappeared without mutation".clone_into(&mut self.edit_status);
+                self.edit_status = if redo {
+                    "no later complete canonical ALGS session is retained".to_owned()
+                } else {
+                    "no prior complete canonical ALGS session is retained".to_owned()
+                };
                 return;
             }
             Err(error) => {
@@ -2792,33 +2724,25 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let (workspace_replay, probe_replay) = replay.into_parts();
-        debug_assert_eq!(workspace_replay.encoding(), &encoding);
-        debug_assert_eq!(probe_replay.encoding(), preview.probe_encoding());
-        let probe_encoding = probe_replay.encoding().clone();
-        self.workspace = workspace_replay.into_document();
-        self.workspace_encoding = encoding;
-        self.presentation = presentation;
-        self.pending_source = None;
-        self.drag = None;
-        self.parameter_drafts.clear();
-        self.node_label_drafts.clear();
-        self.probe_drafts.clear();
-        self.selected_node = self
-            .selected_node
-            .filter(|node| self.workspace.graph().node(*node).is_some());
+        let target_digest = replay.encoding().digest();
+        let prepared = match self.prepare_authoring_session_bytes(replay.encoding().bytes()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.edit_status =
+                    format!("history target failed UI/catalog admission without mutation: {error}");
+                return;
+            }
+        };
+        self.commit_prepared_authoring_session(prepared);
+        self.history = history;
         self.persistence_dirty = true;
         self.persistence_attempted = false;
-        self.refresh_component();
-        self.replace_probe_package(ProbePackage {
-            document: probe_replay.into_document(),
-            encoding: probe_encoding,
-        });
-        "restored exact ALGW/ALGP pair from bounded history".clone_into(&mut self.probe_status);
-        self.reset_cursor_to_trigger();
+        "restored exact ALGS-bound probe sidecar from unified history"
+            .clone_into(&mut self.probe_status);
         self.edit_status = format!(
-            "{} canonical workspace/probe pair; {semantic}",
-            if redo { "redid" } else { "undid to" }
+            "{} complete canonical ALGS session {}…",
+            if redo { "redid" } else { "undid to" },
+            digest_prefix(target_digest.0),
         );
     }
 
@@ -3824,18 +3748,41 @@ impl ExactControlWorkspace {
                 return false;
             }
         };
-        let Some(probes) = self.probes.as_ref() else {
-            "edit history rejected without mutation: no canonical ALGP sidecar is attached"
-                .clone_into(&mut self.edit_status);
-            return false;
+        let (component, component_status) = self.prepare_component_for_workspace(&candidate);
+        let (probes, probe_status) = match self.prepare_probes_for_workspace(&candidate) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.edit_status = format!(
+                    "edit rejected without mutation because no exact ALGP sidecar could be prepared: {error}"
+                );
+                return false;
+            }
         };
-        if let Err(error) = self.history.record(&self.workspace, &probes.document) {
-            self.edit_status = format!("edit history rejected without mutation: {error}");
+        if let Err(error) = Self::authoring_session_document_from_parts(
+            &candidate,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            component.as_ref(),
+        ) {
+            self.edit_status =
+                format!("complete-session candidate rejected without mutation: {error}");
             return false;
         }
+        let history = match self.history_with_current_recorded() {
+            Ok(history) => history,
+            Err(error) => {
+                self.edit_status = format!("edit history rejected without mutation: {error}");
+                return false;
+            }
+        };
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
+        self.component = component;
+        self.component_status = component_status;
+        self.replace_probe_package(probes);
+        self.probe_status = probe_status;
+        self.history = history;
         self.selected_node = self
             .selected_node
             .filter(|node| self.workspace.graph().node(*node).is_some());
@@ -3848,10 +3795,17 @@ impl ExactControlWorkspace {
             .retain(|node, _| self.workspace.graph().node(*node).is_some());
         self.persistence_dirty = true;
         self.persistence_attempted = false;
-        self.refresh_component();
-        self.refresh_probes();
         self.edit_status = format!("{success}; {semantic}");
         true
+    }
+
+    fn history_with_current_recorded(&self) -> Result<GraphAuthoringSessionHistory, String> {
+        let current = self.authoring_session_encoding()?;
+        let mut history = self.history.clone();
+        history
+            .record(current)
+            .map_err(|error| format!("complete ALGS history rejected: {error}"))?;
+        Ok(history)
     }
 
     fn prepare_candidate(
@@ -3880,12 +3834,13 @@ impl ExactControlWorkspace {
         Ok((encoding, presentation, semantic))
     }
 
-    fn authoring_session_document(&self) -> Result<GraphAuthoringSessionDocument, String> {
-        let probes = self
-            .probes
-            .as_ref()
-            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
-        let hierarchy = self.component.as_ref().map(|component| {
+    fn authoring_session_document_from_parts(
+        workspace: &GraphWorkspaceDocument,
+        probes: &GraphProbeDocument,
+        cached_job_workspace: &GraphWorkspaceDocument,
+        component: Option<&ComponentPackage>,
+    ) -> Result<GraphAuthoringSessionDocument, String> {
+        let hierarchy = component.map(|component| {
             GraphAuthoringHierarchyInput::new(
                 component.encoding.digest(),
                 component.hierarchy.document.clone(),
@@ -3895,12 +3850,25 @@ impl ExactControlWorkspace {
         GraphAuthoringSessionDocument::try_new(
             GraphAuthoringSessionLimits::interactive(),
             GraphHierarchySourceMapLimits::interactive(),
-            self.workspace.clone(),
-            probes.document.clone(),
-            self.cached_jobs.workspace.clone(),
+            workspace.clone(),
+            probes.clone(),
+            cached_job_workspace.clone(),
             hierarchy,
         )
         .map_err(|error| error.to_string())
+    }
+
+    fn authoring_session_document(&self) -> Result<GraphAuthoringSessionDocument, String> {
+        let probes = self
+            .probes
+            .as_ref()
+            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            self.component.as_ref(),
+        )
     }
 
     fn authoring_session_encoding(&self) -> Result<CanonicalGraphAuthoringSessionEncoding, String> {
@@ -3908,7 +3876,10 @@ impl ExactControlWorkspace {
         encode_graph_authoring_session(&document).map_err(|error| error.to_string())
     }
 
-    fn restore_authoring_session_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+    fn prepare_authoring_session_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PreparedAuthoringSession, String> {
         let replay =
             replay_graph_authoring_session(bytes, GraphAuthoringSessionReplayLimits::interactive())
                 .map_err(|error| error.to_string())?;
@@ -3960,33 +3931,98 @@ impl ExactControlWorkspace {
             })
             .transpose()?;
 
-        // Commit only after all nested artifacts, exact hierarchy provenance,
-        // UI semantics, and every catalog-bound cached-job leaf have passed.
-        self.workspace = candidate;
-        self.workspace_encoding = encoding;
-        self.presentation = presentation;
-        self.component = component;
+        Ok(PreparedAuthoringSession {
+            workspace: candidate,
+            workspace_encoding: encoding,
+            presentation,
+            component,
+            probes,
+            cached_job_workspace,
+            cached_job_encoding,
+        })
+    }
+
+    fn commit_prepared_authoring_session(&mut self, prepared: PreparedAuthoringSession) {
+        self.workspace = prepared.workspace;
+        self.workspace_encoding = prepared.workspace_encoding;
+        self.presentation = prepared.presentation;
+        self.component = prepared.component;
         self.component_status = if self.component.is_some() {
             "restored exact selected ALGC and complete ALGH/ALGM from ALGS".to_owned()
         } else {
             "ALGS contains no selected component hierarchy".to_owned()
         };
-        self.history.clear();
         self.selected_node = None;
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
         self.node_label_drafts.clear();
         self.probe_drafts.clear();
-        self.replace_probe_package(probes);
-        self.cached_jobs
-            .restore_persisted_workspace(cached_job_workspace, cached_job_encoding);
+        self.replace_probe_package(prepared.probes);
+        self.cached_jobs.restore_persisted_workspace(
+            prepared.cached_job_workspace,
+            prepared.cached_job_encoding,
+        );
         self.reset_cursor_to_trigger();
-        self.persistence_dirty = false;
-        self.persistence_attempted = false;
         "restored canonical ALGP sidecar with exact ALGS/ALGW binding"
             .clone_into(&mut self.probe_status);
+    }
+
+    fn restore_authoring_session_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let prepared = self.prepare_authoring_session_bytes(bytes)?;
+        // Commit only after all nested artifacts, exact hierarchy provenance,
+        // UI semantics, and every catalog-bound cached-job leaf have passed.
+        self.commit_prepared_authoring_session(prepared);
+        self.history.clear();
+        self.persistence_dirty = false;
+        self.persistence_attempted = false;
         Ok(())
+    }
+
+    fn apply_cached_job_action(&mut self, action: CachedJobGraphAction) {
+        let update = match self.cached_jobs.prepare_action(action) {
+            Ok(update) => update,
+            Err(error) => {
+                self.cached_jobs.status =
+                    format!("cached-job edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        if update.encoding == self.cached_jobs.encoding {
+            self.cached_jobs.status = format!(
+                "{}; canonical cached-job workspace already matched",
+                update.status
+            );
+            return;
+        }
+        let Some(probes) = self.probes.as_ref() else {
+            "cached-job edit rejected without mutation: canonical ALGP sidecar is unavailable"
+                .clone_into(&mut self.cached_jobs.status);
+            return;
+        };
+        if let Err(error) = Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &update.workspace,
+            self.component.as_ref(),
+        ) {
+            self.cached_jobs.status =
+                format!("cached-job complete-session candidate rejected without mutation: {error}");
+            return;
+        }
+        let history = match self.history_with_current_recorded() {
+            Ok(history) => history,
+            Err(error) => {
+                self.cached_jobs.status = format!(
+                    "cached-job authoring-session history rejected without mutation: {error}"
+                );
+                return;
+            }
+        };
+        self.cached_jobs.commit_update(update);
+        self.history = history;
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
     }
 
     fn reset_cursor_to_trigger(&mut self) {
@@ -4004,55 +4040,59 @@ impl ExactControlWorkspace {
             .unwrap_or_else(|| Rational::from(0));
     }
 
-    fn refresh_component(&mut self) {
-        match representative_component(&self.workspace, &self.fixture) {
-            Ok(component) => {
-                self.component = Some(component);
-                "canonical ALGC connector pane and front panel attached"
-                    .clone_into(&mut self.component_status);
-            }
-            Err(error) => {
-                self.component = None;
-                self.component_status = format!(
+    fn prepare_component_for_workspace(
+        &self,
+        workspace: &GraphWorkspaceDocument,
+    ) -> (Option<ComponentPackage>, String) {
+        match representative_component(workspace, &self.fixture) {
+            Ok(component) => (
+                Some(component),
+                "canonical ALGC connector pane and front panel attached".to_owned(),
+            ),
+            Err(error) => (
+                None,
+                format!(
                     "ALGC front panel detached from this draft without affecting ALGW: {error}"
-                );
-            }
+                ),
+            ),
         }
     }
 
-    fn refresh_probes(&mut self) {
+    fn prepare_probes_for_workspace(
+        &self,
+        workspace: &GraphWorkspaceDocument,
+    ) -> Result<(ProbePackage, String), String> {
         let result = if let Some(current) = &self.probes {
             let mut document = current.document.clone();
             document
-                .replace_workspace(&self.workspace)
+                .replace_workspace(workspace)
                 .and_then(|()| {
                     let encoding = encode_graph_probes(&document)?;
                     Ok(ProbePackage { document, encoding })
                 })
                 .map_err(|error| error.to_string())
         } else {
-            representative_probes(&self.workspace)
+            representative_probes(workspace)
         };
         match result {
-            Ok(probes) => {
-                self.replace_probe_package(probes);
-                "canonical ALGP diagnostic probes attached".clone_into(&mut self.probe_status);
-            }
-            Err(error) => match empty_probes(&self.workspace) {
-                Ok(probes) => {
-                    self.replace_probe_package(probes);
-                    self.probe_status = format!(
-                        "ALGP bindings incompatible with revised ALGW were atomically replaced by an empty canonical sidecar: {error}"
-                    );
-                }
-                Err(empty_error) => {
-                    self.probes = None;
-                    self.probe_drafts.clear();
-                    self.probe_status = format!(
-                        "ALGP probes detached from this draft without affecting ALGW: {error}; empty sidecar failed: {empty_error}"
-                    );
-                }
-            },
+            Ok(probes) => Ok((
+                probes,
+                "canonical ALGP diagnostic probes attached".to_owned(),
+            )),
+            Err(error) => empty_probes(workspace)
+                .map(|probes| {
+                    (
+                        probes,
+                        format!(
+                            "ALGP bindings incompatible with revised ALGW were atomically replaced by an empty canonical sidecar: {error}"
+                        ),
+                    )
+                })
+                .map_err(|empty_error| {
+                    format!(
+                        "ALGP probe rebinding failed: {error}; empty sidecar failed: {empty_error}"
+                    )
+                }),
         }
     }
 
@@ -4125,14 +4165,17 @@ impl ExactControlWorkspace {
         {
             return Ok(false);
         }
-        let current = self
-            .probes
-            .as_ref()
-            .ok_or_else(|| "no canonical ALGP sidecar is attached".to_owned())?;
-        self.history
-            .record(&self.workspace, &current.document)
-            .map_err(|error| format!("pair history rejected: {error}"))?;
-        Ok(self.replace_probe_package(probes))
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            self.component.as_ref(),
+        )
+        .map_err(|error| format!("probe complete-session candidate rejected: {error}"))?;
+        let history = self.history_with_current_recorded()?;
+        let changed = self.replace_probe_package(probes);
+        self.history = history;
+        Ok(changed)
     }
 
     fn import_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -8244,63 +8287,82 @@ mod tests {
     }
 
     #[test]
-    fn cached_job_ui_rebind_add_history_and_replay_stay_catalog_bound() {
+    fn cached_job_ui_rebind_add_and_unified_session_history_stay_catalog_bound() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
-        let proof = &mut workspace.cached_jobs;
-        let node = proof.selected_node.unwrap();
-        let placement = proof.workspace.placement(node);
-        let initial = proof.encoding.clone();
+        let node = workspace.cached_jobs.selected_node.unwrap();
+        let placement = workspace.cached_jobs.workspace.placement(node);
+        let initial = workspace.cached_jobs.encoding.clone();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
 
-        proof.selected_entry = 1;
-        proof.rebind_selected_reference().unwrap();
-        assert_ne!(proof.encoding, initial);
-        assert_eq!(proof.workspace.placement(node), placement);
-        assert_eq!(proof.history.undo_len(), 1);
-        assert_eq!(proof.history.redo_len(), 0);
+        workspace.cached_jobs.selected_entry = 1;
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        assert_ne!(workspace.cached_jobs.encoding, initial);
+        assert_eq!(workspace.cached_jobs.workspace.placement(node), placement);
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert_eq!(workspace.history.redo_len(), 0);
         assert_eq!(
             cached_job_handle_at_path(
-                proof.workspace.graph().node(node).unwrap(),
-                proof.registry.context_schema(),
+                workspace.cached_jobs.workspace.graph().node(node).unwrap(),
+                workspace.cached_jobs.registry.context_schema(),
                 CACHED_JOB_REFERENCE_SLOTS[0].path,
             ),
-            Some(proof.catalog.entries()[1].handle())
+            Some(workspace.cached_jobs.catalog.entries()[1].handle())
         );
         for selected_slot in 1..CACHED_JOB_REFERENCE_SLOTS.len() {
-            proof.selected_slot = selected_slot;
-            proof.rebind_selected_reference().unwrap();
+            workspace.cached_jobs.selected_slot = selected_slot;
+            workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
         }
-        assert_eq!(proof.history.undo_len(), 3);
+        assert_eq!(workspace.history.undo_len(), 3);
         for slot in CACHED_JOB_REFERENCE_SLOTS {
             assert_eq!(
                 cached_job_handle_at_path(
-                    proof.workspace.graph().node(node).unwrap(),
-                    proof.registry.context_schema(),
+                    workspace.cached_jobs.workspace.graph().node(node).unwrap(),
+                    workspace.cached_jobs.registry.context_schema(),
                     slot.path,
                 ),
-                Some(proof.catalog.entries()[1].handle())
+                Some(workspace.cached_jobs.catalog.entries()[1].handle())
             );
         }
 
-        proof.add_selected_reference().unwrap();
-        assert_eq!(proof.workspace.graph().nodes().len(), 2);
-        assert_eq!(proof.history.undo_len(), 4);
-        let edited = proof.encoding.clone();
+        workspace.apply_cached_job_action(CachedJobGraphAction::Add);
+        assert_eq!(workspace.cached_jobs.workspace.graph().nodes().len(), 2);
+        assert_eq!(workspace.history.undo_len(), 4);
+        let edited = workspace.cached_jobs.encoding.clone();
+        let edited_session = workspace.authoring_session_encoding().unwrap();
         let replay = replay_graph_workspace(
             edited.bytes(),
-            proof.workspace.limits(),
-            proof.workspace.graph().schema().limits(),
+            workspace.cached_jobs.workspace.limits(),
+            workspace.cached_jobs.workspace.graph().schema().limits(),
         )
         .unwrap();
-        validate_cached_job_workspace(&proof.catalog, &proof.registry, replay.document()).unwrap();
+        validate_cached_job_workspace(
+            &workspace.cached_jobs.catalog,
+            &workspace.cached_jobs.registry,
+            replay.document(),
+        )
+        .unwrap();
         assert_eq!(replay.encoding(), &edited);
 
-        proof.navigate_history(false).unwrap();
-        assert_eq!(proof.workspace.graph().nodes().len(), 1);
-        assert_eq!(proof.history.redo_len(), 1);
-        proof.navigate_history(true).unwrap();
-        assert_eq!(proof.encoding, edited);
-        assert_eq!(proof.workspace.graph().nodes().len(), 2);
+        workspace.navigate_history(false);
+        assert_eq!(workspace.cached_jobs.workspace.graph().nodes().len(), 1);
+        assert_eq!(workspace.history.redo_len(), 1);
+        workspace.navigate_history(true);
+        assert_eq!(workspace.cached_jobs.encoding, edited);
+        assert_eq!(workspace.cached_jobs.workspace.graph().nodes().len(), 2);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
 
+        for _ in 0..4 {
+            workspace.navigate_history(false);
+        }
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+
+        let proof = &workspace.cached_jobs;
         let mut raw = proof.workspace.clone();
         let raw_node = raw.graph().nodes()[0].id();
         let raw_handle = JobGraphHandle {
@@ -9191,7 +9253,78 @@ mod tests {
     }
 
     #[test]
-    fn node_label_edits_are_bounded_pair_historical_and_noop_aware() {
+    fn unified_authoring_history_interleaves_graph_probe_cached_job_and_hierarchy_exactly() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.authoring_session_encoding().unwrap();
+
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "17/9");
+        let graph_edit = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(graph_edit, initial);
+        assert!(workspace.component.is_some());
+
+        workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        let probe_edit = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(probe_edit, graph_edit);
+
+        workspace.cached_jobs.selected_entry = 1;
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        let cached_job_edit = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(cached_job_edit, probe_edit);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (3, 0)
+        );
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), probe_edit);
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), graph_edit);
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), initial);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (0, 3)
+        );
+
+        workspace.navigate_history(true);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), graph_edit);
+        workspace.navigate_history(true);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), probe_edit);
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            cached_job_edit
+        );
+
+        workspace.navigate_history(false);
+        workspace.commit_node_label(GraphNodeId::new(8), "branched exact gain");
+        assert_eq!(workspace.history.redo_len(), 0);
+        assert_ne!(
+            workspace.authoring_session_encoding().unwrap(),
+            cached_job_edit
+        );
+    }
+
+    #[test]
+    fn cached_job_noop_does_not_dirty_or_extend_unified_history() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.cached_jobs.status.contains("already matched"));
+    }
+
+    #[test]
+    fn node_label_edits_are_bounded_session_historical_and_noop_aware() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let node = GraphNodeId::new(8);
         let initial = workspace.workspace.clone();
@@ -9382,8 +9515,8 @@ mod tests {
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
         workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
         workspace.cached_jobs.selected_entry = 1;
-        workspace.cached_jobs.rebind_selected_reference().unwrap();
-        assert_eq!(workspace.history.undo_len(), 2);
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        assert_eq!(workspace.history.undo_len(), 3);
         let persisted = workspace.persisted_authoring_session().unwrap();
         assert!(persisted.starts_with(PERSISTED_AUTHORING_SESSION_PREFIX));
         let payload = &persisted[PERSISTED_AUTHORING_SESSION_PREFIX.len()..];
@@ -9413,8 +9546,6 @@ mod tests {
             restored.cached_jobs.encoding,
             workspace.cached_jobs.encoding
         );
-        assert_eq!(restored.cached_jobs.history.undo_len(), 0);
-        assert_eq!(restored.cached_jobs.history.redo_len(), 0);
         assert_eq!(restored.history.undo_len(), 0);
         assert_eq!(restored.history.redo_len(), 0);
         assert!(!restored.persistence_pending());
@@ -9505,6 +9636,50 @@ mod tests {
     }
 
     #[test]
+    fn history_target_failing_cached_job_catalog_admission_is_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "13/7");
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+
+        let mut foreign_cached_job = workspace.cached_jobs.workspace.clone();
+        let node = foreign_cached_job.graph().nodes()[0].id();
+        let foreign_handle = JobGraphHandle {
+            global_job_digest: Digest([0x6d; 32]),
+            ..workspace.cached_jobs.catalog.entries()[0].handle()
+        };
+        let parameter = foreign_cached_job.graph().node(node).unwrap().parameters()[0]
+            .value()
+            .replacing_value_at_path(
+                workspace.cached_jobs.registry.context_schema(),
+                &CACHED_JOB_MIRROR_PATH,
+                GraphValue::JobHandle(foreign_handle),
+            )
+            .unwrap();
+        foreign_cached_job
+            .set_parameter(node, CACHED_JOB_PARAMETER, parameter)
+            .unwrap();
+        let foreign_session = ExactControlWorkspace::authoring_session_document_from_parts(
+            &workspace.workspace,
+            &workspace.probes.as_ref().unwrap().document,
+            &foreign_cached_job,
+            workspace.component.as_ref(),
+        )
+        .unwrap();
+        let foreign_encoding = encode_graph_authoring_session(&foreign_session).unwrap();
+        workspace.history.record(foreign_encoding).unwrap();
+        let retained_history = workspace.history.clone();
+
+        workspace.navigate_history(false);
+
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(workspace.edit_status.contains("UI/catalog admission"));
+    }
+
+    #[test]
     fn probe_edits_dirty_pair_persistence_only_when_canonical_identity_changes() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let initial_workspace = workspace.workspace.clone();
@@ -9536,7 +9711,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_metadata_edits_are_pair_historical_bounded_and_noop_aware() {
+    fn probe_metadata_edits_are_session_historical_bounded_and_noop_aware() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let id = GraphProbeId::new(2);
         let trigger_id = GraphProbeId::new(5);
@@ -10525,7 +10700,7 @@ mod tests {
     }
 
     #[test]
-    fn algp_import_is_pair_historical_and_wrong_binding_fails_closed() {
+    fn algp_import_is_session_historical_and_wrong_binding_fails_closed() {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");

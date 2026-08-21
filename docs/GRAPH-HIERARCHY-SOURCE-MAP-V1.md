@@ -105,7 +105,9 @@ ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
 
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists the selected
 component, complete ALGH, and regenerated ALGM together in browser storage and
-`.algs` files. Editable hierarchy construction, hierarchy-aware undo/redo,
+`.algs` files. Complete-session undo/redo also restores that selected
+component/ALGH/ALGM branch atomically with the other authoring artifacts.
+Editable hierarchy construction, direct hierarchy mutation commands,
 interactive traversal from a flattened item into nested editable component
 canvases, parameter promotion, signed dependency manifests, live device trace
 correlation, and firmware execution evidence remain separate work. `ALGM` V1

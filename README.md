@@ -237,8 +237,10 @@ prototype.
   duplicate immutable references remain legal data and grant no prepare/start
   authority. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
-  Canonical replay-backed undo/redo retains bounded complete `ALGW`/`ALGP` pair
-  snapshots across graph, probe, trigger, and sidecar-import edits. Per-probe
+  Canonical replay-backed undo/redo retains bounded complete `ALGS` session
+  snapshots across graph, probe, trigger, sidecar-import, cached-job,
+  component, hierarchy, and source-map state. Every navigation target reruns
+  complete core replay plus UI semantic/catalog admission. Per-probe
   canonical name, retained-sample, and decimation-stride editors preserve
   stable source/type identity and reject any capture policy that cannot hold
   its active trigger window. A shared aggregate-bounded replay projection now
@@ -493,7 +495,7 @@ assets suitable for later embedding in `alumina-firmware`.
 The next interface milestones add native/tighter broader-curve metric carriers,
 certified nonzero-radius blends, direction-aware and broader-axis kinematics,
 complete public device/security/machine-membership discovery,
-physical-browser/radio qualification, crash-durable cached-job history and
+physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, editable nested-instance

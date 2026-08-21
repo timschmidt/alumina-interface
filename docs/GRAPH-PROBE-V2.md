@@ -171,14 +171,14 @@ workspace-identity mismatch falls back without partial state. Native and
 browser `.algp` exchange uses the same 2 MiB byte admission and canonical replay boundary; import can replace
 only the sidecar after proving the current `ALGW` identity, and importing
 identical bytes is an exact no-op. Probe, capture-policy, and trigger identity
-changes mark the pair dirty; canonical no-op edits do not. If a graph edit removes or retypes an
+changes mark the authoring session dirty; canonical no-op edits do not. If a graph edit removes or retypes an
 observed endpoint, the incompatible sidecar is visibly and atomically replaced
 with an empty sidecar bound to the revised workspace rather than persisting
-unbound probe intent. Ephemeral undo/redo retains complete canonical ALGW/ALGP
-pairs, so undo restores the exact prior probes, trigger, revisions, and graph
-binding even after such an invalidation; redo restores the exact revised pair.
-Probe metadata/trigger edits and canonical ALGP imports are pair-history
-operations too. Per-probe edit fields are transient UI state: unrelated
+unbound probe intent. Ephemeral undo/redo retains complete canonical `ALGS`
+sessions, so undo restores the exact prior probes, trigger, revisions, graph
+binding, cached-job workspace, selected component, hierarchy, and source map;
+redo restores the exact revised session. Probe metadata/trigger edits and
+canonical ALGP imports are complete-session history operations too. Per-probe edit fields are transient UI state: unrelated
 trigger or workspace-binding changes preserve a draft, while history
 navigation and file/storage restore reset fields from the replayed canonical
 sidecar.

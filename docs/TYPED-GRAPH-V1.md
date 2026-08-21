@@ -322,10 +322,11 @@ Physical scalar series share an analog scale only when their complete
 registered sample type is identical; other types receive deterministic
 separate panes on the shared exact root-time axis.
 
-Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
-including the sidecar's exact external-workspace binding, before mutating
-navigation state. Graph, probe metadata, trigger, and ALGP-import changes share this
-history; exact no-ops do not consume a snapshot. Browser origin-local storage
+Bounded undo/redo stores complete canonical `ALGS` authoring sessions and
+replays every nested artifact, including the sidecar's exact
+external-workspace binding and cached-job catalog admission, before mutating
+navigation state. Graph, probe metadata, trigger, ALGP-import, and cached-job
+changes share this history; exact no-ops do not consume a snapshot. Browser origin-local storage
 preserves the current control ALGW, bound ALGP, catalog-bound composite
 cached-job ALGW, and optional exact component hierarchy/source map in one
 canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md), while history remains
