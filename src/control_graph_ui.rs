@@ -18,8 +18,9 @@ use alumina_interface_core::graph::{
     CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
     CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ClockDefinition, ClockKind,
     ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
-    GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    GraphCachedJobCatalog, GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits,
+    GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument, GraphComponentInstance,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentNodeKind, GraphDeploymentRegistry,
     GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
     GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
@@ -28,26 +29,28 @@ use alumina_interface_core::graph::{
     GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
     GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceLimits, GraphWorkspaceProbeHistory, NodeDefinition,
-    NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema, PortDefinition,
-    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId, TypeDefinition,
-    TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
-    compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
-    encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
-    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
-    graph_component_instance_prototype, graph_resource_label, parse_graph_literal_text,
-    project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
-    select_graph_capability_node_resource,
+    GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
+    GraphWorkspaceProbeHistory, NodeDefinition, NodeKind, NodeOutputDependency, NodeParameter,
+    NodeParameterContract, NodeSchema, PortDefinition, RepresentativeControlSignal,
+    RepresentativeExactControlGraph, ResourceClassId, TypeDefinition, TypeKind, TypedGraphValue,
+    WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
+    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
+    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
+    format_graph_literal_text, graph_component_instance_prototype, graph_resource_label,
+    parse_graph_literal_text, project_graph_probe_replay, replay_graph_probes,
+    replay_graph_workspace, select_graph_cached_job_handle, select_graph_capability_node_resource,
 };
 use alumina_interface_core::{
-    BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
-    build_diagnostic_explorer_snapshot,
+    BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
+    build_board_explorer_snapshot, build_diagnostic_explorer_snapshot,
 };
 use alumina_protocol::{DeviceId, Digest};
 use alumina_sim::diagnostics::tinybee_diagnostic_fixture;
 use eframe::egui;
 use hyperreal::Rational;
 
+use crate::cache_delivery::derive_graph_cached_job_catalog_from_ready;
+use crate::m7_simulation::simulate_cache_delivery;
 use crate::workspace_file::{BoundedFileBridge, BoundedFileEvent, BoundedFileSpec};
 
 const MAXIMUM_VISIBLE_NODES: usize = 256;
@@ -70,9 +73,10 @@ const NEW_NODE_X_GAP: i32 = 300;
 const NEW_NODE_ORIGIN: i32 = 28;
 const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
-const PERSISTED_WORKSPACE_PAIR_PREFIX: &str = "algwp1:";
+const PERSISTED_WORKSPACE_BUNDLE_PREFIX: &str = "algwb1:";
 const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_PERSISTED_PROBE_BYTES: usize = 2 * 1024 * 1024;
+const MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
 const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
@@ -83,8 +87,15 @@ const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(238, 126, 161),
     egui::Color32::from_rgb(101, 205, 196),
 ];
+
+#[derive(Debug)]
+struct PersistedWorkspaceBundleBytes {
+    control_workspace: Vec<u8>,
+    probes: Vec<u8>,
+    cached_jobs: Vec<u8>,
+}
 #[cfg(target_arch = "wasm32")]
-pub(crate) const WORKSPACE_PAIR_STORAGE_KEY: &str = "alumina.graph-workspace-pair.algwp.v1";
+pub(crate) const WORKSPACE_BUNDLE_STORAGE_KEY: &str = "alumina.graph-workspace-bundle.algwb.v1";
 const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
@@ -94,6 +105,9 @@ const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::CombinedPermit,
     RepresentativeControlSignal::ExternalPermit,
 ];
+const CACHED_JOB_TYPE: GraphTypeId = GraphTypeId::new(1);
+const CACHED_JOB_PARAMETER: u32 = 1;
+const CACHED_JOB_KIND_NAME: &str = "alumina.job.cached-reference";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WirePresentation {
@@ -1379,6 +1393,479 @@ const fn digital_level_text(level: DigitalLevel) -> &'static str {
     }
 }
 
+/// Offline authoring proof that joins canonical CAM output to simulated,
+/// reconciled cache observations before exposing any graph job identity.
+struct CachedJobGraphProof {
+    catalog: GraphCachedJobCatalog,
+    registry: GraphNodeRegistry,
+    workspace: GraphWorkspaceDocument,
+    encoding: CanonicalGraphWorkspaceEncoding,
+    history: GraphWorkspaceHistory,
+    selected_entry: usize,
+    selected_node: Option<GraphNodeId>,
+    status: String,
+}
+
+impl CachedJobGraphProof {
+    fn try_new(job: &CanonicalGlobalJob2) -> Result<Self, String> {
+        let ready = simulate_cache_delivery(job).map_err(|error| error.to_string())?;
+        let catalog = derive_graph_cached_job_catalog_from_ready(
+            job,
+            &ready,
+            GraphCachedJobCatalogLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        let registry = cached_job_registry()?;
+        let graph = GraphDocument::try_new(
+            0,
+            registry.context_schema().clone(),
+            registry.context_clocks().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut workspace = GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            0,
+            1,
+            1,
+            graph,
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let prototype = cached_job_prototype(&catalog, &registry, 0, "Cached participant 1")?;
+        let selected_node = workspace
+            .create_node(prototype, 28, 28)
+            .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&catalog, &registry, &workspace)?;
+        let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+        Ok(Self {
+            catalog,
+            registry,
+            workspace,
+            encoding,
+            history: GraphWorkspaceHistory::default(),
+            selected_entry: 0,
+            selected_node: Some(selected_node),
+            status:
+                "derived from complete simulated partition + global-manifest cache reconciliation"
+                    .to_owned(),
+        })
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui) -> bool {
+        let starting_digest = self.encoding.digest();
+        ui.heading("Cached job graph references");
+        ui.label(
+            "Offline proof only: choices come from canonically replayed CAM artifacts observed in each simulated MCU cache. A reference is inert data and does not prepare, arm, or start a job.",
+        );
+        ui.label(format!(
+            "{} participants · ALGW {} bytes · revision {} · {} undo / {} redo",
+            self.catalog.entries().len(),
+            self.encoding.bytes().len(),
+            self.workspace.revision(),
+            self.history.undo_len(),
+            self.history.redo_len(),
+        ));
+        ui.monospace(format!(
+            "global job {}… · participant set {}… · graph {}…",
+            digest_prefix(self.catalog.global_job_digest().0),
+            digest_prefix(self.catalog.participant_set_digest().0),
+            digest_prefix(self.encoding.digest().0),
+        ));
+
+        self.show_selection(ui);
+
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("add inert reference").clicked() {
+                action = Some(CachedJobGraphAction::Add);
+            }
+            if ui
+                .add_enabled(
+                    self.selected_node.is_some(),
+                    egui::Button::new("rebind selected"),
+                )
+                .clicked()
+            {
+                action = Some(CachedJobGraphAction::Rebind);
+            }
+            if ui
+                .add_enabled(self.history.can_undo(), egui::Button::new("undo job edit"))
+                .clicked()
+            {
+                action = Some(CachedJobGraphAction::Undo);
+            }
+            if ui
+                .add_enabled(self.history.can_redo(), egui::Button::new("redo job edit"))
+                .clicked()
+            {
+                action = Some(CachedJobGraphAction::Redo);
+            }
+        });
+        if let Some(action) = action {
+            let result = match action {
+                CachedJobGraphAction::Add => self.add_selected_reference(),
+                CachedJobGraphAction::Rebind => self.rebind_selected_reference(),
+                CachedJobGraphAction::Undo => self.navigate_history(false),
+                CachedJobGraphAction::Redo => self.navigate_history(true),
+            };
+            if let Err(error) = result {
+                self.status = error;
+            }
+        }
+        ui.label(&self.status);
+        ui.weak(
+            "No digest, device-ID, partition-ID, path, or command text field is accepted here; deployment and deterministic start remain separate authorities.",
+        );
+        self.encoding.digest() != starting_digest
+    }
+
+    fn show_selection(&mut self, ui: &mut egui::Ui) {
+        let selected_entry_label = self.catalog.entries().get(self.selected_entry).map_or_else(
+            || "unavailable participant".to_owned(),
+            cached_job_entry_label,
+        );
+        egui::ComboBox::from_id_salt("cached_job_catalog_entry")
+            .selected_text(selected_entry_label)
+            .show_ui(ui, |ui| {
+                for (index, entry) in self.catalog.entries().iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.selected_entry,
+                        index,
+                        cached_job_entry_label(entry),
+                    );
+                }
+            });
+
+        let node_choices: Vec<_> = self
+            .workspace
+            .graph()
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                cached_job_parameter(node).and_then(|handle| {
+                    self.catalog
+                        .entry_index_for_handle(handle)
+                        .map(|entry| (node.id(), entry, node.label().to_owned()))
+                })
+            })
+            .collect();
+        if self
+            .selected_node
+            .is_none_or(|selected| !node_choices.iter().any(|choice| choice.0 == selected))
+        {
+            self.selected_node = node_choices.first().map(|choice| choice.0);
+        }
+        let selected_node_label = self
+            .selected_node
+            .and_then(|selected| {
+                node_choices
+                    .iter()
+                    .find(|choice| choice.0 == selected)
+                    .map(|choice| {
+                        format!(
+                            "#{} {} · participant {}",
+                            selected.get(),
+                            choice.2,
+                            choice.1 + 1
+                        )
+                    })
+            })
+            .unwrap_or_else(|| "no managed job-reference node".to_owned());
+        egui::ComboBox::from_id_salt("cached_job_graph_node")
+            .selected_text(selected_node_label)
+            .show_ui(ui, |ui| {
+                for (node, entry, label) in &node_choices {
+                    ui.selectable_value(
+                        &mut self.selected_node,
+                        Some(*node),
+                        format!("#{} {label} · participant {}", node.get(), entry + 1),
+                    );
+                }
+            });
+
+        if let Some(entry) = self.catalog.entries().get(self.selected_entry) {
+            let participant = entry.participant();
+            ui.label(format!(
+                "Selected cache fact: {} partition bytes · {} blocks · {} Hz local timer",
+                participant.partition_byte_len, participant.block_count, participant.local_timer_hz,
+            ));
+            ui.monospace(format!(
+                "capability {}… · config {}… · partition {}…",
+                digest_prefix(participant.capability_digest.0),
+                digest_prefix(participant.config_digest.0),
+                digest_prefix(participant.partition_digest.0),
+            ));
+        }
+    }
+
+    fn add_selected_reference(&mut self) -> Result<(), String> {
+        let index = self.workspace.graph().nodes().len();
+        let ordinal = index
+            .checked_add(1)
+            .ok_or_else(|| "cached job node count overflow".to_owned())?;
+        let x = i32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(260))
+            .and_then(|offset| offset.checked_add(28))
+            .ok_or_else(|| "cached job canvas coordinate overflow".to_owned())?;
+        let prototype = cached_job_prototype(
+            &self.catalog,
+            &self.registry,
+            self.selected_entry,
+            &format!("Cached participant {ordinal}"),
+        )?;
+        let mut candidate = self.workspace.clone();
+        let node = candidate
+            .create_node(prototype, x, 28)
+            .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
+        let encoding = encode_graph_workspace(&candidate).map_err(|error| error.to_string())?;
+        self.commit(candidate, encoding)?;
+        self.selected_node = Some(node);
+        self.status = format!(
+            "added inert cached-job reference #{} from audited catalog entry {}",
+            node.get(),
+            self.selected_entry + 1
+        );
+        Ok(())
+    }
+
+    fn rebind_selected_reference(&mut self) -> Result<(), String> {
+        let node = self
+            .selected_node
+            .ok_or_else(|| "select a catalog-managed job node first".to_owned())?;
+        let mut candidate = self.workspace.clone();
+        let encoding = select_graph_cached_job_handle(
+            &self.catalog,
+            &self.registry,
+            &mut candidate,
+            node,
+            CACHED_JOB_PARAMETER,
+            self.selected_entry,
+        )
+        .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
+        self.commit(candidate, encoding)?;
+        self.status = format!(
+            "rebound inert reference #{} to audited catalog entry {}",
+            node.get(),
+            self.selected_entry + 1
+        );
+        Ok(())
+    }
+
+    fn navigate_history(&mut self, redo: bool) -> Result<(), String> {
+        let mut history = self.history.clone();
+        let replay = if redo {
+            history.redo(
+                &self.workspace,
+                self.workspace.limits(),
+                self.workspace.graph().schema().limits(),
+            )
+        } else {
+            history.undo(
+                &self.workspace,
+                self.workspace.limits(),
+                self.workspace.graph().schema().limits(),
+            )
+        }
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "cached job history has no requested target".to_owned())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, replay.document())?;
+        let encoding = replay.encoding().clone();
+        let workspace = replay.into_document();
+        self.history = history;
+        self.workspace = workspace;
+        self.encoding = encoding;
+        self.selected_node = self
+            .selected_node
+            .filter(|selected| self.workspace.graph().node(*selected).is_some())
+            .or_else(|| {
+                self.workspace
+                    .graph()
+                    .nodes()
+                    .first()
+                    .map(NodeDefinition::id)
+            });
+        if redo {
+            "replayed later canonical cached-job ALGW snapshot"
+        } else {
+            "replayed prior canonical cached-job ALGW snapshot"
+        }
+        .clone_into(&mut self.status);
+        Ok(())
+    }
+
+    fn commit(
+        &mut self,
+        workspace: GraphWorkspaceDocument,
+        encoding: CanonicalGraphWorkspaceEncoding,
+    ) -> Result<(), String> {
+        let mut history = self.history.clone();
+        history
+            .record(self.encoding.clone())
+            .map_err(|error| error.to_string())?;
+        self.history = history;
+        self.workspace = workspace;
+        self.encoding = encoding;
+        Ok(())
+    }
+
+    fn replay_persisted_workspace(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(GraphWorkspaceDocument, CanonicalGraphWorkspaceEncoding), String> {
+        let replay = replay_graph_workspace(
+            bytes,
+            self.workspace.limits(),
+            self.workspace.graph().schema().limits(),
+        )
+        .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, replay.document())?;
+        Ok((replay.document().clone(), replay.encoding().clone()))
+    }
+
+    fn restore_persisted_workspace(
+        &mut self,
+        workspace: GraphWorkspaceDocument,
+        encoding: CanonicalGraphWorkspaceEncoding,
+    ) {
+        self.workspace = workspace;
+        self.encoding = encoding;
+        self.history.clear();
+        self.selected_node = self
+            .workspace
+            .graph()
+            .nodes()
+            .first()
+            .map(NodeDefinition::id);
+        self.selected_entry = self
+            .selected_node
+            .and_then(|node| self.workspace.graph().node(node))
+            .and_then(cached_job_parameter)
+            .and_then(|handle| self.catalog.entry_index_for_handle(handle))
+            .unwrap_or(0);
+        "restored catalog-bound cached-job ALGW from application storage"
+            .clone_into(&mut self.status);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CachedJobGraphAction {
+    Add,
+    Rebind,
+    Undo,
+    Redo,
+}
+
+fn cached_job_registry() -> Result<GraphNodeRegistry, String> {
+    let schema = GraphSchema::try_new(
+        GraphLimits::interactive(),
+        Vec::new(),
+        vec![TypeDefinition::new(
+            CACHED_JOB_TYPE,
+            "job.cached.participant",
+            TypeKind::JobHandle,
+        )],
+    )
+    .map_err(|error| error.to_string())?;
+    let context = GraphDocument::try_new(0, schema, Vec::new(), Vec::new(), Vec::new())
+        .map_err(|error| error.to_string())?;
+    GraphNodeRegistry::try_new(
+        GraphAnalysisLimits::interactive(),
+        &context,
+        vec![NodeSchema::new(
+            NodeKind::new(CACHED_JOB_KIND_NAME, 1),
+            ExecutionDomainSet::HOST_EXACT,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![NodeParameterContract::new(
+                CACHED_JOB_PARAMETER,
+                "job",
+                CACHED_JOB_TYPE,
+            )],
+            Vec::new(),
+            Vec::new(),
+            None,
+        )],
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn cached_job_prototype(
+    catalog: &GraphCachedJobCatalog,
+    registry: &GraphNodeRegistry,
+    entry: usize,
+    label: &str,
+) -> Result<GraphNodePrototype, String> {
+    let entry = catalog
+        .entries()
+        .get(entry)
+        .copied()
+        .ok_or_else(|| "cached job catalog entry is unavailable".to_owned())?;
+    let value = entry
+        .typed_value(registry.context_schema(), CACHED_JOB_TYPE)
+        .map_err(|error| error.to_string())?;
+    Ok(GraphNodePrototype::new(
+        NodeKind::new(CACHED_JOB_KIND_NAME, 1),
+        label,
+        ExecutionDomain::HostExact,
+        Vec::new(),
+        Vec::new(),
+        vec![NodeParameter::new(CACHED_JOB_PARAMETER, "job", value)],
+    ))
+}
+
+fn cached_job_parameter(node: &NodeDefinition) -> Option<alumina_interface_core::JobGraphHandle> {
+    let value = node
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.id() == CACHED_JOB_PARAMETER)?
+        .value()
+        .value();
+    match value {
+        GraphValue::JobHandle(handle) => Some(*handle),
+        _ => None,
+    }
+}
+
+fn validate_cached_job_workspace(
+    catalog: &GraphCachedJobCatalog,
+    registry: &GraphNodeRegistry,
+    workspace: &GraphWorkspaceDocument,
+) -> Result<(), String> {
+    analyze_graph_draft(workspace.graph(), registry).map_err(|error| error.to_string())?;
+    for node in workspace.graph().nodes() {
+        let handle = cached_job_parameter(node).ok_or_else(|| {
+            format!(
+                "cached job node #{} has no typed job parameter",
+                node.id().get()
+            )
+        })?;
+        if catalog.entry_index_for_handle(handle).is_none() {
+            return Err(format!(
+                "cached job node #{} carries a raw, stale, or foreign identity",
+                node.id().get()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn cached_job_entry_label(
+    entry: &alumina_interface_core::graph::GraphCachedJobCatalogEntry,
+) -> String {
+    let participant = entry.participant();
+    format!(
+        "MCU {}… · partition {}…",
+        digest_prefix16(participant.device_id.0),
+        digest_prefix(participant.partition_digest.0),
+    )
+}
+
 /// Browser/native inspector for one shared exact control graph and trace.
 pub(crate) struct ExactControlWorkspace {
     fixture: RepresentativeExactControlGraph,
@@ -1390,6 +1877,7 @@ pub(crate) struct ExactControlWorkspace {
     probe_status: String,
     board_explorer: BoardExplorerPanel,
     target_resources: TargetResourceProof,
+    cached_jobs: CachedJobGraphProof,
     history: GraphWorkspaceProbeHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
@@ -1418,7 +1906,19 @@ impl ExactControlWorkspace {
         Self::try_new_with_persisted(None)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_new_with_persisted(persisted: Option<&str>) -> Result<Self, String> {
+        let program = alumina_interface_core::compile_representative_program()
+            .map_err(|error| error.to_string())?;
+        let job = alumina_interface_core::compile_representative_global_job(&program)
+            .map_err(|error| error.to_string())?;
+        Self::try_new_with_persisted_job(persisted, &job)
+    }
+
+    pub(crate) fn try_new_with_persisted_job(
+        persisted: Option<&str>,
+        job: &CanonicalGlobalJob2,
+    ) -> Result<Self, String> {
         let fixture =
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
@@ -1426,6 +1926,7 @@ impl ExactControlWorkspace {
         let probes = representative_probes(&workspace)?;
         let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
+        let cached_jobs = CachedJobGraphProof::try_new(job)?;
         let traces = trace_series(&fixture, &workspace, &probes.document)?;
         let palette = control_palette(&fixture)?;
         let trigger = probes
@@ -1446,6 +1947,7 @@ impl ExactControlWorkspace {
             probe_status: "canonical ALGP diagnostic probes attached".to_owned(),
             board_explorer,
             target_resources,
+            cached_jobs,
             history: GraphWorkspaceProbeHistory::default(),
             presentation,
             traces,
@@ -1469,22 +1971,26 @@ impl ExactControlWorkspace {
         };
         result.reset_probe_drafts();
         if let Some(persisted) = persisted {
-            match decode_persisted_workspace_pair(
+            match decode_persisted_workspace_bundle(
                 persisted,
                 result.workspace.limits(),
                 GraphProbeLimits::interactive(),
             )
-            .and_then(|(workspace, probes)| {
-                result.restore_workspace_pair_bytes(&workspace, &probes)
+            .and_then(|bundle| {
+                result.restore_workspace_bundle_bytes(
+                    &bundle.control_workspace,
+                    &bundle.probes,
+                    &bundle.cached_jobs,
+                )
             }) {
                 Ok(()) => {
-                    "restored exact canonical ALGW/ALGP pair from application storage"
+                    "restored exact canonical control ALGW/ALGP + cached-job ALGW bundle from application storage"
                         .clone_into(&mut result.edit_status);
                 }
                 Err(error) => {
                     result.persistence_dirty = true;
                     result.edit_status = format!(
-                        "persisted ALGW/ALGP pair rejected atomically; canonical reference loaded instead: {error}"
+                        "persisted control/job graph bundle rejected atomically; canonical reference loaded instead: {error}"
                     );
                 }
             }
@@ -1498,12 +2004,16 @@ impl ExactControlWorkspace {
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) fn persisted_workspace_pair(&self) -> Result<String, String> {
+    pub(crate) fn persisted_workspace_bundle(&self) -> Result<String, String> {
         let probes = self
             .probes
             .as_ref()
             .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
-        encode_persisted_workspace_pair(&self.workspace_encoding, &probes.encoding)
+        encode_persisted_workspace_bundle(
+            &self.workspace_encoding,
+            &probes.encoding,
+            &self.cached_jobs.encoding,
+        )
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
@@ -1573,7 +2083,7 @@ impl ExactControlWorkspace {
         } else if self.persistence_dirty {
             "Browser persistence: pending"
         } else {
-            "Browser persistence: exact ALGW/ALGP pair saved"
+            "Browser persistence: exact control/job graph bundle saved"
         });
         ui.label(format!(
             "Reference trace: {} entries / {} bytes",
@@ -1591,6 +2101,11 @@ impl ExactControlWorkspace {
         ui.monospace(format!(
             "trace {}…",
             digest_prefix(self.fixture.trace().digest().0)
+        ));
+        ui.label(format!(
+            "Cached-job proof: {} exact participants · {} canonical bytes",
+            self.cached_jobs.catalog.entries().len(),
+            self.cached_jobs.encoding.bytes().len()
         ));
         ui.colored_label(
             egui::Color32::YELLOW,
@@ -1681,6 +2196,12 @@ impl ExactControlWorkspace {
         ui.separator();
 
         self.show_target_resources(ui);
+        ui.separator();
+
+        if self.cached_jobs.show(ui) {
+            self.persistence_dirty = true;
+            self.persistence_attempted = false;
+        }
         ui.separator();
 
         self.show_front_panel(ui);
@@ -2959,10 +3480,11 @@ impl ExactControlWorkspace {
         Ok((encoding, presentation, semantic))
     }
 
-    fn restore_workspace_pair_bytes(
+    fn restore_workspace_bundle_bytes(
         &mut self,
         workspace_bytes: &[u8],
         probe_bytes: &[u8],
+        cached_job_bytes: &[u8],
     ) -> Result<(), String> {
         let workspace_replay = replay_graph_workspace(
             workspace_bytes,
@@ -2982,9 +3504,13 @@ impl ExactControlWorkspace {
             document: probe_replay.document().clone(),
             encoding: probe_replay.encoding().clone(),
         };
+        let (cached_job_workspace, cached_job_encoding) = self
+            .cached_jobs
+            .replay_persisted_workspace(cached_job_bytes)?;
 
-        // Commit only after both artifacts have replayed canonically and the
-        // sidecar has proven its binding to the candidate workspace.
+        // Commit only after all three artifacts have replayed canonically, the
+        // probe sidecar has proven its ALGW binding, and every cached-job value
+        // remains a member of the currently reconciled catalog.
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
@@ -2997,6 +3523,8 @@ impl ExactControlWorkspace {
         self.probe_drafts.clear();
         self.refresh_component();
         self.replace_probe_package(probes);
+        self.cached_jobs
+            .restore_persisted_workspace(cached_job_workspace, cached_job_encoding);
         self.reset_cursor_to_trigger();
         self.persistence_dirty = false;
         self.persistence_attempted = false;
@@ -4563,12 +5091,14 @@ fn parse_parameter_text(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn encode_persisted_workspace_pair(
+fn encode_persisted_workspace_bundle(
     workspace: &CanonicalGraphWorkspaceEncoding,
     probes: &CanonicalGraphProbeEncoding,
+    cached_jobs: &CanonicalGraphWorkspaceEncoding,
 ) -> Result<String, String> {
     let workspace_bytes = workspace.bytes();
     let probe_bytes = probes.bytes();
+    let cached_job_bytes = cached_jobs.bytes();
     if workspace_bytes.len() > MAXIMUM_PERSISTED_WORKSPACE_BYTES {
         return Err(format!(
             "canonical ALGW has {} bytes; browser persistence admits at most {}",
@@ -4583,18 +5113,28 @@ fn encode_persisted_workspace_pair(
             MAXIMUM_PERSISTED_PROBE_BYTES
         ));
     }
+    if cached_job_bytes.len() > MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES {
+        return Err(format!(
+            "canonical cached-job ALGW has {} bytes; browser persistence admits at most {}",
+            cached_job_bytes.len(),
+            MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES
+        ));
+    }
     let encoded_bytes = workspace_bytes
         .len()
         .checked_mul(2)
         .and_then(|length| length.checked_add(probe_bytes.len().checked_mul(2)?))
-        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_PAIR_PREFIX.len()))
-        .and_then(|length| length.checked_add(1))
-        .ok_or_else(|| "persisted ALGW/ALGP text length overflowed".to_owned())?;
+        .and_then(|length| length.checked_add(cached_job_bytes.len().checked_mul(2)?))
+        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_BUNDLE_PREFIX.len()))
+        .and_then(|length| length.checked_add(2))
+        .ok_or_else(|| "persisted control/job graph bundle text length overflowed".to_owned())?;
     let mut result = String::with_capacity(encoded_bytes);
-    result.push_str(PERSISTED_WORKSPACE_PAIR_PREFIX);
+    result.push_str(PERSISTED_WORKSPACE_BUNDLE_PREFIX);
     append_lower_hex(&mut result, workspace_bytes);
     result.push(':');
     append_lower_hex(&mut result, probe_bytes);
+    result.push(':');
+    append_lower_hex(&mut result, cached_job_bytes);
     Ok(result)
 }
 
@@ -4607,27 +5147,43 @@ fn append_lower_hex(result: &mut String, bytes: &[u8]) {
     }
 }
 
-fn decode_persisted_workspace_pair(
+fn decode_persisted_workspace_bundle(
     value: &str,
     workspace_limits: GraphWorkspaceLimits,
     probe_limits: GraphProbeLimits,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+) -> Result<PersistedWorkspaceBundleBytes, String> {
     let encoded = value
-        .strip_prefix(PERSISTED_WORKSPACE_PAIR_PREFIX)
-        .ok_or_else(|| "persisted ALGW/ALGP pair prefix/version is unsupported".to_owned())?;
-    let (workspace, probes) = encoded
-        .split_once(':')
-        .ok_or_else(|| "persisted ALGW/ALGP pair separator is missing".to_owned())?;
+        .strip_prefix(PERSISTED_WORKSPACE_BUNDLE_PREFIX)
+        .ok_or_else(|| {
+            "persisted control/job graph bundle prefix/version is unsupported".to_owned()
+        })?;
+    let mut sections = encoded.split(':');
+    let workspace = sections
+        .next()
+        .ok_or_else(|| "persisted control ALGW section is missing".to_owned())?;
+    let probes = sections
+        .next()
+        .ok_or_else(|| "persisted ALGP section is missing".to_owned())?;
+    let cached_jobs = sections
+        .next()
+        .ok_or_else(|| "persisted cached-job ALGW section is missing".to_owned())?;
+    if sections.next().is_some() {
+        return Err("persisted control/job graph bundle has extra sections".to_owned());
+    }
     let workspace_maximum = workspace_limits
         .maximum_workspace_bytes
         .min(MAXIMUM_PERSISTED_WORKSPACE_BYTES);
     let probe_maximum = probe_limits
         .maximum_probe_document_bytes
         .min(MAXIMUM_PERSISTED_PROBE_BYTES);
-    Ok((
-        decode_persisted_hex(workspace, workspace_maximum, "ALGW")?,
-        decode_persisted_hex(probes, probe_maximum, "ALGP")?,
-    ))
+    let cached_job_maximum = workspace_limits
+        .maximum_workspace_bytes
+        .min(MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES);
+    Ok(PersistedWorkspaceBundleBytes {
+        control_workspace: decode_persisted_hex(workspace, workspace_maximum, "ALGW")?,
+        probes: decode_persisted_hex(probes, probe_maximum, "ALGP")?,
+        cached_jobs: decode_persisted_hex(cached_jobs, cached_job_maximum, "cached-job ALGW")?,
+    })
 }
 
 fn decode_persisted_hex(
@@ -6338,6 +6894,88 @@ mod tests {
     };
 
     #[test]
+    fn cached_job_proof_starts_from_complete_reconciled_participant_set() {
+        let workspace = ExactControlWorkspace::try_new().unwrap();
+        let proof = &workspace.cached_jobs;
+        assert_eq!(proof.catalog.entries().len(), 2);
+        assert_eq!(proof.workspace.graph().nodes().len(), 1);
+        assert_eq!(proof.selected_node, Some(GraphNodeId::new(1)));
+        assert!(proof.status.contains("cache reconciliation"));
+        validate_cached_job_workspace(&proof.catalog, &proof.registry, &proof.workspace).unwrap();
+        let replay = replay_graph_workspace(
+            proof.encoding.bytes(),
+            proof.workspace.limits(),
+            proof.workspace.graph().schema().limits(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &proof.workspace);
+        assert_eq!(replay.encoding(), &proof.encoding);
+    }
+
+    #[test]
+    fn cached_job_ui_rebind_add_history_and_replay_stay_catalog_bound() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let proof = &mut workspace.cached_jobs;
+        let node = proof.selected_node.unwrap();
+        let placement = proof.workspace.placement(node);
+        let initial = proof.encoding.clone();
+
+        proof.selected_entry = 1;
+        proof.rebind_selected_reference().unwrap();
+        assert_ne!(proof.encoding, initial);
+        assert_eq!(proof.workspace.placement(node), placement);
+        assert_eq!(proof.history.undo_len(), 1);
+        assert_eq!(proof.history.redo_len(), 0);
+        assert_eq!(
+            cached_job_parameter(proof.workspace.graph().node(node).unwrap()),
+            Some(proof.catalog.entries()[1].handle())
+        );
+
+        proof.add_selected_reference().unwrap();
+        assert_eq!(proof.workspace.graph().nodes().len(), 2);
+        assert_eq!(proof.history.undo_len(), 2);
+        let edited = proof.encoding.clone();
+        let replay = replay_graph_workspace(
+            edited.bytes(),
+            proof.workspace.limits(),
+            proof.workspace.graph().schema().limits(),
+        )
+        .unwrap();
+        validate_cached_job_workspace(&proof.catalog, &proof.registry, replay.document()).unwrap();
+        assert_eq!(replay.encoding(), &edited);
+
+        proof.navigate_history(false).unwrap();
+        assert_eq!(proof.workspace.graph().nodes().len(), 1);
+        assert_eq!(proof.history.redo_len(), 1);
+        proof.navigate_history(true).unwrap();
+        assert_eq!(proof.encoding, edited);
+        assert_eq!(proof.workspace.graph().nodes().len(), 2);
+
+        let mut raw = proof.workspace.clone();
+        let raw_node = raw.graph().nodes()[0].id();
+        let raw_handle = JobGraphHandle {
+            global_job_digest: Digest([0x9a; 32]),
+            ..proof.catalog.entries()[0].handle()
+        };
+        raw.set_parameter(
+            raw_node,
+            CACHED_JOB_PARAMETER,
+            TypedGraphValue::try_new(
+                proof.registry.context_schema(),
+                CACHED_JOB_TYPE,
+                GraphValue::JobHandle(raw_handle),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            validate_cached_job_workspace(&proof.catalog, &proof.registry, &raw)
+                .unwrap_err()
+                .contains("raw, stale, or foreign")
+        );
+    }
+
+    #[test]
     fn representative_layout_is_bounded_acyclic_and_keeps_feedback_visible() {
         let workspace = ExactControlWorkspace::try_new().unwrap();
         assert_eq!(workspace.presentation.nodes.len(), 21);
@@ -7104,7 +7742,7 @@ mod tests {
         );
         assert!(workspace.node_label_drafts.is_empty());
 
-        let persisted = workspace.persisted_workspace_pair().unwrap();
+        let persisted = workspace.persisted_workspace_bundle().unwrap();
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace, workspace.workspace);
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
@@ -7186,26 +7824,33 @@ mod tests {
     }
 
     #[test]
-    fn persistence_round_trips_the_exact_current_workspace_probe_pair() {
+    fn persistence_round_trips_control_probe_and_catalog_bound_job_graphs() {
         let canonical = ExactControlWorkspace::try_new().unwrap();
-        let canonical_persisted = canonical.persisted_workspace_pair().unwrap();
+        let canonical_persisted = canonical.persisted_workspace_bundle().unwrap();
         let canonical_restored =
             ExactControlWorkspace::try_new_with_persisted(Some(&canonical_persisted)).unwrap();
         assert_eq!(
             canonical_restored.probes.as_ref().unwrap().encoding,
             canonical.probes.as_ref().unwrap().encoding
         );
+        assert_eq!(
+            canonical_restored.cached_jobs.encoding,
+            canonical.cached_jobs.encoding
+        );
 
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
         workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        workspace.cached_jobs.selected_entry = 1;
+        workspace.cached_jobs.rebind_selected_reference().unwrap();
         assert_eq!(workspace.history.undo_len(), 2);
-        let persisted = workspace.persisted_workspace_pair().unwrap();
-        assert!(persisted.starts_with(PERSISTED_WORKSPACE_PAIR_PREFIX));
-        let (workspace_hex, probe_hex) = persisted[PERSISTED_WORKSPACE_PAIR_PREFIX.len()..]
-            .split_once(':')
-            .unwrap();
-        assert!([workspace_hex, probe_hex].into_iter().all(|hex| {
+        let persisted = workspace.persisted_workspace_bundle().unwrap();
+        assert!(persisted.starts_with(PERSISTED_WORKSPACE_BUNDLE_PREFIX));
+        let sections: Vec<_> = persisted[PERSISTED_WORKSPACE_BUNDLE_PREFIX.len()..]
+            .split(':')
+            .collect();
+        assert_eq!(sections.len(), 3);
+        assert!(sections.iter().all(|hex| {
             hex.bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         }));
@@ -7221,22 +7866,32 @@ mod tests {
             restored.probes.as_ref().unwrap().encoding,
             workspace.probes.as_ref().unwrap().encoding
         );
+        assert_eq!(
+            restored.cached_jobs.workspace,
+            workspace.cached_jobs.workspace
+        );
+        assert_eq!(
+            restored.cached_jobs.encoding,
+            workspace.cached_jobs.encoding
+        );
+        assert_eq!(restored.cached_jobs.history.undo_len(), 0);
+        assert_eq!(restored.cached_jobs.history.redo_len(), 0);
         assert_eq!(restored.history.undo_len(), 0);
         assert_eq!(restored.history.redo_len(), 0);
         assert!(!restored.persistence_pending());
 
         let mut uppercase = persisted.clone();
-        let offset = workspace_hex
+        let offset = sections[0]
             .bytes()
             .position(|byte| (b'a'..=b'f').contains(&byte))
             .unwrap();
-        let persisted_offset = PERSISTED_WORKSPACE_PAIR_PREFIX.len() + offset;
+        let persisted_offset = PERSISTED_WORKSPACE_BUNDLE_PREFIX.len() + offset;
         uppercase.replace_range(
             persisted_offset..=persisted_offset,
-            &workspace_hex[offset..=offset].to_ascii_uppercase(),
+            &sections[0][offset..=offset].to_ascii_uppercase(),
         );
         assert!(
-            decode_persisted_workspace_pair(
+            decode_persisted_workspace_bundle(
                 &uppercase,
                 GraphWorkspaceLimits::interactive(),
                 GraphProbeLimits::interactive(),
@@ -7245,8 +7900,8 @@ mod tests {
             .contains("lowercase hex")
         );
         assert!(
-            decode_persisted_workspace_pair(
-                "algwp1:0000:00",
+            decode_persisted_workspace_bundle(
+                "algwb1:0000:00:00",
                 GraphWorkspaceLimits {
                     maximum_workspace_bytes: 1,
                     ..GraphWorkspaceLimits::interactive()
@@ -8269,7 +8924,7 @@ mod tests {
             workspace.probes.as_ref().unwrap().encoding,
             edited_probes.encoding
         );
-        let persisted = workspace.persisted_workspace_pair().unwrap();
+        let persisted = workspace.persisted_workspace_bundle().unwrap();
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
         assert_eq!(
@@ -8328,7 +8983,7 @@ mod tests {
         assert!(
             fallback
                 .edit_status
-                .contains("persisted ALGW/ALGP pair rejected")
+                .contains("persisted control/job graph bundle rejected")
         );
         assert!(fallback.persistence_pending());
         assert!(fallback.reference_trace_is_current());
@@ -8336,9 +8991,10 @@ mod tests {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
-        let mismatched_pair = encode_persisted_workspace_pair(
+        let mismatched_pair = encode_persisted_workspace_bundle(
             &source.workspace_encoding,
             &reference.probes.as_ref().unwrap().encoding,
+            &reference.cached_jobs.encoding,
         )
         .unwrap();
         let pair_fallback =
@@ -8408,6 +9064,46 @@ mod tests {
         );
         assert_eq!(target.workspace, retained_workspace);
         assert_eq!(target.history, retained_history);
+    }
+
+    #[test]
+    fn persisted_raw_or_foreign_cached_job_identity_rejects_the_whole_bundle() {
+        let reference = ExactControlWorkspace::try_new().unwrap();
+        let mut foreign_job_workspace = reference.cached_jobs.workspace.clone();
+        let foreign_node = foreign_job_workspace.graph().nodes()[0].id();
+        let foreign_handle = JobGraphHandle {
+            global_job_digest: Digest([0x91; 32]),
+            ..reference.cached_jobs.catalog.entries()[0].handle()
+        };
+        foreign_job_workspace
+            .set_parameter(
+                foreign_node,
+                CACHED_JOB_PARAMETER,
+                TypedGraphValue::try_new(
+                    reference.cached_jobs.registry.context_schema(),
+                    CACHED_JOB_TYPE,
+                    GraphValue::JobHandle(foreign_handle),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let foreign_job_encoding = encode_graph_workspace(&foreign_job_workspace).unwrap();
+        let foreign_bundle = encode_persisted_workspace_bundle(
+            &reference.workspace_encoding,
+            &reference.probes.as_ref().unwrap().encoding,
+            &foreign_job_encoding,
+        )
+        .unwrap();
+
+        let fallback =
+            ExactControlWorkspace::try_new_with_persisted(Some(&foreign_bundle)).unwrap();
+        assert_eq!(fallback.workspace, reference.workspace);
+        assert_eq!(
+            fallback.cached_jobs.workspace,
+            reference.cached_jobs.workspace
+        );
+        assert!(fallback.edit_status.contains("rejected atomically"));
+        assert!(fallback.persistence_pending());
     }
 
     #[test]

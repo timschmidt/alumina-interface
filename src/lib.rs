@@ -42,7 +42,7 @@ use crate::browser_worker::{
 };
 use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
-use crate::control_graph_ui::WORKSPACE_PAIR_STORAGE_KEY;
+use crate::control_graph_ui::WORKSPACE_BUNDLE_STORAGE_KEY;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
 use crate::machine_cam_ui::MachineCamDeploymentTarget;
 use crate::machine_cam_ui::MachineCamWorkspace;
@@ -248,7 +248,9 @@ impl RenderResources {
     }
 }
 
-fn initialize_exact_control_workspace() -> (Option<ExactControlWorkspace>, Option<String>) {
+fn initialize_exact_control_workspace(
+    job: Option<&CanonicalGlobalJob2>,
+) -> (Option<ExactControlWorkspace>, Option<String>) {
     #[cfg(target_arch = "wasm32")]
     let persisted = load_persisted_exact_control_workspace();
     #[cfg(not(target_arch = "wasm32"))]
@@ -258,7 +260,13 @@ fn initialize_exact_control_workspace() -> (Option<ExactControlWorkspace>, Optio
         Ok(persisted) => (persisted, None),
         Err(error) => (None, Some(error)),
     };
-    match ExactControlWorkspace::try_new_with_persisted(persisted.as_deref()) {
+    let Some(job) = job else {
+        return (
+            None,
+            Some("exact control workspace has no canonical cached-job fixture".to_owned()),
+        );
+    };
+    match ExactControlWorkspace::try_new_with_persisted_job(persisted.as_deref(), job) {
         Ok(mut workspace) => {
             if let Some(error) = persistence_error {
                 workspace.note_persistence_error(&error);
@@ -365,7 +373,8 @@ impl AluminaApp {
                 },
                 None => (None, None),
             };
-        let (exact_control, exact_control_error) = initialize_exact_control_workspace();
+        let (exact_control, exact_control_error) =
+            initialize_exact_control_workspace(representative_global_job.as_ref());
         let (machine_cam, machine_cam_error) = match MachineCamWorkspace::try_new() {
             Ok(workspace) => (Some(workspace), None),
             Err(error) => (None, Some(format!("machine/CAM workspace failed: {error}"))),
@@ -1073,7 +1082,7 @@ impl AluminaApp {
         if !workspace.persistence_pending() {
             return;
         }
-        let persisted = match workspace.persisted_workspace_pair() {
+        let persisted = match workspace.persisted_workspace_bundle() {
             Ok(persisted) => persisted,
             Err(error) => {
                 workspace.note_persistence_error(&error);
@@ -1082,7 +1091,7 @@ impl AluminaApp {
         };
         let result = browser_local_storage().and_then(|storage| {
             storage
-                .set_item(WORKSPACE_PAIR_STORAGE_KEY, &persisted)
+                .set_item(WORKSPACE_BUNDLE_STORAGE_KEY, &persisted)
                 .map_err(|value| browser_value_text(&value))
         });
         match result {
@@ -2726,7 +2735,7 @@ fn browser_local_storage() -> Result<web_sys::Storage, String> {
 #[cfg(target_arch = "wasm32")]
 fn load_persisted_exact_control_workspace() -> Result<Option<String>, String> {
     browser_local_storage()?
-        .get_item(WORKSPACE_PAIR_STORAGE_KEY)
+        .get_item(WORKSPACE_BUNDLE_STORAGE_KEY)
         .map_err(|value| browser_value_text(&value))
 }
 

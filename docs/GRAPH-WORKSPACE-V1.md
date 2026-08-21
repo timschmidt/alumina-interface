@@ -103,7 +103,11 @@ text exactly, composite parsing follows the registered schema, and canonical
 `ALGR` encoding stores the normalized value without a floating-point
 conversion. Resource/job handles and runtime Event/Stream shapes remain
 visibly read-only in the text editor. The separate capability-derived target
-draft can replace a resource handle only through exact catalog selection.
+draft can replace a resource handle only through exact catalog selection. The
+separate [cache-derived job draft](GRAPH-CACHED-JOB-CATALOG-V1.md) can add or
+replace an inert job handle only after canonical CAM artifacts and complete
+participant cache-ready observations match exactly; it accepts no raw identity
+text.
 
 The UI rebuilds semantic layering and reruns audited analysis after each
 candidate. A newly created or disconnected required input is retained as an
@@ -146,22 +150,23 @@ workspace or bound sidecar is itself one undoable pair edit.
 
 ## Persistence and file exchange
 
-The browser stores the current canonical workspace and its exact graph-probe
-sidecar together in one origin-local storage value after a successful graph,
-history, probe, or trigger edit. The application envelope is version-tagged
-`algwp1:`, followed by lowercase hexadecimal `ALGW`, one `:`, and lowercase
-hexadecimal `ALGP`. One `setItem` replaces the complete pair; there is no
-two-key state in which a newly stored workspace can be mistaken for an older
-sidecar. Decoding rejects the wrong tag, missing separator, odd length,
-uppercase or non-hex text, and either artifact over its 2 MiB browser
-persistence ceiling before allocating its bytes.
+The browser stores the current canonical control workspace, its exact
+graph-probe sidecar, and the separate catalog-bound cached-job workspace in one
+origin-local value after a successful edit. The greenfield application envelope
+is version-tagged `algwb1:`, followed by lowercase hexadecimal control `ALGW`,
+`ALGP`, and cached-job `ALGW` sections separated by `:`. One `setItem` replaces
+the complete bundle. Decoding rejects the wrong tag, missing or extra section,
+odd length, uppercase or non-hex text, or any section over its independent
+2 MiB ceiling before allocating its bytes.
 
-Restore first replays and admits the candidate `ALGW`, then replays `ALGP`
-against that exact candidate identity. Only after both replays and byte-for-byte
-canonical checks succeed does either document replace the in-memory reference.
-A malformed sidecar, a valid sidecar for another workspace, or an invalid
-workspace therefore rejects the pair atomically. The old ALGW-only storage key
-and text representation are intentionally not compatibility inputs.
+Restore replays and admits the control `ALGW`, replays `ALGP` against that exact
+identity, and independently replays the cached-job `ALGW` before checking every
+job handle against the newly derived exact catalog. Only after all canonical
+and binding checks succeed does any document replace the in-memory reference.
+A malformed sidecar, a sidecar for another workspace, or a raw, stale, or
+foreign cached-job handle therefore rejects the bundle atomically. Earlier
+application keys and text representations are intentionally not compatibility
+inputs.
 
 Browser download writes the byte-for-byte canonical `ALGW` or currently bound
 `ALGP` encoding to a corresponding `.algw` or `.algp` Blob. Browser upload

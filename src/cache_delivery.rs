@@ -7,7 +7,9 @@ use alumina_interface_client::upload::{
     CacheUploadError, CacheUploadMachine, CacheUploadPhase, UploadOperation, UploadSource,
 };
 use alumina_interface_core::{
-    CanonicalGlobalJob2, CanonicalMachinePartition2, GlobalJobCompileError,
+    CanonicalGlobalJob2, CanonicalMachinePartition2, GlobalJobCompileError, GraphCachedJobCatalog,
+    GraphCachedJobCatalogError, GraphCachedJobCatalogLimits, GraphCachedJobPublicationEvidence,
+    derive_graph_cached_job_catalog,
 };
 use alumina_protocol::DeviceId;
 use alumina_storage::{ChunkUploadHeader, PublishedObject, UploadId, UploadPlan};
@@ -332,6 +334,36 @@ pub fn prepare_global_cache_delivery(
         .collect()
 }
 
+/// Derive inert graph job-handle choices from reconciled cache-delivery evidence.
+///
+/// This adapter is the public provenance bridge: callers cannot manufacture a
+/// [`ParticipantCacheReady`] value outside this crate, and readiness is emitted
+/// only after both upload machines complete. The core derivation still compares
+/// every publication exactly with `job` before returning any catalog entry.
+///
+/// # Errors
+///
+/// Rejects malformed readiness identities, incomplete/duplicate participant
+/// sets, substituted publications, and caller-policy limit violations.
+pub fn derive_graph_cached_job_catalog_from_ready(
+    job: &CanonicalGlobalJob2,
+    ready: &[ParticipantCacheReady],
+    limits: GraphCachedJobCatalogLimits,
+) -> Result<GraphCachedJobCatalog, GraphCachedJobCatalogError> {
+    let evidence = ready
+        .iter()
+        .copied()
+        .map(|item| {
+            GraphCachedJobPublicationEvidence::try_new(
+                item.device_id(),
+                item.partition(),
+                item.global_manifest(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    derive_graph_cached_job_catalog(job, &evidence, limits)
+}
+
 /// Failure before a participant may be reported cache-ready.
 #[derive(Debug)]
 pub enum ParticipantCacheDeliveryError {
@@ -503,6 +535,34 @@ mod tests {
                 .unwrap();
             assert!(partition_finalize < manifest_inspect);
             assert_eq!(delivery.publications(), expected_publications);
+        }
+
+        assert_ready_graph_catalog(&job, &deliveries);
+    }
+
+    fn assert_ready_graph_catalog(
+        job: &CanonicalGlobalJob2,
+        deliveries: &[ParticipantCacheDelivery],
+    ) {
+        let mut ready: Vec<_> = deliveries
+            .iter()
+            .map(|delivery| delivery.readiness().unwrap())
+            .collect();
+        ready.reverse();
+        let catalog = derive_graph_cached_job_catalog_from_ready(
+            job,
+            &ready,
+            GraphCachedJobCatalogLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(catalog.global_job_digest(), job.global_job_digest());
+        assert_eq!(catalog.entries().len(), job.participants().len());
+        for (entry, participant) in catalog.entries().iter().zip(job.participant_records()) {
+            assert_eq!(entry.handle().device_id, participant.device_id);
+            assert_eq!(
+                entry.handle().partition_digest,
+                participant.partition_digest
+            );
         }
     }
 

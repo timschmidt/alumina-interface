@@ -225,7 +225,13 @@ prototype.
   analysis runs before commit. Deterministic quoted text, hexadecimal bytes,
   arrays, records,
   options, and results round-trip through the window-free core; resource/job
-  handles remain selector-bound rather than text-authorized. Every edit is
+  handles remain selector-bound rather than text-authorized. A separate
+  [cache-derived job catalog](docs/GRAPH-CACHED-JOB-CATALOG-V1.md) joins the
+  canonical global CAM manifest to exact partition-plus-manifest cache-ready
+  observations, retains the precision-relevant participant record, and offers
+  only those inert participant-local references in an offline graph selector.
+  Raw/stale/foreign identities reject; duplicate immutable references remain
+  legal data and grant no prepare/start authority. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
   Canonical replay-backed undo/redo retains bounded complete `ALGW`/`ALGP` pair
   snapshots across graph, probe, trigger, and sidecar-import edits. Per-probe

@@ -19,6 +19,7 @@ mod control_fixture;
 mod deployment;
 mod document;
 mod hierarchy;
+mod job_catalog;
 mod literal_text;
 mod probe;
 mod simulation;
@@ -72,6 +73,12 @@ pub use hierarchy::{
     GraphHierarchyReplay, encode_graph_hierarchy, flatten_graph_hierarchy,
     graph_component_instance_input_port, graph_component_instance_output_port,
     graph_component_instance_prototype, replay_graph_hierarchy,
+};
+pub use job_catalog::{
+    GraphCachedJobCatalog, GraphCachedJobCatalogEntry, GraphCachedJobCatalogError,
+    GraphCachedJobCatalogLimits, GraphCachedJobHandleSelectionError,
+    GraphCachedJobPublicationEvidence, derive_graph_cached_job_catalog,
+    select_graph_cached_job_handle,
 };
 pub use literal_text::{
     GraphLiteralTextError, GraphLiteralTextLimits, INTERACTIVE_GRAPH_LITERAL_TEXT_BYTES,
