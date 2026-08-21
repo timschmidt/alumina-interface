@@ -72,6 +72,27 @@ identities to derived instance ports so callers do not duplicate that mapping.
 The same check applies at every component scope, so a binding cannot silently
 substitute a different connector shape.
 
+## Transactional authoring operations
+
+`GraphHierarchyDocument` exposes three bounded clone-and-validate mutations:
+
+- `add_root_instance` resolves an existing exact dependency, derives its
+  placeholder shape, and allocates the root node through the root `ALGW`'s
+  monotonic cursor;
+- `remove_root_instance` deletes one exact root binding, its placeholder, and
+  all incident root wires without removing dependencies or rewinding node and
+  wire cursors; and
+- `replace_component` substitutes one exact library dependency and remaps both
+  child-component references and parent-scope references from the old digest
+  to the replacement digest.
+
+Each operation constructs a complete candidate and reruns all hierarchy
+invariants before replacing the prior document. An unknown dependency or
+instance, incompatible connector shape, digest collision, limit failure,
+integer overflow, or any nested validation error therefore leaves the original
+hierarchy byte-for-byte intact. Replacing a dependency with its exact current
+encoding is a no-op and does not advance revision.
+
 ## Bounded dependency analysis
 
 Validation treats component digests as definition identities and scoped
@@ -157,17 +178,34 @@ cursor correlate leaf-local endpoints such as `[1/1]:n8.p1` with the final
 does not substitute a collapsed placeholder into the executable editor canvas
 or claim that an instance itself can run.
 
+The adjacent component-library panel selects only dependencies already present
+in the canonical hierarchy. Adding a selected dependency places a new root
+placeholder to the right of the current root layout; deleting a selected root
+occurrence also deletes only its incident root wires. The UI then freshly
+encodes `ALGH`, flattens it, regenerates `ALGM`, admits the flattened draft
+through the audited semantic registry, constructs the complete `ALGS`, records
+the previous complete session, and commits all artifacts together. Direct
+authoring therefore participates in the same exact undo/redo and persistence
+timeline as control, probe, and cached-job edits.
+
+When an attached control workspace changes compatibly, the UI constructs the
+replacement selected `ALGC` and calls `replace_component`; authored root
+instances, root IDs/placements/wires, and unrelated dependency encodings remain
+unchanged while every old selected-component binding moves to the new digest.
+An incompatible component edit follows the existing visible detached-hierarchy
+path and remains recoverable through complete-session undo.
+
 ## Deliberately open
 
-Editable component-instance creation/deletion on the main canvas,
-direct hierarchy mutation commands that feed the existing complete-session
-history, general library authoring, parameter
-promotion/overrides, package signatures and permissions, locked dependency
-manifests, incremental flattening, interactive traversal from final items into
-nested editable canvases, and executable front-panel inputs remain open.
+Direct root-instance creation/deletion is implemented through the dedicated
+library panel. Main-canvas instance wiring and movement, nested definition
+editing, general library import/creation/removal, parameter promotion/overrides,
+package signatures and permissions, locked dependency manifests, incremental
+flattening, interactive traversal from final items into nested editable
+canvases, and executable front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
-restores that branch with all other authoring state; it does not add those
-editing operations. `ALGH` V2 and `ALGM` V1 grant no
+restores direct root-instance edits with all other authoring state. `ALGH` V2
+and `ALGM` V1 grant no
 semantic, implementation, resource, timing, safety, firmware, or
 physical-output authority.

@@ -108,8 +108,9 @@ and source map together. Failed restore leaves all prior authoring state intact.
 The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
 Control-workspace, probe/trigger, focused import, cached-job, selected-component,
-hierarchy, and source-map state therefore share one timeline rather than
-independent histories that could be navigated into a mismatched combination.
+direct root-instance, hierarchy, and source-map state therefore share one
+timeline rather than independent histories that could be navigated into a
+mismatched combination.
 
 The first interactive policy retains at most 16 snapshots in each direction
 and 64 MiB of canonical `ALGS` bytes across both stacks. The current session is
@@ -123,8 +124,9 @@ the application's audited graph and cached-job catalog admission before
 changing either authoring state or history stacks. Byte corruption, tighter
 replay limits, unknown semantics, or stale/foreign cached-job identities fail
 without mutation. Navigation restores all six bound artifact roles together
-and clears only transient UI selections and text/drag drafts. Fresh startup,
-complete-session import, and persistence restore begin with empty history.
+and clears or reconciles only transient UI selections and text/drag drafts.
+Fresh startup, complete-session import, and persistence restore begin with
+empty history.
 
 ## Browser persistence and file exchange
 

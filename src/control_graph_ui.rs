@@ -31,20 +31,20 @@ use alumina_interface_core::graph::{
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
     GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
-    GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
-    GraphHierarchyLimits, GraphHierarchyNodeOrigin, GraphHierarchySourceMapLimits, GraphLimits,
-    GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry,
-    GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge,
-    GraphProbeId, GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits,
-    GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry,
-    GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceLimits, InputConnectionRequirement,
-    MAX_GRAPH_AUTHORING_SESSION_BYTES, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
-    MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, NodeDefinition, NodeInputChannelContract,
-    NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
-    NodeSchema, PortDefinition, RecordField, RecordFieldId, RecordValueField,
-    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
-    ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
+    GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDependency, GraphHierarchyDocument,
+    GraphHierarchyFlattening, GraphHierarchyLimits, GraphHierarchyNodeOrigin,
+    GraphHierarchySourceMapLimits, GraphInstanceScope, GraphLimits, GraphLiteralTextLimits,
+    GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry, GraphPortId,
+    GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeId,
+    GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits, GraphProbeTrigger,
+    GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry, GraphTraceEntry,
+    GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId, GraphWorkspaceDocument,
+    GraphWorkspaceLimits, InputConnectionRequirement, MAX_GRAPH_AUTHORING_SESSION_BYTES,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
+    NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
+    NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
+    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
     analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
     encode_graph_hierarchy, encode_graph_hierarchy_source_map, encode_graph_probes,
@@ -596,6 +596,12 @@ enum ProbeUiAction {
     SetTrigger(GraphProbeId, GraphProbeEdge),
     ApplyMetadata(GraphProbeId, ProbeEditDraft),
     ResetMetadata(GraphProbeId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HierarchyUiAction {
+    AddRoot(Digest),
+    RemoveRoot(GraphNodeId),
 }
 
 #[derive(Clone, Debug)]
@@ -2164,6 +2170,8 @@ pub(crate) struct ExactControlWorkspace {
     node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     selected_node: Option<GraphNodeId>,
+    selected_hierarchy_component: Option<Digest>,
+    selected_hierarchy_instance: Option<GraphNodeId>,
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
     edit_status: String,
@@ -2204,6 +2212,14 @@ impl ExactControlWorkspace {
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let component = representative_component(&workspace, &fixture)?;
+        let selected_hierarchy_component = Some(component.encoding.digest());
+        let selected_hierarchy_instance = component
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .find(|instance| instance.scope() == GraphInstanceScope::Root)
+            .map(|instance| instance.node());
         let probes = representative_probes(&workspace)?;
         let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
@@ -2238,6 +2254,8 @@ impl ExactControlWorkspace {
             node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
             selected_node: None,
+            selected_hierarchy_component,
+            selected_hierarchy_instance,
             pending_source: None,
             drag: None,
             edit_status: "canonical workspace ready; no structural edits".to_owned(),
@@ -2476,6 +2494,9 @@ impl ExactControlWorkspace {
         if let Some(action) = self.cached_jobs.show(ui) {
             self.apply_cached_job_action(action);
         }
+        ui.separator();
+
+        self.show_hierarchy_authoring(ui);
         ui.separator();
 
         self.show_front_panel(ui);
@@ -2848,6 +2869,308 @@ impl ExactControlWorkspace {
             egui::Color32::YELLOW,
             "Offline native/WASM actor replay only: there is no MCU session, upload, install, start, GPIO configuration, or physical read authority. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
         );
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the two selectors share one immutable canonical hierarchy snapshot and defer their single action until all display borrows end"
+    )]
+    fn show_hierarchy_authoring(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Component library / root instances");
+        ui.label(
+            "Choose one exact embedded ALGC dependency, instantiate it in the hierarchy root, or remove a selected root occurrence. These authoring-only placeholders flatten through ALGH/ALGM and never deploy by themselves.",
+        );
+        self.reconcile_hierarchy_selection(None);
+        let Some(component) = self.component.as_ref() else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_status);
+            return;
+        };
+        let dependencies = component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .map(|dependency| {
+                (
+                    dependency.digest(),
+                    format!(
+                        "{} · {}…",
+                        dependency.document().name(),
+                        digest_prefix(dependency.digest().0)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root_instances = component
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .filter(|instance| instance.scope() == GraphInstanceScope::Root)
+            .map(|instance| {
+                let node = instance.node();
+                let node_label = component
+                    .hierarchy
+                    .document
+                    .root()
+                    .graph()
+                    .node(node)
+                    .map_or("missing placeholder", NodeDefinition::label);
+                let component_name = component
+                    .hierarchy
+                    .document
+                    .dependency(instance.component())
+                    .map_or("missing component", |dependency| {
+                        dependency.document().name()
+                    });
+                (
+                    node,
+                    format!(
+                        "#{} {} → {} · {}…",
+                        node.get(),
+                        node_label,
+                        component_name,
+                        digest_prefix(instance.component().0)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_dependency_label = dependencies
+            .iter()
+            .find(|(digest, _)| Some(*digest) == self.selected_hierarchy_component)
+            .map_or("no component dependency", |(_, label)| label.as_str());
+        let selected_instance_label = root_instances
+            .iter()
+            .find(|(node, _)| Some(*node) == self.selected_hierarchy_instance)
+            .map_or("no root instance", |(_, label)| label.as_str());
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Library component");
+            egui::ComboBox::from_id_salt("hierarchy_library_component")
+                .selected_text(selected_dependency_label)
+                .show_ui(ui, |ui| {
+                    for (digest, label) in &dependencies {
+                        ui.selectable_value(
+                            &mut self.selected_hierarchy_component,
+                            Some(*digest),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    self.selected_hierarchy_component.is_some(),
+                    egui::Button::new("add root instance"),
+                )
+                .clicked()
+                && let Some(digest) = self.selected_hierarchy_component
+            {
+                action = Some(HierarchyUiAction::AddRoot(digest));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Root occurrence");
+            egui::ComboBox::from_id_salt("hierarchy_root_instance")
+                .selected_text(selected_instance_label)
+                .show_ui(ui, |ui| {
+                    for (node, label) in &root_instances {
+                        ui.selectable_value(
+                            &mut self.selected_hierarchy_instance,
+                            Some(*node),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    self.selected_hierarchy_instance.is_some(),
+                    egui::Button::new("delete root instance"),
+                )
+                .clicked()
+                && let Some(node) = self.selected_hierarchy_instance
+            {
+                action = Some(HierarchyUiAction::RemoveRoot(node));
+            }
+        });
+        ui.monospace(format!(
+            "{} exact dependencies · {} root bindings · next root node {}",
+            dependencies.len(),
+            root_instances.len(),
+            component.hierarchy.document.root().next_node_id(),
+        ));
+        ui.label(&self.component_status);
+        if let Some(action) = action {
+            self.apply_hierarchy_action(action);
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "candidate hierarchy mutation, ALGH/ALGM regeneration, complete-session admission, history recording, and commit remain one auditable transaction"
+    )]
+    fn apply_hierarchy_action(&mut self, action: HierarchyUiAction) {
+        let Some(current) = self.component.clone() else {
+            "hierarchy edit rejected without mutation: no selected component hierarchy is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = current.hierarchy.document.clone();
+        let (status, selected_component, selected_instance) = match action {
+            HierarchyUiAction::AddRoot(component) => {
+                let maximum_x = document
+                    .root()
+                    .placements()
+                    .iter()
+                    .map(|placement| placement.x())
+                    .max();
+                let x = maximum_x.map_or(Ok(NEW_NODE_ORIGIN), |maximum_x| {
+                    maximum_x
+                        .checked_add(NEW_NODE_X_GAP)
+                        .ok_or_else(|| "root instance x coordinate overflowed".to_owned())
+                });
+                let x = match x {
+                    Ok(x) => x,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                let label = format!("Component instance {}", document.root().next_node_id());
+                let node = match document.add_root_instance(component, label, x, NEW_NODE_ORIGIN) {
+                    Ok(node) => node,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added root instance #{} of exact ALGC {}…",
+                        node.get(),
+                        digest_prefix(component.0)
+                    ),
+                    Some(component),
+                    Some(node),
+                )
+            }
+            HierarchyUiAction::RemoveRoot(node) => {
+                let removed_wires = match document.remove_root_instance(node) {
+                    Ok(removed_wires) => removed_wires,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "removed root instance #{} and {removed_wires} incident root wire(s)",
+                        node.get()
+                    ),
+                    self.selected_hierarchy_component,
+                    None,
+                )
+            }
+        };
+        let hierarchy = match hierarchy_package(document, &self.fixture) {
+            Ok(hierarchy) => hierarchy,
+            Err(error) => {
+                self.component_status =
+                    format!("hierarchy edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        let candidate = ComponentPackage {
+            document: current.document,
+            encoding: current.encoding,
+            hierarchy,
+        };
+        let Some(probes) = self.probes.as_ref() else {
+            "hierarchy edit rejected without mutation: canonical ALGP sidecar is unavailable"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        if let Err(error) = Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            Some(&candidate),
+        ) {
+            self.component_status =
+                format!("hierarchy complete-session candidate rejected without mutation: {error}");
+            return;
+        }
+        let history = match self.history_with_current_recorded() {
+            Ok(history) => history,
+            Err(error) => {
+                self.component_status =
+                    format!("hierarchy authoring-session history rejected: {error}");
+                return;
+            }
+        };
+        self.component = Some(candidate);
+        self.history = history;
+        self.selected_hierarchy_component = selected_component;
+        self.selected_hierarchy_instance = selected_instance;
+        self.reconcile_hierarchy_selection(None);
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
+        self.component_status = format!("{status}; complete ALGS history recorded");
+        self.edit_status.clone_from(&self.component_status);
+    }
+
+    fn reconcile_hierarchy_selection(&mut self, component_remap: Option<(Digest, Digest)>) {
+        let Some(component) = self.component.as_ref() else {
+            self.selected_hierarchy_component = None;
+            self.selected_hierarchy_instance = None;
+            return;
+        };
+        let mut selected_component = self.selected_hierarchy_component;
+        if let Some((original, replacement)) = component_remap
+            && selected_component == Some(original)
+        {
+            selected_component = Some(replacement);
+        }
+        if selected_component
+            .is_none_or(|digest| component.hierarchy.document.dependency(digest).is_none())
+        {
+            selected_component = component
+                .hierarchy
+                .document
+                .dependency(component.encoding.digest())
+                .map(GraphHierarchyDependency::digest)
+                .or_else(|| {
+                    component
+                        .hierarchy
+                        .document
+                        .dependencies()
+                        .first()
+                        .map(GraphHierarchyDependency::digest)
+                });
+        }
+        let mut selected_instance = self.selected_hierarchy_instance;
+        if selected_instance.is_none_or(|node| {
+            !component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root && instance.node() == node
+                })
+        }) {
+            selected_instance = component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .find(|instance| instance.scope() == GraphInstanceScope::Root)
+                .map(|instance| instance.node());
+        }
+        self.selected_hierarchy_component = selected_component;
+        self.selected_hierarchy_instance = selected_instance;
     }
 
     #[allow(
@@ -3775,11 +4098,21 @@ impl ExactControlWorkspace {
                 return false;
             }
         };
+        let prior_component_digest = self
+            .component
+            .as_ref()
+            .map(|component| component.encoding.digest());
+        let replacement_component_digest = component
+            .as_ref()
+            .map(|component| component.encoding.digest());
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
         self.component = component;
         self.component_status = component_status;
+        self.reconcile_hierarchy_selection(
+            prior_component_digest.zip(replacement_component_digest),
+        );
         self.replace_probe_package(probes);
         self.probe_status = probe_status;
         self.history = history;
@@ -3952,6 +4285,12 @@ impl ExactControlWorkspace {
         } else {
             "ALGS contains no selected component hierarchy".to_owned()
         };
+        self.selected_hierarchy_component = self
+            .component
+            .as_ref()
+            .map(|component| component.encoding.digest());
+        self.selected_hierarchy_instance = None;
+        self.reconcile_hierarchy_selection(None);
         self.selected_node = None;
         self.pending_source = None;
         self.drag = None;
@@ -4044,11 +4383,38 @@ impl ExactControlWorkspace {
         &self,
         workspace: &GraphWorkspaceDocument,
     ) -> (Option<ComponentPackage>, String) {
-        match representative_component(workspace, &self.fixture) {
-            Ok(component) => (
-                Some(component),
-                "canonical ALGC connector pane and front panel attached".to_owned(),
-            ),
+        let prepared =
+            representative_component_document(workspace).and_then(|(document, encoding)| {
+                let hierarchy = if let Some(current) = &self.component {
+                    let mut hierarchy = current.hierarchy.document.clone();
+                    let remapped = hierarchy
+                        .replace_component(current.encoding.digest(), document.clone())
+                        .map_err(|error| error.to_string())?;
+                    if remapped != encoding.digest() {
+                        return Err(
+                            "hierarchy dependency replacement returned a foreign ALGC identity"
+                                .to_owned(),
+                        );
+                    }
+                    hierarchy_package(hierarchy, &self.fixture)?
+                } else {
+                    representative_hierarchy(&document, encoding.digest(), &self.fixture)?
+                };
+                Ok(ComponentPackage {
+                    document,
+                    encoding,
+                    hierarchy,
+                })
+            });
+        match prepared {
+            Ok(component) => {
+                let status = if self.component.is_some() {
+                    "canonical ALGC updated while authored ALGH root instances and stable library dependencies were preserved exactly"
+                } else {
+                    "canonical ALGC connector pane and fresh representative ALGH attached"
+                };
+                (Some(component), status.to_owned())
+            }
             Err(error) => (
                 None,
                 format!(
@@ -6549,6 +6915,18 @@ fn representative_component(
     workspace: &GraphWorkspaceDocument,
     fixture: &RepresentativeExactControlGraph,
 ) -> Result<ComponentPackage, String> {
+    let (document, encoding) = representative_component_document(workspace)?;
+    let hierarchy = representative_hierarchy(&document, encoding.digest(), fixture)?;
+    Ok(ComponentPackage {
+        document,
+        encoding,
+        hierarchy,
+    })
+}
+
+fn representative_component_document(
+    workspace: &GraphWorkspaceDocument,
+) -> Result<(GraphComponentDocument, CanonicalGraphComponentEncoding), String> {
     let outputs = SIGNALS
         .iter()
         .copied()
@@ -6628,12 +7006,7 @@ fn representative_component(
     )
     .map_err(|error| error.to_string())?;
     let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
-    let hierarchy = representative_hierarchy(&document, encoding.digest(), fixture)?;
-    Ok(ComponentPackage {
-        document,
-        encoding,
-        hierarchy,
-    })
+    Ok((document, encoding))
 }
 
 fn representative_wrapper_component(
@@ -6774,6 +7147,13 @@ fn representative_hierarchy(
         ],
     )
     .map_err(|error| error.to_string())?;
+    hierarchy_package(document, fixture)
+}
+
+fn hierarchy_package(
+    document: GraphHierarchyDocument,
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<HierarchyPackage, String> {
     let encoding = encode_graph_hierarchy(&document).map_err(|error| error.to_string())?;
     let flattening = flatten_graph_hierarchy(&document).map_err(|error| error.to_string())?;
     let source_map = encode_graph_hierarchy_source_map(
@@ -9056,6 +9436,277 @@ mod tests {
                 .document
                 .workspace_digest(),
             workspace.workspace_encoding.digest()
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one lifecycle test proves cross-branch isolation, exact history, monotonic identity, and persistence together"
+    )]
+    fn root_instance_authoring_is_exact_historical_monotonic_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let component = initial_component.encoding.digest();
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(component));
+
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_component = workspace.component.as_ref().unwrap();
+        let added = GraphNodeId::new(2);
+        assert_ne!(added_session, initial_session);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(added_component.document, initial_component.document);
+        assert_eq!(added_component.encoding, initial_component.encoding);
+        assert_ne!(
+            added_component.hierarchy.encoding,
+            initial_component.hierarchy.encoding
+        );
+        assert_ne!(
+            added_component.hierarchy.source_map,
+            initial_component.hierarchy.source_map
+        );
+        assert_eq!(added_component.hierarchy.document.root().next_node_id(), 3);
+        assert_eq!(
+            added_component
+                .hierarchy
+                .document
+                .flattened_instance_count(),
+            3
+        );
+        assert_eq!(
+            added_component.hierarchy.document.flattened_node_count(),
+            42
+        );
+        assert_eq!(
+            added_component.hierarchy.document.flattened_wire_count(),
+            50
+        );
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == added
+                        && instance.component() == component
+                })
+        );
+        assert_eq!(workspace.selected_hierarchy_instance, Some(added));
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            added_session
+        );
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveRoot(added));
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root()
+                .next_node_id(),
+            3
+        );
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(component));
+        let monotonic = workspace.component.as_ref().unwrap();
+        assert!(
+            monotonic
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(3)
+                        && instance.component() == component
+                })
+        );
+        assert_eq!(monotonic.hierarchy.document.root().next_node_id(), 4);
+
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps the pre-edit hierarchy and every remapped binding visible in one exact preservation proof"
+    )]
+    fn control_edits_remap_selected_component_without_losing_root_authoring() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let original_component = workspace.component.as_ref().unwrap().encoding.digest();
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(original_component));
+        let authored_session = workspace.authoring_session_encoding().unwrap();
+        let authored_hierarchy = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .clone();
+        let wrapper = authored_hierarchy
+            .instances()
+            .iter()
+            .find(|instance| {
+                instance.scope() == GraphInstanceScope::Root
+                    && instance.node() == GraphNodeId::new(1)
+            })
+            .unwrap()
+            .component();
+        let wrapper_encoding = authored_hierarchy
+            .dependency(wrapper)
+            .unwrap()
+            .encoding()
+            .clone();
+
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "23/11");
+
+        let updated = workspace.component.as_ref().unwrap();
+        let replacement = updated.encoding.digest();
+        assert_ne!(replacement, original_component);
+        assert_eq!(updated.hierarchy.document.root(), authored_hierarchy.root());
+        assert_eq!(
+            updated
+                .hierarchy
+                .document
+                .dependency(wrapper)
+                .unwrap()
+                .encoding(),
+            &wrapper_encoding
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .dependency(original_component)
+                .is_none()
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(2)
+                        && instance.component() == replacement
+                })
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(wrapper)
+                        && instance.component() == replacement
+                })
+        );
+        assert_eq!(workspace.selected_hierarchy_component, Some(replacement));
+        assert_eq!(workspace.history.undo_len(), 2);
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            authored_session
+        );
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(2)
+                        && instance.component() == original_component
+                })
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root(),
+            authored_hierarchy.root()
+        );
+    }
+
+    #[test]
+    fn invalid_hierarchy_selections_fail_without_session_mutation() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(Digest([0xa7; 32])));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveRoot(GraphNodeId::new(99)));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
         );
     }
 

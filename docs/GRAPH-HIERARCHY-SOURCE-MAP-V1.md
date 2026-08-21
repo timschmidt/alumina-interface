@@ -107,9 +107,12 @@ Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists the selected
 component, complete ALGH, and regenerated ALGM together in browser storage and
 `.algs` files. Complete-session undo/redo also restores that selected
 component/ALGH/ALGM branch atomically with the other authoring artifacts.
-Editable hierarchy construction, direct hierarchy mutation commands,
+Direct root-instance add/delete now regenerates the map from the complete
+candidate hierarchy before one `ALGS` transaction commits, so source
+correlation and the unified history cannot lag the visible instance set.
+Main-canvas wiring/movement, nested component editing, general library import,
 interactive traversal from a flattened item into nested editable component
 canvases, parameter promotion, signed dependency manifests, live device trace
 correlation, and firmware execution evidence remain separate work. `ALGM` V1
-closes only deterministic total source correlation for one complete,
-validated, freshly flattened hierarchy.
+closes deterministic total source correlation for each complete, validated,
+freshly flattened hierarchy.

@@ -132,8 +132,9 @@ sessions](GRAPH-AUTHORING-SESSION-V1.md), not mutable UI deltas, inverse
 operations, or a subset of the visible state. One timeline therefore restores
 the control `ALGW`, bound `ALGP`, catalog-bound cached-job `ALGW`, selected
 `ALGC`, complete `ALGH`, and exact `ALGM` atomically. A successful graph,
-probe, trigger, sidecar-import, or cached-job edit records the exact prior
-session and discards the abandoned redo branch. An exact no-op records nothing.
+probe, trigger, sidecar-import, cached-job, or direct root-instance edit records
+the exact prior session and discards the abandoned redo branch. An exact no-op
+records nothing.
 
 Every navigation target first replays the complete `ALGS` and all nested
 artifacts. The UI then rebuilds layout, reruns audited semantic admission, and

@@ -107,12 +107,15 @@ states. Controls
 use the same Hyperreal parsing, typed-value validation, canonical `ALGR` edit,
 history, and persistence path as the selected-node inspector.
 
-Every accepted workspace edit rebuilds and encodes the component. If an
-otherwise valid draft deletes or changes a referenced endpoint, the front panel
-detaches visibly without rejecting the `ALGW` edit. Undo or another restoring
-edit reattaches it after complete validation. Indicators never relabel stale
-trace bytes: once the embedded graph digest differs from the reference replay,
-they report that the exact replay is detached.
+Every accepted workspace edit rebuilds and encodes the selected component. A
+compatible replacement is remapped into the existing hierarchy by old and new
+exact digest, preserving authored root instances and unrelated component
+dependencies. If an otherwise valid draft deletes or changes a referenced
+endpoint, the front panel and hierarchy detach visibly without rejecting the
+`ALGW` edit. Undo or another restoring edit reattaches them after complete
+validation. Indicators never relabel stale trace bytes: once the embedded graph
+digest differs from the reference replay, they report that the exact replay is
+detached.
 
 This initial panel metadata is reconstructed from the reviewed fixture rather
 than persisted separately by the current `.algw` bridge. Canonical `ALGC` core
@@ -124,9 +127,11 @@ a later UI slice.
 The separate canonical [`ALGH` V2 hierarchy](GRAPH-HIERARCHY-V2.md) now binds
 scoped component instances by exact digest, rejects dependency cycles, bounds
 recursive expansion, and deterministically flattens a component DAG to ordinary
-`ALGW`/`ALGR`. Editable instance workflows, component libraries, package
-signatures/permissions, locked dependency manifests, connector editing,
-arbitrary panel editing, panel value injection during simulation, probes,
-groups/comments, and `ALGC` persistence or file exchange remain open. `ALGC` V1
-grants no semantic, implementation, resource, timing, safety, firmware, or
-physical-output authority.
+`ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
+from the embedded dependency library and preserves them across compatible
+selected-component edits. Nested instance-definition workflows, general
+component-library import/creation, package signatures/permissions, locked
+dependency manifests, connector editing, arbitrary panel editing, panel value
+injection during simulation, probes, groups/comments, and standalone `ALGC`
+file exchange remain open. `ALGC` V1 grants no semantic, implementation,
+resource, timing, safety, firmware, or physical-output authority.

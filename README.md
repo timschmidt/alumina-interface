@@ -278,6 +278,14 @@ prototype.
   path freshly flattens the complete `ALGH` and regenerates every byte before
   the selected-node inspector or exact trace cursor displays source-path/final
   endpoint correlation; it grants no execution or firmware authority.
+  The component-library panel now lists only exact dependencies already
+  admitted by that `ALGH`, and can add or delete root occurrences directly.
+  Each action edits a cloned hierarchy, retains monotonic root identities,
+  regenerates and admits the complete `ALGH`/flattened `ALGW`/`ALGM` branch,
+  and records the prior complete `ALGS` before committing. Compatible control
+  edits replace the selected `ALGC` dependency and remap every exact binding
+  while preserving the authored root workspace and stable library entries;
+  invalid replacements or selections leave the prior session unchanged.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
@@ -499,8 +507,8 @@ physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, editable nested-instance
-and component-library workflows, interactive traversal from flattened items
-into nested editable canvases,
+definition canvases and general component-library import/creation, interactive
+traversal from flattened items into nested editable canvases,
 front-panel editing/execution, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared
 workspace persistence,
