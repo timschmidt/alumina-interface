@@ -1849,10 +1849,13 @@ mod tests {
 
     use super::*;
     use crate::graph::{
-        ClockDefinition, GraphLimits, GraphPortId, GraphSchema, GraphTypeId, GraphValue,
-        GraphWireId, NodeDefinition, NodeInputChannelContract, NodeOutputDependency, NodeParameter,
-        NodeParameterContract, PortDefinition, RecordField, RecordValueField, ResourceClassId,
-        ResourceGraphHandle, TypeDefinition, TypedGraphValue, WireEndpoint,
+        ClockDefinition, GraphDeploymentReplayError, GraphDeploymentReplayInput,
+        GraphDeploymentReplayLimits, GraphDeploymentReplayReleaseOutcome,
+        GraphDeploymentResourceSample, GraphLimits, GraphPortId, GraphSchema, GraphTypeId,
+        GraphValue, GraphWireId, NodeDefinition, NodeInputChannelContract, NodeOutputDependency,
+        NodeParameter, NodeParameterContract, PortDefinition, RecordField, RecordValueField,
+        ResourceClassId, ResourceGraphHandle, TypeDefinition, TypedGraphValue, WireEndpoint,
+        replay_realtime_graph_deployment,
     };
 
     const BOOL: GraphTypeId = GraphTypeId::new(1);
@@ -2551,6 +2554,262 @@ mod tests {
                 node: GraphNodeId::new(10),
                 aspect: "capability paired-resource palette",
             })
+        );
+    }
+
+    #[test]
+    fn paired_tinybee_replay_is_bounded_ordered_and_fault_preserving() {
+        use alumina_protocol::DeviceCycle;
+        use alumina_runtime::graph::GraphExecutionFault;
+
+        let limits = tinybee_limits();
+        let target = tinybee_target();
+        let pair = (ResourceId::Gpio(22), ResourceId::Gpio(35));
+        let (document, registry) = paired_input_fixture(pair.0, pair.1);
+        let report = lower_graph_deployment(&document, &registry, target, &limits).unwrap();
+        let period = report.package().header().realtime_schedule.period_cycles;
+        let start = DeviceCycle(period);
+        let input = |index: u64, first, second, reverse| {
+            let mut resources = vec![
+                GraphDeploymentResourceSample::new(pair.0, first),
+                GraphDeploymentResourceSample::new(pair.1, second),
+            ];
+            if reverse {
+                resources.reverse();
+            }
+            GraphDeploymentReplayInput::new(DeviceCycle(start.0 + index * period), true, resources)
+        };
+        let truth_table = vec![
+            input(0, Some(false), Some(false), false),
+            input(1, Some(false), Some(true), false),
+            input(2, Some(true), Some(false), false),
+            input(3, Some(true), Some(true), false),
+        ];
+        let replay = replay_realtime_graph_deployment(
+            &report,
+            target,
+            board_mks_tinybee::PACKAGE.graph.opcodes,
+            board_mks_tinybee::PACKAGE.graph.resources,
+            1,
+            1,
+            start,
+            &truth_table,
+            GraphDeploymentReplayLimits::interactive(),
+        )
+        .unwrap();
+        assert!(replay.complete());
+        assert_eq!(replay.requested_releases(), 4);
+        assert_eq!(replay.releases().len(), 4);
+        assert_eq!(replay.terminal_fault(), None);
+        assert_eq!(replay.run().start_cycle, start);
+        assert_eq!(
+            replay.implementation_digest(),
+            report.implementation_digest()
+        );
+        for release in replay.releases() {
+            assert_eq!(release.reads(), [pair.0, pair.1]);
+        }
+        assert_eq!(
+            replay
+                .releases()
+                .iter()
+                .map(|release| match release.outcome() {
+                    GraphDeploymentReplayReleaseOutcome::Completed(report) => {
+                        report.last_sink_value
+                    }
+                    GraphDeploymentReplayReleaseOutcome::Faulted(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            [Some(false), Some(false), Some(false), Some(true)]
+        );
+
+        let reversed = truth_table
+            .iter()
+            .map(|input| {
+                let mut resources = input.resources().to_vec();
+                resources.reverse();
+                GraphDeploymentReplayInput::new(input.cycle(), true, resources)
+            })
+            .collect::<Vec<_>>();
+        let reordered_replay = replay_realtime_graph_deployment(
+            &report,
+            target,
+            board_mks_tinybee::PACKAGE.graph.opcodes,
+            board_mks_tinybee::PACKAGE.graph.resources,
+            1,
+            1,
+            start,
+            &reversed,
+            GraphDeploymentReplayLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(reordered_replay, replay);
+        assert_eq!(reordered_replay.evidence_digest(), replay.evidence_digest());
+
+        let unavailable = vec![input(0, None, Some(true), true)];
+        let fault = replay_realtime_graph_deployment(
+            &report,
+            target,
+            board_mks_tinybee::PACKAGE.graph.opcodes,
+            board_mks_tinybee::PACKAGE.graph.resources,
+            2,
+            1,
+            start,
+            &unavailable,
+            GraphDeploymentReplayLimits::interactive(),
+        )
+        .unwrap();
+        assert!(!fault.complete());
+        assert_eq!(fault.releases().len(), 1);
+        assert_eq!(fault.releases()[0].reads(), [pair.0, pair.1]);
+        assert_eq!(
+            fault.terminal_fault().unwrap().observation.fault,
+            GraphExecutionFault::ResourceUnavailable
+        );
+        assert_ne!(fault.evidence_digest(), replay.evidence_digest());
+
+        let duplicate = vec![GraphDeploymentReplayInput::new(
+            start,
+            true,
+            vec![
+                GraphDeploymentResourceSample::new(pair.0, Some(true)),
+                GraphDeploymentResourceSample::new(pair.0, Some(false)),
+            ],
+        )];
+        assert_eq!(
+            replay_realtime_graph_deployment(
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                3,
+                1,
+                start,
+                &duplicate,
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::DuplicateResource {
+                release: 0,
+                resource: pair.0,
+            })
+        );
+        assert_eq!(
+            replay_realtime_graph_deployment(
+                &report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                4,
+                1,
+                start,
+                &[
+                    input(0, Some(true), Some(true), false),
+                    input(0, Some(false), Some(false), false,)
+                ],
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::NonmonotonicCycle { release: 1 })
+        );
+    }
+
+    #[test]
+    fn realtime_replay_rejects_domain_and_collection_boundary_violations() {
+        use alumina_protocol::DeviceCycle;
+
+        let tinybee_target = tinybee_target();
+        let pair = (ResourceId::Gpio(22), ResourceId::Gpio(35));
+        let (document, registry) = paired_input_fixture(pair.0, pair.1);
+        let report =
+            lower_graph_deployment(&document, &registry, tinybee_target, &tinybee_limits())
+                .unwrap();
+        let start = DeviceCycle(report.package().header().realtime_schedule.period_cycles);
+        let input = GraphDeploymentReplayInput::new(
+            start,
+            true,
+            vec![
+                GraphDeploymentResourceSample::new(pair.0, Some(true)),
+                GraphDeploymentResourceSample::new(pair.1, Some(true)),
+            ],
+        );
+        let replay = |inputs: &[GraphDeploymentReplayInput], limits| {
+            replay_realtime_graph_deployment(
+                &report,
+                tinybee_target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                1,
+                1,
+                start,
+                inputs,
+                limits,
+            )
+        };
+
+        assert_eq!(
+            replay(
+                std::slice::from_ref(&input),
+                GraphDeploymentReplayLimits {
+                    maximum_releases: 0,
+                    maximum_inputs_per_release: 2,
+                    maximum_reads_per_release: 2,
+                },
+            ),
+            Err(GraphDeploymentReplayError::InvalidLimits)
+        );
+        assert_eq!(
+            replay(&[], GraphDeploymentReplayLimits::interactive()),
+            Err(GraphDeploymentReplayError::Empty)
+        );
+        assert_eq!(
+            replay(
+                std::slice::from_ref(&input),
+                GraphDeploymentReplayLimits {
+                    maximum_releases: 1,
+                    maximum_inputs_per_release: 1,
+                    maximum_reads_per_release: 2,
+                },
+            ),
+            Err(GraphDeploymentReplayError::LimitExceeded {
+                aspect: "resource-input count",
+                release: Some(0),
+            })
+        );
+        assert_eq!(
+            replay(
+                &[input],
+                GraphDeploymentReplayLimits {
+                    maximum_releases: 1,
+                    maximum_inputs_per_release: 2,
+                    maximum_reads_per_release: 1,
+                },
+            ),
+            Err(GraphDeploymentReplayError::LimitExceeded {
+                aspect: "resource-read count",
+                release: Some(0),
+            })
+        );
+
+        let (service_document, service_registry) = fixture(1, 1_000, 2, 40);
+        let service_report = lower_graph_deployment(
+            &service_document,
+            &service_registry,
+            target(),
+            &GraphDeploymentLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(
+            replay_realtime_graph_deployment(
+                &service_report,
+                target(),
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                1,
+                1,
+                start,
+                &[],
+                GraphDeploymentReplayLimits::interactive(),
+            ),
+            Err(GraphDeploymentReplayError::ServiceDomainPresent)
         );
     }
 

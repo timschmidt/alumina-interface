@@ -23,32 +23,35 @@ use alumina_interface_core::graph::{
     GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument,
     GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
-    GraphDeploymentRegistry, GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding,
-    GraphFrontPanelItem, GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument,
-    GraphHierarchyFlattening, GraphHierarchyLimits, GraphLimits, GraphLiteralTextLimits,
-    GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry, GraphPortId,
-    GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeId,
-    GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits, GraphProbeTrigger,
-    GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry, GraphTraceEntry,
-    GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId, GraphWorkspaceDocument,
-    GraphWorkspaceHistory, GraphWorkspaceLimits, GraphWorkspaceProbeHistory,
-    InputConnectionRequirement, NodeDefinition, NodeInputChannelContract, NodeInputChannelKind,
-    NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema,
-    PortDefinition, RecordField, RecordFieldId, RecordValueField, RepresentativeControlSignal,
-    RepresentativeExactControlGraph, ResourceClassId, ResourceGraphHandle, TypeDefinition,
-    TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
-    compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
-    encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
-    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
-    graph_component_instance_prototype, graph_resource_label, lower_graph_deployment,
-    parse_graph_literal_text, project_graph_probe_replay, replay_graph_probes,
-    replay_graph_workspace, select_graph_cached_job_handle, select_graph_capability_node_resource,
+    GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
+    GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
+    GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
+    GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
+    GraphHierarchyLimits, GraphLimits, GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement,
+    GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
+    GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
+    GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
+    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment,
+    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
+    GraphWorkspaceProbeHistory, InputConnectionRequirement, NodeDefinition,
+    NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter,
+    NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
+    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
+    analyze_graph_draft, compile_representative_exact_control_graph,
+    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
+    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
+    format_graph_literal_text, graph_component_instance_prototype, graph_resource_label,
+    lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
+    replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
+    select_graph_cached_job_handle, select_graph_capability_node_resource,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
     build_board_explorer_snapshot, build_diagnostic_explorer_snapshot,
 };
-use alumina_protocol::{DeviceId, Digest};
+use alumina_protocol::{DeviceCycle, DeviceId, Digest};
+use alumina_runtime::graph::GraphExecutionFault;
 use alumina_sim::diagnostics::tinybee_diagnostic_fixture;
 use eframe::egui;
 use hyperreal::Rational;
@@ -523,6 +526,17 @@ struct TargetResourceDeployment {
     second: ResourceId,
     realtime_period_cycles: u64,
     realtime_wcet_cycles: u64,
+    actor_replay: TargetResourceActorReplay,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TargetResourceActorReplay {
+    success_evidence_digest: Digest,
+    fault_evidence_digest: Digest,
+    truth_table: [bool; 4],
+    ordered_reads: [ResourceId; 2],
+    fault_reads: [ResourceId; 2],
+    terminal_fault: GraphExecutionFault,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2732,13 +2746,37 @@ impl ExactControlWorkspace {
             proof.deployment.realtime_period_cycles,
             proof.deployment.realtime_wcet_cycles,
         ));
+        let actor_replay = proof.deployment.actor_replay;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Portable firmware-actor replay");
+            ui.monospace(format!(
+                "00→{} · 01→{} · 10→{} · 11→{}",
+                u8::from(actor_replay.truth_table[0]),
+                u8::from(actor_replay.truth_table[1]),
+                u8::from(actor_replay.truth_table[2]),
+                u8::from(actor_replay.truth_table[3]),
+            ));
+        });
+        ui.monospace(format!(
+            "actual provider order {} → {} · success evidence {}…",
+            graph_resource_label(actor_replay.ordered_reads[0]),
+            graph_resource_label(actor_replay.ordered_reads[1]),
+            digest_prefix(actor_replay.success_evidence_digest.0),
+        ));
+        ui.monospace(format!(
+            "unavailable first input → {:?} · retained reads {} → {} · no completed sink report · fault evidence {}…",
+            actor_replay.terminal_fault,
+            graph_resource_label(actor_replay.fault_reads[0]),
+            graph_resource_label(actor_replay.fault_reads[1]),
+            digest_prefix(actor_replay.fault_evidence_digest.0),
+        ));
         ui.label(&proof.status);
         ui.label(
-            "Both resource identities are selectable only from the digest-verified scalar catalog. Stable record-field IDs determine ordered lowering; no label, device ID, digest, class, or numeric GPIO field is text-editable. Duplicate physical identities and capability-unadvertised resources fail without changing ALGW or ALGR.",
+            "Both resource identities are selectable only from the digest-verified scalar catalog. Stable record-field IDs determine ordered lowering and provider calls. Candidate edits commit ALGW, ALGR, and replay evidence together only after the actual fixed-memory firmware actors reproduce the four-case conjunction and the ordered unavailable-resource fault. Duplicate physical identities and capability-unadvertised resources fail without changing that transaction.",
         );
         ui.colored_label(
             egui::Color32::YELLOW,
-            "Offline lowering only: there is no MCU session, upload, install, start, GPIO configuration, or physical read authority. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
+            "Offline native/WASM actor replay only: there is no MCU session, upload, install, start, GPIO configuration, or physical read authority. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
         );
     }
 
@@ -5458,6 +5496,12 @@ fn lower_target_resource_workspace(
         ));
     }
     let realtime = package.header().realtime_schedule;
+    let actor_replay = replay_target_resource_deployment(
+        &report,
+        catalog.target(),
+        lowered_pair,
+        realtime.period_cycles,
+    )?;
     Ok(TargetResourceDeployment {
         package_digest: package.digest(),
         implementation_digest: report.implementation_digest(),
@@ -5466,7 +5510,175 @@ fn lower_target_resource_workspace(
         second: lowered_pair.1,
         realtime_period_cycles: realtime.period_cycles,
         realtime_wcet_cycles: realtime.total_wcet_cycles,
+        actor_replay,
     })
+}
+
+fn replay_target_resource_deployment(
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+    pair: (ResourceId, ResourceId),
+    period_cycles: u64,
+) -> Result<TargetResourceActorReplay, String> {
+    if period_cycles == 0 {
+        return Err("target resource package has a zero Realtime period".to_owned());
+    }
+    let start = DeviceCycle(period_cycles);
+    let (success_evidence_digest, truth_table, ordered_reads) =
+        replay_target_resource_success(report, target, pair, period_cycles, start)?;
+    let (fault_evidence_digest, fault_reads, terminal_fault) =
+        replay_target_resource_fault(report, target, pair, start)?;
+    Ok(TargetResourceActorReplay {
+        success_evidence_digest,
+        fault_evidence_digest,
+        truth_table,
+        ordered_reads,
+        fault_reads,
+        terminal_fault,
+    })
+}
+
+fn replay_target_resource_success(
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+    pair: (ResourceId, ResourceId),
+    period_cycles: u64,
+    start: DeviceCycle,
+) -> Result<(Digest, [bool; 4], [ResourceId; 2]), String> {
+    let truth_inputs = [(false, false), (false, true), (true, false), (true, true)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (first, second))| {
+            let release = u64::try_from(index + 1)
+                .map_err(|_| "target resource replay release index overflowed".to_owned())?;
+            let cycle = period_cycles
+                .checked_mul(release)
+                .map(DeviceCycle)
+                .ok_or_else(|| "target resource replay cycle overflowed".to_owned())?;
+            Ok(GraphDeploymentReplayInput::new(
+                cycle,
+                true,
+                vec![
+                    GraphDeploymentResourceSample::new(pair.1, Some(second)),
+                    GraphDeploymentResourceSample::new(pair.0, Some(first)),
+                ],
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let success = replay_realtime_graph_deployment(
+        report,
+        target,
+        board_mks_tinybee::PACKAGE.graph.opcodes,
+        board_mks_tinybee::PACKAGE.graph.resources,
+        1,
+        1,
+        start,
+        &truth_inputs,
+        GraphDeploymentReplayLimits::interactive(),
+    )
+    .map_err(|error| format!("target resource firmware-actor success replay failed: {error}"))?;
+    if !success.complete()
+        || success.requested_releases() != truth_inputs.len()
+        || success.releases().len() != truth_inputs.len()
+    {
+        return Err(
+            "target resource firmware actors did not complete the four-case replay".to_owned(),
+        );
+    }
+
+    let expected_reads = [pair.0, pair.1];
+    let mut truth_table = [false; 4];
+    for (index, release) in success.releases().iter().enumerate() {
+        if release.reads() != expected_reads {
+            return Err(format!(
+                "target resource firmware actor release {index} read {:?} instead of {:?}",
+                release.reads(),
+                expected_reads,
+            ));
+        }
+        truth_table[index] = match release.outcome() {
+            GraphDeploymentReplayReleaseOutcome::Completed(release) => {
+                release.last_sink_value.ok_or_else(|| {
+                    format!("target resource firmware actor release {index} produced no sink value")
+                })?
+            }
+            GraphDeploymentReplayReleaseOutcome::Faulted(error) => {
+                return Err(format!(
+                    "target resource firmware actor release {index} faulted unexpectedly: {error:?}"
+                ));
+            }
+        };
+    }
+    if truth_table != [false, false, false, true] {
+        return Err(format!(
+            "target resource firmware actor produced an invalid conjunction table {truth_table:?}"
+        ));
+    }
+    Ok((success.evidence_digest(), truth_table, expected_reads))
+}
+
+fn replay_target_resource_fault(
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+    pair: (ResourceId, ResourceId),
+    start: DeviceCycle,
+) -> Result<(Digest, [ResourceId; 2], GraphExecutionFault), String> {
+    let expected_reads = [pair.0, pair.1];
+    let fault_input = [GraphDeploymentReplayInput::new(
+        start,
+        true,
+        vec![
+            GraphDeploymentResourceSample::new(pair.1, Some(true)),
+            GraphDeploymentResourceSample::new(pair.0, None),
+        ],
+    )];
+    let fault = replay_realtime_graph_deployment(
+        report,
+        target,
+        board_mks_tinybee::PACKAGE.graph.opcodes,
+        board_mks_tinybee::PACKAGE.graph.resources,
+        2,
+        1,
+        start,
+        &fault_input,
+        GraphDeploymentReplayLimits::interactive(),
+    )
+    .map_err(|error| format!("target resource firmware-actor fault replay failed: {error}"))?;
+    let [fault_release] = fault.releases() else {
+        return Err(format!(
+            "target resource firmware-actor fault replay attempted {} release(s) instead of one",
+            fault.releases().len()
+        ));
+    };
+    let fault_reads: [ResourceId; 2] = fault_release.reads().try_into().map_err(|_| {
+        format!(
+            "target resource firmware-actor fault replay retained {} read(s) instead of two",
+            fault_release.reads().len()
+        )
+    })?;
+    if fault.complete() || fault.requested_releases() != 1 || fault_reads != expected_reads {
+        return Err(
+            "target resource firmware actors did not preserve the ordered fault replay".to_owned(),
+        );
+    }
+    let terminal_fault = match fault_release.outcome() {
+        GraphDeploymentReplayReleaseOutcome::Faulted(error)
+            if error.observation.fault == GraphExecutionFault::ResourceUnavailable =>
+        {
+            error.observation.fault
+        }
+        GraphDeploymentReplayReleaseOutcome::Faulted(error) => {
+            return Err(format!(
+                "target resource firmware actor produced the wrong terminal fault: {error:?}"
+            ));
+        }
+        GraphDeploymentReplayReleaseOutcome::Completed(_) => {
+            return Err(
+                "target resource firmware actor completed the unavailable-input release".to_owned(),
+            );
+        }
+    };
+    Ok((fault.evidence_digest(), fault_reads, terminal_fault))
 }
 
 fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
@@ -7786,6 +7998,34 @@ mod tests {
         assert_eq!(proof.deployment.realtime_period_cycles, 240_000);
         assert_eq!(proof.deployment.realtime_wcet_cycles, 160);
         assert_eq!(
+            proof.deployment.actor_replay.truth_table,
+            [false, false, false, true]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.ordered_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(32)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.fault_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(32)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.terminal_fault,
+            GraphExecutionFault::ResourceUnavailable
+        );
+        assert_ne!(
+            proof.deployment.actor_replay.success_evidence_digest,
+            proof.deployment.actor_replay.fault_evidence_digest
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.success_evidence_digest),
+            "a26b41965997461d109d2aeec4b562eb0d2c7c3dfe61870139c2bd2293f12147"
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.fault_evidence_digest),
+            "5e122937631516da3b57fd9f3e1f1d39a473ada6bf7dbad9c04b5121a4b89f6c"
+        );
+        assert_eq!(
             proof
                 .workspace
                 .graph()
@@ -7839,8 +8079,40 @@ mod tests {
             proof.deployment.implementation_digest,
             before_deployment.implementation_digest
         );
+        assert_ne!(
+            proof.deployment.actor_replay.success_evidence_digest,
+            before_deployment.actor_replay.success_evidence_digest
+        );
+        assert_ne!(
+            proof.deployment.actor_replay.fault_evidence_digest,
+            before_deployment.actor_replay.fault_evidence_digest
+        );
         assert_eq!(proof.deployment.first, ResourceId::Gpio(22));
         assert_eq!(proof.deployment.second, ResourceId::Gpio(35));
+        assert_eq!(
+            proof.deployment.actor_replay.truth_table,
+            [false, false, false, true]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.ordered_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(35)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.fault_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(35)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.terminal_fault,
+            GraphExecutionFault::ResourceUnavailable
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.success_evidence_digest),
+            "cf2215451f222f8b402b85285ae889ffd67c06e7de8eb3d9c03c8d075dc2a8df"
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.fault_evidence_digest),
+            "e99110e8980e319389b8fe7731a6087375a465e4151289c37edaec0ed133b176"
+        );
         assert_eq!(proof.workspace.next_node_id(), before_node_cursor);
         assert_eq!(proof.workspace.next_wire_id(), before_wire_cursor);
         assert_eq!(proof.workspace.placement(node), before_placement);

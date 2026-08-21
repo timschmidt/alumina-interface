@@ -18,6 +18,7 @@ alumina-job.workspace = true
 alumina-machine-ir.workspace = true
 alumina-motion.workspace = true
 alumina-protocol.workspace = true
+alumina-runtime.workspace = true
 alumina-storage.workspace = true
 csgrs.workspace = true
 hypercurve.workspace = true
@@ -31,7 +32,4 @@ serde_json.workspace = true
 [dev-dependencies]
 alumina-sim.workspace = true
 board-mks-tinybee.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-alumina-runtime.workspace = true
 critical-section = { version = "1.2.0", features = ["std"] }

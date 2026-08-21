@@ -22,6 +22,7 @@ mod hierarchy;
 mod job_catalog;
 mod literal_text;
 mod probe;
+mod realtime_replay;
 mod simulation;
 mod storage;
 mod trace;
@@ -91,6 +92,13 @@ pub use probe::{
     GraphProbeProjection, GraphProbeProjectionError, GraphProbeProjectionLimits, GraphProbeReplay,
     GraphProbeTrigger, GraphProbeTriggerMatch, GraphProbeTriggerResolution, encode_graph_probes,
     project_graph_probe_replay, replay_graph_probes, resolve_graph_probe_trigger,
+};
+pub use realtime_replay::{
+    GRAPH_DEPLOYMENT_REPLAY_MAGIC, GraphDeploymentReplay, GraphDeploymentReplayError,
+    GraphDeploymentReplayInput, GraphDeploymentReplayLimits, GraphDeploymentReplayRelease,
+    GraphDeploymentReplayReleaseOutcome, GraphDeploymentResourceSample,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_INPUTS_PER_RELEASE, MAX_GRAPH_DEPLOYMENT_REPLAY_READS_PER_RELEASE,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_RELEASES, replay_realtime_graph_deployment,
 };
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,
