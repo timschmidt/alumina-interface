@@ -103,9 +103,11 @@ ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
 
 ## Deliberately open
 
-Editable hierarchy construction, hierarchy-aware browser persistence and
-undo/redo, interactive traversal from a flattened item into nested editable
-component canvases, parameter promotion, signed dependency manifests, live
-device trace correlation, and firmware execution evidence remain separate
-work. `ALGM` V1 closes only deterministic total source correlation for one
-complete, validated, freshly flattened hierarchy.
+Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists the selected
+component, complete ALGH, and regenerated ALGM together in browser storage and
+`.algs` files. Editable hierarchy construction, hierarchy-aware undo/redo,
+interactive traversal from a flattened item into nested editable component
+canvases, parameter promotion, signed dependency manifests, live device trace
+correlation, and firmware execution evidence remain separate work. `ALGM` V1
+closes only deterministic total source correlation for one complete,
+validated, freshly flattened hierarchy.

@@ -164,10 +164,11 @@ Adding a valid output with no samples in the immutable reference `ALGT` still
 records bounded authoring intent but invents no data.
 
 The browser persists the current canonical `ALGP` together with its bound
-`ALGW` in one versioned local-storage value. Pair restore replays both artifacts
-before committing either, so a malformed sidecar or workspace-identity mismatch
-falls back without partial state. Native and browser `.algp` exchange uses the
-same 2 MiB byte admission and canonical replay boundary; import can replace
+`ALGW` and the rest of the exact authoring state in one canonical
+[`ALGS` V1 session](GRAPH-AUTHORING-SESSION-V1.md). Complete-session restore
+replays both artifacts before committing anything, so a malformed sidecar or
+workspace-identity mismatch falls back without partial state. Native and
+browser `.algp` exchange uses the same 2 MiB byte admission and canonical replay boundary; import can replace
 only the sidecar after proving the current `ALGW` identity, and importing
 identical bytes is an exact no-op. Probe, capture-policy, and trigger identity
 changes mark the pair dirty; canonical no-op edits do not. If a graph edit removes or retypes an

@@ -252,10 +252,14 @@ prototype.
   whitelist. Physical scalars with the same registered type share one scale;
   distinct types receive deterministic separate panes with their canonical type
   name and unit while retaining the shared exact-time axis and cursor. Browser
-  local storage atomically preserves the control `ALGW`, bound `ALGP`, and
-  catalog-bound composite cached-job `ALGW` in one `algwb1:` bundle, and
-  native/browser `.algw` plus `.algp` exchange imports only after bounded full
-  replay, exact sidecar binding, and audited UI admission.
+  local storage atomically preserves one canonical
+  [`ALGS` V1 authoring session](docs/GRAPH-AUTHORING-SESSION-V1.md): the control
+  `ALGW`, bound `ALGP`, catalog-bound composite cached-job `ALGW`, selected
+  `ALGC`, complete `ALGH`, and freshly replayed `ALGM`. The `algs1:` wrapper has
+  one lowercase-hex payload; the retired `algwb1:` format is unsupported.
+  Native/browser `.algs`, `.algw`, `.algp`, and `.algm` exchange imports only
+  after bounded full replay, identity binding, catalog checks, and audited UI
+  admission.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible

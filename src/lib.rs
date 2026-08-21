@@ -40,9 +40,9 @@ use crate::browser_worker::{
     BrowserWorkerSupervisor, ConnectedCapabilityView, ConnectedTelemetryView,
     ConnectedVisualAssetView, ConnectedWaveformView, SupervisorLifecycle,
 };
-use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
-use crate::control_graph_ui::WORKSPACE_BUNDLE_STORAGE_KEY;
+use crate::control_graph_ui::AUTHORING_SESSION_STORAGE_KEY;
+use crate::control_graph_ui::ExactControlWorkspace;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
 use crate::machine_cam_ui::MachineCamDeploymentTarget;
 use crate::machine_cam_ui::MachineCamWorkspace;
@@ -1082,7 +1082,7 @@ impl AluminaApp {
         if !workspace.persistence_pending() {
             return;
         }
-        let persisted = match workspace.persisted_workspace_bundle() {
+        let persisted = match workspace.persisted_authoring_session() {
             Ok(persisted) => persisted,
             Err(error) => {
                 workspace.note_persistence_error(&error);
@@ -1091,7 +1091,7 @@ impl AluminaApp {
         };
         let result = browser_local_storage().and_then(|storage| {
             storage
-                .set_item(WORKSPACE_BUNDLE_STORAGE_KEY, &persisted)
+                .set_item(AUTHORING_SESSION_STORAGE_KEY, &persisted)
                 .map_err(|value| browser_value_text(&value))
         });
         match result {
@@ -2735,7 +2735,7 @@ fn browser_local_storage() -> Result<web_sys::Storage, String> {
 #[cfg(target_arch = "wasm32")]
 fn load_persisted_exact_control_workspace() -> Result<Option<String>, String> {
     browser_local_storage()?
-        .get_item(WORKSPACE_BUNDLE_STORAGE_KEY)
+        .get_item(AUTHORING_SESSION_STORAGE_KEY)
         .map_err(|value| browser_value_text(&value))
 }
 

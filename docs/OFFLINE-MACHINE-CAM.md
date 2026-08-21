@@ -88,9 +88,9 @@ The inspector exposes:
 
 The prior `ALGW`-specific platform bridge is now a generic bounded byte bridge
 while parsing authority remains in each owning workspace. Native paths and
-browser file selection/download support `.algw`, `.almcfg`, `.almevd`, and
-UI-only `.nc` source without treating an extension as evidence or source text as
-canonical.
+browser file selection/download support `.algs`, `.algw`, `.algp`, `.algm`,
+`.algrrep`, `.almcfg`, `.almevd`, `.almdfe`, and UI-only `.nc` source without
+treating an extension as evidence or source text as canonical.
 
 An imported configuration replaces visible state only after complete board
 validation, exact derivation, travel certification, scheduling, lowering,

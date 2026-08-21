@@ -326,11 +326,12 @@ Bounded undo/redo stores complete canonical ALGW/ALGP pairs and replays both,
 including the sidecar's exact external-workspace binding, before mutating
 navigation state. Graph, probe metadata, trigger, and ALGP-import changes share this
 history; exact no-ops do not consume a snapshot. Browser origin-local storage
-preserves the current control ALGW, bound ALGP, and catalog-bound composite
-cached-job ALGW in one greenfield `algwb1:` value, while history remains
-ephemeral. Browser `.algw`/`.algp` upload and download and the
+preserves the current control ALGW, bound ALGP, catalog-bound composite
+cached-job ALGW, and optional exact component hierarchy/source map in one
+canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md), while history remains
+ephemeral. Browser `.algs`/`.algw`/`.algp` upload and download and the
 native explicit-path bridges exchange exact bytes under their independent
-20 MiB workspace and 2 MiB probe ceilings. ALGW imports additionally require
+8 MiB session, 20 MiB workspace, and 2 MiB probe ceilings. ALGW imports additionally require
 layout admission and the fixed audited registry, allowing only a visible
 missing-required-input draft blocker rather than silently interpreting unknown
 behavior.
@@ -477,11 +478,12 @@ filters immutable host trace series only; it grants no firmware read, telemetry,
 device-trigger, or deployment authority. See
 [`GRAPH-PROBE-V2.md`](GRAPH-PROBE-V2.md).
 
-The browser stores the exact current `ALGW` and `ALGP` in one versioned value
-and restores neither until both canonical replays and their identity binding
-succeed. Separate bounded `.algw` and `.algp` exchange is available in native
+The browser stores one exact `ALGS` authoring session and restores nothing until
+the outer artifact, both workspaces, probe binding, optional hierarchy/source
+map, selected component, UI semantics, and cached-job catalog membership all
+succeed. Bounded `.algs`, `.algw`, and `.algp` exchange is available in native
 and browser shells; an ALGP import can change only the sidecar bound to the
-current workspace.
+current workspace, while ALGS import is one complete atomic replacement.
 
 ## Canonical bytes and replay
 

@@ -17,11 +17,13 @@ use alumina_diagnostics::{
 };
 use alumina_graph_ir::{GraphIrOpcode, decode_graph_resource_pair_parameter};
 use alumina_interface_core::graph::{
-    CanonicalGraphComponentEncoding, CanonicalGraphDeploymentReplayEvidence1,
-    CanonicalGraphHierarchyEncoding, CanonicalGraphHierarchySourceMapEncoding,
-    CanonicalGraphProbeEncoding, CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding,
-    ChannelFullPolicy, ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet,
-    GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits, GraphCachedJobCatalog,
+    CanonicalGraphAuthoringSessionEncoding, CanonicalGraphComponentEncoding,
+    CanonicalGraphDeploymentReplayEvidence1, CanonicalGraphHierarchyEncoding,
+    CanonicalGraphHierarchySourceMapEncoding, CanonicalGraphProbeEncoding,
+    CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ChannelFullPolicy,
+    ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES,
+    GraphAnalysisLimits, GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument,
+    GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog,
     GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
     GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInstance,
     GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
@@ -37,22 +39,22 @@ use alumina_interface_core::graph::{
     GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry,
     GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId,
     GraphWorkspaceDocument, GraphWorkspaceHistory, GraphWorkspaceLimits,
-    GraphWorkspaceProbeHistory, InputConnectionRequirement,
+    GraphWorkspaceProbeHistory, InputConnectionRequirement, MAX_GRAPH_AUTHORING_SESSION_BYTES,
     MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
     NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
     NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
     RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
     ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
     analyze_graph_draft, compile_representative_exact_control_graph,
-    derive_graph_capability_node_catalog, encode_graph_component, encode_graph_hierarchy,
-    encode_graph_hierarchy_source_map, encode_graph_probes, encode_graph_workspace,
-    encode_typed_graph_value, flatten_graph_hierarchy, format_graph_literal_text,
-    graph_component_instance_input_port, graph_component_instance_output_port,
-    graph_component_instance_prototype, graph_resource_label, lower_graph_deployment,
-    parse_graph_literal_text, project_graph_probe_replay, replay_graph_hierarchy_source_map,
-    replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
-    select_graph_cached_job_handle, select_graph_capability_node_resource,
-    verify_graph_deployment_evidence_bytes,
+    derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
+    encode_graph_hierarchy, encode_graph_hierarchy_source_map, encode_graph_probes,
+    encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
+    format_graph_literal_text, graph_component_instance_input_port,
+    graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
+    lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
+    replay_graph_authoring_session, replay_graph_hierarchy_source_map, replay_graph_probes,
+    replay_graph_workspace, replay_realtime_graph_deployment, select_graph_cached_job_handle,
+    select_graph_capability_node_resource, verify_graph_deployment_evidence_bytes,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
@@ -88,13 +90,11 @@ const NEW_NODE_X_GAP: i32 = 300;
 const NEW_NODE_ORIGIN: i32 = 28;
 const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
-const PERSISTED_WORKSPACE_BUNDLE_PREFIX: &str = "algwb1:";
-const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
-const MAXIMUM_PERSISTED_PROBE_BYTES: usize = 2 * 1024 * 1024;
-const MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
+const PERSISTED_AUTHORING_SESSION_PREFIX: &str = "algs1:";
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
 const ALGM_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGM source map", "algm");
+const ALGS_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGS authoring session", "algs");
 const ALGR_SUCCESS_REPLAY_FILE: BoundedFileSpec =
     BoundedFileSpec::new("success ALGRREP1 evidence", "algrrep");
 const ALGR_FAULT_REPLAY_FILE: BoundedFileSpec =
@@ -108,14 +108,8 @@ const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(101, 205, 196),
 ];
 
-#[derive(Debug)]
-struct PersistedWorkspaceBundleBytes {
-    control_workspace: Vec<u8>,
-    probes: Vec<u8>,
-    cached_jobs: Vec<u8>,
-}
 #[cfg(target_arch = "wasm32")]
-pub(crate) const WORKSPACE_BUNDLE_STORAGE_KEY: &str = "alumina.graph-workspace-bundle.algwb.v1";
+pub(crate) const AUTHORING_SESSION_STORAGE_KEY: &str = "alumina.graph-authoring-session.algs.v1";
 const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
@@ -2207,6 +2201,7 @@ pub(crate) struct ExactControlWorkspace {
     persistence_dirty: bool,
     persistence_attempted: bool,
     file_status: String,
+    authoring_session_file_bridge: BoundedFileBridge,
     workspace_file_bridge: BoundedFileBridge,
     probe_file_bridge: BoundedFileBridge,
     hierarchy_source_file_bridge: BoundedFileBridge,
@@ -2280,6 +2275,7 @@ impl ExactControlWorkspace {
             persistence_dirty: persisted.is_none(),
             persistence_attempted: false,
             file_status: "canonical workspace has not been exported this session".to_owned(),
+            authoring_session_file_bridge: BoundedFileBridge::default(),
             workspace_file_bridge: BoundedFileBridge::default(),
             probe_file_bridge: BoundedFileBridge::default(),
             hierarchy_source_file_bridge: BoundedFileBridge::default(),
@@ -2291,26 +2287,17 @@ impl ExactControlWorkspace {
         };
         result.reset_probe_drafts();
         if let Some(persisted) = persisted {
-            match decode_persisted_workspace_bundle(
-                persisted,
-                result.workspace.limits(),
-                GraphProbeLimits::interactive(),
-            )
-            .and_then(|bundle| {
-                result.restore_workspace_bundle_bytes(
-                    &bundle.control_workspace,
-                    &bundle.probes,
-                    &bundle.cached_jobs,
-                )
-            }) {
+            match decode_persisted_authoring_session(persisted)
+                .and_then(|bytes| result.restore_authoring_session_bytes(&bytes))
+            {
                 Ok(()) => {
-                    "restored exact canonical control ALGW/ALGP + cached-job ALGW bundle from application storage"
+                    "restored one exact canonical ALGS authoring session from application storage"
                         .clone_into(&mut result.edit_status);
                 }
                 Err(error) => {
                     result.persistence_dirty = true;
                     result.edit_status = format!(
-                        "persisted control/job graph bundle rejected atomically; canonical reference loaded instead: {error}"
+                        "persisted ALGS authoring session rejected atomically; canonical reference loaded instead: {error}"
                     );
                 }
             }
@@ -2324,16 +2311,9 @@ impl ExactControlWorkspace {
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) fn persisted_workspace_bundle(&self) -> Result<String, String> {
-        let probes = self
-            .probes
-            .as_ref()
-            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
-        encode_persisted_workspace_bundle(
-            &self.workspace_encoding,
-            &probes.encoding,
-            &self.cached_jobs.encoding,
-        )
+    pub(crate) fn persisted_authoring_session(&self) -> Result<String, String> {
+        let encoding = self.authoring_session_encoding()?;
+        encode_persisted_authoring_session(&encoding)
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
@@ -2409,7 +2389,7 @@ impl ExactControlWorkspace {
         } else if self.persistence_dirty {
             "Browser persistence: pending"
         } else {
-            "Browser persistence: exact control/job graph bundle saved"
+            "Browser persistence: exact ALGS authoring session saved"
         });
         ui.label(format!(
             "Reference trace: {} entries / {} bytes",
@@ -2594,6 +2574,8 @@ impl ExactControlWorkspace {
             self.navigate_history(redo);
         }
 
+        self.show_authoring_session_file_controls(ui);
+
         let download_name = format!(
             "alumina-{}.algw",
             digest_prefix(self.workspace_encoding.digest().0)
@@ -2633,6 +2615,61 @@ impl ExactControlWorkspace {
 
         self.show_probe_file_controls(ui);
         ui.weak(&self.file_status);
+    }
+
+    fn show_authoring_session_file_controls(&mut self, ui: &mut egui::Ui) {
+        let encoding = match self.authoring_session_encoding() {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("ALGS file exchange unavailable: {error}"),
+                );
+                return;
+            }
+        };
+        let download_name = format!(
+            "alumina-session-{}.algs",
+            digest_prefix(encoding.digest().0)
+        );
+        let events = self.authoring_session_file_bridge.show(
+            ui,
+            encoding.bytes(),
+            MAX_GRAPH_AUTHORING_SESSION_BYTES,
+            &download_name,
+            ALGS_FILE,
+        );
+        for event in events {
+            match event {
+                BoundedFileEvent::Import(Ok(bytes)) => {
+                    match self.restore_authoring_session_bytes(&bytes) {
+                        Ok(()) => {
+                            self.persistence_dirty = true;
+                            self.persistence_attempted = false;
+                            self.file_status = format!(
+                                "imported {} exact ALGS bytes after atomic complete-session replay",
+                                bytes.len()
+                            );
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "ALGS import rejected without authoring-state mutation: {error}"
+                            );
+                        }
+                    }
+                }
+                BoundedFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("ALGS file read rejected: {error}");
+                }
+                BoundedFileEvent::Export(Ok(bytes)) => {
+                    self.file_status =
+                        format!("exported {bytes} exact canonical ALGS authoring-session bytes");
+                }
+                BoundedFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("ALGS export failed: {error}");
+                }
+            }
+        }
     }
 
     fn show_probe_file_controls(&mut self, ui: &mut egui::Ui) {
@@ -3843,40 +3880,97 @@ impl ExactControlWorkspace {
         Ok((encoding, presentation, semantic))
     }
 
-    fn restore_workspace_bundle_bytes(
-        &mut self,
-        workspace_bytes: &[u8],
-        probe_bytes: &[u8],
-        cached_job_bytes: &[u8],
-    ) -> Result<(), String> {
-        let workspace_replay = replay_graph_workspace(
-            workspace_bytes,
-            GraphWorkspaceLimits::interactive(),
-            GraphLimits::interactive(),
+    fn authoring_session_document(&self) -> Result<GraphAuthoringSessionDocument, String> {
+        let probes = self
+            .probes
+            .as_ref()
+            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
+        let hierarchy = self.component.as_ref().map(|component| {
+            GraphAuthoringHierarchyInput::new(
+                component.encoding.digest(),
+                component.hierarchy.document.clone(),
+                component.hierarchy.source_map.clone(),
+            )
+        });
+        GraphAuthoringSessionDocument::try_new(
+            GraphAuthoringSessionLimits::interactive(),
+            GraphHierarchySourceMapLimits::interactive(),
+            self.workspace.clone(),
+            probes.document.clone(),
+            self.cached_jobs.workspace.clone(),
+            hierarchy,
         )
-        .map_err(|error| error.to_string())?;
-        let candidate = workspace_replay.document().clone();
+        .map_err(|error| error.to_string())
+    }
+
+    fn authoring_session_encoding(&self) -> Result<CanonicalGraphAuthoringSessionEncoding, String> {
+        let document = self.authoring_session_document()?;
+        encode_graph_authoring_session(&document).map_err(|error| error.to_string())
+    }
+
+    fn restore_authoring_session_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let replay =
+            replay_graph_authoring_session(bytes, GraphAuthoringSessionReplayLimits::interactive())
+                .map_err(|error| error.to_string())?;
+        let session = replay.document();
+        let candidate = session.control_workspace().clone();
         let (encoding, presentation, _) = self.prepare_candidate(&candidate)?;
-        if workspace_replay.encoding() != &encoding {
-            return Err("replayed ALGW identity changed during UI admission".to_owned());
+        if session.control_encoding() != &encoding {
+            return Err("ALGS control ALGW identity changed during UI admission".to_owned());
         }
-        let probe_replay =
-            replay_graph_probes(probe_bytes, &candidate, GraphProbeLimits::interactive())
-                .map_err(|error| format!("bound ALGP replay failed: {error}"))?;
         let probes = ProbePackage {
-            document: probe_replay.document().clone(),
-            encoding: probe_replay.encoding().clone(),
+            document: session.probes().clone(),
+            encoding: session.probe_encoding().clone(),
         };
         let (cached_job_workspace, cached_job_encoding) = self
             .cached_jobs
-            .replay_persisted_workspace(cached_job_bytes)?;
+            .replay_persisted_workspace(session.cached_job_encoding().bytes())?;
+        if &cached_job_encoding != session.cached_job_encoding() {
+            return Err(
+                "ALGS cached-job ALGW identity changed during catalog admission".to_owned(),
+            );
+        }
+        let component = session
+            .hierarchy()
+            .map(|hierarchy| {
+                analyze_graph_draft(
+                    hierarchy.flattening().workspace().graph(),
+                    self.fixture.registry().semantic_registry(),
+                )
+                .map_err(|error| {
+                    format!("ALGS flattened component draft semantics rejected: {error}")
+                })?;
+                if hierarchy.selected_component_encoding().digest()
+                    != hierarchy.selected_component()
+                {
+                    return Err(
+                        "ALGS selected component identity changed during UI admission".to_owned(),
+                    );
+                }
+                Ok(ComponentPackage {
+                    document: hierarchy.selected_component_document().clone(),
+                    encoding: hierarchy.selected_component_encoding().clone(),
+                    hierarchy: HierarchyPackage {
+                        document: hierarchy.document().clone(),
+                        encoding: hierarchy.encoding().clone(),
+                        flattening: hierarchy.flattening().clone(),
+                        source_map: hierarchy.source_map().clone(),
+                    },
+                })
+            })
+            .transpose()?;
 
-        // Commit only after all three artifacts have replayed canonically, the
-        // probe sidecar has proven its ALGW binding, and every cached-job value
-        // remains a member of the currently reconciled catalog.
+        // Commit only after all nested artifacts, exact hierarchy provenance,
+        // UI semantics, and every catalog-bound cached-job leaf have passed.
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
+        self.component = component;
+        self.component_status = if self.component.is_some() {
+            "restored exact selected ALGC and complete ALGH/ALGM from ALGS".to_owned()
+        } else {
+            "ALGS contains no selected component hierarchy".to_owned()
+        };
         self.history.clear();
         self.selected_node = None;
         self.pending_source = None;
@@ -3884,14 +3978,13 @@ impl ExactControlWorkspace {
         self.parameter_drafts.clear();
         self.node_label_drafts.clear();
         self.probe_drafts.clear();
-        self.refresh_component();
         self.replace_probe_package(probes);
         self.cached_jobs
             .restore_persisted_workspace(cached_job_workspace, cached_job_encoding);
         self.reset_cursor_to_trigger();
         self.persistence_dirty = false;
         self.persistence_attempted = false;
-        "restored canonical ALGP sidecar with exact ALGW binding"
+        "restored canonical ALGP sidecar with exact ALGS/ALGW binding"
             .clone_into(&mut self.probe_status);
         Ok(())
     }
@@ -6200,50 +6293,25 @@ fn parse_parameter_text(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn encode_persisted_workspace_bundle(
-    workspace: &CanonicalGraphWorkspaceEncoding,
-    probes: &CanonicalGraphProbeEncoding,
-    cached_jobs: &CanonicalGraphWorkspaceEncoding,
+fn encode_persisted_authoring_session(
+    session: &CanonicalGraphAuthoringSessionEncoding,
 ) -> Result<String, String> {
-    let workspace_bytes = workspace.bytes();
-    let probe_bytes = probes.bytes();
-    let cached_job_bytes = cached_jobs.bytes();
-    if workspace_bytes.len() > MAXIMUM_PERSISTED_WORKSPACE_BYTES {
+    let bytes = session.bytes();
+    if bytes.len() > MAX_GRAPH_AUTHORING_SESSION_BYTES {
         return Err(format!(
-            "canonical ALGW has {} bytes; browser persistence admits at most {}",
-            workspace_bytes.len(),
-            MAXIMUM_PERSISTED_WORKSPACE_BYTES
+            "canonical ALGS has {} bytes; browser persistence admits at most {}",
+            bytes.len(),
+            MAX_GRAPH_AUTHORING_SESSION_BYTES
         ));
     }
-    if probe_bytes.len() > MAXIMUM_PERSISTED_PROBE_BYTES {
-        return Err(format!(
-            "canonical ALGP has {} bytes; browser persistence admits at most {}",
-            probe_bytes.len(),
-            MAXIMUM_PERSISTED_PROBE_BYTES
-        ));
-    }
-    if cached_job_bytes.len() > MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES {
-        return Err(format!(
-            "canonical cached-job ALGW has {} bytes; browser persistence admits at most {}",
-            cached_job_bytes.len(),
-            MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES
-        ));
-    }
-    let encoded_bytes = workspace_bytes
+    let encoded_bytes = bytes
         .len()
         .checked_mul(2)
-        .and_then(|length| length.checked_add(probe_bytes.len().checked_mul(2)?))
-        .and_then(|length| length.checked_add(cached_job_bytes.len().checked_mul(2)?))
-        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_BUNDLE_PREFIX.len()))
-        .and_then(|length| length.checked_add(2))
-        .ok_or_else(|| "persisted control/job graph bundle text length overflowed".to_owned())?;
+        .and_then(|length| length.checked_add(PERSISTED_AUTHORING_SESSION_PREFIX.len()))
+        .ok_or_else(|| "persisted ALGS text length overflowed".to_owned())?;
     let mut result = String::with_capacity(encoded_bytes);
-    result.push_str(PERSISTED_WORKSPACE_BUNDLE_PREFIX);
-    append_lower_hex(&mut result, workspace_bytes);
-    result.push(':');
-    append_lower_hex(&mut result, probe_bytes);
-    result.push(':');
-    append_lower_hex(&mut result, cached_job_bytes);
+    result.push_str(PERSISTED_AUTHORING_SESSION_PREFIX);
+    append_lower_hex(&mut result, bytes);
     Ok(result)
 }
 
@@ -6256,43 +6324,11 @@ fn append_lower_hex(result: &mut String, bytes: &[u8]) {
     }
 }
 
-fn decode_persisted_workspace_bundle(
-    value: &str,
-    workspace_limits: GraphWorkspaceLimits,
-    probe_limits: GraphProbeLimits,
-) -> Result<PersistedWorkspaceBundleBytes, String> {
+fn decode_persisted_authoring_session(value: &str) -> Result<Vec<u8>, String> {
     let encoded = value
-        .strip_prefix(PERSISTED_WORKSPACE_BUNDLE_PREFIX)
-        .ok_or_else(|| {
-            "persisted control/job graph bundle prefix/version is unsupported".to_owned()
-        })?;
-    let mut sections = encoded.split(':');
-    let workspace = sections
-        .next()
-        .ok_or_else(|| "persisted control ALGW section is missing".to_owned())?;
-    let probes = sections
-        .next()
-        .ok_or_else(|| "persisted ALGP section is missing".to_owned())?;
-    let cached_jobs = sections
-        .next()
-        .ok_or_else(|| "persisted cached-job ALGW section is missing".to_owned())?;
-    if sections.next().is_some() {
-        return Err("persisted control/job graph bundle has extra sections".to_owned());
-    }
-    let workspace_maximum = workspace_limits
-        .maximum_workspace_bytes
-        .min(MAXIMUM_PERSISTED_WORKSPACE_BYTES);
-    let probe_maximum = probe_limits
-        .maximum_probe_document_bytes
-        .min(MAXIMUM_PERSISTED_PROBE_BYTES);
-    let cached_job_maximum = workspace_limits
-        .maximum_workspace_bytes
-        .min(MAXIMUM_PERSISTED_CACHED_JOB_WORKSPACE_BYTES);
-    Ok(PersistedWorkspaceBundleBytes {
-        control_workspace: decode_persisted_hex(workspace, workspace_maximum, "ALGW")?,
-        probes: decode_persisted_hex(probes, probe_maximum, "ALGP")?,
-        cached_jobs: decode_persisted_hex(cached_jobs, cached_job_maximum, "cached-job ALGW")?,
-    })
+        .strip_prefix(PERSISTED_AUTHORING_SESSION_PREFIX)
+        .ok_or_else(|| "persisted ALGS prefix/version is unsupported".to_owned())?;
+    decode_persisted_hex(encoded, MAX_GRAPH_AUTHORING_SESSION_BYTES, "ALGS")
 }
 
 fn decode_persisted_hex(
@@ -8104,6 +8140,79 @@ mod tests {
         replay_graph_workspace,
     };
 
+    struct AlgsHierarchyOffsets {
+        selected_component: std::ops::Range<usize>,
+        hierarchy: std::ops::Range<usize>,
+        source_map: std::ops::Range<usize>,
+    }
+
+    fn persisted_algs(bytes: &[u8]) -> String {
+        let mut persisted = String::with_capacity(
+            PERSISTED_AUTHORING_SESSION_PREFIX.len() + bytes.len().saturating_mul(2),
+        );
+        persisted.push_str(PERSISTED_AUTHORING_SESSION_PREFIX);
+        append_lower_hex(&mut persisted, bytes);
+        persisted
+    }
+
+    fn replace_exact_embedded_bytes(session: &mut [u8], current: &[u8], replacement: &[u8]) {
+        assert_eq!(current.len(), replacement.len());
+        let positions = session
+            .windows(current.len())
+            .enumerate()
+            .filter_map(|(index, candidate)| (candidate == current).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(positions.len(), 1);
+        session[positions[0]..positions[0] + current.len()].copy_from_slice(replacement);
+    }
+
+    fn algs_hierarchy_offsets(bytes: &[u8]) -> AlgsHierarchyOffsets {
+        const FIXED_HEADER: usize = 4 + 2 + 2 + 6 * 8;
+
+        fn take_length(bytes: &[u8], cursor: &mut usize) -> usize {
+            let end = *cursor + 4;
+            let length =
+                usize::try_from(u32::from_le_bytes(bytes[*cursor..end].try_into().unwrap()))
+                    .unwrap();
+            *cursor = end;
+            length
+        }
+
+        let mut cursor = FIXED_HEADER;
+        for _ in 0..3 {
+            let length = take_length(bytes, &mut cursor);
+            cursor += length;
+        }
+        assert_eq!(bytes[cursor], 1);
+        cursor += 1;
+        let selected_component = cursor..cursor + 32;
+        cursor = selected_component.end;
+        let hierarchy_length = take_length(bytes, &mut cursor);
+        let hierarchy = cursor..cursor + hierarchy_length;
+        cursor = hierarchy.end;
+        let source_map_length = take_length(bytes, &mut cursor);
+        let source_map = cursor..cursor + source_map_length;
+        cursor = source_map.end;
+        assert_eq!(cursor, bytes.len());
+        AlgsHierarchyOffsets {
+            selected_component,
+            hierarchy,
+            source_map,
+        }
+    }
+
+    fn assert_exact_component_package_equal(
+        actual: &ComponentPackage,
+        expected: &ComponentPackage,
+    ) {
+        assert_eq!(actual.document, expected.document);
+        assert_eq!(actual.encoding, expected.encoding);
+        assert_eq!(actual.hierarchy.document, expected.hierarchy.document);
+        assert_eq!(actual.hierarchy.encoding, expected.hierarchy.encoding);
+        assert_eq!(actual.hierarchy.flattening, expected.hierarchy.flattening);
+        assert_eq!(actual.hierarchy.source_map, expected.hierarchy.source_map);
+    }
+
     #[test]
     fn cached_job_proof_starts_from_complete_reconciled_participant_set() {
         let workspace = ExactControlWorkspace::try_new().unwrap();
@@ -9165,7 +9274,7 @@ mod tests {
         );
         assert!(workspace.node_label_drafts.is_empty());
 
-        let persisted = workspace.persisted_workspace_bundle().unwrap();
+        let persisted = workspace.persisted_authoring_session().unwrap();
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace, workspace.workspace);
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
@@ -9247,9 +9356,14 @@ mod tests {
     }
 
     #[test]
-    fn persistence_round_trips_control_probe_and_catalog_bound_job_graphs() {
+    fn persistence_round_trips_one_complete_exact_authoring_session() {
         let canonical = ExactControlWorkspace::try_new().unwrap();
-        let canonical_persisted = canonical.persisted_workspace_bundle().unwrap();
+        let canonical_encoding = canonical.authoring_session_encoding().unwrap();
+        let canonical_persisted = canonical.persisted_authoring_session().unwrap();
+        assert_eq!(
+            decode_persisted_authoring_session(&canonical_persisted).unwrap(),
+            canonical_encoding.bytes()
+        );
         let canonical_restored =
             ExactControlWorkspace::try_new_with_persisted(Some(&canonical_persisted)).unwrap();
         assert_eq!(
@@ -9260,6 +9374,9 @@ mod tests {
             canonical_restored.cached_jobs.encoding,
             canonical.cached_jobs.encoding
         );
+        let canonical_component = canonical.component.as_ref().unwrap();
+        let restored_component = canonical_restored.component.as_ref().unwrap();
+        assert_exact_component_package_equal(restored_component, canonical_component);
 
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
@@ -9267,16 +9384,15 @@ mod tests {
         workspace.cached_jobs.selected_entry = 1;
         workspace.cached_jobs.rebind_selected_reference().unwrap();
         assert_eq!(workspace.history.undo_len(), 2);
-        let persisted = workspace.persisted_workspace_bundle().unwrap();
-        assert!(persisted.starts_with(PERSISTED_WORKSPACE_BUNDLE_PREFIX));
-        let sections: Vec<_> = persisted[PERSISTED_WORKSPACE_BUNDLE_PREFIX.len()..]
-            .split(':')
-            .collect();
-        assert_eq!(sections.len(), 3);
-        assert!(sections.iter().all(|hex| {
-            hex.bytes()
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        assert!(persisted.starts_with(PERSISTED_AUTHORING_SESSION_PREFIX));
+        let payload = &persisted[PERSISTED_AUTHORING_SESSION_PREFIX.len()..];
+        assert!(!payload.contains(':'));
+        assert!(
+            payload
+                .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        }));
+        );
 
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace, workspace.workspace);
@@ -9302,37 +9418,89 @@ mod tests {
         assert_eq!(restored.history.undo_len(), 0);
         assert_eq!(restored.history.redo_len(), 0);
         assert!(!restored.persistence_pending());
+        let component = workspace.component.as_ref().unwrap();
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_exact_component_package_equal(restored_component, component);
 
         let mut uppercase = persisted.clone();
-        let offset = sections[0]
+        let offset = payload
             .bytes()
             .position(|byte| (b'a'..=b'f').contains(&byte))
             .unwrap();
-        let persisted_offset = PERSISTED_WORKSPACE_BUNDLE_PREFIX.len() + offset;
+        let persisted_offset = PERSISTED_AUTHORING_SESSION_PREFIX.len() + offset;
         uppercase.replace_range(
             persisted_offset..=persisted_offset,
-            &sections[0][offset..=offset].to_ascii_uppercase(),
+            &payload[offset..=offset].to_ascii_uppercase(),
         );
         assert!(
-            decode_persisted_workspace_bundle(
-                &uppercase,
-                GraphWorkspaceLimits::interactive(),
-                GraphProbeLimits::interactive(),
-            )
-            .unwrap_err()
-            .contains("lowercase hex")
+            decode_persisted_authoring_session(&uppercase)
+                .unwrap_err()
+                .contains("lowercase hex")
         );
         assert!(
-            decode_persisted_workspace_bundle(
-                "algwb1:0000:00:00",
-                GraphWorkspaceLimits {
-                    maximum_workspace_bytes: 1,
-                    ..GraphWorkspaceLimits::interactive()
-                },
-                GraphProbeLimits::interactive(),
-            )
-            .unwrap_err()
-            .contains("admission limit")
+            decode_persisted_authoring_session("algwb1:0000:00:00")
+                .unwrap_err()
+                .contains("prefix/version is unsupported")
+        );
+    }
+
+    #[test]
+    fn absent_authoring_hierarchy_stays_absent_after_restore() {
+        let mut detached = ExactControlWorkspace::try_new().unwrap();
+        detached.component = None;
+        let detached_persisted = detached.persisted_authoring_session().unwrap();
+        let detached_restored =
+            ExactControlWorkspace::try_new_with_persisted(Some(&detached_persisted)).unwrap();
+        assert!(detached_restored.component.is_none());
+        assert!(detached_restored.component_status.contains("no selected"));
+    }
+
+    #[test]
+    fn hierarchy_identity_and_nested_artifact_corruption_reject_atomically() {
+        let source = ExactControlWorkspace::try_new().unwrap();
+        let canonical = source.authoring_session_encoding().unwrap();
+        let offsets = algs_hierarchy_offsets(canonical.bytes());
+        let mut target = ExactControlWorkspace::try_new().unwrap();
+        target.commit_parameter_text(GraphNodeId::new(8), 1, "11/5");
+        let retained = target.authoring_session_encoding().unwrap();
+
+        let mut selected_substitution = canonical.bytes().to_vec();
+        selected_substitution[offsets.selected_component.clone()].fill(0xa7);
+        assert!(
+            target
+                .restore_authoring_session_bytes(&selected_substitution)
+                .unwrap_err()
+                .contains("selected component")
+        );
+        assert_eq!(
+            target.authoring_session_encoding().unwrap().bytes(),
+            retained.bytes()
+        );
+
+        let mut corrupt_hierarchy = canonical.bytes().to_vec();
+        corrupt_hierarchy[offsets.hierarchy.start] ^= 0xff;
+        assert!(
+            target
+                .restore_authoring_session_bytes(&corrupt_hierarchy)
+                .unwrap_err()
+                .contains("hierarchy")
+        );
+        assert_eq!(
+            target.authoring_session_encoding().unwrap().bytes(),
+            retained.bytes()
+        );
+
+        let mut corrupt_source_map = canonical.bytes().to_vec();
+        corrupt_source_map[offsets.source_map.start] ^= 0xff;
+        assert!(
+            target
+                .restore_authoring_session_bytes(&corrupt_source_map)
+                .unwrap_err()
+                .contains("source map")
+        );
+        assert_eq!(
+            target.authoring_session_encoding().unwrap().bytes(),
+            retained.bytes()
         );
     }
 
@@ -10347,7 +10515,7 @@ mod tests {
             workspace.probes.as_ref().unwrap().encoding,
             edited_probes.encoding
         );
-        let persisted = workspace.persisted_workspace_bundle().unwrap();
+        let persisted = workspace.persisted_authoring_session().unwrap();
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
         assert_eq!(
@@ -10406,7 +10574,7 @@ mod tests {
         assert!(
             fallback
                 .edit_status
-                .contains("persisted control/job graph bundle rejected")
+                .contains("persisted ALGS authoring session rejected")
         );
         assert!(fallback.persistence_pending());
         assert!(fallback.reference_trace_is_current());
@@ -10414,12 +10582,14 @@ mod tests {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
-        let mismatched_pair = encode_persisted_workspace_bundle(
-            &source.workspace_encoding,
-            &reference.probes.as_ref().unwrap().encoding,
-            &reference.cached_jobs.encoding,
-        )
-        .unwrap();
+        let source_session = source.authoring_session_encoding().unwrap();
+        let mut mismatched_pair = source_session.bytes().to_vec();
+        replace_exact_embedded_bytes(
+            &mut mismatched_pair,
+            source.probes.as_ref().unwrap().encoding.bytes(),
+            reference.probes.as_ref().unwrap().encoding.bytes(),
+        );
+        let mismatched_pair = persisted_algs(&mismatched_pair);
         let pair_fallback =
             ExactControlWorkspace::try_new_with_persisted(Some(&mismatched_pair)).unwrap();
         assert_eq!(pair_fallback.workspace, reference.workspace);
@@ -10490,7 +10660,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_raw_or_foreign_cached_job_identity_rejects_the_whole_bundle() {
+    fn persisted_raw_or_foreign_cached_job_identity_rejects_the_whole_session() {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut foreign_job_workspace = reference.cached_jobs.workspace.clone();
         let foreign_node = foreign_job_workspace.graph().nodes()[0].id();
@@ -10514,12 +10684,14 @@ mod tests {
             .set_parameter(foreign_node, CACHED_JOB_PARAMETER, foreign_parameter)
             .unwrap();
         let foreign_job_encoding = encode_graph_workspace(&foreign_job_workspace).unwrap();
-        let foreign_bundle = encode_persisted_workspace_bundle(
-            &reference.workspace_encoding,
-            &reference.probes.as_ref().unwrap().encoding,
-            &foreign_job_encoding,
-        )
-        .unwrap();
+        let reference_session = reference.authoring_session_encoding().unwrap();
+        let mut foreign_bundle = reference_session.bytes().to_vec();
+        replace_exact_embedded_bytes(
+            &mut foreign_bundle,
+            reference.cached_jobs.encoding.bytes(),
+            foreign_job_encoding.bytes(),
+        );
+        let foreign_bundle = persisted_algs(&foreign_bundle);
 
         let fallback =
             ExactControlWorkspace::try_new_with_persisted(Some(&foreign_bundle)).unwrap();

@@ -160,10 +160,12 @@ or claim that an instance itself can run.
 ## Deliberately open
 
 Editable component-instance creation/deletion on the main canvas,
-hierarchy-aware undo/redo and file/browser persistence, general library
-authoring, parameter promotion/overrides, package signatures and permissions,
-locked dependency manifests, incremental flattening, interactive traversal
-from final items into nested editable canvases, and executable front-panel
-inputs remain open. `ALGH` V2 and `ALGM` V1 grant no
+hierarchy-aware undo/redo, general library authoring, parameter
+promotion/overrides, package signatures and permissions, locked dependency
+manifests, incremental flattening, interactive traversal from final items into
+nested editable canvases, and executable front-panel inputs remain open.
+Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
+component with its complete ALGH/ALGM branch atomically; it does not add those
+editing operations. `ALGH` V2 and `ALGM` V1 grant no
 semantic, implementation, resource, timing, safety, firmware, or
 physical-output authority.

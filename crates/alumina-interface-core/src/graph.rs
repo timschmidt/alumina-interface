@@ -13,6 +13,7 @@ use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
 mod analysis;
+mod authoring_session;
 mod capability_catalog;
 mod component;
 mod control_fixture;
@@ -39,6 +40,14 @@ pub use analysis::{
     NodeInputChannelKind, NodeOutputDependency, NodeParameterContract, NodeRateTransitionContract,
     NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind,
     analyze_graph, analyze_graph_draft,
+};
+pub use authoring_session::{
+    CanonicalGraphAuthoringSessionEncoding, GRAPH_AUTHORING_SESSION_MAGIC,
+    GRAPH_AUTHORING_SESSION_VERSION, GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument,
+    GraphAuthoringSessionError, GraphAuthoringSessionHierarchy, GraphAuthoringSessionLimits,
+    GraphAuthoringSessionReplay, GraphAuthoringSessionReplayLimits,
+    MAX_GRAPH_AUTHORING_SESSION_BYTES, encode_graph_authoring_session,
+    replay_graph_authoring_session,
 };
 pub use capability_catalog::{
     GraphCapabilityCatalogError, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,

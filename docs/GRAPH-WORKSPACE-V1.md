@@ -154,34 +154,35 @@ workspace or bound sidecar is itself one undoable pair edit.
 
 ## Persistence and file exchange
 
-The browser stores the current canonical control workspace, its exact
-graph-probe sidecar, and the separate catalog-bound cached-job workspace in one
-origin-local value after a successful edit. The greenfield application envelope
-is version-tagged `algwb1:`, followed by lowercase hexadecimal control `ALGW`,
-`ALGP`, and cached-job `ALGW` sections separated by `:`. One `setItem` replaces
-the complete bundle. Decoding rejects the wrong tag, missing or extra section,
-odd length, uppercase or non-hex text, or any section over its independent
-2 MiB ceiling before allocating its bytes.
+The browser stores one canonical
+[`ALGS` V1 authoring session](GRAPH-AUTHORING-SESSION-V1.md) after a successful
+edit. That artifact binds the current control workspace, exact graph-probe
+sidecar, catalog-bound cached-job workspace, selected component identity,
+complete hierarchy, and regenerated hierarchy source map. The origin-local
+value is `algs1:` followed by one lowercase hexadecimal `ALGS`; one `setItem`
+replaces the whole session. The retired `algwb1:` representation and key are
+not compatibility inputs.
 
-Restore replays and admits the control `ALGW`, replays `ALGP` against that exact
-identity, and independently replays the cached-job `ALGW` before checking every
-job handle against the newly derived exact catalog. Only after all canonical
-and binding checks succeed does any document replace the in-memory reference.
-A malformed sidecar, a sidecar for another workspace, or a raw, stale, or
-foreign cached-job handle therefore rejects the bundle atomically. Earlier
-application keys and text representations are intentionally not compatibility
-inputs.
+Restore replays the complete outer artifact and every nested canonical
+artifact, proves the ALGP/control binding and selected-component/control
+binding, freshly flattens ALGH to regenerate ALGM, admits both visible graphs
+through the fixed UI registry, and checks every cached-job handle against the
+newly derived exact catalog. Only after all checks succeed does any in-memory
+state change. Malformed, mismatched, stale, foreign, or substituted input thus
+rejects the complete session atomically.
 
-Browser download writes the byte-for-byte canonical `ALGW` or currently bound
-`ALGP` encoding to a corresponding `.algw` or `.algp` Blob. Browser upload
+Browser download writes byte-for-byte canonical `.algs`, `.algw`, `.algp`, or
+`.algm` content. Browser upload
 checks the advertised file size, bounds the materialized `ArrayBuffer`, and
 forwards only bytes within that artifact's policy. The native shell exposes
 independent explicit paths with bounded reads and exact, synchronized writes.
-Neither platform bridge parses an artifact. An opened `.algp` is replayed
+Neither platform bridge parses an artifact. A complete `.algs` import commits
+only after the same atomic restore transaction used by browser persistence. An
+opened `.algp` is replayed
 against the exact current workspace and cannot mutate the graph; an identity
 mismatch leaves both graph and prior sidecar unchanged. Explicit ALGW files
 retain the 20 MiB workspace admission ceiling; ALGP files use their canonical
-2 MiB document ceiling.
+2 MiB document ceiling; complete ALGS files use the 8 MiB session ceiling.
 
 All opened ALGW bytes first pass canonical replay, embedded-limit checks, exact
 re-encoding, UI layout admission, and the fixed audited semantic registry. A

@@ -86,15 +86,17 @@ catalog-membership admission before it replaces current state.
 
 ## Origin-local persistence
 
-Application persistence is now one versioned `algwb1:` bundle containing
-lowercase-hex control `ALGW`, bound `ALGP`, and catalog-bound cached-job `ALGW`
-sections. This is a greenfield replacement, not a compatibility envelope. Each
-section has an independent 2 MiB ceiling. Restore replays and admits all three
-artifacts first; the cached-job graph must still resolve every handle against
-the catalog derived at this startup. Only then are any in-memory documents
-replaced. Missing, extra, uppercase, oversized, noncanonical, mismatched-probe,
-raw-handle at any nested leaf, stale-handle, or foreign-job input rejects the
-complete bundle.
+Application persistence is one canonical
+[`ALGS` V1 authoring session](GRAPH-AUTHORING-SESSION-V1.md), represented in
+origin-local storage as `algs1:` plus one lowercase-hex payload. ALGS binds the
+control `ALGW`, bound `ALGP`, catalog-bound cached-job `ALGW`, and optional
+complete component hierarchy/source map. Restore replays and admits every
+nested artifact first; the cached-job graph must still resolve every handle
+against the catalog derived at this startup. Only then is any in-memory state
+replaced. Unsupported prefix, uppercase, oversized, noncanonical,
+mismatched-probe, raw-handle at any nested leaf, stale-handle, foreign-job, or
+hierarchy substitution rejects the complete session. The retired `algwb1:`
+format is not decoded or migrated.
 History remains ephemeral and is cleared after restore.
 
 ## Closed claims
