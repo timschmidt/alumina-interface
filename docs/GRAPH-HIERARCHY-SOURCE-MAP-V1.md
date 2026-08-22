@@ -124,6 +124,13 @@ A fresh reload preserved those bytes and reset the transient navigation
 status. The retained 1,847-byte browser result has SHA-256
 `af12d28874bad849f93cbb71f05b4b30a643f11b896a2969f5ceefc0434782b4`.
 
+Component identity evolution regenerates this map through the ordinary
+recursive hierarchy transaction. Editor selections follow the exact digest
+replacement report, but a retained source-browser origin is not guessed across
+the identity boundary: if the old final/origin pair is absent from the new
+`ALGM`, focus and pending scroll are cleared with a visible stale-origin status.
+No historical digest or stable-name alias is encoded.
+
 The core golden also exercises both origin tags: two ordinary root nodes, one
 ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
 2,577-byte encoding has SHA-256
@@ -138,8 +145,8 @@ component/ALGH/ALGM branch atomically with the other authoring artifacts.
 Direct root-instance add/delete now regenerates the map from the complete
 candidate hierarchy before one `ALGS` transaction commits, so source
 correlation and the unified history cannot lag the visible instance set.
-Nested definition import with separately supplied scoped bindings, component
-rename/version evolution, parameter promotion, signed dependency manifests,
+Nested definition import with separately supplied scoped bindings, parameter
+promotion, signed dependency manifests,
 live device trace correlation, and firmware execution evidence remain separate
 work. `ALGM` V1 closes deterministic total source correlation for each
 complete, validated, freshly flattened hierarchy.

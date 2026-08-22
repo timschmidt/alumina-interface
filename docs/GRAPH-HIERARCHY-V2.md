@@ -280,6 +280,16 @@ byte-identical. The replacement `ALGC`, complete `ALGH`, and source-bound
 `ALGM` identities change together and enter the ordinary complete-session
 history; the flattened ordinary `ALGW` remains identical.
 
+Stable-name and behavior-version evolution also use this replacement path.
+The selected library dependency is cloned, its canonical metadata is changed,
+and the complete recursive replacement report rewrites every exact descendant,
+parent, root, and selected-component digest before admission. A behavior
+version may stay unchanged or increase but never regress; duplicate stable
+names and exact no-ops are resolved before commit. No old-name or old-digest
+alias enters `ALGH`. Logical editor selection follows the replacement digest,
+while an exact flattened-source origin that disappeared is cleared rather than
+retargeted heuristically.
+
 The connector-pane editor follows the dependency chosen in the adjacent
 library selector, rather than being fixed to the complete-session control
 component. An accepted input/output add, update, or removal replaces that exact
@@ -351,7 +361,7 @@ remained exact at
 Direct root-instance creation/deletion is implemented through the dedicated
 library panel, and exact root placement/wiring is implemented on its structural
 canvas. Nested definition import with separately supplied scoped bindings,
-component rename/version evolution, parameter promotion/overrides, package
+parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
 flattening, child rebinding/replacement, coordinated descendant/control-authority
 replacement, and executable front-panel inputs remain open.

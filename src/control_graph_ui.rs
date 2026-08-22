@@ -269,6 +269,21 @@ impl ComponentDefinitionEditor {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ComponentIdentityDraft {
+    name: String,
+    component_version: String,
+}
+
+impl ComponentIdentityDraft {
+    fn from_document(document: &GraphComponentDocument) -> Self {
+        Self {
+            name: document.name().to_owned(),
+            component_version: document.component_version().to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum HierarchySourceSelection {
     Node {
         flattened: GraphNodeId,
@@ -2444,6 +2459,7 @@ pub(crate) struct ExactControlWorkspace {
     node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
+    component_identity_drafts: BTreeMap<Digest, ComponentIdentityDraft>,
     component_connector_drafts: BTreeMap<ComponentConnectorSelection, ComponentConnectorDraft>,
     component_connector_scope: Option<Digest>,
     component_definition: ComponentDefinitionEditor,
@@ -2567,6 +2583,7 @@ impl ExactControlWorkspace {
             node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
             panel_item_drafts: BTreeMap::new(),
+            component_identity_drafts: BTreeMap::new(),
             component_connector_drafts: BTreeMap::new(),
             component_connector_scope: selected_hierarchy_component,
             component_definition: ComponentDefinitionEditor::default(),
@@ -3249,6 +3266,7 @@ impl ExactControlWorkspace {
             "Choose one exact embedded ALGC dependency, instantiate it in the hierarchy root, or remove a selected root occurrence. These authoring-only placeholders flatten through ALGH/ALGM and never deploy by themselves.",
         );
         self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_identity_drafts();
         let Some(component) = self.component.as_ref() else {
             ui.colored_label(egui::Color32::YELLOW, &self.component_status);
             return;
@@ -3312,6 +3330,7 @@ impl ExactControlWorkspace {
             .find(|(node, _)| Some(*node) == self.selected_hierarchy_instance)
             .map_or("no root instance", |(_, label)| label.as_str());
         let mut action = None;
+        let mut identity_action = None;
         ui.horizontal_wrapped(|ui| {
             ui.strong("Library component");
             egui::ComboBox::from_id_salt("hierarchy_library_component")
@@ -3369,6 +3388,43 @@ impl ExactControlWorkspace {
                 "only exact unreferenced non-authoritative dependencies are removable"
             });
         });
+        if let Some(scope) = selected_dependency
+            && let Some(dependency) = component.hierarchy.document.dependency(scope)
+        {
+            let document = dependency.document().clone();
+            let mut draft = self
+                .component_identity_drafts
+                .get(&scope)
+                .cloned()
+                .unwrap_or_else(|| ComponentIdentityDraft::from_document(&document));
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Selected component identity");
+                ui.label("stable name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .char_limit(64)
+                        .desired_width(230.0),
+                );
+                ui.label("behavior version");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.component_version)
+                        .char_limit(10)
+                        .desired_width(72.0),
+                );
+                if ui.button("apply identity metadata").clicked() {
+                    identity_action = Some((scope, draft.clone()));
+                }
+                if ui.button("reset identity draft").clicked() {
+                    draft = ComponentIdentityDraft::from_document(&document);
+                }
+                ui.weak(format!(
+                    "canonical revision {} · version may stay {} or increase",
+                    document.revision(),
+                    document.component_version()
+                ));
+            });
+            self.component_identity_drafts.insert(scope, draft);
+        }
         ui.horizontal_wrapped(|ui| {
             ui.strong("New library component");
             ui.add(
@@ -3446,6 +3502,9 @@ impl ExactControlWorkspace {
         }
         if let Some(action) = action {
             self.apply_hierarchy_action(action);
+        }
+        if let Some((scope, draft)) = identity_action {
+            self.apply_component_identity_draft(scope, &draft);
         }
         for event in component_file_events {
             self.handle_component_file_event(event);
@@ -5402,6 +5461,7 @@ impl ExactControlWorkspace {
             self.selected_hierarchy_component = selected_component;
             self.selected_hierarchy_instance = selected_instance;
             self.reconcile_hierarchy_selection(None);
+            self.reconcile_component_identity_drafts();
             self.component_status = format!("{status}; canonical hierarchy already matched");
             self.edit_status.clone_from(&self.component_status);
             return Ok(false);
@@ -5428,12 +5488,76 @@ impl ExactControlWorkspace {
         self.selected_hierarchy_component = selected_component;
         self.selected_hierarchy_instance = selected_instance;
         self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_identity_drafts();
         self.reconcile_component_definition_editor();
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.component_status = format!("{status}; complete ALGS history recorded");
         self.edit_status.clone_from(&self.component_status);
         Ok(true)
+    }
+
+    fn apply_component_identity_draft(&mut self, original: Digest, draft: &ComponentIdentityDraft) {
+        let Some(current) = self.component.clone() else {
+            "component identity edit rejected without mutation: no selected component is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(dependency) = current.hierarchy.document.dependency(original) else {
+            "component identity edit rejected without mutation: selected hierarchy library component is unavailable"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let component_version = match parse_component_behavior_version(&draft.component_version) {
+            Ok(version) => version,
+            Err(error) => {
+                self.component_status =
+                    format!("component identity edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        if let Some(conflict) = current
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|candidate| {
+                candidate.digest() != original && candidate.document().name() == draft.name
+            })
+        {
+            self.component_status = format!(
+                "component identity edit rejected without mutation: stable name {} already belongs to ALGC {}…",
+                draft.name,
+                digest_prefix(conflict.digest().0)
+            );
+            return;
+        }
+        let original_name = dependency.document().name().to_owned();
+        let original_version = dependency.document().component_version();
+        let mut document = dependency.document().clone();
+        if let Err(error) = document.update_identity_metadata(draft.name.clone(), component_version)
+        {
+            self.component_status =
+                format!("component identity edit rejected without mutation: {error}");
+            return;
+        }
+        let status = format!(
+            "updated exact component identity {original_name} v{original_version} → {} v{component_version}",
+            draft.name
+        );
+        match self.commit_component_dependency_document(
+            &current,
+            original,
+            document,
+            &status,
+            self.selected_panel_item,
+        ) {
+            Ok(_) => self.reconcile_component_identity_drafts(),
+            Err(error) => {
+                self.component_status =
+                    format!("component identity edit rejected without mutation: {error}");
+            }
+        }
     }
 
     #[allow(
@@ -5689,6 +5813,7 @@ impl ExactControlWorkspace {
             .ok_or_else(|| "selected hierarchy library component is unavailable".to_owned())?;
         if &document == dependency.document() {
             self.reconcile_hierarchy_selection(None);
+            self.reconcile_component_identity_drafts();
             self.reconcile_component_connector_selection(self.selected_component_connector);
             self.reconcile_panel_selection(selected_panel_item);
             self.component_status =
@@ -5748,6 +5873,7 @@ impl ExactControlWorkspace {
             .selected_hierarchy_component
             .map(|selected| report.resolve(selected));
         self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_identity_drafts();
         self.reconcile_component_definition_editor();
         self.reconcile_component_connector_selection(None);
         self.reconcile_panel_selection(selected_panel_item);
@@ -5900,6 +6026,24 @@ impl ExactControlWorkspace {
             self.hierarchy_drag = None;
         }
         self.reconcile_hierarchy_source_browser();
+    }
+
+    fn reconcile_component_identity_drafts(&mut self) {
+        let retained = self
+            .component
+            .as_ref()
+            .map(|component| {
+                component
+                    .hierarchy
+                    .document
+                    .dependencies()
+                    .iter()
+                    .map(GraphHierarchyDependency::digest)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        self.component_identity_drafts
+            .retain(|component, _| retained.contains(component));
     }
 
     fn reconcile_hierarchy_source_browser(&mut self) {
@@ -7818,6 +7962,7 @@ impl ExactControlWorkspace {
         self.node_label_drafts.clear();
         self.probe_drafts.clear();
         self.panel_item_drafts.clear();
+        self.component_identity_drafts.clear();
         self.component_connector_drafts.clear();
         self.component_definition.reset_scope(
             self.selected_hierarchy_component,
@@ -10746,6 +10891,23 @@ fn representative_hierarchy(
     )
     .map_err(|error| error.to_string())?;
     hierarchy_package(document, fixture)
+}
+
+fn parse_component_behavior_version(text: &str) -> Result<u32, String> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(
+            "behavior version must be one canonical nonzero unsigned decimal integer".to_owned(),
+        );
+    }
+    let version = text.parse::<u32>().map_err(|_| {
+        "behavior version must fit one canonical nonzero unsigned 32-bit integer".to_owned()
+    })?;
+    if version == 0 || version.to_string() != text {
+        return Err(
+            "behavior version must be one canonical nonzero unsigned decimal integer".to_owned(),
+        );
+    }
+    Ok(version)
 }
 
 fn hierarchy_package(
@@ -15882,6 +16044,248 @@ mod tests {
                 .component_status
                 .contains("rejected without mutation")
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one component-identity lifecycle proves monotonic metadata, authoritative replacement, source reconciliation, history, persistence, and atomic invalid drafts"
+    )]
+    fn component_identity_metadata_is_exact_monotonic_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial.encoding.digest();
+        let wrapper = initial
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let wrapper_digest = wrapper.digest();
+        let wrapper_encoding = wrapper.encoding().clone();
+        let wire_mapping = initial.hierarchy.flattening.wire_provenance()[0].clone();
+        let selection = HierarchySourceSelection::Wire {
+            flattened: wire_mapping.flattened_wire(),
+            origin: wire_mapping.origin().clone(),
+        };
+        assert!(matches!(
+            selection,
+            HierarchySourceSelection::Wire {
+                origin: GraphHierarchyWireOrigin::Component { component, .. },
+                ..
+            } if component == authoritative
+        ));
+        workspace.open_hierarchy_source(selection.clone());
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(selection)
+        );
+        assert_eq!(workspace.component_definition.scope, Some(authoritative));
+
+        workspace.mark_persisted();
+        workspace.apply_component_identity_draft(
+            authoritative,
+            &ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "2".to_owned(),
+            },
+        );
+
+        let updated_session = workspace.authoring_session_encoding().unwrap();
+        let updated = workspace.component.as_ref().unwrap();
+        let replacement = updated.encoding.digest();
+        assert_ne!(updated_session, initial_session);
+        assert_ne!(replacement, authoritative);
+        let mut expected_document = initial.document.clone();
+        expected_document
+            .update_identity_metadata("control.reference_pid_v2", 2)
+            .unwrap();
+        let expected_encoding = encode_graph_component(&expected_document).unwrap();
+        assert_eq!(updated.document, expected_document);
+        assert_eq!(updated.encoding, expected_encoding);
+        assert_eq!(updated.document.revision(), initial.document.revision() + 1);
+        assert_eq!(updated.document.component_version(), 2);
+        assert_eq!(updated.document.name(), "control.reference_pid_v2");
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(
+            updated.hierarchy.document.root(),
+            initial.hierarchy.document.root()
+        );
+        assert_eq!(
+            updated.hierarchy.flattening.workspace(),
+            initial.hierarchy.flattening.workspace()
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .dependency(authoritative)
+                .is_none()
+        );
+        assert_eq!(
+            updated
+                .hierarchy
+                .document
+                .dependency(replacement)
+                .unwrap()
+                .encoding(),
+            &expected_encoding
+        );
+        assert_eq!(
+            updated
+                .hierarchy
+                .document
+                .dependency(wrapper_digest)
+                .unwrap()
+                .encoding(),
+            &wrapper_encoding
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(wrapper_digest)
+                        && instance.component() == replacement
+                })
+        );
+        assert_eq!(
+            workspace
+                .authoring_session_document()
+                .unwrap()
+                .hierarchy()
+                .unwrap()
+                .selected_component(),
+            replacement
+        );
+        assert_eq!(workspace.selected_hierarchy_component, Some(replacement));
+        assert_eq!(workspace.component_definition.scope, Some(replacement));
+        assert_eq!(workspace.component_connector_scope, Some(replacement));
+        assert!(
+            !workspace
+                .component_identity_drafts
+                .contains_key(&authoritative)
+        );
+        assert_eq!(workspace.hierarchy_source_browser.last_opened, None);
+        assert!(!workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("absent from the current exact hierarchy")
+        );
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert!(workspace.persistence_pending());
+
+        workspace.mark_persisted();
+        let retained_history = workspace.history.clone();
+        workspace.apply_component_identity_draft(
+            replacement,
+            &ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "2".to_owned(),
+            },
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("already matched"));
+
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        for draft in [
+            ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "1".to_owned(),
+            },
+            ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "02".to_owned(),
+            },
+            ComponentIdentityDraft {
+                name: "control.reference_pid_wrapper".to_owned(),
+                component_version: "2".to_owned(),
+            },
+            ComponentIdentityDraft {
+                name: "invalid component name".to_owned(),
+                component_version: "2".to_owned(),
+            },
+        ] {
+            workspace.apply_component_identity_draft(replacement, &draft);
+            assert_eq!(
+                workspace.authoring_session_encoding().unwrap(),
+                updated_session
+            );
+            assert_exact_component_package_equal(
+                workspace.component.as_ref().unwrap(),
+                &retained_component,
+            );
+            assert_eq!(workspace.history, retained_history);
+            assert!(!workspace.persistence_pending());
+            assert!(
+                workspace
+                    .component_status
+                    .contains("rejected without mutation")
+            );
+        }
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+
+        workspace.mark_persisted();
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_eq!(restored_component.encoding, expected_encoding);
+        assert_eq!(restored_component.document, expected_document);
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn component_behavior_version_text_is_canonical_nonzero_u32() {
+        assert_eq!(parse_component_behavior_version("1"), Ok(1));
+        assert_eq!(parse_component_behavior_version("4294967295"), Ok(u32::MAX));
+        for invalid in [
+            "",
+            "0",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1.0",
+            "4294967296",
+            "18446744073709551615",
+        ] {
+            assert!(
+                parse_component_behavior_version(invalid).is_err(),
+                "noncanonical behavior version {invalid:?} was accepted"
+            );
+        }
     }
 
     #[test]

@@ -302,6 +302,13 @@ prototype.
   stable name rejects; recreating byte-identical empty content is a
   selection-only no-op. The panel removes only an unreferenced
   non-authoritative dependency and can add or delete root occurrences directly.
+  The same panel edits the selected dependency's stable name and declared
+  behavior version as one canonical metadata transaction. Versions are
+  canonical nonzero decimal `u32` values and may stay unchanged or increase,
+  never regress; a name already owned by another dependency rejects, and an
+  identical name/version pair is an exact no-op. Accepted edits recursively
+  replace every affected parent and binding by digest, regenerate `ALGH` and
+  `ALGM`, and reconcile transient selections and source focus without aliases.
   Each accepted action edits a cloned
   hierarchy, retains monotonic identities, regenerates and admits the complete
   `ALGH`/flattened `ALGW`/`ALGM` branch, and records the prior complete `ALGS`
@@ -551,7 +558,7 @@ physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, child-occurrence
-rebinding, component rename/version evolution,
+rebinding,
 connector-shape authoring/remapping, front-panel runtime injection/execution,
 responsive/grouped panel layout, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared

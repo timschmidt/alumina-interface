@@ -413,6 +413,44 @@ impl GraphComponentDocument {
         &self.name
     }
 
+    /// Transactionally replace the stable component name and declared behavior
+    /// version. Authoring may retain or increase the behavior version but may
+    /// never regress it. An identical replacement is an exact no-op.
+    pub fn update_identity_metadata(
+        &mut self,
+        name: impl Into<String>,
+        component_version: u32,
+    ) -> Result<(), GraphComponentError> {
+        if component_version == 0 {
+            return Err(GraphComponentError::ZeroComponentVersion);
+        }
+        if component_version < self.component_version {
+            return Err(GraphComponentError::ComponentVersionRegression {
+                current: self.component_version,
+                proposed: component_version,
+            });
+        }
+        let name = name.into();
+        if name == self.name && component_version == self.component_version {
+            return Ok(());
+        }
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            component_version,
+            name,
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            self.outputs.clone(),
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Return the next public-input identity or exhausted sentinel.
     pub const fn next_input_id(&self) -> u64 {
         self.next_input_id
@@ -901,6 +939,13 @@ pub enum GraphComponentError {
     LimitExceeded(&'static str),
     /// Declared reusable behavior version was zero.
     ZeroComponentVersion,
+    /// An authoring edit attempted to decrease the declared behavior version.
+    ComponentVersionRegression {
+        /// Current canonical behavior version.
+        current: u32,
+        /// Rejected proposed behavior version.
+        proposed: u32,
+    },
     /// Input did not begin with [`GRAPH_COMPONENT_MAGIC`].
     InvalidMagic,
     /// Component format version is unsupported.
@@ -984,6 +1029,10 @@ impl fmt::Display for GraphComponentError {
             Self::ZeroComponentVersion => {
                 formatter.write_str("graph component behavior version is zero")
             }
+            Self::ComponentVersionRegression { current, proposed } => write!(
+                formatter,
+                "graph component behavior version regressed from {current} to {proposed}"
+            ),
             Self::InvalidMagic => formatter.write_str("graph component magic is invalid"),
             Self::UnsupportedVersion(version) => {
                 write!(
@@ -1793,6 +1842,63 @@ mod tests {
         assert_eq!(replay.document(), &component);
         assert_eq!(replay.encoding(), &encoding);
         assert_eq!(replay.encoding().bytes(), encoding.bytes());
+    }
+
+    #[test]
+    fn identity_metadata_is_monotonic_transactional_and_noop_aware() {
+        let mut component = component();
+        let initial = component.clone();
+        let initial_encoding = encode_graph_component(&component).unwrap();
+
+        component
+            .update_identity_metadata("control.reference_pid", 1)
+            .unwrap();
+        assert_eq!(component, initial);
+        assert_eq!(
+            encode_graph_component(&component).unwrap(),
+            initial_encoding
+        );
+
+        component
+            .update_identity_metadata("control.renamed_pid", 1)
+            .unwrap();
+        assert_eq!(component.revision(), 2);
+        assert_eq!(component.component_version(), 1);
+        assert_eq!(component.name(), "control.renamed_pid");
+        assert_eq!(component.workspace(), initial.workspace());
+        assert_eq!(component.workspace_digest(), initial.workspace_digest());
+        assert_eq!(component.inputs(), initial.inputs());
+        assert_eq!(component.outputs(), initial.outputs());
+        assert_eq!(component.panel_items(), initial.panel_items());
+        assert_eq!(component.next_input_id(), initial.next_input_id());
+        assert_eq!(component.next_output_id(), initial.next_output_id());
+        assert_eq!(component.next_panel_item_id(), initial.next_panel_item_id());
+
+        component
+            .update_identity_metadata("control.renamed_pid", 3)
+            .unwrap();
+        assert_eq!(component.revision(), 3);
+        assert_eq!(component.component_version(), 3);
+        let advanced = component.clone();
+
+        assert_eq!(
+            component.update_identity_metadata("control.regressed_pid", 2),
+            Err(GraphComponentError::ComponentVersionRegression {
+                current: 3,
+                proposed: 2,
+            })
+        );
+        assert_eq!(component, advanced);
+        assert_eq!(
+            component.update_identity_metadata("control.zero_pid", 0),
+            Err(GraphComponentError::ZeroComponentVersion)
+        );
+        assert_eq!(component, advanced);
+        assert_eq!(
+            component.update_identity_metadata("invalid component name", 3),
+            Err(GraphComponentError::InvalidName("component"))
+        );
+        assert_eq!(component, advanced);
     }
 
     #[test]

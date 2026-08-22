@@ -42,6 +42,14 @@ connector namespace. IDs are nonzero and never duplicated. The next-ID cursors
 must exceed every retained ID and may use `u32::MAX + 1` only as an exhausted
 sentinel.
 
+The declared behavior version is component-author-controlled metadata, not the
+`ALGC` wire-format version. Canonical replay accepts any nonzero `u32` because
+historical artifacts remain independently meaningful. The authoring mutation
+is intentionally stricter: it can retain or increase the current behavior
+version, but cannot decrease it. A stable-name-only edit may therefore retain
+the behavior version. Every accepted metadata change advances component
+revision; an identical name/version pair is byte-for-byte a no-op.
+
 The first interactive policy admits at most 24 MiB total, 128 public inputs,
 128 public outputs, 256 panel items, and panel edges no greater than 1,000,000
 logical pixels. The separately replayed workspace retains its own 20 MiB,
@@ -198,6 +206,21 @@ names and a stable name already bound to another digest reject without
 mutation; requesting the byte-identical empty component again is a
 selection-only no-op with no history or persistence write.
 
+The selected-component identity row edits an existing dependency's stable name
+and behavior version together. The visible version field accepts only the
+canonical decimal spelling of a nonzero `u32`: no signs, whitespace, leading
+zeroes, or overflow. A version regression, invalid name, or name already owned
+by another dependency rejects before mutation. An accepted edit uses the same
+recursive component-replacement report as definition and connector authoring,
+so every parent-local binding, root binding, selected digest, `ALGH`, and
+`ALGM` follows the new exact identity in one complete `ALGS` history commit.
+No alias from the old digest or stable name is retained. Control workspace,
+probes, cached-job workspace, unchanged root structure, unrelated dependency
+encodings, and the freshly flattened ordinary workspace remain exact when the
+component's public shape is unchanged. Transient identity drafts follow the
+current digest; stale flattened-source focus clears if its exact origin no
+longer exists.
+
 Optimized Chromium qualification dragged panel item `#14`
 `combined_permit_indicator` by exactly `(+80, +30)` logical pixels, from
 `(460, 404, 240, 54)` to `(540, 434, 240, 54)`. The selected `ALGC` identity
@@ -241,6 +264,31 @@ remained exact. Visible Undo restored the empty-component session, visible
 Redo restored the one-node session, and a fresh reload retained those exact
 bytes and allowed the populated component to be selected again.
 
+The optimized identity-evolution Chromium qualification began from the same
+14,770-byte reference `ALGS` and used the visible metadata row to rename
+`control.reference_pid` version 1 to `control.browser_pid_v2` version 2. Its
+4,815-byte revision-1 `ALGC`
+`10e6498ec36afc377f138cacb5c6afe2091c40749ea3c9e9d4bba8925a4f0228`
+became the 4,816-byte revision-2 `ALGC`
+`63d2873a02f832bac32a524ec57c68ce9218c22e0b327243b8d8074b2e0cdc80`.
+The 7,125-byte revision-2 `ALGH`
+`17baef8eae8b5ba3287b4b8968502ea627b34f8fc2aa9355f0ec954e94da447e`
+contains no old component digest and changes the wrapper's exact child binding
+to the replacement while retaining the 1,222-byte wrapper and root workspace
+byte-for-byte. Its regenerated 2,550-byte `ALGM`
+`71126d248b87c27b6fca5c3cdae27f129d1b39dbb525bdaae2d63f91040a5a7b`
+binds that hierarchy while retaining the exact flattened workspace identity
+`6804b964535d08b9ceead3d43891c3ae4c5aa5ce38b015c34b4b385bfa3257d4`
+and 21-node/25-wire cardinality. Control `ALGW`, probes, cached-job `ALGW`,
+root `ALGW`, connector/panel payload, and unrelated dependency remained exact.
+A second visible apply retained the evolved 14,771-byte `ALGS` byte-for-byte;
+an attempted version regression from 2 to 1 visibly rejected without mutation.
+Visible Undo restored the exact reference session, while Redo and a fresh
+reload restored the evolved session
+`78afc205232830829c5e4d5db54dacfc09e5e4e5e3fb4e7dce3b636bef7a21c4`.
+The retained 38,577-byte proof result has SHA-256
+`ae6e4c6e4edc4eda6c21e5922ad301204693d0bf6971a430a64f6ea015696092`.
+
 ## Deliberately open
 
 The separate canonical [`ALGH` V2 hierarchy](GRAPH-HIERARCHY-V2.md) now binds
@@ -249,8 +297,7 @@ recursive expansion, and deterministically flattens a component DAG to ordinary
 `ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
 from the embedded dependency library and preserves them across compatible
 selected-component edits. Nested definition import with separately supplied
-scoped bindings,
-component rename/version evolution, package signatures/permissions, locked
+scoped bindings, package signatures/permissions, locked
 dependency manifests, child rebinding,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.

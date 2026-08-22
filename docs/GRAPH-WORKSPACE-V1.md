@@ -232,6 +232,14 @@ same transactional authoring path. Invalid, overlong, or conflicting names
 reject atomically; an already-present byte-identical empty definition is a
 selection-only no-op.
 
+The adjacent selected-component identity editor can then replace the stable
+name and declared behavior version of any selected dependency. It accepts only
+canonical nonzero decimal `u32` version text, permits the version to remain or
+increase, and rejects regression or a stable-name collision. Accepted metadata
+changes use complete recursive `ALGC`/`ALGH`/`ALGM` replacement and one `ALGS`
+history transaction; an identical pair records no history or persistence
+write. No compatibility alias or alternate lookup path is created.
+
 All opened ALGW bytes first pass canonical replay, embedded-limit checks, exact
 re-encoding, UI layout admission, and the fixed audited semantic registry. A
 required input may remain disconnected as a visible editor draft blocker;

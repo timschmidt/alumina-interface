@@ -112,7 +112,8 @@ The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
 Control-workspace, probe/trigger, focused import, cached-job,
 selected-component, component-library creation/import/removal, direct
-root-instance, hierarchy, and source-map state—including root instance
+root-instance, selected-component identity evolution, hierarchy, and source-map
+state—including root instance
 placement and typed root wiring—share one timeline rather than independent
 histories that could be navigated into a mismatched combination.
 
@@ -128,6 +129,15 @@ this same complete-session boundary. Invalid, overlong, or conflicting names
 leave the current `ALGS`, both history stacks, and pending-persistence state
 unchanged. Selecting an already-present byte-identical empty component changes
 only ephemeral UI scope and records no history.
+
+Renaming a selected dependency or retaining/increasing its declared behavior
+version uses the same complete-session boundary. Recursive digest replacement
+updates every affected hierarchy binding and source map before commit; an exact
+name/version no-op records nothing, while version regression, noncanonical
+decimal input, invalid or conflicting names, and any recursive admission
+failure preserve the current session, both history stacks, and persistence
+state byte-for-byte. Undo, redo, and persisted restore retain the evolved
+identity without an alias to the former digest.
 
 Undo and redo replay the target through the complete core boundary, then rerun
 the application's audited graph and cached-job catalog admission before
@@ -195,7 +205,10 @@ highlighting, retained target-node inspection, no session/history/persistence
 mutation, and stale-origin reconciliation, deterministic empty component
 creation with exact schema/clock inheritance, identity-cursor initialization,
 duplicate no-op selection, immediate definition editing, history/persistence,
-and invalid/conflicting-name atomicity, abandoned-redo clearing, and
+and invalid/conflicting-name atomicity, monotonic selected-component
+name/version evolution with recursive binding replacement, exact no-op,
+stale-source reconciliation, history/persistence, and invalid, regressing, or
+conflicting metadata atomicity, abandoned-redo clearing, and
 transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 
