@@ -17,6 +17,7 @@ mod authoring_session;
 mod authoring_session_history;
 mod capability_catalog;
 mod component;
+mod component_package;
 mod control_fixture;
 mod deployment;
 mod document;
@@ -65,6 +66,13 @@ pub use component::{
     GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphComponentReplay,
     GraphFrontPanelBinding, GraphFrontPanelItem, GraphFrontPanelItemId, GraphFrontPanelRect,
     encode_graph_component, replay_graph_component,
+};
+pub use component_package::{
+    CanonicalGraphComponentPackageEncoding, GRAPH_COMPONENT_PACKAGE_MAGIC,
+    GRAPH_COMPONENT_PACKAGE_VERSION, GraphComponentPackageDependency,
+    GraphComponentPackageDocument, GraphComponentPackageError, GraphComponentPackageImportReport,
+    GraphComponentPackageLimits, GraphComponentPackageReplay, encode_graph_component_package,
+    replay_graph_component_package,
 };
 pub use control_fixture::{
     RepresentativeControlSignal, RepresentativeExactControlError, RepresentativeExactControlGraph,

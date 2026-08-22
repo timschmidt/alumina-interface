@@ -28,20 +28,20 @@ use alumina_interface_core::graph::{
     GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
     GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInputId,
     GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
-    GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
-    GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
-    GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
-    GraphDeploymentTarget, GraphDocument, GraphFlattenedNodeProvenance,
-    GraphFlattenedWireProvenance, GraphFrontPanelBinding, GraphFrontPanelItem,
-    GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDependency, GraphHierarchyDocument,
-    GraphHierarchyFlattening, GraphHierarchyLimits, GraphHierarchyNodeOrigin,
-    GraphHierarchySourceMapLimits, GraphHierarchyWireOrigin, GraphInstanceScope, GraphLimits,
-    GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry,
-    GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge,
-    GraphProbeId, GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits,
-    GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry,
-    GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceLimits, InputConnectionRequirement,
+    GraphComponentPackageLimits, GraphDeploymentImplementation, GraphDeploymentLimits,
+    GraphDeploymentNodeKind, GraphDeploymentRegistry, GraphDeploymentReplayInput,
+    GraphDeploymentReplayLimits, GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport,
+    GraphDeploymentResourceSample, GraphDeploymentTarget, GraphDocument,
+    GraphFlattenedNodeProvenance, GraphFlattenedWireProvenance, GraphFrontPanelBinding,
+    GraphFrontPanelItem, GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDependency,
+    GraphHierarchyDocument, GraphHierarchyFlattening, GraphHierarchyLimits,
+    GraphHierarchyNodeOrigin, GraphHierarchySourceMapLimits, GraphHierarchyWireOrigin,
+    GraphInstanceScope, GraphLimits, GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement,
+    GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
+    GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
+    GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
+    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment,
+    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceLimits, InputConnectionRequirement,
     MAX_GRAPH_AUTHORING_SESSION_BYTES, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
     MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, NodeDefinition, NodeInputChannelContract,
     NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
@@ -50,15 +50,15 @@ use alumina_interface_core::graph::{
     ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireDefinition, WireEndpoint,
     analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
-    encode_graph_hierarchy, encode_graph_hierarchy_source_map, encode_graph_probes,
-    encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
+    encode_graph_component_package, encode_graph_hierarchy, encode_graph_hierarchy_source_map,
+    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
     format_graph_literal_text, graph_component_instance_input_port,
     graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
     lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
-    replay_graph_authoring_session, replay_graph_component, replay_graph_hierarchy_source_map,
-    replay_graph_probes, replay_graph_workspace, replay_realtime_graph_deployment,
-    select_graph_cached_job_handle, select_graph_capability_node_resource,
-    verify_graph_deployment_evidence_bytes,
+    replay_graph_authoring_session, replay_graph_component, replay_graph_component_package,
+    replay_graph_hierarchy_source_map, replay_graph_probes, replay_graph_workspace,
+    replay_realtime_graph_deployment, select_graph_cached_job_handle,
+    select_graph_capability_node_resource, verify_graph_deployment_evidence_bytes,
 };
 use alumina_interface_core::{
     BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
@@ -98,6 +98,7 @@ const PERSISTED_AUTHORING_SESSION_PREFIX: &str = "algs1:";
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
 const ALGC_FILE: BoundedFileSpec = BoundedFileSpec::new("selected ALGC dependency", "algc");
+const ALCP_FILE: BoundedFileSpec = BoundedFileSpec::new("selected ALCP component closure", "alcp");
 const ALGM_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGM source map", "algm");
 const ALGS_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGS authoring session", "algs");
 const ALGR_SUCCESS_REPLAY_FILE: BoundedFileSpec =
@@ -2489,6 +2490,7 @@ pub(crate) struct ExactControlWorkspace {
     workspace_file_bridge: BoundedFileBridge,
     probe_file_bridge: BoundedFileBridge,
     component_file_bridge: BoundedFileBridge,
+    component_package_file_bridge: BoundedFileBridge,
     hierarchy_source_file_bridge: BoundedFileBridge,
     target_success_replay_file_bridge: BoundedFileBridge,
     target_fault_replay_file_bridge: BoundedFileBridge,
@@ -2613,6 +2615,7 @@ impl ExactControlWorkspace {
             workspace_file_bridge: BoundedFileBridge::default(),
             probe_file_bridge: BoundedFileBridge::default(),
             component_file_bridge: BoundedFileBridge::default(),
+            component_package_file_bridge: BoundedFileBridge::default(),
             hierarchy_source_file_bridge: BoundedFileBridge::default(),
             target_success_replay_file_bridge: BoundedFileBridge::default(),
             target_fault_replay_file_bridge: BoundedFileBridge::default(),
@@ -3485,6 +3488,49 @@ impl ExactControlWorkspace {
         ui.weak(
             "ALGC import accepts a bounded canonical leaf component only after exact replay, audited graph admission, and current hierarchy-context validation.",
         );
+        let component_package_export = selected_dependency
+            .map(|digest| {
+                let package = component
+                    .hierarchy
+                    .document
+                    .export_component_package(digest, GraphComponentPackageLimits::interactive())
+                    .map_err(|error| error.to_string())?;
+                let encoding =
+                    encode_graph_component_package(&package).map_err(|error| error.to_string())?;
+                Ok::<_, String>((digest, package, encoding))
+            })
+            .transpose();
+        let component_package_file_events = match component_package_export {
+            Ok(Some((digest, package, encoding))) => {
+                let download_name =
+                    format!("alumina-component-closure-{}.alcp", digest_prefix(digest.0));
+                let events = self.component_package_file_bridge.show(
+                    ui,
+                    encoding.bytes(),
+                    GraphComponentPackageLimits::interactive().maximum_package_bytes,
+                    &download_name,
+                    ALCP_FILE,
+                );
+                ui.weak(format!(
+                    "ALCP closure: {} exact components · {} scoped bindings · {} expanded occurrences · no execution authority",
+                    package.dependencies().len(),
+                    package.instances().len(),
+                    package.expanded_instance_count(),
+                ));
+                events
+            }
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    format!("selected component closure is not exportable: {error}"),
+                );
+                Vec::new()
+            }
+        };
+        ui.weak(
+            "ALCP imports one exact root component with its complete transitive ALGC/scoped-binding closure. Existing identities and bindings are never replaced; exact duplicate packages are selection-only no-ops.",
+        );
         ui.monospace(format!(
             "{} exact dependencies · {} root bindings · next root node {}",
             dependencies.len(),
@@ -3508,6 +3554,9 @@ impl ExactControlWorkspace {
         }
         for event in component_file_events {
             self.handle_component_file_event(event);
+        }
+        for event in component_package_file_events {
+            self.handle_component_package_file_event(event);
         }
     }
 
@@ -6090,6 +6139,81 @@ impl ExactControlWorkspace {
             document,
             &status,
             Some(digest),
+            self.selected_hierarchy_instance,
+        )
+    }
+
+    fn handle_component_package_file_event(&mut self, event: BoundedFileEvent) {
+        match event {
+            BoundedFileEvent::Import(Ok(bytes)) => {
+                match self.import_component_package_dependency(&bytes) {
+                    Ok(_) => self.file_status.clone_from(&self.component_status),
+                    Err(error) => {
+                        self.file_status =
+                            format!("ALCP import rejected without authoring mutation: {error}");
+                        self.component_status.clone_from(&self.file_status);
+                    }
+                }
+            }
+            BoundedFileEvent::Import(Err(error)) => {
+                self.file_status = format!("ALCP file read rejected: {error}");
+            }
+            BoundedFileEvent::Export(Ok(bytes)) => {
+                self.file_status = format!("exported {bytes} exact selected ALCP closure bytes");
+            }
+            BoundedFileEvent::Export(Err(error)) => {
+                self.file_status = format!("ALCP export failed: {error}");
+            }
+        }
+    }
+
+    fn import_component_package_dependency(&mut self, bytes: &[u8]) -> Result<bool, String> {
+        let replay = replay_graph_component_package(
+            bytes,
+            GraphComponentPackageLimits::interactive(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        let root = replay.document().root();
+        let package_identity = replay.encoding().digest();
+        let package_component_count = replay.document().dependencies().len();
+        let package_binding_count = replay.document().instances().len();
+        let Some(current) = self.component.clone() else {
+            return Err("no selected component hierarchy is attached".to_owned());
+        };
+        let mut document = current.hierarchy.document.clone();
+        let report = document
+            .import_component_package(replay.document())
+            .map_err(|error| error.to_string())?;
+        if report.root() != root {
+            return Err("component-package admission returned a foreign root identity".to_owned());
+        }
+        let status = if report.changed() {
+            format!(
+                "imported {}-byte ALCP {}… rooted at {}…: {} of {} components and {} of {} scoped bindings added",
+                bytes.len(),
+                digest_prefix(package_identity.0),
+                digest_prefix(root.0),
+                report.added_components().len(),
+                package_component_count,
+                report.added_instance_bindings(),
+                package_binding_count,
+            )
+        } else {
+            format!(
+                "selected exact duplicate {}-byte ALCP {}… root {}…",
+                bytes.len(),
+                digest_prefix(package_identity.0),
+                digest_prefix(root.0),
+            )
+        };
+        self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            Some(root),
             self.selected_hierarchy_instance,
         )
     }
@@ -17028,6 +17152,185 @@ mod tests {
             (restored.history.undo_len(), restored.history.redo_len()),
             (0, 0)
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one nested-package lifecycle proves closure admission, exact duplicate no-op behavior, conflict atomicity, complete-session history, and persistence"
+    )]
+    fn nested_component_package_import_is_exact_historical_and_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+
+        let leaf = empty_library_component("user.package_leaf", &workspace.workspace).unwrap();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let (mut wrapper, _) = representative_wrapper_component(&leaf).unwrap();
+        wrapper
+            .update_identity_metadata("user.package_wrapper", 1)
+            .unwrap();
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let package = alumina_interface_core::graph::GraphComponentPackageDocument::try_new(
+            GraphComponentPackageLimits::interactive(),
+            wrapper_digest,
+            vec![leaf.clone(), wrapper.clone()],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let package_encoding = encode_graph_component_package(&package).unwrap();
+
+        workspace.mark_persisted();
+        assert!(
+            workspace
+                .import_component_package_dependency(package_encoding.bytes())
+                .unwrap()
+        );
+        let imported_session = workspace.authoring_session_encoding().unwrap();
+        let imported = workspace.component.as_ref().unwrap();
+        assert_ne!(imported_session, initial_session);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(imported.document, initial_component.document);
+        assert_eq!(imported.encoding, initial_component.encoding);
+        assert_eq!(imported.hierarchy.document.root(), &initial_root);
+        assert_eq!(imported.hierarchy.document.dependencies().len(), 4);
+        assert_eq!(
+            imported
+                .hierarchy
+                .document
+                .dependency(leaf_digest)
+                .unwrap()
+                .document(),
+            &leaf
+        );
+        assert_eq!(
+            imported
+                .hierarchy
+                .document
+                .dependency(wrapper_digest)
+                .unwrap()
+                .document(),
+            &wrapper
+        );
+        assert!(
+            imported
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(
+                            wrapper_digest,
+                            GraphNodeId::new(1),
+                            leaf_digest,
+                        )
+                })
+        );
+        assert_eq!(workspace.selected_hierarchy_component, Some(wrapper_digest));
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert!(workspace.persistence_pending());
+        assert!(workspace.component_status.contains("2 of 2 components"));
+        assert!(
+            workspace
+                .component_status
+                .contains("1 of 1 scoped bindings")
+        );
+
+        workspace.mark_persisted();
+        let imported_history = workspace.history.clone();
+        assert!(
+            !workspace
+                .import_component_package_dependency(package_encoding.bytes())
+                .unwrap()
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        assert_eq!(workspace.history, imported_history);
+        assert!(!workspace.persistence_pending());
+        assert_eq!(workspace.selected_hierarchy_component, Some(wrapper_digest));
+        assert!(workspace.component_status.contains("exact duplicate"));
+        assert!(workspace.component_status.contains("already matched"));
+
+        let alternate_leaf =
+            empty_library_component("user.package_alternate_leaf", &workspace.workspace).unwrap();
+        let alternate_leaf_digest = encode_graph_component(&alternate_leaf).unwrap().digest();
+        let (mut exact_wrapper, _) = representative_wrapper_component(&alternate_leaf).unwrap();
+        exact_wrapper
+            .update_identity_metadata("user.package_wrapper", 1)
+            .unwrap();
+        assert_eq!(
+            encode_graph_component(&exact_wrapper).unwrap().digest(),
+            wrapper_digest,
+            "same-shape child identity leaked into parent ALGC"
+        );
+        let conflict = alumina_interface_core::graph::GraphComponentPackageDocument::try_new(
+            GraphComponentPackageLimits::interactive(),
+            wrapper_digest,
+            vec![alternate_leaf, exact_wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                alternate_leaf_digest,
+            )],
+        )
+        .unwrap();
+        let conflict_encoding = encode_graph_component_package(&conflict).unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        assert!(
+            workspace
+                .import_component_package_dependency(conflict_encoding.bytes())
+                .unwrap_err()
+                .contains("already bound")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        let restored_hierarchy = &restored.component.as_ref().unwrap().hierarchy.document;
+        assert!(restored_hierarchy.dependency(leaf_digest).is_some());
+        assert!(restored_hierarchy.dependency(wrapper_digest).is_some());
+        assert!(restored_hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest)
+        }));
+        assert!(!restored.persistence_pending());
     }
 
     #[test]

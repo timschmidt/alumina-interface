@@ -205,7 +205,10 @@ ordinary-node semantics, and current `ALGH` context validation. Importing an
 exact duplicate is a no-op; importing a new identity or later removing that
 unreferenced identity is a complete-session historical edit. Nested
 definitions require scoped `ALGH` bindings that standalone `ALGC` does not
-carry, so this first file workflow deliberately admits leaf packages only.
+carry, so `.algc` remains a leaf-only workflow. Canonical
+[`ALCP` V1](GRAPH-COMPONENT-PACKAGE-V1.md) supplies the selected `ALGC`, its
+complete transitive dependency closure, and those scoped bindings as one exact
+immutable exchange package.
 
 A file is not required to start a new leaf package. The same library panel can
 construct a named version-1 empty `ALGC` whose embedded `ALGW` and `ALGR` use
@@ -307,8 +310,8 @@ scoped component instances by exact digest, rejects dependency cycles, bounds
 recursive expansion, and deterministically flattens a component DAG to ordinary
 `ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
 from the embedded dependency library and preserves them across compatible
-selected-component edits. Nested definition import with separately supplied
-scoped bindings, package signatures/permissions, locked dependency manifests,
+selected-component edits. Nested definition/binding exchange is implemented by
+`ALCP` V1. Package signatures/permissions, locked dependency manifests,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.
 `ALGC` V1 grants no semantic, implementation, resource, timing, safety,

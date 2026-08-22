@@ -347,6 +347,14 @@ prototype.
   every exact binding while preserving the authored root workspace and stable
   library entries; invalid imports, removals, replacements, or selections
   leave the prior session unchanged.
+  Selected dependencies now also export and import canonical `ALCP` V1
+  packages. Each package contains exactly one selected root component, its
+  transitive `ALGC` closure, and the component-scoped bindings that standalone
+  `ALGC` cannot represent. Import never replaces an existing identity or
+  binding: exact duplicates are selection-only no-ops, while stable-name or
+  parent/node child conflicts reject atomically. A changing merge advances
+  `ALGH` once, regenerates flattened `ALGW`/`ALGM`, passes complete library and
+  session admission, and enters unified undo/redo/persistence as one edit.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
@@ -396,6 +404,8 @@ prototype.
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
   The component-instance/flattening boundary is in
   [`docs/GRAPH-HIERARCHY-V2.md`](docs/GRAPH-HIERARCHY-V2.md).
+  The reusable nested component exchange boundary is in
+  [`docs/GRAPH-COMPONENT-PACKAGE-V1.md`](docs/GRAPH-COMPONENT-PACKAGE-V1.md).
   The canonical total hierarchy source-map boundary is in
   [`docs/GRAPH-HIERARCHY-SOURCE-MAP-V1.md`](docs/GRAPH-HIERARCHY-SOURCE-MAP-V1.md).
   The authenticated resource-palette boundary is in

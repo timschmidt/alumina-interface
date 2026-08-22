@@ -118,6 +118,12 @@ accepted definition edit freshly validates and flattens `ALGH`, regenerates
 remain exact unless a coordinated control-authority replacement is explicitly
 required, which this surface rejects.
 
+Reusable nested definitions cross project/library boundaries through canonical
+[`ALCP` V1](GRAPH-COMPONENT-PACKAGE-V1.md), not by guessing bindings from a
+standalone `ALGC`. The package contains no root placement and importing it does
+not mutate this workspace; only a later explicit root or nested occurrence
+authoring action places the imported definition.
+
 The separate ALGM source browser is read-only navigation across those editors.
 It verifies a chosen final node or wire still has the displayed exact origin,
 resolves a component occurrence path through current scoped bindings, and
@@ -209,7 +215,7 @@ state change. Malformed, mismatched, stale, foreign, or substituted input thus
 rejects the complete session atomically.
 
 Browser download writes byte-for-byte canonical `.algs`, `.algw`, `.algp`,
-`.algc`, or `.algm` content. Browser upload
+`.algc`, `.alcp`, or `.algm` content. Browser upload
 checks the advertised file size, bounds the materialized `ArrayBuffer`, and
 forwards only bytes within that artifact's policy. The native shell exposes
 independent explicit paths with bounded reads and exact, synchronized writes.
@@ -228,6 +234,14 @@ Successful add/remove changes are ordinary complete-session edits; an exact
 duplicate import is a no-op. A dependency cannot be removed while named by a
 child or parent-scope binding, and the selected control-authority component is
 never removable through this workflow.
+
+A focused `.alcp` import instead admits one selected root plus its complete
+transitive definition/binding closure. It never replaces an existing component
+or scoped binding. A stable-name conflict or a different child for an existing
+parent/node rejects the cloned hierarchy, while an exact duplicate only follows
+the transient library selection. A changing merge reruns complete recursive
+flattening, source-map generation, semantic admission, and `ALGS` construction
+before one historical commit.
 
 The library can also create a canonical component without an input file. A
 valid stable name deterministically produces a version-1 empty `ALGC` whose

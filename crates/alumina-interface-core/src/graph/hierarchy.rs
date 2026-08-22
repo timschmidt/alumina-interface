@@ -2716,9 +2716,11 @@ mod tests {
     use super::*;
     use crate::graph::{
         ClockDefinition, ClockKind, GraphClockId, GraphComponentInput, GraphComponentInputId,
-        GraphComponentOutput, GraphComponentOutputId, GraphDocument, GraphNodePlacement,
-        GraphWireId, NodeDefinition, RepresentativeControlSignal, WireDefinition, analyze_graph,
-        compile_representative_exact_control_graph,
+        GraphComponentOutput, GraphComponentOutputId, GraphComponentPackageError,
+        GraphComponentPackageLimits, GraphDocument, GraphNodePlacement, GraphWireId,
+        NodeDefinition, RepresentativeControlSignal, WireDefinition, analyze_graph,
+        compile_representative_exact_control_graph, encode_graph_component_package,
+        replay_graph_component_package,
     };
 
     fn endpoint(node: u32, port: u32) -> WireEndpoint {
@@ -3036,6 +3038,26 @@ mod tests {
             root(&component),
             vec![component],
             vec![GraphComponentInstance::root(GraphNodeId::new(2), digest)],
+        )
+        .unwrap()
+    }
+
+    fn empty_root(component: &GraphComponentDocument) -> GraphWorkspaceDocument {
+        let graph = GraphDocument::try_new(
+            1,
+            component.workspace().graph().schema().clone(),
+            component.workspace().graph().clocks().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            1,
+            1,
+            1,
+            graph,
+            Vec::new(),
         )
         .unwrap()
     }
@@ -4583,5 +4605,293 @@ mod tests {
                         port: GraphPortId::new(1),
                     }
         }));
+    }
+
+    #[test]
+    fn exact_nested_component_package_round_trips_and_merges_once() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.package_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut unrelated = leaf.clone();
+        unrelated
+            .update_identity_metadata("control.unrelated_leaf", 1)
+            .unwrap();
+        let unrelated_digest = encode_graph_component(&unrelated).unwrap().digest();
+        let source = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            7,
+            root(&wrapper),
+            vec![leaf.clone(), wrapper.clone(), unrelated],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+
+        let package = source
+            .export_component_package(wrapper_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        assert_eq!(package.root(), wrapper_digest);
+        assert_eq!(package.dependencies().len(), 2);
+        assert!(
+            package
+                .dependencies()
+                .iter()
+                .all(|dependency| dependency.digest() != unrelated_digest)
+        );
+        assert_eq!(package.instances().len(), 1);
+        assert_eq!(package.expanded_instance_count(), 2);
+        let encoding = encode_graph_component_package(&package).unwrap();
+        let replay = replay_graph_component_package(
+            encoding.bytes(),
+            GraphComponentPackageLimits::interactive(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &package);
+        assert_eq!(replay.encoding(), &encoding);
+
+        let destination_root = empty_root(&leaf);
+        let mut destination = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            11,
+            destination_root.clone(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let report = destination
+            .import_component_package(replay.document())
+            .unwrap();
+        assert!(report.changed());
+        assert_eq!(report.root(), wrapper_digest);
+        assert_eq!(report.added_components().len(), 2);
+        assert_eq!(report.added_instance_bindings(), 1);
+        assert_eq!(destination.revision(), 12);
+        assert_eq!(destination.root(), &destination_root);
+        assert_eq!(destination.dependencies().len(), 2);
+        assert_eq!(destination.instances().len(), 1);
+
+        let imported = destination.clone();
+        let duplicate = destination
+            .import_component_package(replay.document())
+            .unwrap();
+        assert!(!duplicate.changed());
+        assert!(duplicate.added_components().is_empty());
+        assert_eq!(duplicate.added_instance_bindings(), 0);
+        assert_eq!(destination, imported);
+
+        assert_eq!(
+            destination
+                .add_root_instance(wrapper_digest, "Imported wrapper", 12, 18)
+                .unwrap(),
+            GraphNodeId::new(1)
+        );
+        let flattened = flatten_graph_hierarchy(&destination).unwrap();
+        assert_eq!(
+            flattened.workspace().graph().nodes().len(),
+            package.flattened_node_count()
+        );
+        assert_eq!(
+            flattened.workspace().graph().wires().len(),
+            package.flattened_wire_count()
+        );
+    }
+
+    #[test]
+    fn component_package_conflicts_reject_atomically() {
+        let leaf_a = component();
+        let leaf_a_digest = encode_graph_component(&leaf_a).unwrap().digest();
+        let mut leaf_b = leaf_a.clone();
+        leaf_b
+            .update_identity_metadata("control.package_leaf_b", 1)
+            .unwrap();
+        let leaf_b_digest = encode_graph_component(&leaf_b).unwrap().digest();
+        let wrapper = wrapper_component(&leaf_a, "control.package_conflict_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let source = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf_a.clone(), wrapper.clone()],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_a_digest),
+            ],
+        )
+        .unwrap();
+        let package = source
+            .export_component_package(wrapper_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        let mut destination = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            3,
+            empty_root(&leaf_a),
+            vec![leaf_b, wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_b_digest,
+            )],
+        )
+        .unwrap();
+        let retained = destination.clone();
+        assert_eq!(
+            destination.import_component_package(&package),
+            Err(GraphComponentPackageError::BindingConflict {
+                parent: wrapper_digest,
+                node: GraphNodeId::new(1),
+                existing: leaf_b_digest,
+                incoming: leaf_a_digest,
+            })
+        );
+        assert_eq!(destination, retained);
+
+        let leaf_package = source
+            .export_component_package(leaf_a_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        let mut same_name = leaf_a.clone();
+        let mut workspace = same_name.workspace().clone();
+        let node = workspace.graph().nodes()[0].id();
+        let placement = workspace.placement(node).unwrap();
+        workspace
+            .move_node(node, placement.x() + 1, placement.y())
+            .unwrap();
+        same_name.replace_workspace(workspace).unwrap();
+        let same_name_digest = encode_graph_component(&same_name).unwrap().digest();
+        let mut destination = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            5,
+            empty_root(&leaf_a),
+            vec![same_name],
+            Vec::new(),
+        )
+        .unwrap();
+        let retained = destination.clone();
+        assert_eq!(
+            destination.import_component_package(&leaf_package),
+            Err(GraphComponentPackageError::StableNameConflict {
+                name: "control.pid_leaf".to_owned(),
+                existing: same_name_digest,
+                incoming: leaf_a_digest,
+            })
+        );
+        assert_eq!(destination, retained);
+    }
+
+    #[test]
+    fn component_package_replay_and_closure_fail_closed() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let hierarchy = hierarchy();
+        let package = hierarchy
+            .export_component_package(leaf_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        let encoding = encode_graph_component_package(&package).unwrap();
+
+        let mut invalid_magic = encoding.bytes().to_vec();
+        invalid_magic[0] ^= 0xff;
+        assert_eq!(
+            replay_graph_component_package(
+                &invalid_magic,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::InvalidMagic)
+        );
+        let mut unsupported_version = encoding.bytes().to_vec();
+        unsupported_version[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        assert_eq!(
+            replay_graph_component_package(
+                &unsupported_version,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::UnsupportedVersion(2))
+        );
+        let mut unknown_root = encoding.bytes().to_vec();
+        unknown_root[64..96].fill(0xff);
+        assert_eq!(
+            replay_graph_component_package(
+                &unknown_root,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::UnknownRoot(Digest([0xff; 32])))
+        );
+        let mut trailing = encoding.bytes().to_vec();
+        trailing.push(0);
+        assert_eq!(
+            replay_graph_component_package(
+                &trailing,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::TrailingBytes)
+        );
+        let mut tight_admission = GraphComponentPackageLimits::interactive();
+        tight_admission.maximum_components = 1;
+        assert_eq!(
+            replay_graph_component_package(
+                encoding.bytes(),
+                tight_admission,
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::LimitExceeded(
+                "embedded admission limit"
+            ))
+        );
+
+        let mut unrelated = leaf.clone();
+        unrelated
+            .update_identity_metadata("control.package_unreachable", 1)
+            .unwrap();
+        let unrelated_digest = encode_graph_component(&unrelated).unwrap().digest();
+        assert_eq!(
+            crate::graph::GraphComponentPackageDocument::try_new(
+                GraphComponentPackageLimits::interactive(),
+                leaf_digest,
+                vec![leaf.clone(), unrelated],
+                Vec::new(),
+            ),
+            Err(GraphComponentPackageError::UnreachableComponent(
+                unrelated_digest
+            ))
+        );
+        assert_eq!(
+            crate::graph::GraphComponentPackageDocument::try_new(
+                GraphComponentPackageLimits::interactive(),
+                leaf_digest,
+                vec![leaf],
+                vec![GraphComponentInstance::root(
+                    GraphNodeId::new(1),
+                    leaf_digest,
+                )],
+            ),
+            Err(GraphComponentPackageError::RootBinding)
+        );
+        assert_eq!(
+            crate::graph::GraphComponentPackageDocument::try_new(
+                GraphComponentPackageLimits::interactive(),
+                leaf_digest,
+                vec![component(), component()],
+                Vec::new(),
+            ),
+            Err(GraphComponentPackageError::DuplicateComponent(leaf_digest))
+        );
     }
 }

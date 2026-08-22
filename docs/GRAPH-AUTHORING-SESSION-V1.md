@@ -178,13 +178,19 @@ session and marks persistence pending.
 
 Native and browser UI expose the same complete bytes as `.algs`. Import is
 bounded at 8 MiB and uses the same atomic replay/admission transaction. The
-separate `.algw`, `.algp`, `.algc`, and `.algm` tools remain useful for focused
+separate `.algw`, `.algp`, `.algc`, `.alcp`, and `.algm` tools remain useful for focused
 artifact inspection, but they are not substitutes for complete-session
 persistence. A valid new `.algc` leaf is inserted into the embedded hierarchy
 library only after exact replay and semantic/context admission, then commits a
 new complete `ALGS`; a byte-identical duplicate records no history. Removal is
 available only for an unreferenced non-authoritative dependency and likewise
 commits through complete-session history.
+
+An external canonical [`ALCP` V1](GRAPH-COMPONENT-PACKAGE-V1.md) import first
+merges its exact dependency closure and scoped bindings into the cloned `ALGH`.
+Only after fresh flattening, `ALGM` regeneration, library semantic admission,
+and complete `ALGS` construction succeed does it create one history state. An
+exact duplicate package is selection-only UI state and leaves `ALGS` unchanged.
 
 ## Golden fixture
 
@@ -222,6 +228,9 @@ conflicting metadata atomicity, exact scoped child-occurrence rebinding with
 stable-ID endpoint preservation, same-target no-op, recursive shape refresh,
 history/persistence, and atomic rejection of missing connectors, cycles,
 unknown targets, or authority replacement, abandoned-redo clearing, and
+canonical nested-component closure exchange with exact duplicate no-op,
+single-revision merge, stable-name/binding conflict rejection, and atomic
+history/persistence,
 transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 

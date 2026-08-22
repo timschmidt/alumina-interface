@@ -386,6 +386,37 @@ the A binding; Redo and a fresh reload restored the B binding exactly. The
 retained 122,143-byte parsed proof result has SHA-256
 `1b277b9487cd57d509f69accd754fcac69b167d93d2f97bdf5b7e882a3474389`.
 
+The selected dependency can also be exported as canonical
+[`ALCP` V1](GRAPH-COMPONENT-PACKAGE-V1.md). Unlike leaf-only `ALGC` exchange,
+that immutable package includes exactly the selected root component, every
+transitively reachable child definition, and their component-scoped bindings.
+Replay proves a complete acyclic closure with one semantic context; import adds
+new exact definitions and bindings in one hierarchy revision without replacing
+anything already present. Stable-name collisions and different child targets
+for an existing parent/node reject atomically. An exact duplicate changes only
+transient library selection and records no history or persistence write.
+
+Optimized Chromium qualification visibly created leaf
+`user.browser_package_leaf` (`ALGC`
+`21095733ea4c610fa059dcf3b81e605ed5d2e938970c8345e05b58d1af1f39cc`)
+and nested root `user.browser_package_root` (`ALGC`
+`f0499ffabb76e8b7c9735419fb05818093b1ba75fa43c8b8fa7bdae028efd2b6`),
+then downloaded their exact 1,761-byte one-binding `ALCP` with SHA-256
+`71bc56d7e52c1dcd54eb1f2258ad70ed44be1fd32f95a21310eeafdd56c2e4b0`.
+After clearing browser authoring storage and restoring the two-dependency
+reference, opening that file added both definitions and the root-local node-1
+binding in one `ALGH` revision. The imported 8,782-byte revision-2 `ALGH` has
+SHA-256
+`f6a006ac527225db6aa717f27ca512c6db6adff6fd45bb198c56a1c62d7f0cc1`;
+the resulting 16,428-byte `ALGS` has SHA-256
+`0fd9bad9b1000d2701afc2fa54c26bc98af2a63328a4abcd639a8bc036631701`.
+Control `ALGW`, probes, cached-job `ALGW`, control-authority `ALGC`, structural
+root `ALGW`, flattened `ALGW`, and the 2,478-byte provenance body remained
+byte-identical. A second visible import changed no session byte. Visible Undo
+restored the exact reference, Redo restored the imported session, and a fresh
+reload retained it. The retained 14,333-byte parsed proof result has SHA-256
+`2294ba6c706945093bf4c335bbf9ec09d7adebb4084b7de08af15caeef78b4f6`.
+
 Creating an unreferenced empty dependency advanced the reference hierarchy
 from 7,124 bytes at revision one to 7,864 bytes at revision two, with identity
 `98a27e8e59bb0c5173ac1e16f4c19bc7431a8ec782dd75fcde0ee1d970c015f2`.
@@ -403,8 +434,8 @@ remained exact at
 
 Direct root-instance creation/deletion is implemented through the dedicated
 library panel, and exact root placement/wiring is implemented on its structural
-canvas. Nested definition import with separately supplied scoped bindings,
-parameter promotion/overrides, package
+canvas. Canonical nested definition/binding exchange is implemented through
+`ALCP` V1. Parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
 flattening, coordinated descendant/control-authority replacement, and
 executable front-panel inputs remain open.
