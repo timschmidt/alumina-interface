@@ -102,10 +102,15 @@ metadata, integer placement, and typed-wire surface to the embedded `ALGW` of
 one non-authoritative `ALGC` dependency. It keeps separate selection, drag,
 pending-wire, and text-draft state from the complete-session control canvas.
 Component-instance placeholders can be selected, moved, relabeled, and wired,
-but cannot be deleted because their scoped occurrence records belong to
-`ALGH`. Every accepted definition edit replaces the selected `ALGC`,
-recursively refreshes `ALGH` and `ALGM`, reruns flattened semantics, and records
-one complete `ALGS`; control `ALGW`, probes, and cached jobs remain exact.
+but cannot be removed by ordinary node deletion because their scoped occurrence
+records belong to `ALGH`. The child-component selector creates a fresh
+placeholder and scoped binding atomically from an existing library dependency;
+the placeholder inspector removes that node, its incident wires, and the
+binding in one transaction. Live public connector or panel bindings reject
+removal, and deleted identities are never reused. Every accepted definition
+edit replaces the selected `ALGC`, recursively refreshes `ALGH` and `ALGM`,
+reruns flattened semantics, and records one complete `ALGS`; control `ALGW`,
+probes, and cached jobs remain exact.
 
 The shared parameter surface accepts bounded schema-directed Boolean,
 exact-rational, measurement-interval, canonical signed/unsigned lattice-count,

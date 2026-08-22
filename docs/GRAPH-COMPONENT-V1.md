@@ -153,13 +153,18 @@ selected non-authoritative dependency as its own canonical structural canvas.
 It supports the audited palette, stable node creation/deletion, exact label,
 domain, and parameter edits, integer placement drag, and monotonic typed-wire
 connect/disconnect. Transient node, wire, drag, and text-draft state is scoped
-separately from the main control canvas. `ALGH`-owned component-instance
-placeholders remain visible and wireable but cannot be deleted on this surface.
-Each accepted edit uses the same full recursive replacement report and
-complete-session transaction as connector authoring. Exact no-ops create no
-revision or history state; invalid connectors/panel references, semantic
-failures, indirect control-authority changes, and placeholder deletion reject
-atomically.
+separately from the main control canvas. It can add another dependency already
+present in the `ALGH` library as a fresh child occurrence; the parent-local
+placeholder and scoped `GraphComponentInstance` binding commit atomically.
+`ALGH`-owned placeholders remain visible and wireable but cannot be deleted by
+the ordinary node action. A dedicated occurrence action removes the
+placeholder, incident wires, and scoped binding together, unless a public
+connector or panel item still binds that node. Each accepted edit uses the same
+full recursive replacement report and complete-session transaction as
+connector authoring. Exact no-ops create no revision or history state; invalid
+connectors/panel references, cycles, semantic failures, and indirect
+control-authority changes reject atomically. Deletion preserves the monotonic
+node cursor.
 
 The reviewed fixture supplies the initial panel metadata. Once edited, the
 canonical `ALGC` inside `ALGS` and `.algc` exchange is authoritative; later
@@ -201,7 +206,7 @@ recursive expansion, and deterministically flattens a component DAG to ordinary
 from the embedded dependency library and preserves them across compatible
 selected-component edits. Nested instance-definition/import workflows,
 general component-library creation, package signatures/permissions, locked
-dependency manifests, scoped nested-instance creation/deletion and traversal,
+dependency manifests, child rebinding and source-definition traversal,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.
 `ALGC` V1 grants no semantic, implementation, resource, timing, safety,

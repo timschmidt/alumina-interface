@@ -272,13 +272,42 @@ cannot silently change the `ALGS` authority.
 The library selector also drives a separate selected-definition canvas for a
 non-authoritative dependency's embedded `ALGW`. Audited ordinary nodes can be
 created/deleted, edited, moved, and wired around visible collapsed child
-occurrences. A child placeholder remains owned by its scoped
-`GraphComponentInstance` record and therefore cannot be deleted as an ordinary
-node. Accepted definition edits replace the exact selected dependency, retain
-logical selection across the replacement report, refresh affected ancestors
-and flattened provenance, and enter complete-session history. The main control
-workspace, probes, cached-job workspace, root workspace when the public shape
-is unchanged, and unrelated dependencies remain exact.
+occurrences. The child-component selector can append an occurrence of any
+other dependency already in the library. `add_nested_instance` creates the
+parent-local placeholder with the parent's monotonic node allocator and adds
+its scoped `GraphComponentInstance` in one candidate; neither half is ever
+observable alone. A child placeholder still cannot be deleted as an ordinary
+node. Its dedicated inspector action calls `remove_nested_instance`, deleting
+the placeholder, incident parent-local wires, and scoped binding together.
+Connector or panel bindings that still name the child reject that removal, and
+cycle, depth, expansion, and authority checks run before commit. Removing an
+occurrence does not rewind the parent node cursor, so a later occurrence gets a
+fresh identity. Accepted definition edits replace the exact selected
+dependency, retain logical selection across the replacement report, refresh
+affected ancestors and flattened provenance, and enter complete-session
+history. The main control workspace, probes, cached-job workspace, root
+workspace when the public shape is unchanged, and unrelated dependencies
+remain exact.
+
+Optimized Chromium qualification selected the wrapper, created scoped child
+node `2` at exact canvas `(328, 28)`, deleted it, and created node `3` at the
+same placement without reusing `2`. The complete `ALGS` moved from 14,770 bytes
+(`d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`)
+to 17,567 bytes
+(`0175e289c430f729f1ffc0ab83874f0f49dce359cdcea3472cc172357f4d3104`),
+then to a 14,770-byte removal state
+(`ab07bdc48f62769d2b9c835a890d8d6b6b320155b4d9bcccaafa2aa5cb42d21c`),
+and finally to the 17,567-byte node-`3` state
+(`a37f43fc8fb2b74aea845bdfa58fdd064b15cf2355d7e47b532cfb56182cc27d`).
+The final 7,483-byte `ALGH` has SHA-256
+`2782073c2d322c0a2a3f777a2a182296fffd4431515c870b8e843d75455283c2`;
+its bindings name root wrapper
+`307e9712e40195e17d6e2be0864bcaad4cf9564a6012c0579b1c9e4fccdea668`
+and nested nodes `1` and `3`, both bound to the unchanged selected control
+`ALGC`. The control `ALGW`, `ALGP`, cached-job `ALGW`, selected control `ALGC`,
+and root `ALGW` remained byte-identical through every state. Visible Undo
+restored the exact removal state; Redo and a fresh reload restored the exact
+node-`3` state.
 
 ## Deliberately open
 
@@ -287,9 +316,9 @@ library panel, and exact root placement/wiring is implemented on its structural
 canvas. Nested definition import with separately supplied scoped bindings,
 general library creation, parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
-flattening, scoped child-occurrence creation/deletion, interactive traversal
-from final items into their source definitions, coordinated descendant/control-
-authority replacement, and executable front-panel inputs remain open.
+flattening, child rebinding/replacement, interactive traversal from final items
+into their source definitions, coordinated descendant/control-authority
+replacement, and executable front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2

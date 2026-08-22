@@ -226,6 +226,7 @@ struct NodeDrag {
 struct ComponentDefinitionEditor {
     scope: Option<Digest>,
     palette_index: usize,
+    child_component: Option<Digest>,
     selected_node: Option<GraphNodeId>,
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
@@ -239,6 +240,7 @@ impl Default for ComponentDefinitionEditor {
         Self {
             scope: None,
             palette_index: 0,
+            child_component: None,
             selected_node: None,
             pending_source: None,
             drag: None,
@@ -254,6 +256,7 @@ impl Default for ComponentDefinitionEditor {
 impl ComponentDefinitionEditor {
     fn reset_scope(&mut self, scope: Option<Digest>, status: String) {
         self.scope = scope;
+        self.child_component = None;
         self.selected_node = None;
         self.pending_source = None;
         self.drag = None;
@@ -3581,6 +3584,59 @@ impl ExactControlWorkspace {
             return;
         }
 
+        let selected_child_label = self
+            .component_definition
+            .child_component
+            .and_then(|child| component.hierarchy.document.dependency(child))
+            .map_or_else(
+                || "no other library dependency".to_owned(),
+                |dependency| {
+                    format!(
+                        "{} · {}…",
+                        dependency.document().name(),
+                        digest_prefix(dependency.digest().0)
+                    )
+                },
+            );
+        let mut add_child_requested = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Child component");
+            egui::ComboBox::from_id_salt(("component_definition_child", scope.0))
+                .selected_text(selected_child_label)
+                .show_ui(ui, |ui| {
+                    for dependency in component
+                        .hierarchy
+                        .document
+                        .dependencies()
+                        .iter()
+                        .filter(|dependency| dependency.digest() != scope)
+                    {
+                        let digest = dependency.digest();
+                        ui.selectable_value(
+                            &mut self.component_definition.child_component,
+                            Some(digest),
+                            format!(
+                                "{} · {}…",
+                                dependency.document().name(),
+                                digest_prefix(digest.0)
+                            ),
+                        );
+                    }
+                });
+            add_child_requested = ui
+                .add_enabled(
+                    self.component_definition.child_component.is_some(),
+                    egui::Button::new("add child occurrence"),
+                )
+                .clicked();
+            ui.weak("one ALGW placeholder + one scoped ALGH binding");
+        });
+        if add_child_requested && let Some(child) = self.component_definition.child_component {
+            self.add_component_definition_child(scope, child);
+            ui.label(&self.component_definition.status);
+            return;
+        }
+
         if self.show_component_definition_canvas(ui, scope, &workspace, &presentation) {
             ui.label(&self.component_definition.status);
             return;
@@ -3602,7 +3658,7 @@ impl ExactControlWorkspace {
     ) -> bool {
         ui.strong("Canonical selected-definition canvas");
         ui.weak(
-            "Drag node headers on the exact integer canvas. Select an output then a typed input to connect; secondary-click an owned input to disconnect. Component-instance placeholders may be wired or relabeled but are owned by ALGH and cannot be deleted here.",
+            "Drag node headers on the exact integer canvas. Select an output then a typed input to connect; secondary-click an owned input to disconnect. Component-instance placeholders may be wired or relabeled; their dedicated inspector action removes the placeholder and scoped ALGH occurrence atomically.",
         );
         let nodes = workspace.graph().nodes().to_vec();
         let wires = workspace.graph().wires().to_vec();
@@ -3811,12 +3867,15 @@ impl ExactControlWorkspace {
                 if ui.small_button("clear").clicked() {
                     self.component_definition.selected_node = None;
                 }
-                delete_requested = ui
-                    .add_enabled(!placeholder, egui::Button::new("delete node + wires"))
-                    .on_disabled_hover_text(
-                        "ALGH owns component-instance placeholders; remove the nested occurrence through a future scoped hierarchy operation",
-                    )
-                    .clicked();
+                delete_requested = if placeholder {
+                    ui.button("delete child occurrence + wires")
+                        .on_hover_text(
+                            "Atomically removes this parent-local ALGW placeholder and its scoped ALGH binding. Public connector or panel bindings must be rebound first.",
+                        )
+                        .clicked()
+                } else {
+                    ui.button("delete node + wires").clicked()
+                };
             });
             (label_request, domain_request) = show_node_identity_editors(
                 ui,
@@ -3848,7 +3907,9 @@ impl ExactControlWorkspace {
                 &mut self.component_definition.parameter_drafts,
             );
             if placeholder {
-                ui.weak("Collapsed nested ALGC occurrence · structural node owned by ALGH");
+                ui.weak(
+                    "Collapsed nested ALGC occurrence · this placeholder and its scoped ALGH binding have one lifecycle",
+                );
             } else if let Some(state) = state {
                 ui.label(format!(
                     "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
@@ -3862,7 +3923,11 @@ impl ExactControlWorkspace {
             .node_label_drafts
             .insert(id, label_text);
         if delete_requested {
-            self.delete_component_definition_node(scope, id);
+            if placeholder {
+                self.remove_component_definition_child(scope, id);
+            } else {
+                self.delete_component_definition_node(scope, id);
+            }
         } else if let Some(label) = label_request {
             self.commit_component_definition_node_label(scope, id, &label);
         } else if let Some(domain) = domain_request {
@@ -4006,6 +4071,170 @@ impl ExactControlWorkspace {
         ) {
             self.component_definition.selected_node = Some(id);
             self.component_definition.pending_source = None;
+        }
+    }
+
+    fn add_component_definition_child(&mut self, scope: Digest, child: Digest) {
+        let (current, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence creation", error);
+                return;
+            }
+        };
+        let Some(child_dependency) = current.hierarchy.document.dependency(child) else {
+            self.reject_component_definition_edit(
+                "child occurrence creation",
+                format!("child component {} is unavailable", digest_prefix(child.0)),
+            );
+            return;
+        };
+        let child_name = child_dependency.document().name().to_owned();
+        let (x, y) = match new_node_position(document.workspace()) {
+            Ok(position) => position,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence creation", error);
+                return;
+            }
+        };
+        let label = format!(
+            "{child_name} occurrence {}",
+            document.workspace().next_node_id()
+        );
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let (node, report) = match hierarchy_document.add_nested_instance(scope, child, label, x, y)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence creation", error);
+                return;
+            }
+        };
+        let authoritative = current.encoding.digest();
+        if report.resolve(authoritative) != authoritative {
+            self.reject_component_definition_edit(
+                "child occurrence creation",
+                "the nested occurrence would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available",
+            );
+            return;
+        }
+        let replacement = report.resolve(scope);
+        let retained_child = report.resolve(child);
+        let remaps = report.remaps().len();
+        let selected_instance = self.selected_hierarchy_instance;
+        let status = format!(
+            "added selected-definition child occurrence node {} of {child_name} {}… at canonical canvas ({x}, {y}) with one scoped ALGH binding across {remaps} recursive identity remap(s)",
+            node.get(),
+            digest_prefix(retained_child.0)
+        );
+        match self.commit_hierarchy_document(
+            current,
+            hierarchy_document,
+            &status,
+            Some(replacement),
+            selected_instance,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = Some(replacement);
+                self.component_definition.child_component = Some(retained_child);
+                self.component_definition.selected_node = Some(node);
+                self.component_definition.pending_source = None;
+                self.component_definition.drag = None;
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence transaction", error);
+            }
+        }
+    }
+
+    fn remove_component_definition_child(&mut self, scope: Digest, node: GraphNodeId) {
+        let (current, _) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence deletion", error);
+                return;
+            }
+        };
+        let instance_scope = GraphInstanceScope::Component(scope);
+        let Some(instance) = current
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .copied()
+            .find(|instance| instance.scope() == instance_scope && instance.node() == node)
+        else {
+            self.reject_component_definition_edit(
+                "child occurrence deletion",
+                format!("node {} has no scoped ALGH binding", node.get()),
+            );
+            return;
+        };
+        let child = instance.component();
+        let child_name = current
+            .hierarchy
+            .document
+            .dependency(child)
+            .map_or("unknown child", |dependency| dependency.document().name())
+            .to_owned();
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let (removed_wires, report) = match hierarchy_document.remove_nested_instance(scope, node) {
+            Ok(result) => result,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence deletion", error);
+                return;
+            }
+        };
+        let authoritative = current.encoding.digest();
+        if report.resolve(authoritative) != authoritative {
+            self.reject_component_definition_edit(
+                "child occurrence deletion",
+                "the nested occurrence removal would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available",
+            );
+            return;
+        }
+        let replacement = report.resolve(scope);
+        let retained_child = report.resolve(child);
+        let remaps = report.remaps().len();
+        let selected_instance = self.selected_hierarchy_instance;
+        let status = format!(
+            "removed selected-definition child occurrence node {} of {child_name} {}…, {removed_wires} incident wire(s), and its scoped ALGH binding across {remaps} recursive identity remap(s)",
+            node.get(),
+            digest_prefix(retained_child.0)
+        );
+        match self.commit_hierarchy_document(
+            current,
+            hierarchy_document,
+            &status,
+            Some(replacement),
+            selected_instance,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = Some(replacement);
+                self.component_definition.child_component = Some(retained_child);
+                self.component_definition.selected_node = None;
+                self.component_definition.pending_source = self
+                    .component_definition
+                    .pending_source
+                    .filter(|source| source.node != node);
+                self.component_definition.drag = self
+                    .component_definition
+                    .drag
+                    .filter(|drag| drag.node != node);
+                self.component_definition
+                    .parameter_drafts
+                    .retain(|(draft_node, _), _| *draft_node != node);
+                self.component_definition.node_label_drafts.remove(&node);
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence transaction", error);
+            }
         }
     }
 
@@ -5017,9 +5246,17 @@ impl ExactControlWorkspace {
                 scope == component.encoding.digest(),
                 dependency.document().name().to_owned(),
                 dependency.document().workspace().clone(),
+                component
+                    .hierarchy
+                    .document
+                    .dependencies()
+                    .iter()
+                    .map(GraphHierarchyDependency::digest)
+                    .filter(|digest| *digest != scope)
+                    .collect::<Vec<_>>(),
             ))
         });
-        let Some((scope, authoritative, name, workspace)) = snapshot else {
+        let Some((scope, authoritative, name, workspace, child_components)) = snapshot else {
             if self.component_definition.scope.is_some() {
                 self.component_definition.reset_scope(
                     None,
@@ -5042,6 +5279,11 @@ impl ExactControlWorkspace {
             };
             self.component_definition.reset_scope(Some(scope), status);
         }
+        self.component_definition.child_component = self
+            .component_definition
+            .child_component
+            .filter(|selected| child_components.contains(selected))
+            .or_else(|| child_components.first().copied());
         let graph = workspace.graph();
         self.component_definition.selected_node = self
             .component_definition
@@ -13513,6 +13755,259 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scoped child lifecycle proves atomic hierarchy binding, recursive identity refresh, monotonic allocation, exact history, and persistence together"
+    )]
+    fn selected_definition_child_occurrence_is_exact_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_control_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_root_digest = initial_component.hierarchy.document.root_digest();
+        let initial_instances = initial_component
+            .hierarchy
+            .document
+            .flattened_instance_count();
+        let initial_nodes = initial_component.hierarchy.document.flattened_node_count();
+        let child_nodes = initial_component
+            .hierarchy
+            .document
+            .dependency(authoritative)
+            .unwrap()
+            .document()
+            .workspace()
+            .graph()
+            .nodes()
+            .len();
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+
+        workspace.selected_hierarchy_component = Some(initial_wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.child_component = Some(authoritative);
+        workspace.add_component_definition_child(initial_wrapper, authoritative);
+
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_scope = workspace.component_definition.scope.unwrap();
+        let added_component = workspace.component.as_ref().unwrap();
+        let added_node = GraphNodeId::new(2);
+        let added_wrapper = added_component
+            .hierarchy
+            .document
+            .dependency(added_scope)
+            .unwrap()
+            .document();
+        assert_ne!(added_session, initial_session);
+        assert_ne!(added_scope, initial_wrapper);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(added_node)
+        );
+        assert_eq!(
+            workspace.component_definition.child_component,
+            Some(authoritative)
+        );
+        assert_eq!(added_wrapper.workspace().next_node_id(), 3);
+        assert!(added_wrapper.workspace().graph().node(added_node).is_some());
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(added_scope, added_node, authoritative)
+                })
+        );
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::root(GraphNodeId::new(1), added_scope)
+                })
+        );
+        assert_eq!(
+            added_component
+                .hierarchy
+                .document
+                .flattened_instance_count(),
+            initial_instances + 1
+        );
+        assert_eq!(
+            added_component.hierarchy.document.flattened_node_count(),
+            initial_nodes + child_nodes
+        );
+        assert_eq!(added_component.document, initial_component.document);
+        assert_eq!(added_component.encoding, initial_component.encoding);
+        assert_eq!(added_component.hierarchy.document.root(), &initial_root);
+        assert_eq!(
+            added_component.hierarchy.document.root_digest(),
+            initial_root_digest
+        );
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+
+        workspace.remove_component_definition_child(added_scope, added_node);
+
+        let removed_session = workspace.authoring_session_encoding().unwrap();
+        let removed_scope = workspace.component_definition.scope.unwrap();
+        let removed_component = workspace.component.as_ref().unwrap();
+        let removed_wrapper = removed_component
+            .hierarchy
+            .document
+            .dependency(removed_scope)
+            .unwrap()
+            .document();
+        assert_ne!(removed_session, added_session);
+        assert_ne!(removed_scope, added_scope);
+        assert_eq!(workspace.component_definition.selected_node, None);
+        assert_eq!(removed_wrapper.workspace().next_node_id(), 3);
+        assert!(
+            removed_wrapper
+                .workspace()
+                .graph()
+                .node(added_node)
+                .is_none()
+        );
+        assert!(
+            !removed_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(removed_scope)
+                        && instance.node() == added_node
+                })
+        );
+        assert_eq!(
+            removed_component
+                .hierarchy
+                .document
+                .flattened_instance_count(),
+            initial_instances
+        );
+        assert_eq!(
+            removed_component.hierarchy.document.flattened_node_count(),
+            initial_nodes
+        );
+        assert_eq!(removed_component.document, initial_component.document);
+        assert_eq!(removed_component.encoding, initial_component.encoding);
+        assert_eq!(removed_component.hierarchy.document.root(), &initial_root);
+
+        workspace.add_component_definition_child(removed_scope, authoritative);
+
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_scope = workspace.component_definition.scope.unwrap();
+        let final_component = workspace.component.as_ref().unwrap().clone();
+        let final_node = GraphNodeId::new(3);
+        let final_wrapper = final_component
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap()
+            .document();
+        assert_ne!(final_session, removed_session);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(final_node)
+        );
+        assert_eq!(final_wrapper.workspace().next_node_id(), 4);
+        assert!(final_wrapper.workspace().graph().node(added_node).is_none());
+        assert!(final_wrapper.workspace().graph().node(final_node).is_some());
+        assert!(
+            final_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(final_scope, final_node, authoritative)
+                })
+        );
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(final_component.hierarchy.document.root(), &initial_root);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            removed_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(restored.workspace, initial_control_workspace);
+        assert_eq!(restored.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(restored.cached_jobs.encoding, initial_cached_jobs);
+        assert_exact_component_package_equal(
+            restored.component.as_ref().unwrap(),
+            &final_component,
+        );
+        let restored_wrapper = restored
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap()
+            .document();
+        assert_eq!(restored_wrapper.workspace().next_node_id(), 4);
+        assert!(
+            restored_wrapper
+                .workspace()
+                .graph()
+                .node(final_node)
+                .is_some()
+        );
+        assert!(
+            restored
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(final_scope, final_node, authoritative)
+                })
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
     fn selected_definition_canvas_rejects_placeholder_and_control_authority_edits() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.mark_persisted();
@@ -13552,6 +14047,82 @@ mod tests {
         workspace.selected_hierarchy_component = Some(authoritative);
         workspace.reconcile_component_definition_editor();
         workspace.add_component_definition_node(authoritative);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("must be edited on the main canvas")
+        );
+    }
+
+    #[test]
+    fn selected_definition_child_occurrence_rejects_bindings_cycles_and_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_history = workspace.history.clone();
+        let authoritative = initial_component.encoding.digest();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.remove_component_definition_child(wrapper, GraphNodeId::new(1));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("rejected without mutation")
+        );
+
+        workspace.add_component_definition_child(wrapper, wrapper);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("dependency cycle")
+        );
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_component_definition_editor();
+        workspace.add_component_definition_child(authoritative, wrapper);
         assert_eq!(
             workspace.authoring_session_encoding().unwrap(),
             initial_session

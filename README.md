@@ -302,12 +302,16 @@ prototype.
   A separate selected-definition canvas follows the exact non-authoritative
   dependency chosen in that library panel. It reuses the audited palette,
   stable node and wire allocators, schema-directed metadata editors, and exact
-  integer dragging against the dependency's embedded `ALGW`. `ALGH`-owned
-  child placeholders remain visible and wireable but cannot be deleted as
-  ordinary nodes. Accepted edits replace the selected `ALGC`, retain logical
-  selection through every recursive digest remap, and commit regenerated
-  `ALGH`/`ALGM` in complete `ALGS` history while preserving control, probe,
-  cached-job, and unchanged-root authority exactly.
+  integer dragging against the dependency's embedded `ALGW`. An existing
+  library dependency can be added as a child through one transaction that
+  creates its fresh monotonic placeholder and scoped `ALGH` binding together.
+  `ALGH`-owned child placeholders remain visible and wireable; the dedicated
+  inspector action removes a placeholder, its incident wires, and its scoped
+  binding together, while an ordinary node deletion remains invalid and live
+  public connector or panel bindings veto removal. Accepted edits replace the
+  selected `ALGC`, retain logical selection through every recursive digest
+  remap, and commit regenerated `ALGH`/`ALGM` in complete `ALGS` history while
+  preserving control, probe, cached-job, and unchanged-root authority exactly.
   Compatible control edits replace the selected `ALGC` dependency and remap
   every exact binding while preserving the authored root workspace and stable
   library entries; invalid imports, removals, replacements, or selections
@@ -532,8 +536,8 @@ complete public device/security/machine-membership discovery,
 physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
-logic-analyzer acquisition, analog telemetry, groups, scoped nested-instance
-occurrence creation/deletion and general component-library creation,
+logic-analyzer acquisition, analog telemetry, groups, child-occurrence
+rebinding and general component-library creation,
 interactive traversal from flattened items into their source definitions,
 connector-shape authoring/remapping, front-panel runtime injection/execution,
 responsive/grouped panel layout, executable composite

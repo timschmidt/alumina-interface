@@ -174,8 +174,9 @@ history, authored-panel retention across later workspace edits, stable
 connector authoring on both the selected control component and another chosen
 library dependency, recursive dependency-selection/root-placeholder refresh,
 selected-library definition node/placement/wire authoring, control-authority
-isolation, atomic rejection of placeholder deletion and an indirect authority
-rewrite,
+isolation, atomic scoped child-occurrence add/remove/re-add with monotonic node
+identity, exact child history/persistence, rejection of live public bindings,
+cycles, ordinary placeholder deletion, and an indirect authority rewrite,
 abandoned-redo clearing, and transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 
