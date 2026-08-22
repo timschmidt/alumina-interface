@@ -4522,7 +4522,39 @@ impl ExactControlWorkspace {
             .unwrap_or_else(|| node.label().to_owned());
         let placeholder = node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
             && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION;
+        let bound_child = placeholder.then(|| {
+            self.component.as_ref().and_then(|component| {
+                component
+                    .hierarchy
+                    .document
+                    .instances()
+                    .iter()
+                    .find(|instance| {
+                        instance.scope() == GraphInstanceScope::Component(scope)
+                            && instance.node() == id
+                    })
+                    .map(|instance| instance.component())
+            })
+        });
+        let bound_child = bound_child.flatten();
+        let bound_child_label = bound_child.and_then(|child| {
+            self.component.as_ref().and_then(|component| {
+                component
+                    .hierarchy
+                    .document
+                    .dependency(child)
+                    .map(|dependency| {
+                        format!(
+                            "{} · {}…",
+                            dependency.document().name(),
+                            digest_prefix(child.0)
+                        )
+                    })
+            })
+        });
+        let rebind_target = self.component_definition.child_component;
         let mut delete_requested = false;
+        let mut rebind_requested = false;
         let mut label_request = None;
         let mut domain_request = None;
         let mut parameter_request = None;
@@ -4542,6 +4574,17 @@ impl ExactControlWorkspace {
                 } else {
                     ui.button("delete node + wires").clicked()
                 };
+                if placeholder {
+                    rebind_requested = ui
+                        .add_enabled(
+                            rebind_target.is_some(),
+                            egui::Button::new("rebind child to selected component"),
+                        )
+                        .on_hover_text(
+                            "Uses the Child component selector above. The node, placement, and compatible live stable-ID endpoints remain exact.",
+                        )
+                        .clicked();
+                }
             });
             (label_request, domain_request) = show_node_identity_editors(
                 ui,
@@ -4573,9 +4616,10 @@ impl ExactControlWorkspace {
                 &mut self.component_definition.parameter_drafts,
             );
             if placeholder {
-                ui.weak(
-                    "Collapsed nested ALGC occurrence · this placeholder and its scoped ALGH binding have one lifecycle",
-                );
+                ui.weak(format!(
+                    "Collapsed nested ALGC occurrence · bound child {} · this placeholder and its scoped ALGH binding have one lifecycle",
+                    bound_child_label.as_deref().unwrap_or("unavailable")
+                ));
             } else if let Some(state) = state {
                 ui.label(format!(
                     "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
@@ -4594,6 +4638,8 @@ impl ExactControlWorkspace {
             } else {
                 self.delete_component_definition_node(scope, id);
             }
+        } else if rebind_requested && let Some(child) = rebind_target {
+            self.rebind_component_definition_child(scope, id, child);
         } else if let Some(label) = label_request {
             self.commit_component_definition_node_label(scope, id, &label);
         } else if let Some(domain) = domain_request {
@@ -4806,6 +4852,106 @@ impl ExactControlWorkspace {
                 self.component_definition.selected_node = Some(node);
                 self.component_definition.pending_source = None;
                 self.component_definition.drag = None;
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence transaction", error);
+            }
+        }
+    }
+
+    fn rebind_component_definition_child(
+        &mut self,
+        scope: Digest,
+        node: GraphNodeId,
+        child: Digest,
+    ) {
+        let (current, _) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence rebinding", error);
+                return;
+            }
+        };
+        let instance_scope = GraphInstanceScope::Component(scope);
+        let Some(instance) = current
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .copied()
+            .find(|instance| instance.scope() == instance_scope && instance.node() == node)
+        else {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                format!("node {} has no scoped ALGH binding", node.get()),
+            );
+            return;
+        };
+        let original_child = instance.component();
+        let Some(original_dependency) = current.hierarchy.document.dependency(original_child)
+        else {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                format!(
+                    "bound child component {} is unavailable",
+                    digest_prefix(original_child.0)
+                ),
+            );
+            return;
+        };
+        let original_name = original_dependency.document().name().to_owned();
+        let Some(child_dependency) = current.hierarchy.document.dependency(child) else {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                format!(
+                    "replacement child component {} is unavailable",
+                    digest_prefix(child.0)
+                ),
+            );
+            return;
+        };
+        let child_name = child_dependency.document().name().to_owned();
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let report = match hierarchy_document.rebind_nested_instance(scope, node, child) {
+            Ok(report) => report,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence rebinding", error);
+                return;
+            }
+        };
+        let authoritative = current.encoding.digest();
+        if report.resolve(authoritative) != authoritative {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                "the replacement would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available",
+            );
+            return;
+        }
+        let replacement = report.resolve(scope);
+        let retained_child = report.resolve(child);
+        let remaps = report.remaps().len();
+        let selected_instance = self.selected_hierarchy_instance;
+        let status = format!(
+            "rebound selected-definition child occurrence node {} from {original_name} {}… to {child_name} {}… while retaining its node, placement, and compatible stable-ID endpoints across {remaps} recursive identity remap(s)",
+            node.get(),
+            digest_prefix(original_child.0),
+            digest_prefix(retained_child.0)
+        );
+        match self.commit_hierarchy_document(
+            current,
+            hierarchy_document,
+            &status,
+            Some(replacement),
+            selected_instance,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = Some(replacement);
+                self.component_definition.child_component = Some(retained_child);
+                self.component_definition.selected_node = Some(node);
+                self.reconcile_component_definition_editor();
                 self.component_definition
                     .status
                     .clone_from(&self.component_status);
@@ -15228,6 +15374,235 @@ mod tests {
                 })
         );
         assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one child-rebinding lifecycle proves binding-only replacement, exact authority isolation, source regeneration, no-op, history, and persistence together"
+    )]
+    fn selected_definition_child_rebinding_is_exact_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let reference = workspace.component.as_ref().unwrap().clone();
+        let authoritative = reference.encoding.digest();
+        let mut alias = reference.document.clone();
+        alias
+            .update_identity_metadata("control.reference_pid_alias", 1)
+            .unwrap();
+        let alias_encoding = encode_graph_component(&alias).unwrap();
+        let alias_digest = alias_encoding.digest();
+        assert!(
+            workspace
+                .import_component_dependency(alias_encoding.bytes())
+                .unwrap()
+        );
+        let baseline = workspace.component.as_ref().unwrap().clone();
+        let baseline_session = workspace.authoring_session_encoding().unwrap();
+        let baseline_history = workspace.history.clone();
+        let baseline_source_map = baseline.hierarchy.source_map.clone();
+        let wrapper = baseline
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let wrapper_digest = wrapper.digest();
+        let wrapper_encoding = wrapper.encoding().clone();
+        let baseline_root = baseline.hierarchy.document.root().clone();
+        let baseline_flattened = baseline.hierarchy.flattening.workspace().clone();
+        let baseline_revision = baseline.hierarchy.document.revision();
+        let node = GraphNodeId::new(1);
+
+        workspace.selected_hierarchy_component = Some(wrapper_digest);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.child_component = Some(alias_digest);
+        workspace.component_definition.selected_node = Some(node);
+        workspace.component_definition.pending_source = Some(WireEndpoint {
+            node,
+            port: GraphPortId::new(1),
+        });
+        workspace.mark_persisted();
+        workspace.rebind_component_definition_child(wrapper_digest, node, alias_digest);
+
+        let rebound_session = workspace.authoring_session_encoding().unwrap();
+        let rebound = workspace.component.as_ref().unwrap();
+        assert_ne!(rebound_session, baseline_session);
+        assert_eq!(rebound.document, baseline.document);
+        assert_eq!(rebound.encoding, baseline.encoding);
+        assert_eq!(rebound.hierarchy.document.revision(), baseline_revision + 1);
+        assert_eq!(rebound.hierarchy.document.root(), &baseline_root);
+        assert_eq!(
+            rebound.hierarchy.flattening.workspace(),
+            &baseline_flattened
+        );
+        assert_ne!(rebound.hierarchy.source_map, baseline_source_map);
+        assert_eq!(
+            rebound
+                .hierarchy
+                .document
+                .dependency(wrapper_digest)
+                .unwrap()
+                .encoding(),
+            &wrapper_encoding
+        );
+        assert!(
+            rebound
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::nested(wrapper_digest, node, alias_digest)
+                })
+        );
+        assert!(
+            !rebound
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::nested(wrapper_digest, node, authoritative)
+                })
+        );
+        assert_eq!(workspace.component_definition.scope, Some(wrapper_digest));
+        assert_eq!(
+            workspace.component_definition.child_component,
+            Some(alias_digest)
+        );
+        assert_eq!(workspace.component_definition.selected_node, Some(node));
+        assert_eq!(
+            workspace.component_definition.pending_source,
+            Some(WireEndpoint {
+                node,
+                port: GraphPortId::new(1),
+            })
+        );
+        assert_eq!(
+            workspace.history.undo_len(),
+            baseline_history.undo_len() + 1
+        );
+        assert!(workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("across 0 recursive identity remap(s)")
+        );
+
+        workspace.mark_persisted();
+        let rebound_history = workspace.history.clone();
+        workspace.rebind_component_definition_child(wrapper_digest, node, alias_digest);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            rebound_session
+        );
+        assert_eq!(workspace.history, rebound_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("already matched"));
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            baseline_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            rebound_session
+        );
+
+        workspace.mark_persisted();
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            rebound_session
+        );
+        let restored_component = restored.component.as_ref().unwrap();
+        assert!(
+            restored_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::nested(wrapper_digest, node, alias_digest)
+                })
+        );
+        assert_eq!(restored_component.document, baseline.document);
+        assert_eq!(restored_component.encoding, baseline.encoding);
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn selected_definition_child_rebinding_rejects_incompatible_cycles_and_unknowns() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let empty =
+            empty_library_component("user.empty_rebind_target", &workspace.workspace).unwrap();
+        let empty_encoding = encode_graph_component(&empty).unwrap();
+        let empty_digest = empty_encoding.digest();
+        assert!(
+            workspace
+                .import_component_dependency(empty_encoding.bytes())
+                .unwrap()
+        );
+        let baseline = workspace.component.as_ref().unwrap().clone();
+        let baseline_session = workspace.authoring_session_encoding().unwrap();
+        let baseline_history = workspace.history.clone();
+        let authoritative = baseline.encoding.digest();
+        let wrapper = baseline
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        let node = GraphNodeId::new(1);
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.mark_persisted();
+
+        for (target, selected_node) in [
+            (empty_digest, node),
+            (wrapper, node),
+            (Digest([0x91; 32]), node),
+            (authoritative, GraphNodeId::new(99)),
+        ] {
+            workspace.rebind_component_definition_child(wrapper, selected_node, target);
+            assert_eq!(
+                workspace.authoring_session_encoding().unwrap(),
+                baseline_session
+            );
+            assert_exact_component_package_equal(workspace.component.as_ref().unwrap(), &baseline);
+            assert_eq!(workspace.history, baseline_history);
+            assert!(!workspace.persistence_pending());
+            assert!(
+                workspace
+                    .component_definition
+                    .status
+                    .contains("rejected without mutation")
+            );
+        }
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_component_definition_editor();
+        workspace.rebind_component_definition_child(authoritative, node, wrapper);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            baseline_session
+        );
+        assert_exact_component_package_equal(workspace.component.as_ref().unwrap(), &baseline);
+        assert_eq!(workspace.history, baseline_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("must be edited on the main canvas")
+        );
     }
 
     #[test]

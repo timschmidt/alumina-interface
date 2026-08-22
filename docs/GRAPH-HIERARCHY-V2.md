@@ -311,7 +311,22 @@ other dependency already in the library. `add_nested_instance` creates the
 parent-local placeholder with the parent's monotonic node allocator and adds
 its scoped `GraphComponentInstance` in one candidate; neither half is ever
 observable alone. A child placeholder still cannot be deleted as an ordinary
-node. Its dedicated inspector action calls `remove_nested_instance`, deleting
+node. Its inspector can instead call `rebind_nested_instance` for exactly one
+scoped occurrence. The target is another exact dependency already present in
+the library. Stable child connector IDs remap compatible parent-local wires and
+public connector endpoints while retaining the placeholder node, label,
+placement, and parent allocation cursors. If the old and new child derive the
+same placeholder, only that scoped binding and the `ALGH` revision change at
+the parent boundary, so the replacement report has no component-identity
+remaps; this is distinct from a same-target exact no-op because the hierarchy
+itself changes. A public-shape change recursively replaces the parent and every
+affected ancestor through the ordinary replacement report. Missing or
+type-incompatible live connectors, cycles, bounds, and indirect replacement of
+the complete-session control authority reject before commit. Both successful
+paths freshly flatten the whole hierarchy, regenerate `ALGM`, and enter one
+complete-session history state.
+
+The dedicated removal action calls `remove_nested_instance`, deleting
 the placeholder, incident parent-local wires, and scoped binding together.
 Connector or panel bindings that still name the child reject that removal, and
 cycle, depth, expansion, and authority checks run before commit. Removing an
@@ -343,6 +358,34 @@ and root `ALGW` remained byte-identical through every state. Visible Undo
 restored the exact removal state; Redo and a fresh reload restored the exact
 node-`3` state.
 
+A later optimized Chromium lifecycle created two canonical empty dependencies,
+added `user.browser_child_a` as wrapper-local node `2`, and visibly rebound
+that same occurrence to same-shape `user.browser_child_b`. The 1,320-byte
+wrapper `ALGC` remained byte-identical at
+`42c0e5af13e27a1085bcc52ab574ba105c9d351a021b79e09a6629af85a74423`;
+its 984-byte `ALGW`, node-`3`/wire-`1` allocation cursors, node-`2` placement
+`(328, 28)`, root workspace, dependency library, control workspace, probes,
+and cached-job workspace also remained exact. Only scoped node `2` changed
+from child digest
+`bddfa32bafd4479c58641acd6aa24d8a87a60ae4b592c9d5f597d79987fbd853`
+to
+`3d1b0dd9bf5147fe6215345418c903f177c6d3485ee72f01dd88c8e160dea5ae`.
+`ALGH` advanced once from revision 4 identity
+`fd37e63ee1d59194864c61e7e3a7de3c510f90439158942a039c4ec12064dcab`
+to revision 5 identity
+`c389dbd41338f2a258c341836d3d397f91fb140d9cbf9d0c0583f438f0859774`
+without changing its 8,767-byte size. The flattened workspace identity
+remained
+`d7f39dac860a59935385d381ccb1226342d3919a8f6f4ac217ae6df8750e13af`,
+while regenerated `ALGM` changed from
+`0854b6b155bce215339f7619a35b4a2342f828b658f3c2ff7b61a5ec43a28e20`
+to
+`7fa57889808eb3219f5d3335834ce79b935b9034922f4255526d6cdf21ff25dc`.
+A second visible rebind to B retained every `ALGS` byte. Visible Undo restored
+the A binding; Redo and a fresh reload restored the B binding exactly. The
+retained 122,143-byte parsed proof result has SHA-256
+`1b277b9487cd57d509f69accd754fcac69b167d93d2f97bdf5b7e882a3474389`.
+
 Creating an unreferenced empty dependency advanced the reference hierarchy
 from 7,124 bytes at revision one to 7,864 bytes at revision two, with identity
 `98a27e8e59bb0c5173ac1e16f4c19bc7431a8ec782dd75fcde0ee1d970c015f2`.
@@ -363,8 +406,8 @@ library panel, and exact root placement/wiring is implemented on its structural
 canvas. Nested definition import with separately supplied scoped bindings,
 parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
-flattening, child rebinding/replacement, coordinated descendant/control-authority
-replacement, and executable front-panel inputs remain open.
+flattening, coordinated descendant/control-authority replacement, and
+executable front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2

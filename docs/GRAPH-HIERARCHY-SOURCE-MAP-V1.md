@@ -131,6 +131,25 @@ the identity boundary: if the old final/origin pair is absent from the new
 `ALGM`, focus and pending scroll are cleared with a visible stale-origin status.
 No historical digest or stable-name alias is encoded.
 
+Scoped child-occurrence rebinding uses the same regeneration boundary. A
+same-shape target can preserve the parent `ALGC` while changing its exact
+`ALGH` occurrence binding; the flattened workspace and component-origin
+digests are nevertheless derived afresh from the replacement child. A
+public-shape change recursively replaces affected parent identities first.
+Neither path patches provenance or carries an origin across a digest change by
+heuristic equivalence.
+
+The optimized same-shape rebinding proof retained flattened-workspace identity
+`d7f39dac860a59935385d381ccb1226342d3919a8f6f4ac217ae6df8750e13af`
+and the 2,478-byte provenance body at
+`98d2431fbb8aaaf8b774842ff3d5f09f7d4d4c971fbafc3f68fd995a56afdd55`,
+but changed the 2,550-byte map identity from
+`0854b6b155bce215339f7619a35b4a2342f828b658f3c2ff7b61a5ec43a28e20`
+to
+`7fa57889808eb3219f5d3335834ce79b935b9034922f4255526d6cdf21ff25dc`
+because its exact source-`ALGH` binding changed. Undo, Redo, and reload restored
+the corresponding complete map bytes rather than patching the source digest.
+
 The core golden also exercises both origin tags: two ordinary root nodes, one
 ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
 2,577-byte encoding has SHA-256

@@ -105,12 +105,18 @@ Component-instance placeholders can be selected, moved, relabeled, and wired,
 but cannot be removed by ordinary node deletion because their scoped occurrence
 records belong to `ALGH`. The child-component selector creates a fresh
 placeholder and scoped binding atomically from an existing library dependency;
-the placeholder inspector removes that node, its incident wires, and the
-binding in one transaction. Live public connector or panel bindings reject
-removal, and deleted identities are never reused. Every accepted definition
-edit replaces the selected `ALGC`, recursively refreshes `ALGH` and `ALGM`,
-reruns flattened semantics, and records one complete `ALGS`; control `ALGW`,
-probes, and cached jobs remain exact.
+the placeholder inspector can rebind that exact occurrence through the same
+selector while retaining the node, label, placement, allocation cursors, and
+stable-ID-compatible live endpoints. A same-shape child leaves the parent
+`ALGC` exact while changing its scoped binding; a shape change recursively
+replaces affected parent identities. The inspector can instead remove the
+node, its incident wires, and the binding in one transaction. Live public
+connector or panel bindings reject incompatible rebinding or removal, cycles
+and limits reject atomically, and deleted identities are never reused. Every
+accepted definition edit freshly validates and flattens `ALGH`, regenerates
+`ALGM`, and records one complete `ALGS`; control `ALGW`, probes, and cached jobs
+remain exact unless a coordinated control-authority replacement is explicitly
+required, which this surface rejects.
 
 The separate ALGM source browser is read-only navigation across those editors.
 It verifies a chosen final node or wire still has the displayed exact origin,

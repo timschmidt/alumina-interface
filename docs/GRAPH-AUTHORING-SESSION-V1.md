@@ -112,10 +112,10 @@ The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
 Control-workspace, probe/trigger, focused import, cached-job,
 selected-component, component-library creation/import/removal, direct
-root-instance, selected-component identity evolution, hierarchy, and source-map
-state—including root instance
-placement and typed root wiring—share one timeline rather than independent
-histories that could be navigated into a mismatched combination.
+root-instance, selected-component identity evolution, scoped child-occurrence
+rebinding, hierarchy, and source-map state—including root instance placement
+and typed root wiring—share one timeline rather than independent histories that
+could be navigated into a mismatched combination.
 
 The first interactive policy retains at most 16 snapshots in each direction
 and 64 MiB of canonical `ALGS` bytes across both stacks. The current session is
@@ -138,6 +138,16 @@ decimal input, invalid or conflicting names, and any recursive admission
 failure preserve the current session, both history stacks, and persistence
 state byte-for-byte. Undo, redo, and persisted restore retain the evolved
 identity without an alias to the former digest.
+
+Rebinding one selected-definition child occurrence also uses this boundary.
+Stable-ID-compatible parent wiring and public endpoints survive, while a
+missing or incompatible live connector, cycle, bound violation, unknown
+identity, or indirect control-authority replacement preserves the current
+session and both history stacks exactly. Rebinding to the current target is an
+exact no-op. A successful same-shape binding-only change and a successful
+recursive public-shape replacement each record exactly one prior `ALGS`; Undo,
+Redo, and persisted restore therefore cannot separate the placeholder from its
+scoped binding or regenerated source map.
 
 Undo and redo replay the target through the complete core boundary, then rerun
 the application's audited graph and cached-job catalog admission before
@@ -208,7 +218,10 @@ duplicate no-op selection, immediate definition editing, history/persistence,
 and invalid/conflicting-name atomicity, monotonic selected-component
 name/version evolution with recursive binding replacement, exact no-op,
 stale-source reconciliation, history/persistence, and invalid, regressing, or
-conflicting metadata atomicity, abandoned-redo clearing, and
+conflicting metadata atomicity, exact scoped child-occurrence rebinding with
+stable-ID endpoint preservation, same-target no-op, recursive shape refresh,
+history/persistence, and atomic rejection of missing connectors, cycles,
+unknown targets, or authority replacement, abandoned-redo clearing, and
 transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 
@@ -236,3 +249,15 @@ byte-for-byte (SHA-256
 rejected a selected-component digest substitution and rewrote the exact
 canonical fallback, ignored the retired storage key without migration, and
 downloaded a `.algs` exactly equal to the canonical local-storage bytes.
+
+Optimized Chromium also exercised a same-shape scoped child rebind through the
+visible selected-definition inspector. The complete 16,413-byte `ALGS` changed
+from A-bound identity
+`7579d044c131d3098b3bfd60a8455becda9e1d98f17c4a57ce5f1f7e6d9bc5bb`
+to B-bound identity
+`129c1617f9f33af2374db8e294703699ad455cdd8a71dc50d0dc9fb4851f9ff4`
+while the parent `ALGC`, parent `ALGW`, placement, allocation cursors, and
+flattened workspace remained byte-identical. Reapplying B was an exact no-op;
+visible Undo restored A, and Redo plus fresh browser restore recovered B
+byte-for-byte. The selected placeholder itself correctly remained ephemeral
+across reload while its canonical scoped binding persisted.

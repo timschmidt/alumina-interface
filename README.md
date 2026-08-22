@@ -326,6 +326,16 @@ prototype.
   integer dragging against the dependency's embedded `ALGW`. An existing
   library dependency can be added as a child through one transaction that
   creates its fresh monotonic placeholder and scoped `ALGH` binding together.
+  The same selector can rebind one selected child placeholder to another exact
+  library dependency. Stable child connector IDs preserve every compatible
+  parent-local wire and public endpoint while the placeholder node, label,
+  placement, and allocation cursors remain exact. A same-shape replacement
+  changes only the scoped binding at the parent-definition boundary; a changed
+  public shape recursively replaces affected parent identities. Both paths
+  freshly flatten and regenerate `ALGM` before one complete-session commit.
+  Missing or incompatible live connectors, cycles, limits, and indirect
+  control-authority replacement reject atomically, while selecting the already
+  bound child is an exact no-op.
   `ALGH`-owned child placeholders remain visible and wireable; the dedicated
   inspector action removes a placeholder, its incident wires, and its scoped
   binding together, while an ordinary node deletion remains invalid and live

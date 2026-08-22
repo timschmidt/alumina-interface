@@ -164,6 +164,17 @@ connect/disconnect. Transient node, wire, drag, and text-draft state is scoped
 separately from the main control canvas. It can add another dependency already
 present in the `ALGH` library as a fresh child occurrence; the parent-local
 placeholder and scoped `GraphComponentInstance` binding commit atomically.
+The placeholder inspector can also rebind that one scoped occurrence to the
+dependency chosen by the child-component selector. The placeholder's node,
+label, placement, allocation cursors, and every live endpoint whose stable
+child connector ID remains compatible are preserved. If the replacement has
+the same public placeholder shape, the parent `ALGC` remains exact and only
+its scoped `ALGH` binding changes at that boundary; otherwise affected parent
+identities are recursively replaced. Either case freshly validates and
+flattens the complete hierarchy and regenerates `ALGM` before commit. Missing
+or incompatible live connectors, cycles, limits, and an indirect rewrite of
+the complete-session control `ALGC` reject atomically. Rebinding to the already
+bound child is an exact no-op.
 `ALGH`-owned placeholders remain visible and wireable but cannot be deleted by
 the ordinary node action. A dedicated occurrence action removes the
 placeholder, incident wires, and scoped binding together, unless a public
@@ -297,8 +308,7 @@ recursive expansion, and deterministically flattens a component DAG to ordinary
 `ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
 from the embedded dependency library and preserves them across compatible
 selected-component edits. Nested definition import with separately supplied
-scoped bindings, package signatures/permissions, locked
-dependency manifests, child rebinding,
+scoped bindings, package signatures/permissions, locked dependency manifests,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.
 `ALGC` V1 grants no semantic, implementation, resource, timing, safety,
