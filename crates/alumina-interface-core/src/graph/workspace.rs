@@ -315,6 +315,7 @@ impl GraphWorkspaceDocument {
     }
 
     /// Transactionally move one node and advance only the workspace revision.
+    /// An exact no-op does not advance the revision.
     pub fn move_node(
         &mut self,
         node: GraphNodeId,
@@ -323,14 +324,17 @@ impl GraphWorkspaceDocument {
     ) -> Result<(), GraphWorkspaceError> {
         validate_coordinate(x, self.limits)?;
         validate_coordinate(y, self.limits)?;
-        let revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
         let mut placements = self.placements.clone();
         let index = placements
             .binary_search_by_key(&node, |placement| placement.node)
             .map_err(|_| GraphWorkspaceError::UnknownNode(node))?;
+        if placements[index].x() == x && placements[index].y() == y {
+            return Ok(());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
         placements[index] = GraphNodePlacement::new(node, x, y);
         let candidate = Self::try_new(
             self.limits,
@@ -512,7 +516,8 @@ impl GraphWorkspaceDocument {
     }
 
     /// Transactionally replace one exact parameter value while preserving its
-    /// stable ID, name, and registered root type.
+    /// stable ID, name, and registered root type. An exact no-op does not
+    /// advance either revision.
     pub fn set_parameter(
         &mut self,
         node_id: GraphNodeId,
@@ -535,6 +540,9 @@ impl GraphWorkspaceDocument {
         let received = value.value_type();
         if expected != received {
             return Err(GraphWorkspaceError::ParameterTypeMismatch { expected, received });
+        }
+        if parameter.value() == &value {
+            return Ok(());
         }
         *parameter = NodeParameter::new(parameter.id(), parameter.name(), value);
         let replacement = NodeDefinition::new(
@@ -1523,6 +1531,10 @@ mod tests {
         );
         assert_ne!(encode_graph_workspace(&workspace).unwrap().digest(), before);
 
+        let unchanged = workspace.clone();
+        workspace.move_node(GraphNodeId::new(1), 321, 654).unwrap();
+        assert_eq!(workspace, unchanged);
+
         let retained = workspace.clone();
         assert_eq!(
             workspace
@@ -1786,6 +1798,19 @@ mod tests {
                 .value(),
             &GraphValue::ExactRational(Rational::fraction(3, 2).unwrap())
         );
+
+        let unchanged = workspace.clone();
+        let exact_no_op = workspace
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .clone();
+        workspace
+            .set_parameter(GraphNodeId::new(8), 1, exact_no_op)
+            .unwrap();
+        assert_eq!(workspace, unchanged);
 
         let retained = workspace.clone();
         let other_type = workspace

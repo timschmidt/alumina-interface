@@ -66,11 +66,13 @@ It embeds graph identity
   name, and registered root type.
 
 Each operation constructs and validates a complete candidate before replacing
-the prior document. Rejected coordinates, missing IDs, exhausted counters,
-wrong port direction/type, duplicate target ownership, invalid label/domain,
-parameter type drift, or revision overflow leave the workspace byte-for-byte
-unchanged. Node, wire, label, domain, and parameter edits also advance the
-embedded graph revision and therefore change its canonical digest. Labels are
+the prior document. Exact placement, label, domain, and parameter no-ops do not
+advance a graph or workspace revision. Rejected coordinates, missing IDs,
+exhausted counters, wrong port direction/type, duplicate target ownership,
+invalid label/domain, parameter type drift, or revision overflow leave the
+workspace byte-for-byte unchanged. Changes to node, wire, label, domain, and
+parameter facts also advance the embedded graph revision and therefore change
+its canonical digest. Labels are
 canonical human metadata, but are never matched as behavior identity. The core
 domain replacement is deliberately structural: allowed kind/domain families,
 clock relationships, wire crossings, implementations, target capabilities, and
@@ -94,6 +96,16 @@ placements in the graph, sorted canonically, and never accepted as raw text.
 The complete candidate is rerun through the fixed semantic registry before it
 can commit. A graph with no reviewed device identity consequently cannot invent
 a Service or Realtime target.
+
+The selected-library definition editor applies that same palette, exact node
+metadata, integer placement, and typed-wire surface to the embedded `ALGW` of
+one non-authoritative `ALGC` dependency. It keeps separate selection, drag,
+pending-wire, and text-draft state from the complete-session control canvas.
+Component-instance placeholders can be selected, moved, relabeled, and wired,
+but cannot be deleted because their scoped occurrence records belong to
+`ALGH`. Every accepted definition edit replaces the selected `ALGC`,
+recursively refreshes `ALGH` and `ALGM`, reruns flattened semantics, and records
+one complete `ALGS`; control `ALGW`, probes, and cached jobs remain exact.
 
 The shared parameter surface accepts bounded schema-directed Boolean,
 exact-rational, measurement-interval, canonical signed/unsigned lattice-count,
@@ -133,8 +145,9 @@ operations, or a subset of the visible state. One timeline therefore restores
 the control `ALGW`, bound `ALGP`, catalog-bound cached-job `ALGW`, selected
 `ALGC`, complete `ALGH`, and exact `ALGM` atomically. A successful graph,
 probe, trigger, sidecar-import, cached-job, component-library, or direct
-root-instance edit—including root placement, typed root wiring, and exact
-front-panel binding/layout authoring—records the exact prior session and
+root-instance edit—including root placement, typed root wiring, exact
+front-panel binding/layout authoring, and selected-library definition
+edits—records the exact prior session and
 discards the abandoned redo branch. An exact no-op records nothing.
 
 Every navigation target first replays the complete `ALGS` and all nested

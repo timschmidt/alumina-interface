@@ -269,16 +269,27 @@ session's exact control workspace, the UI rejects the candidate atomically.
 Such a change requires a future coordinated control-workspace transaction; it
 cannot silently change the `ALGS` authority.
 
+The library selector also drives a separate selected-definition canvas for a
+non-authoritative dependency's embedded `ALGW`. Audited ordinary nodes can be
+created/deleted, edited, moved, and wired around visible collapsed child
+occurrences. A child placeholder remains owned by its scoped
+`GraphComponentInstance` record and therefore cannot be deleted as an ordinary
+node. Accepted definition edits replace the exact selected dependency, retain
+logical selection across the replacement report, refresh affected ancestors
+and flattened provenance, and enter complete-session history. The main control
+workspace, probes, cached-job workspace, root workspace when the public shape
+is unchanged, and unrelated dependencies remain exact.
+
 ## Deliberately open
 
 Direct root-instance creation/deletion is implemented through the dedicated
 library panel, and exact root placement/wiring is implemented on its structural
-canvas. Nested definition editing and import with separately supplied nested
-bindings, general library creation, parameter promotion/overrides, package
+canvas. Nested definition import with separately supplied scoped bindings,
+general library creation, parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
-flattening, interactive traversal from final items into nested editable
-canvases, coordinated descendant/control-authority replacement, and executable
-front-panel inputs remain open.
+flattening, scoped child-occurrence creation/deletion, interactive traversal
+from final items into their source definitions, coordinated descendant/control-
+authority replacement, and executable front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2

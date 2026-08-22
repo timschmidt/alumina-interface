@@ -45,8 +45,8 @@ use alumina_interface_core::graph::{
     NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
     NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
     RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
-    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireEndpoint,
-    analyze_graph_draft, compile_representative_exact_control_graph,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue,
+    WireDefinition, WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
     encode_graph_hierarchy, encode_graph_hierarchy_source_map, encode_graph_probes,
     encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
@@ -220,6 +220,47 @@ struct NodeDrag {
     node: GraphNodeId,
     origin: GraphNodePlacement,
     delta: egui::Vec2,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentDefinitionEditor {
+    scope: Option<Digest>,
+    palette_index: usize,
+    selected_node: Option<GraphNodeId>,
+    pending_source: Option<WireEndpoint>,
+    drag: Option<NodeDrag>,
+    parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
+    node_label_drafts: BTreeMap<GraphNodeId, String>,
+    status: String,
+}
+
+impl Default for ComponentDefinitionEditor {
+    fn default() -> Self {
+        Self {
+            scope: None,
+            palette_index: 0,
+            selected_node: None,
+            pending_source: None,
+            drag: None,
+            parameter_drafts: BTreeMap::new(),
+            node_label_drafts: BTreeMap::new(),
+            status:
+                "select a non-authoritative ALGH library dependency to edit its exact definition"
+                    .to_owned(),
+        }
+    }
+}
+
+impl ComponentDefinitionEditor {
+    fn reset_scope(&mut self, scope: Option<Digest>, status: String) {
+        self.scope = scope;
+        self.selected_node = None;
+        self.pending_source = None;
+        self.drag = None;
+        self.parameter_drafts.clear();
+        self.node_label_drafts.clear();
+        self.status = status;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2271,6 +2312,7 @@ pub(crate) struct ExactControlWorkspace {
     panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
     component_connector_drafts: BTreeMap<ComponentConnectorSelection, ComponentConnectorDraft>,
     component_connector_scope: Option<Digest>,
+    component_definition: ComponentDefinitionEditor,
     selected_node: Option<GraphNodeId>,
     selected_panel_item: Option<GraphFrontPanelItemId>,
     selected_component_connector: Option<ComponentConnectorSelection>,
@@ -2391,6 +2433,7 @@ impl ExactControlWorkspace {
             panel_item_drafts: BTreeMap::new(),
             component_connector_drafts: BTreeMap::new(),
             component_connector_scope: selected_hierarchy_component,
+            component_definition: ComponentDefinitionEditor::default(),
             selected_node: None,
             selected_panel_item,
             selected_component_connector,
@@ -2648,6 +2691,9 @@ impl ExactControlWorkspace {
         ui.separator();
 
         self.show_hierarchy_authoring(ui);
+        ui.separator();
+
+        self.show_selected_component_definition(ui);
         ui.separator();
 
         self.show_front_panel(ui);
@@ -3432,6 +3478,870 @@ impl ExactControlWorkspace {
 
     #[allow(
         clippy::too_many_lines,
+        reason = "selected dependency identity, palette, exact canvas interaction, and node inspector form one scoped definition editor"
+    )]
+    fn show_selected_component_definition(&mut self, ui: &mut egui::Ui) {
+        self.reconcile_component_definition_editor();
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Selected component definition");
+            ui.weak("ALGC workspace canvas · authoring only");
+        });
+        ui.label(
+            "Edit the internal ALGW of the selected non-authoritative library dependency. Every accepted node, parameter, placement, or typed-wire edit replaces that exact ALGC, recursively refreshes ALGH/ALGM, and commits one complete ALGS history state.",
+        );
+        let Some(component) = self.component.clone() else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_definition.status);
+            return;
+        };
+        let Some(scope) = self.component_definition.scope else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_definition.status);
+            return;
+        };
+        let Some(dependency) = component.hierarchy.document.dependency(scope) else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "the selected exact component definition is no longer available",
+            );
+            return;
+        };
+        let document = dependency.document().clone();
+        let workspace = document.workspace().clone();
+        let authoritative = scope == component.encoding.digest();
+        ui.monospace(format!(
+            "{} · {}… · ALGW {}… · revision {} · {} nodes / {} wires{}",
+            document.name(),
+            digest_prefix(scope.0),
+            digest_prefix(workspace.graph_digest().0),
+            document.revision(),
+            workspace.graph().nodes().len(),
+            workspace.graph().wires().len(),
+            if authoritative {
+                " · control authority"
+            } else {
+                " · editable library definition"
+            },
+        ));
+        if authoritative {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "This ALGC supplies the complete-session control ALGW. Edit it on the main exact-control canvas below so probes, panel bindings, and control authority move together.",
+            );
+            ui.label(&self.component_definition.status);
+            return;
+        }
+        let presentation = match structural_workspace_presentation(&workspace) {
+            Ok(presentation) => presentation,
+            Err(error) => {
+                self.component_definition.status =
+                    format!("component definition canvas rejected without mutation: {error}");
+                ui.colored_label(egui::Color32::YELLOW, &self.component_definition.status);
+                return;
+            }
+        };
+
+        if self.component_definition.palette_index >= self.palette.len() {
+            self.component_definition.palette_index = 0;
+        }
+        let palette_label = self
+            .palette
+            .get(self.component_definition.palette_index)
+            .map_or("audited palette unavailable", |entry| {
+                entry.display_name.as_str()
+            });
+        let mut add_requested = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Definition palette");
+            egui::ComboBox::from_id_salt("component_definition_palette")
+                .selected_text(palette_label)
+                .show_ui(ui, |ui| {
+                    for (index, entry) in self.palette.iter().enumerate() {
+                        ui.selectable_value(
+                            &mut self.component_definition.palette_index,
+                            index,
+                            &entry.display_name,
+                        );
+                    }
+                });
+            add_requested = ui.button("add node to definition").clicked();
+            if let Some(source) = self.component_definition.pending_source {
+                ui.colored_label(
+                    egui::Color32::WHITE,
+                    format!("wiring #{}.{}", source.node.get(), source.port.get()),
+                );
+                if ui.small_button("cancel definition wire").clicked() {
+                    self.component_definition.pending_source = None;
+                    "pending component-definition wire cancelled"
+                        .clone_into(&mut self.component_definition.status);
+                }
+            }
+        });
+        if add_requested {
+            self.add_component_definition_node(scope);
+            ui.label(&self.component_definition.status);
+            return;
+        }
+
+        if self.show_component_definition_canvas(ui, scope, &workspace, &presentation) {
+            ui.label(&self.component_definition.status);
+            return;
+        }
+        self.show_component_definition_selected_node(ui, scope, &workspace);
+        ui.label(&self.component_definition.status);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the scoped definition canvas keeps node, port, wire, and drag interactions together before one deferred transaction"
+    )]
+    fn show_component_definition_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Digest,
+        workspace: &GraphWorkspaceDocument,
+        presentation: &GraphPresentation,
+    ) -> bool {
+        ui.strong("Canonical selected-definition canvas");
+        ui.weak(
+            "Drag node headers on the exact integer canvas. Select an output then a typed input to connect; secondary-click an owned input to disconnect. Component-instance placeholders may be wired or relabeled but are owned by ALGH and cannot be deleted here.",
+        );
+        let nodes = workspace.graph().nodes().to_vec();
+        let wires = workspace.graph().wires().to_vec();
+        let mut clicked_node = None;
+        let mut canvas_clicked = false;
+        let mut move_request = None;
+        let mut port_edit = None;
+        egui::ScrollArea::both()
+            .id_salt(("selected_component_definition_canvas", scope.0))
+            .auto_shrink([false, false])
+            .min_scrolled_height(260.0)
+            .max_height(360.0)
+            .show(ui, |ui| {
+                let canvas_size = egui::vec2(
+                    presentation.size.x.max(ui.available_width()),
+                    presentation.size.y.max(260.0),
+                );
+                let (canvas, painter) = ui.allocate_painter(canvas_size, egui::Sense::click());
+                canvas_clicked = canvas.clicked();
+                painter.rect_filled(canvas.rect, 0.0, egui::Color32::from_rgb(17, 21, 29));
+                paint_grid(&painter, canvas.rect);
+                let origin = canvas.rect.min.to_vec2();
+                for wire in &wires {
+                    Self::paint_wire(
+                        &painter,
+                        origin,
+                        workspace.graph(),
+                        presentation,
+                        self.component_definition.selected_node,
+                        wire,
+                    );
+                }
+                for node in &nodes {
+                    let Some(node_presentation) = presentation.nodes.get(&node.id()) else {
+                        continue;
+                    };
+                    let rect = node_presentation.rect.translate(origin);
+                    let header_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
+                    );
+                    let response = ui.interact(
+                        header_rect,
+                        egui::Id::new((
+                            "selected_component_definition_node",
+                            scope.0,
+                            node.id().get(),
+                        )),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if response.drag_started()
+                        && let Some(placement) = workspace.placement(node.id())
+                    {
+                        self.component_definition.drag = Some(NodeDrag {
+                            node: node.id(),
+                            origin: placement,
+                            delta: egui::Vec2::ZERO,
+                        });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.component_definition.drag.as_mut()
+                        && drag.node == node.id()
+                    {
+                        drag.delta += response.drag_delta();
+                    }
+                    let dragging = self
+                        .component_definition
+                        .drag
+                        .filter(|drag| drag.node == node.id())
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let painted_rect = dragging.map_or(rect, |drag| rect.translate(drag.delta));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        move_request = Some((drag, drag.delta));
+                        self.component_definition.drag = None;
+                    }
+                    if response.clicked() {
+                        clicked_node = Some(node.id());
+                    }
+                    for (index, port) in node.inputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, false);
+                        let response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "selected_component_definition_input",
+                                scope.0,
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        let endpoint = WireEndpoint {
+                            node: node.id(),
+                            port: port.id(),
+                        };
+                        if response.secondary_clicked() {
+                            port_edit = Some(PortEdit::DisconnectInput(endpoint));
+                            clicked_node = Some(node.id());
+                        } else if response.clicked() {
+                            port_edit = Some(PortEdit::ConnectInput(endpoint));
+                            clicked_node = Some(node.id());
+                        }
+                    }
+                    for (index, port) in node.outputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, true);
+                        let response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "selected_component_definition_output",
+                                scope.0,
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        if response.clicked() {
+                            port_edit = Some(PortEdit::SelectOutput(WireEndpoint {
+                                node: node.id(),
+                                port: port.id(),
+                            }));
+                            clicked_node = Some(node.id());
+                        }
+                    }
+                    self.paint_node(
+                        &painter,
+                        painted_rect,
+                        node,
+                        node_presentation.rank,
+                        self.component_definition.selected_node,
+                    );
+                }
+                if let Some(source) = self.component_definition.pending_source
+                    && let Some(anchor) = port_anchor(workspace.graph(), presentation, source, true)
+                    && let Some(pointer) = ui.ctx().pointer_hover_pos()
+                {
+                    painter.line_segment(
+                        [anchor + origin, pointer],
+                        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    );
+                }
+            });
+        let interaction_consumed =
+            clicked_node.is_some() || move_request.is_some() || port_edit.is_some();
+        if let Some((drag, delta)) = move_request {
+            return self.commit_component_definition_node_drag(scope, drag, delta);
+        }
+        if let Some(edit) = port_edit
+            && self.handle_component_definition_port_edit(scope, edit)
+        {
+            return true;
+        }
+        if let Some(node) = clicked_node {
+            self.component_definition.selected_node = Some(node);
+        } else if canvas_clicked && !interaction_consumed {
+            self.component_definition.selected_node = None;
+        }
+        false
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the definition inspector presents one exact node and defers each possible canonical mutation until the display borrow ends"
+    )]
+    fn show_component_definition_selected_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Digest,
+        workspace: &GraphWorkspaceDocument,
+    ) {
+        let Some(id) = self.component_definition.selected_node else {
+            ui.weak("Select a definition node to inspect exact ports and edit its metadata.");
+            return;
+        };
+        let Some(node) = workspace.graph().node(id).cloned() else {
+            return;
+        };
+        let graph = workspace.graph().clone();
+        let placement = workspace.placement(id);
+        let schema = self
+            .fixture
+            .registry()
+            .semantic_registry()
+            .schema(node.kind());
+        let state = schema.and_then(alumina_interface_core::graph::NodeSchema::state);
+        let domain_choices = schema.map_or_else(Vec::new, |schema| {
+            audited_domain_choices(&graph, schema.allowed_domains())
+        });
+        let maximum_label_bytes = graph.schema().limits().maximum_label_bytes;
+        let mut label_text = self
+            .component_definition
+            .node_label_drafts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| node.label().to_owned());
+        let placeholder = node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
+            && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION;
+        let mut delete_requested = false;
+        let mut label_request = None;
+        let mut domain_request = None;
+        let mut parameter_request = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(format!("definition #{} {}", id.get(), node.label()));
+                ui.monospace(format!("{} v{}", node.kind().name(), node.kind().version()));
+                if ui.small_button("clear").clicked() {
+                    self.component_definition.selected_node = None;
+                }
+                delete_requested = ui
+                    .add_enabled(!placeholder, egui::Button::new("delete node + wires"))
+                    .on_disabled_hover_text(
+                        "ALGH owns component-instance placeholders; remove the nested occurrence through a future scoped hierarchy operation",
+                    )
+                    .clicked();
+            });
+            (label_request, domain_request) = show_node_identity_editors(
+                ui,
+                &node,
+                &domain_choices,
+                maximum_label_bytes,
+                &mut label_text,
+            );
+            if let Some(placement) = placement {
+                ui.monospace(format!(
+                    "ALGC {}… · canvas = ({}, {}) logical px",
+                    digest_prefix(scope.0),
+                    placement.x(),
+                    placement.y()
+                ));
+            }
+            ui.horizontal_wrapped(|ui| {
+                for port in node.inputs() {
+                    ui.monospace(port_description(&graph, "in", port));
+                }
+                for port in node.outputs() {
+                    ui.monospace(port_description(&graph, "out", port));
+                }
+            });
+            parameter_request = show_node_parameter_editors(
+                ui,
+                &graph,
+                &node,
+                &mut self.component_definition.parameter_drafts,
+            );
+            if placeholder {
+                ui.weak("Collapsed nested ALGC occurrence · structural node owned by ALGH");
+            } else if let Some(state) = state {
+                ui.label(format!(
+                    "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
+                    state.clock().get(),
+                    state.value_type().get(),
+                    state.declared_storage_bytes()
+                ));
+            }
+        });
+        self.component_definition
+            .node_label_drafts
+            .insert(id, label_text);
+        if delete_requested {
+            self.delete_component_definition_node(scope, id);
+        } else if let Some(label) = label_request {
+            self.commit_component_definition_node_label(scope, id, &label);
+        } else if let Some(domain) = domain_request {
+            self.commit_component_definition_node_domain(scope, id, domain);
+        } else if let Some((parameter, text)) = parameter_request {
+            self.commit_component_definition_parameter_text(scope, id, parameter, &text);
+        }
+    }
+
+    fn editable_component_definition(
+        &self,
+        scope: Digest,
+    ) -> Result<(ComponentPackage, GraphComponentDocument), String> {
+        let current = self
+            .component
+            .clone()
+            .ok_or_else(|| "no selected component hierarchy is attached".to_owned())?;
+        if self.component_definition.scope != Some(scope)
+            || self.selected_hierarchy_component != Some(scope)
+        {
+            return Err("the selected component-definition scope changed".to_owned());
+        }
+        if current.encoding.digest() == scope {
+            return Err(
+                "the complete-session control ALGC must be edited on the main canvas".to_owned(),
+            );
+        }
+        let document = current
+            .hierarchy
+            .document
+            .dependency(scope)
+            .ok_or_else(|| "the selected component definition is unavailable".to_owned())?
+            .document()
+            .clone();
+        Ok((current, document))
+    }
+
+    fn reject_component_definition_edit(&mut self, context: &str, error: impl std::fmt::Display) {
+        self.component_definition.status =
+            format!("component definition {context} rejected without mutation: {error}");
+        self.component_status
+            .clone_from(&self.component_definition.status);
+        self.edit_status
+            .clone_from(&self.component_definition.status);
+    }
+
+    fn commit_component_definition_workspace(
+        &mut self,
+        scope: Digest,
+        candidate: GraphWorkspaceDocument,
+        success: &str,
+    ) -> bool {
+        let (current, mut document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("edit", error);
+                return false;
+            }
+        };
+        if &candidate == document.workspace() {
+            self.component_definition.status =
+                format!("{success}; canonical component definition already matched");
+            self.component_status
+                .clone_from(&self.component_definition.status);
+            self.edit_status
+                .clone_from(&self.component_definition.status);
+            return true;
+        }
+        if let Err(error) = structural_workspace_presentation(&candidate) {
+            self.reject_component_definition_edit("presentation", error);
+            return false;
+        }
+        if let Err(error) = document.replace_workspace(candidate) {
+            self.reject_component_definition_edit("workspace replacement", error);
+            return false;
+        }
+        match self.commit_component_dependency_document(
+            &current,
+            scope,
+            document,
+            success,
+            self.selected_panel_item,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = self.selected_hierarchy_component;
+                self.reconcile_component_definition_editor();
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+                true
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("transaction", error);
+                false
+            }
+        }
+    }
+
+    fn add_component_definition_node(&mut self, scope: Digest) {
+        let Some(entry) = self
+            .palette
+            .get(self.component_definition.palette_index)
+            .cloned()
+        else {
+            self.reject_component_definition_edit(
+                "node creation",
+                "palette selection is unavailable",
+            );
+            return;
+        };
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node creation", error);
+                return;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        let (x, y) = match new_node_position(&candidate) {
+            Ok(position) => position,
+            Err(error) => {
+                self.reject_component_definition_edit("node creation", error);
+                return;
+            }
+        };
+        let id = match candidate.create_node(entry.prototype, x, y) {
+            Ok(id) => id,
+            Err(error) => {
+                self.reject_component_definition_edit("node creation", error);
+                return;
+            }
+        };
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "created {} as selected-definition node {} at canonical canvas ({x}, {y})",
+                entry.display_name,
+                id.get()
+            ),
+        ) {
+            self.component_definition.selected_node = Some(id);
+            self.component_definition.pending_source = None;
+        }
+    }
+
+    fn delete_component_definition_node(&mut self, scope: Digest, id: GraphNodeId) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node deletion", error);
+                return;
+            }
+        };
+        let Some(node) = document.workspace().graph().node(id) else {
+            self.reject_component_definition_edit(
+                "node deletion",
+                format!("node {} is unavailable", id.get()),
+            );
+            return;
+        };
+        if node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
+            && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION
+        {
+            self.reject_component_definition_edit(
+                "node deletion",
+                "ALGH owns component-instance placeholders",
+            );
+            return;
+        }
+        let mut candidate = document.workspace().clone();
+        let removed_wires = match candidate.delete_node(id) {
+            Ok(count) => count,
+            Err(error) => {
+                self.reject_component_definition_edit("node deletion", error);
+                return;
+            }
+        };
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "deleted selected-definition node {} and {removed_wires} incident wire(s) without reusing identities",
+                id.get()
+            ),
+        ) {
+            self.component_definition.selected_node = None;
+            self.component_definition.pending_source = self
+                .component_definition
+                .pending_source
+                .filter(|source| source.node != id);
+            self.component_definition
+                .parameter_drafts
+                .retain(|(node, _), _| *node != id);
+            self.component_definition.node_label_drafts.remove(&id);
+        }
+    }
+
+    fn commit_component_definition_node_label(
+        &mut self,
+        scope: Digest,
+        id: GraphNodeId,
+        label: &str,
+    ) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node label", error);
+                return;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        if let Err(error) = candidate.set_node_label(id, label) {
+            self.reject_component_definition_edit("node label", error);
+            return;
+        }
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "set selected-definition node {} label to exact UTF-8 {label:?}",
+                id.get()
+            ),
+        ) {
+            self.component_definition
+                .node_label_drafts
+                .insert(id, label.to_owned());
+        }
+    }
+
+    fn commit_component_definition_node_domain(
+        &mut self,
+        scope: Digest,
+        id: GraphNodeId,
+        domain: ExecutionDomain,
+    ) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node domain", error);
+                return;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        if let Err(error) = candidate.set_node_domain(id, domain) {
+            self.reject_component_definition_edit("node domain", error);
+            return;
+        }
+        self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "set selected-definition node {} execution placement to {}",
+                id.get(),
+                domain_choice_label(domain)
+            ),
+        );
+    }
+
+    fn commit_component_definition_parameter_text(
+        &mut self,
+        scope: Digest,
+        id: GraphNodeId,
+        parameter_id: u32,
+        text: &str,
+    ) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("parameter", error);
+                return;
+            }
+        };
+        let workspace = document.workspace();
+        let Some(parameter) = workspace
+            .graph()
+            .node(id)
+            .and_then(|node| {
+                node.parameters()
+                    .iter()
+                    .find(|value| value.id() == parameter_id)
+            })
+            .cloned()
+        else {
+            self.reject_component_definition_edit(
+                "parameter",
+                format!("node {} parameter {parameter_id} is unavailable", id.get()),
+            );
+            return;
+        };
+        let value =
+            match parse_parameter_text(workspace.graph(), parameter.value().value_type(), text) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.reject_component_definition_edit("parameter", error);
+                    return;
+                }
+            };
+        let canonical =
+            parameter_edit_text(workspace.graph(), &value).unwrap_or_else(|| text.to_owned());
+        let mut candidate = workspace.clone();
+        if let Err(error) = candidate.set_parameter(id, parameter_id, value) {
+            self.reject_component_definition_edit("parameter", error);
+            return;
+        }
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "set selected-definition node {} parameter {} to exact canonical {canonical}",
+                id.get(),
+                parameter.name()
+            ),
+        ) {
+            self.component_definition
+                .parameter_drafts
+                .insert((id, parameter_id), canonical);
+        }
+    }
+
+    fn commit_component_definition_node_drag(
+        &mut self,
+        scope: Digest,
+        drag: NodeDrag,
+        delta: egui::Vec2,
+    ) -> bool {
+        let (x, y) = match (
+            quantized_canvas_coordinate(drag.origin.x(), delta.x),
+            quantized_canvas_coordinate(drag.origin.y(), delta.y),
+        ) {
+            (Ok(x), Ok(y)) => (x, y),
+            (Err(error), _) | (_, Err(error)) => {
+                self.reject_component_definition_edit("node move", error);
+                return false;
+            }
+        };
+        if x == drag.origin.x() && y == drag.origin.y() {
+            self.component_definition.status = format!(
+                "selected-definition node {} already matched canonical canvas ({x}, {y})",
+                drag.node.get()
+            );
+            self.component_status
+                .clone_from(&self.component_definition.status);
+            self.edit_status
+                .clone_from(&self.component_definition.status);
+            return true;
+        }
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node move", error);
+                return false;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        if let Err(error) = candidate.move_node(drag.node, x, y) {
+            self.reject_component_definition_edit("node move", error);
+            return false;
+        }
+        self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "moved selected-definition node {} to canonical canvas ({x}, {y})",
+                drag.node.get()
+            ),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "typed output selection plus transactional connect/disconnect share one scoped pending-wire state"
+    )]
+    fn handle_component_definition_port_edit(&mut self, scope: Digest, edit: PortEdit) -> bool {
+        match edit {
+            PortEdit::SelectOutput(source) => {
+                if self.component_definition.pending_source == Some(source) {
+                    self.component_definition.pending_source = None;
+                    "pending component-definition wire cancelled"
+                        .clone_into(&mut self.component_definition.status);
+                } else {
+                    self.component_definition.pending_source = Some(source);
+                    self.component_definition.status = format!(
+                        "selected definition output #{}.{}; choose one typed input",
+                        source.node.get(),
+                        source.port.get()
+                    );
+                }
+                false
+            }
+            PortEdit::ConnectInput(target) => {
+                let Some(source) = self.component_definition.pending_source else {
+                    self.component_definition.status = format!(
+                        "definition input #{}.{} selected; choose an output first",
+                        target.node.get(),
+                        target.port.get()
+                    );
+                    return false;
+                };
+                let (_, document) = match self.editable_component_definition(scope) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.reject_component_definition_edit("wire", error);
+                        return false;
+                    }
+                };
+                let mut candidate = document.workspace().clone();
+                let id = match candidate.connect(source, target) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        self.reject_component_definition_edit("wire", error);
+                        return false;
+                    }
+                };
+                let changed = self.commit_component_definition_workspace(
+                    scope,
+                    candidate,
+                    &format!(
+                        "connected selected-definition wire {} from #{}.{} to #{}.{}",
+                        id.get(),
+                        source.node.get(),
+                        source.port.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                );
+                if changed {
+                    self.component_definition.pending_source = None;
+                }
+                changed
+            }
+            PortEdit::DisconnectInput(target) => {
+                let (_, document) = match self.editable_component_definition(scope) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.reject_component_definition_edit("wire removal", error);
+                        return false;
+                    }
+                };
+                let Some(id) = document
+                    .workspace()
+                    .graph()
+                    .wires()
+                    .iter()
+                    .find(|wire| wire.target() == target)
+                    .map(|wire| wire.id())
+                else {
+                    self.component_definition.status = format!(
+                        "definition input #{}.{} is already disconnected",
+                        target.node.get(),
+                        target.port.get()
+                    );
+                    return false;
+                };
+                let mut candidate = document.workspace().clone();
+                if let Err(error) = candidate.disconnect(id) {
+                    self.reject_component_definition_edit("wire removal", error);
+                    return false;
+                }
+                let changed = self.commit_component_definition_workspace(
+                    scope,
+                    candidate,
+                    &format!(
+                        "disconnected selected-definition wire {} from input #{}.{}",
+                        id.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                );
+                if changed {
+                    self.component_definition.pending_source = None;
+                }
+                changed
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
         reason = "candidate hierarchy mutation, ALGH/ALGM regeneration, complete-session admission, history recording, and commit remain one auditable transaction"
     )]
     fn apply_hierarchy_action(&mut self, action: HierarchyUiAction) {
@@ -3627,6 +4537,7 @@ impl ExactControlWorkspace {
         self.selected_hierarchy_component = selected_component;
         self.selected_hierarchy_instance = selected_instance;
         self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_definition_editor();
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.component_status = format!("{status}; complete ALGS history recorded");
@@ -3938,10 +4849,15 @@ impl ExactControlWorkspace {
         self.history = history;
         self.panel_item_drafts.clear();
         self.component_connector_drafts.clear();
+        self.component_definition.scope = self
+            .component_definition
+            .scope
+            .map(|scope| report.resolve(scope));
         self.selected_hierarchy_component = self
             .selected_hierarchy_component
             .map(|selected| report.resolve(selected));
         self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_definition_editor();
         self.reconcile_component_connector_selection(None);
         self.reconcile_panel_selection(selected_panel_item);
         self.persistence_dirty = true;
@@ -4090,6 +5006,66 @@ impl ExactControlWorkspace {
         }) {
             self.hierarchy_drag = None;
         }
+    }
+
+    fn reconcile_component_definition_editor(&mut self) {
+        let snapshot = self.component.as_ref().and_then(|component| {
+            let scope = self.selected_hierarchy_component?;
+            let dependency = component.hierarchy.document.dependency(scope)?;
+            Some((
+                scope,
+                scope == component.encoding.digest(),
+                dependency.document().name().to_owned(),
+                dependency.document().workspace().clone(),
+            ))
+        });
+        let Some((scope, authoritative, name, workspace)) = snapshot else {
+            if self.component_definition.scope.is_some() {
+                self.component_definition.reset_scope(
+                    None,
+                    "no exact ALGH library dependency is selected for definition authoring"
+                        .to_owned(),
+                );
+            }
+            return;
+        };
+        if self.component_definition.scope != Some(scope) {
+            let status = if authoritative {
+                format!(
+                    "{name} is the complete-session control authority; edit it on the main exact-control canvas"
+                )
+            } else {
+                format!(
+                    "selected exact {name} definition {}…; no definition edit has been proposed",
+                    digest_prefix(scope.0)
+                )
+            };
+            self.component_definition.reset_scope(Some(scope), status);
+        }
+        let graph = workspace.graph();
+        self.component_definition.selected_node = self
+            .component_definition
+            .selected_node
+            .filter(|node| graph.node(*node).is_some());
+        self.component_definition.pending_source =
+            self.component_definition.pending_source.filter(|source| {
+                graph
+                    .node(source.node)
+                    .is_some_and(|node| node.outputs().iter().any(|port| port.id() == source.port))
+            });
+        if self
+            .component_definition
+            .drag
+            .is_some_and(|drag| graph.node(drag.node).is_none())
+        {
+            self.component_definition.drag = None;
+        }
+        self.component_definition
+            .parameter_drafts
+            .retain(|(node, _), _| graph.node(*node).is_some());
+        self.component_definition
+            .node_label_drafts
+            .retain(|node, _| graph.node(*node).is_some());
     }
 
     fn reconcile_panel_selection(&mut self, preferred: Option<GraphFrontPanelItemId>) {
@@ -5041,7 +6017,14 @@ impl ExactControlWorkspace {
                 let origin = canvas.rect.min.to_vec2();
 
                 for wire in &wires {
-                    self.paint_wire(&painter, origin, wire.id(), wire.source(), wire.target());
+                    Self::paint_wire(
+                        &painter,
+                        origin,
+                        self.workspace.graph(),
+                        &self.presentation,
+                        self.selected_node,
+                        wire,
+                    );
                 }
                 for node in &nodes {
                     let Some(presentation) = self.presentation.nodes.get(&node.id()) else {
@@ -5128,7 +6111,13 @@ impl ExactControlWorkspace {
                             clicked_node = Some(node.id());
                         }
                     }
-                    self.paint_node(&painter, painted_rect, node, presentation.rank);
+                    self.paint_node(
+                        &painter,
+                        painted_rect,
+                        node,
+                        presentation.rank,
+                        self.selected_node,
+                    );
                 }
                 if let Some(source) = self.pending_source
                     && let Some(source_anchor) =
@@ -5157,37 +6146,35 @@ impl ExactControlWorkspace {
     }
 
     fn paint_wire(
-        &self,
         painter: &egui::Painter,
         origin: egui::Vec2,
-        id: GraphWireId,
-        source: WireEndpoint,
-        target: WireEndpoint,
+        document: &GraphDocument,
+        presentation: &GraphPresentation,
+        selected_node: Option<GraphNodeId>,
+        wire: &WireDefinition,
     ) {
         let (Some(source_anchor), Some(target_anchor)) = (
-            port_anchor(self.workspace.graph(), &self.presentation, source, true),
-            port_anchor(self.workspace.graph(), &self.presentation, target, false),
+            port_anchor(document, presentation, wire.source(), true),
+            port_anchor(document, presentation, wire.target(), false),
         ) else {
             return;
         };
         let source_anchor = source_anchor + origin;
         let target_anchor = target_anchor + origin;
-        let selected = self
-            .selected_node
-            .is_some_and(|node| node == source.node || node == target.node);
+        let selected = selected_node
+            .is_some_and(|node| node == wire.source().node || node == wire.target().node);
         let color = if selected {
             egui::Color32::WHITE
         } else {
-            wire_color(self.workspace.graph(), source)
+            wire_color(document, wire.source())
         };
         let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
-        let feedback_lane = self
-            .presentation
+        let feedback_lane = presentation
             .wires
-            .get(&id)
+            .get(&wire.id())
             .and_then(|wire| wire.feedback_lane);
         let points = if let Some(lane) = feedback_lane {
-            let route_y = origin.y + self.presentation.size.y - 18.0 - display_index(lane) * 13.0;
+            let route_y = origin.y + presentation.size.y - 18.0 - display_index(lane) * 13.0;
             vec![
                 source_anchor,
                 egui::pos2(source_anchor.x + 22.0, source_anchor.y),
@@ -5223,8 +6210,9 @@ impl ExactControlWorkspace {
         rect: egui::Rect,
         node: &NodeDefinition,
         rank: usize,
+        selected_node: Option<GraphNodeId>,
     ) {
-        let selected = self.selected_node == Some(node.id());
+        let selected = selected_node == Some(node.id());
         let stateful = self
             .fixture
             .registry()
@@ -5648,6 +6636,7 @@ impl ExactControlWorkspace {
         self.reconcile_hierarchy_selection(
             prior_component_digest.zip(replacement_component_digest),
         );
+        self.reconcile_component_definition_editor();
         self.reconcile_component_connector_selection(self.selected_component_connector);
         self.reconcile_panel_selection(self.selected_panel_item);
         self.replace_probe_package(probes);
@@ -5839,6 +6828,11 @@ impl ExactControlWorkspace {
         self.probe_drafts.clear();
         self.panel_item_drafts.clear();
         self.component_connector_drafts.clear();
+        self.component_definition.reset_scope(
+            self.selected_hierarchy_component,
+            "restored selected component-definition navigation from canonical ALGS authority"
+                .to_owned(),
+        );
         self.component_connector_scope = self.selected_hierarchy_component;
         self.selected_component_connector = self.component.as_ref().and_then(|component| {
             component
@@ -12285,6 +13279,434 @@ mod tests {
                 .component_status
                 .contains("would recursively rewrite the complete-session control ALGC")
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one definition lifecycle proves recursive identity refresh, exact control isolation, scoped selection, no-op behavior, history, and persistence together"
+    )]
+    fn selected_library_definition_canvas_preserves_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_control_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_source_map = initial_component.hierarchy.source_map.clone();
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let initial_wrapper_digest = initial_wrapper.digest();
+        assert_eq!(initial_wrapper.document().workspace().next_node_id(), 2);
+
+        workspace.selected_hierarchy_component = Some(initial_wrapper_digest);
+        workspace.reconcile_component_definition_editor();
+        assert_eq!(
+            workspace.component_definition.scope,
+            Some(initial_wrapper_digest)
+        );
+        workspace.component_definition.palette_index = 0;
+        workspace.add_component_definition_node(initial_wrapper_digest);
+
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_scope = workspace.component_definition.scope.unwrap();
+        let added_component = workspace.component.as_ref().unwrap();
+        let added_wrapper = added_component
+            .hierarchy
+            .document
+            .dependency(added_scope)
+            .unwrap();
+        let added_node = GraphNodeId::new(2);
+        assert_ne!(added_session, initial_session);
+        assert_ne!(added_scope, initial_wrapper_digest);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(added_node)
+        );
+        assert_eq!(added_wrapper.document().workspace().next_node_id(), 3);
+        assert!(
+            added_wrapper
+                .document()
+                .workspace()
+                .graph()
+                .node(added_node)
+                .is_some()
+        );
+        assert_eq!(added_component.document, initial_component.document);
+        assert_eq!(added_component.encoding, initial_component.encoding);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+        assert_eq!(added_component.hierarchy.document.root(), &initial_root);
+        assert_eq!(
+            added_component.hierarchy.document.flattened_node_count(),
+            initial_component.hierarchy.document.flattened_node_count() + 1
+        );
+        assert_ne!(added_component.hierarchy.source_map, initial_source_map);
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::root(GraphNodeId::new(1), added_scope)
+                })
+        );
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(
+                            added_scope,
+                            GraphNodeId::new(1),
+                            authoritative,
+                        )
+                })
+        );
+
+        workspace.commit_component_definition_node_label(
+            added_scope,
+            added_node,
+            "nested_setpoint_exact",
+        );
+        let renamed_session = workspace.authoring_session_encoding().unwrap();
+        let renamed_scope = workspace.component_definition.scope.unwrap();
+        assert_ne!(renamed_session, added_session);
+        assert_ne!(renamed_scope, added_scope);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(added_node)
+        );
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependency(renamed_scope)
+                .unwrap()
+                .document()
+                .workspace()
+                .graph()
+                .node(added_node)
+                .unwrap()
+                .label(),
+            "nested_setpoint_exact"
+        );
+
+        let no_op_history = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.commit_component_definition_node_label(
+            renamed_scope,
+            added_node,
+            "nested_setpoint_exact",
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            renamed_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            no_op_history
+        );
+
+        let origin = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(renamed_scope)
+            .unwrap()
+            .document()
+            .workspace()
+            .placement(added_node)
+            .unwrap();
+        assert!(workspace.commit_component_definition_node_drag(
+            renamed_scope,
+            NodeDrag {
+                node: added_node,
+                origin,
+                delta: egui::Vec2::ZERO,
+            },
+            egui::vec2(61.0, 37.0),
+        ));
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_scope = workspace.component_definition.scope.unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        let final_wrapper = final_component
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap();
+        let final_placement = final_wrapper
+            .document()
+            .workspace()
+            .placement(added_node)
+            .unwrap();
+        assert_eq!(final_placement.x(), origin.x() + 61);
+        assert_eq!(final_placement.y(), origin.y() + 37);
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+        assert_eq!(final_component.hierarchy.document.root(), &initial_root);
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            renamed_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(restored.workspace, initial_control_workspace);
+        assert_eq!(restored.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(restored.cached_jobs.encoding, initial_cached_job);
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_eq!(restored_component.document, initial_component.document);
+        assert_eq!(restored_component.encoding, initial_component.encoding);
+        let restored_wrapper = restored_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .document();
+        assert_eq!(
+            restored_wrapper
+                .workspace()
+                .graph()
+                .node(added_node)
+                .unwrap()
+                .label(),
+            "nested_setpoint_exact"
+        );
+        assert_eq!(
+            restored_wrapper.workspace().placement(added_node),
+            Some(final_placement)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn selected_definition_canvas_rejects_placeholder_and_control_authority_edits() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_history = workspace.history.clone();
+        let authoritative = initial_component.encoding.digest();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.delete_component_definition_node(wrapper, GraphNodeId::new(1));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("ALGH owns component-instance placeholders")
+        );
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_component_definition_editor();
+        workspace.add_component_definition_node(authoritative);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("must be edited on the main canvas")
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one typed-wire lifecycle proves duplicate rejection, disconnect, and monotonic reconnection under recursive definition replacement"
+    )]
+    fn selected_library_definition_typed_wires_retain_monotonic_identity() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_control = workspace.workspace.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+
+        workspace.component_definition.palette_index = workspace
+            .palette
+            .iter()
+            .position(|entry| entry.prototype.kind().name() == "control.source.value")
+            .unwrap();
+        workspace.add_component_definition_node(wrapper);
+        let source_scope = workspace.component_definition.scope.unwrap();
+        let source_node = GraphNodeId::new(2);
+        workspace.component_definition.palette_index = workspace
+            .palette
+            .iter()
+            .position(|entry| entry.prototype.kind().name() == "control.rate.value")
+            .unwrap();
+        workspace.add_component_definition_node(source_scope);
+        let rate_scope = workspace.component_definition.scope.unwrap();
+        let rate_node = GraphNodeId::new(3);
+        let source = WireEndpoint {
+            node: source_node,
+            port: GraphPortId::new(1),
+        };
+        let target = WireEndpoint {
+            node: rate_node,
+            port: GraphPortId::new(1),
+        };
+
+        assert!(
+            !workspace
+                .handle_component_definition_port_edit(rate_scope, PortEdit::SelectOutput(source),)
+        );
+        assert!(
+            workspace
+                .handle_component_definition_port_edit(rate_scope, PortEdit::ConnectInput(target),)
+        );
+        let connected_scope = workspace.component_definition.scope.unwrap();
+        let connected_session = workspace.authoring_session_encoding().unwrap();
+        let connected_workspace = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(connected_scope)
+            .unwrap()
+            .document()
+            .workspace();
+        assert_eq!(connected_workspace.next_node_id(), 4);
+        assert_eq!(connected_workspace.next_wire_id(), 2);
+        assert_eq!(
+            connected_workspace.graph().wires(),
+            &[alumina_interface_core::graph::WireDefinition::new(
+                GraphWireId::new(1),
+                source,
+                target,
+            )]
+        );
+
+        let history = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.component_definition.pending_source = Some(source);
+        assert!(!workspace.handle_component_definition_port_edit(
+            connected_scope,
+            PortEdit::ConnectInput(target),
+        ));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            connected_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history
+        );
+
+        assert!(workspace.handle_component_definition_port_edit(
+            connected_scope,
+            PortEdit::DisconnectInput(target),
+        ));
+        let disconnected_scope = workspace.component_definition.scope.unwrap();
+        let disconnected_workspace = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(disconnected_scope)
+            .unwrap()
+            .document()
+            .workspace();
+        assert!(disconnected_workspace.graph().wires().is_empty());
+        assert_eq!(disconnected_workspace.next_wire_id(), 2);
+
+        workspace.component_definition.pending_source = Some(source);
+        assert!(workspace.handle_component_definition_port_edit(
+            disconnected_scope,
+            PortEdit::ConnectInput(target),
+        ));
+        let final_scope = workspace.component_definition.scope.unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        let final_workspace = final_component
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap()
+            .document()
+            .workspace();
+        assert_eq!(final_workspace.next_wire_id(), 3);
+        assert_eq!(
+            final_workspace.graph().wires(),
+            &[alumina_interface_core::graph::WireDefinition::new(
+                GraphWireId::new(2),
+                source,
+                target,
+            )]
+        );
+        assert_eq!(workspace.workspace, initial_control);
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(final_component.hierarchy.document.root(), &initial_root);
     }
 
     #[test]
