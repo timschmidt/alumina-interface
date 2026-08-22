@@ -2270,6 +2270,7 @@ pub(crate) struct ExactControlWorkspace {
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
     component_connector_drafts: BTreeMap<ComponentConnectorSelection, ComponentConnectorDraft>,
+    component_connector_scope: Option<Digest>,
     selected_node: Option<GraphNodeId>,
     selected_panel_item: Option<GraphFrontPanelItemId>,
     selected_component_connector: Option<ComponentConnectorSelection>,
@@ -2389,6 +2390,7 @@ impl ExactControlWorkspace {
             probe_drafts: BTreeMap::new(),
             panel_item_drafts: BTreeMap::new(),
             component_connector_drafts: BTreeMap::new(),
+            component_connector_scope: selected_hierarchy_component,
             selected_node: None,
             selected_panel_item,
             selected_component_connector,
@@ -3642,7 +3644,17 @@ impl ExactControlWorkspace {
                 .clone_into(&mut self.component_status);
             return;
         };
-        let mut document = current.document.clone();
+        let Some(original) = self.component_connector_scope else {
+            "connector-pane edit rejected without mutation: no hierarchy library component is selected"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(dependency) = current.hierarchy.document.dependency(original) else {
+            "connector-pane edit rejected without mutation: selected hierarchy library component is unavailable"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = dependency.document().clone();
         let (status, preferred, clears_input, clears_output) = match action {
             ComponentConnectorUiAction::AddInput { name, target } => {
                 let input = match document.add_input(name, target) {
@@ -3739,8 +3751,13 @@ impl ExactControlWorkspace {
                 )
             }
         };
-        match self.commit_component_document(&current, document, &status, self.selected_panel_item)
-        {
+        match self.commit_component_dependency_document(
+            &current,
+            original,
+            document,
+            &status,
+            self.selected_panel_item,
+        ) {
             Ok(_) => {
                 if clears_input {
                     self.new_component_input_name.clear();
@@ -3842,26 +3859,68 @@ impl ExactControlWorkspace {
         status: &str,
         selected_panel_item: Option<GraphFrontPanelItemId>,
     ) -> Result<bool, String> {
-        if document == current.document {
+        self.commit_component_dependency_document(
+            current,
+            current.encoding.digest(),
+            document,
+            status,
+            selected_panel_item,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "arbitrary ALGC replacement, recursive hierarchy remap, control-authority preservation, flattening, complete-session admission, history, and UI reconciliation are one transaction"
+    )]
+    fn commit_component_dependency_document(
+        &mut self,
+        current: &ComponentPackage,
+        original: Digest,
+        document: GraphComponentDocument,
+        status: &str,
+        selected_panel_item: Option<GraphFrontPanelItemId>,
+    ) -> Result<bool, String> {
+        let dependency = current
+            .hierarchy
+            .document
+            .dependency(original)
+            .ok_or_else(|| "selected hierarchy library component is unavailable".to_owned())?;
+        if &document == dependency.document() {
+            self.reconcile_hierarchy_selection(None);
+            self.reconcile_component_connector_selection(self.selected_component_connector);
             self.reconcile_panel_selection(selected_panel_item);
-            self.component_status = format!("{status}; canonical component already matched");
+            self.component_status =
+                format!("{status}; canonical hierarchy library component already matched");
             self.edit_status.clone_from(&self.component_status);
             return Ok(false);
         }
         let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
-        let original = current.encoding.digest();
         let replacement = encoding.digest();
         let mut hierarchy_document = current.hierarchy.document.clone();
-        let remapped = hierarchy_document
-            .replace_component(original, document.clone())
+        let report = hierarchy_document
+            .replace_component_with_report(original, document.clone())
             .map_err(|error| error.to_string())?;
-        if remapped != replacement {
+        if report.requested_replacement() != replacement {
             return Err("hierarchy replacement returned a foreign ALGC identity".to_owned());
         }
+        let authoritative_original = current.encoding.digest();
+        let authoritative_replacement = report.resolve(authoritative_original);
+        if original != authoritative_original && authoritative_replacement != authoritative_original
+        {
+            return Err(
+                "library edit would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available"
+                    .to_owned(),
+            );
+        }
         let hierarchy = hierarchy_package(hierarchy_document, &self.fixture)?;
+        let (selected_document, selected_encoding) = if original == authoritative_original {
+            (document, encoding)
+        } else {
+            (current.document.clone(), current.encoding.clone())
+        };
         let candidate = ComponentPackage {
-            document,
-            encoding,
+            document: selected_document,
+            encoding: selected_encoding,
             hierarchy,
         };
         let Some(probes) = self.probes.as_ref() else {
@@ -3879,14 +3938,18 @@ impl ExactControlWorkspace {
         self.history = history;
         self.panel_item_drafts.clear();
         self.component_connector_drafts.clear();
-        self.reconcile_hierarchy_selection(Some((original, replacement)));
+        self.selected_hierarchy_component = self
+            .selected_hierarchy_component
+            .map(|selected| report.resolve(selected));
+        self.reconcile_hierarchy_selection(None);
         self.reconcile_component_connector_selection(None);
         self.reconcile_panel_selection(selected_panel_item);
         self.persistence_dirty = true;
         self.persistence_attempted = false;
         self.component_status = format!(
-            "{status}; exact ALGC {}… and complete ALGS history recorded",
-            digest_prefix(replacement.0)
+            "{status}; exact selected library ALGC {}… and complete ALGS history recorded across {} recursive identity remap(s)",
+            digest_prefix(replacement.0),
+            report.remaps().len()
         );
         self.edit_status.clone_from(&self.component_status);
         Ok(true)
@@ -4070,21 +4133,39 @@ impl ExactControlWorkspace {
         &mut self,
         preferred: Option<ComponentConnectorSelection>,
     ) {
-        let Some(component) = self.component.as_ref() else {
+        let Some((scope, document)) = self.component.as_ref().and_then(|component| {
+            let scope = self
+                .selected_hierarchy_component
+                .filter(|digest| component.hierarchy.document.dependency(*digest).is_some())
+                .unwrap_or_else(|| component.encoding.digest());
+            component
+                .hierarchy
+                .document
+                .dependency(scope)
+                .map(|dependency| (scope, dependency.document().clone()))
+        }) else {
+            self.component_connector_scope = None;
             self.selected_component_connector = None;
             self.component_connector_drafts.clear();
             self.new_component_input_target = None;
             self.new_component_output_source = None;
             return;
         };
-        let connectors = component
-            .document
+        if self.component_connector_scope != Some(scope) {
+            self.component_connector_scope = Some(scope);
+            self.selected_component_connector = None;
+            self.component_connector_drafts.clear();
+            self.new_component_input_name.clear();
+            self.new_component_input_target = None;
+            self.new_component_output_name.clear();
+            self.new_component_output_source = None;
+        }
+        let connectors = document
             .inputs()
             .iter()
             .map(|input| ComponentConnectorSelection::Input(input.id()))
             .chain(
-                component
-                    .document
+                document
                     .outputs()
                     .iter()
                     .map(|output| ComponentConnectorSelection::Output(output.id())),
@@ -4100,7 +4181,7 @@ impl ExactControlWorkspace {
             })
             .or_else(|| connectors.first().copied());
 
-        let input_choices = component_input_endpoint_choices(&component.document, None);
+        let input_choices = component_input_endpoint_choices(&document, None);
         if self.new_component_input_target.is_none_or(|target| {
             input_choices
                 .iter()
@@ -4108,7 +4189,7 @@ impl ExactControlWorkspace {
         }) {
             self.new_component_input_target = input_choices.first().map(|(endpoint, _)| *endpoint);
         }
-        let output_choices = component_output_endpoint_choices(&component.document, None);
+        let output_choices = component_output_endpoint_choices(&document, None);
         if self.new_component_output_source.is_none_or(|source| {
             output_choices
                 .iter()
@@ -4128,20 +4209,30 @@ impl ExactControlWorkspace {
         ui: &mut egui::Ui,
         component: &ComponentPackage,
     ) -> Option<ComponentConnectorUiAction> {
+        let scope = self.component_connector_scope?;
+        let dependency = component.hierarchy.document.dependency(scope)?;
+        let document = dependency.document().clone();
         ui.separator();
         ui.strong("Canonical public connector authoring");
         ui.weak(
-            "Expose an unowned internal input or any unexposed internal output under a fresh monotonic identity. Stable connector IDs, never positional ports, govern recursive ALGC placeholder and wire remapping through ALGH, ALGM, and complete ALGS history.",
+            "Edit the selected ALGH library dependency. Expose an unowned internal input or any unexposed internal output under a fresh monotonic identity. Stable connector IDs, never positional ports, govern recursive ALGC placeholder and wire remapping through ALGH, ALGM, and complete ALGS history.",
         );
         ui.monospace(format!(
-            "{} inputs / {} outputs · next IDs {} / {}",
-            component.document.inputs().len(),
-            component.document.outputs().len(),
-            component.document.next_input_id(),
-            component.document.next_output_id(),
+            "{} · {}… · {} inputs / {} outputs · next IDs {} / {}{}",
+            document.name(),
+            digest_prefix(scope.0),
+            document.inputs().len(),
+            document.outputs().len(),
+            document.next_input_id(),
+            document.next_output_id(),
+            if scope == component.encoding.digest() {
+                " · control authority"
+            } else {
+                " · library dependency"
+            },
         ));
 
-        let input_choices = component_input_endpoint_choices(&component.document, None);
+        let input_choices = component_input_endpoint_choices(&document, None);
         if self.new_component_input_target.is_none_or(|target| {
             input_choices
                 .iter()
@@ -4189,7 +4280,7 @@ impl ExactControlWorkspace {
             }
         });
 
-        let output_choices = component_output_endpoint_choices(&component.document, None);
+        let output_choices = component_output_endpoint_choices(&document, None);
         if self.new_component_output_source.is_none_or(|source| {
             output_choices
                 .iter()
@@ -4240,27 +4331,27 @@ impl ExactControlWorkspace {
         let mut selected = self.selected_component_connector;
         let selected_label = selected.map_or_else(
             || "no public connector".to_owned(),
-            |connector| component_connector_label(&component.document, connector),
+            |connector| component_connector_label(&document, connector),
         );
         ui.horizontal_wrapped(|ui| {
             ui.label("selected public connector");
             egui::ComboBox::from_id_salt("selected_component_connector")
                 .selected_text(selected_label)
                 .show_ui(ui, |ui| {
-                    for input in component.document.inputs() {
+                    for input in document.inputs() {
                         let connector = ComponentConnectorSelection::Input(input.id());
                         ui.selectable_value(
                             &mut selected,
                             Some(connector),
-                            component_connector_label(&component.document, connector),
+                            component_connector_label(&document, connector),
                         );
                     }
-                    for output in component.document.outputs() {
+                    for output in document.outputs() {
                         let connector = ComponentConnectorSelection::Output(output.id());
                         ui.selectable_value(
                             &mut selected,
                             Some(connector),
-                            component_connector_label(&component.document, connector),
+                            component_connector_label(&document, connector),
                         );
                     }
                 });
@@ -4287,19 +4378,19 @@ impl ExactControlWorkspace {
         if let Some(connector) = selected {
             let (canonical_name, canonical_endpoint, choices) = match connector {
                 ComponentConnectorSelection::Input(input) => {
-                    let input = component.document.input(input)?;
+                    let input = document.input(input)?;
                     (
                         input.name(),
                         input.target(),
-                        component_input_endpoint_choices(&component.document, Some(input.id())),
+                        component_input_endpoint_choices(&document, Some(input.id())),
                     )
                 }
                 ComponentConnectorSelection::Output(output) => {
-                    let output = component.document.output(output)?;
+                    let output = document.output(output)?;
                     (
                         output.name(),
                         output.source(),
-                        component_output_endpoint_choices(&component.document, Some(output.id())),
+                        component_output_endpoint_choices(&document, Some(output.id())),
                     )
                 }
             };
@@ -5748,6 +5839,7 @@ impl ExactControlWorkspace {
         self.probe_drafts.clear();
         self.panel_item_drafts.clear();
         self.component_connector_drafts.clear();
+        self.component_connector_scope = self.selected_hierarchy_component;
         self.selected_component_connector = self.component.as_ref().and_then(|component| {
             component
                 .document
@@ -11891,6 +11983,308 @@ mod tests {
             first_source
         );
         assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one selected-library lifecycle proves recursive root refresh, control-authority isolation, stable connector identity, exact history, and persistence together"
+    )]
+    fn selected_library_connector_authoring_preserves_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_root_instance = workspace.selected_hierarchy_instance;
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let initial_wrapper_digest = initial_wrapper.digest();
+        let retained_source = initial_wrapper
+            .document()
+            .output(GraphComponentOutputId::new(7))
+            .unwrap()
+            .source();
+
+        workspace.selected_hierarchy_component = Some(initial_wrapper_digest);
+        workspace.reconcile_component_connector_selection(None);
+        assert_eq!(
+            workspace.component_connector_scope,
+            Some(initial_wrapper_digest)
+        );
+        assert_eq!(
+            workspace.selected_component_connector,
+            Some(ComponentConnectorSelection::Output(
+                GraphComponentOutputId::new(1)
+            ))
+        );
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: GraphComponentOutputId::new(1),
+            draft: ComponentConnectorDraft {
+                name: "wrapped_error_exact".to_owned(),
+                endpoint: initial_wrapper
+                    .document()
+                    .output(GraphComponentOutputId::new(1))
+                    .unwrap()
+                    .source(),
+            },
+        });
+        let renamed_session = workspace.authoring_session_encoding().unwrap();
+        let renamed = workspace.component.as_ref().unwrap();
+        assert_ne!(renamed_session, initial_session);
+        assert_eq!(renamed.document, initial_component.document);
+        assert_eq!(renamed.encoding, initial_component.encoding);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+        assert_eq!(workspace.selected_hierarchy_instance, initial_root_instance);
+        assert!(
+            renamed
+                .hierarchy
+                .document
+                .dependency(initial_wrapper_digest)
+                .is_none()
+        );
+        let renamed_wrapper = renamed
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let renamed_wrapper_digest = renamed_wrapper.digest();
+        assert_ne!(renamed_wrapper_digest, initial_wrapper_digest);
+        assert_eq!(
+            renamed_wrapper
+                .document()
+                .output(GraphComponentOutputId::new(1))
+                .unwrap()
+                .name(),
+            "wrapped_error_exact"
+        );
+        assert_eq!(
+            workspace.selected_hierarchy_component,
+            Some(renamed_wrapper_digest)
+        );
+        assert_eq!(
+            workspace.component_connector_scope,
+            Some(renamed_wrapper_digest)
+        );
+        assert_eq!(
+            renamed
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .find(|instance| instance.scope() == GraphInstanceScope::Root)
+                .unwrap()
+                .component(),
+            renamed_wrapper_digest
+        );
+        let renamed_root = renamed.hierarchy.document.root();
+        assert_ne!(renamed_root, &initial_root);
+        assert_eq!(renamed_root.placements(), initial_root.placements());
+        assert_eq!(renamed_root.next_node_id(), initial_root.next_node_id());
+        assert_eq!(renamed_root.next_wire_id(), initial_root.next_wire_id());
+        assert_eq!(renamed_root.graph().wires(), initial_root.graph().wires());
+        assert_eq!(
+            renamed_root
+                .graph()
+                .node(GraphNodeId::new(1))
+                .unwrap()
+                .outputs()[0]
+                .name(),
+            "wrapped_error_exact"
+        );
+        assert_eq!(
+            workspace
+                .authoring_session_document()
+                .unwrap()
+                .hierarchy()
+                .unwrap()
+                .selected_component(),
+            authoritative
+        );
+
+        let history_lengths = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: GraphComponentOutputId::new(1),
+            draft: ComponentConnectorDraft {
+                name: "wrapped_error_exact".to_owned(),
+                endpoint: renamed_wrapper
+                    .document()
+                    .output(GraphComponentOutputId::new(1))
+                    .unwrap()
+                    .source(),
+            },
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            renamed_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::RemoveOutput(
+            GraphComponentOutputId::new(7),
+        ));
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependency(workspace.component_connector_scope.unwrap())
+                .unwrap()
+                .document()
+                .next_output_id(),
+            8
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddOutput {
+            name: "wrapped_permitted_output_final".to_owned(),
+            source: retained_source,
+        });
+        let final_output = GraphComponentOutputId::new(8);
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        let final_wrapper_digest = workspace.component_connector_scope.unwrap();
+        let final_wrapper = final_component
+            .hierarchy
+            .document
+            .dependency(final_wrapper_digest)
+            .unwrap()
+            .document();
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(final_wrapper.next_output_id(), 9);
+        assert!(
+            final_wrapper
+                .output(GraphComponentOutputId::new(7))
+                .is_none()
+        );
+        assert_eq!(
+            final_wrapper.output(final_output).unwrap().name(),
+            "wrapped_permitted_output_final"
+        );
+        assert_eq!(
+            workspace.selected_component_connector,
+            Some(ComponentConnectorSelection::Output(final_output))
+        );
+
+        workspace.navigate_history(false);
+        assert_ne!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_eq!(restored_component.document, initial_component.document);
+        assert_eq!(restored_component.encoding, initial_component.encoding);
+        let restored_wrapper = restored_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .document();
+        assert_eq!(restored_wrapper.next_output_id(), 9);
+        assert!(
+            restored_wrapper
+                .output(GraphComponentOutputId::new(7))
+                .is_none()
+        );
+        assert_eq!(
+            restored_wrapper.output(final_output).unwrap().source(),
+            retained_source
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn library_connector_edit_cannot_indirectly_rewrite_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap().clone();
+        let leaf = initial.encoding.digest();
+        let wrapper = initial
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let wrapper_document = wrapper.document().clone();
+        let wrapper_encoding = wrapper.encoding().clone();
+        workspace.workspace = wrapper_document.workspace().clone();
+        workspace.workspace_encoding = encode_graph_workspace(&workspace.workspace).unwrap();
+        workspace.probes = Some(empty_probes(&workspace.workspace).unwrap());
+        workspace.component = Some(ComponentPackage {
+            document: wrapper_document,
+            encoding: wrapper_encoding,
+            hierarchy: initial.hierarchy,
+        });
+        workspace.selected_hierarchy_component = Some(leaf);
+        workspace.component_connector_scope = Some(leaf);
+        workspace.selected_panel_item = None;
+        workspace.reconcile_component_connector_selection(None);
+
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let source = retained_component
+            .hierarchy
+            .document
+            .dependency(leaf)
+            .unwrap()
+            .document()
+            .output(GraphComponentOutputId::new(1))
+            .unwrap()
+            .source();
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: GraphComponentOutputId::new(1),
+            draft: ComponentConnectorDraft {
+                name: "would_rewrite_selected_wrapper".to_owned(),
+                endpoint: source,
+            },
+        });
+
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(
+            workspace
+                .component_status
+                .contains("would recursively rewrite the complete-session control ALGC")
+        );
     }
 
     #[test]

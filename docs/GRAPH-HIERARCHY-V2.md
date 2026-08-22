@@ -95,9 +95,14 @@ substitute a different connector shape.
   identity only in the accepted candidate;
 - `disconnect_root_wire` removes one known root wire without rewinding the
   root wire cursor; and
-- `replace_component` substitutes one exact library dependency and remaps both
-  child-component references and parent-scope references from the old digest
-  to the replacement digest.
+- `replace_component` substitutes one exact library dependency, refreshes
+  affected placeholder ports and public endpoints by stable connector ID, and
+  recursively remaps child-component references and parent-scope references
+  through every changed ancestor digest; and
+- `replace_component_with_report` performs that same transaction and returns
+  the requested old/new identity plus every directly or recursively rebuilt
+  dependency in canonical old-digest order. Its exact no-op report contains no
+  remaps.
 
 Each operation constructs a complete candidate and reruns all hierarchy
 invariants before replacing the prior document. An unknown dependency or
@@ -251,6 +256,19 @@ byte-identical. The replacement `ALGC`, complete `ALGH`, and source-bound
 `ALGM` identities change together and enter the ordinary complete-session
 history; the flattened ordinary `ALGW` remains identical.
 
+The connector-pane editor follows the dependency chosen in the adjacent
+library selector, rather than being fixed to the complete-session control
+component. An accepted input/output add, update, or removal replaces that exact
+dependency and uses the complete replacement report to retain the logical UI
+selection across its new digest. Editing the root-reachable wrapper refreshes
+the root placeholder shape while preserving root node identity, placement,
+wires, and allocation cursors; the selected control `ALGC`, control `ALGW`,
+probes, and cached-job workspace remain exact. If editing a non-authoritative
+descendant would recursively rebuild the `ALGC` that supplies the complete
+session's exact control workspace, the UI rejects the candidate atomically.
+Such a change requires a future coordinated control-workspace transaction; it
+cannot silently change the `ALGS` authority.
+
 ## Deliberately open
 
 Direct root-instance creation/deletion is implemented through the dedicated
@@ -259,8 +277,8 @@ canvas. Nested definition editing and import with separately supplied nested
 bindings, general library creation, parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
 flattening, interactive traversal from final items into nested editable
-canvases, connector-shape remapping, and executable front-panel inputs remain
-open.
+canvases, coordinated descendant/control-authority replacement, and executable
+front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo
 restores direct root-instance edits with all other authoring state. `ALGH` V2

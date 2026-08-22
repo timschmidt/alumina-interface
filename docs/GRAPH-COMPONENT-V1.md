@@ -137,6 +137,17 @@ retain the embedded control `ALGW`, connector pane, root workspace, unrelated
 dependencies, probes, and cached-job workspace exactly. Exact no-ops record no
 history.
 
+The visible connector editor follows the exact dependency selected in the
+`ALGH` library panel. It offers bounded endpoint choices and all six stable-ID
+input/output add, metadata-update, and reference-safe removal operations for
+the control component or another selected dependency. Every accepted library
+edit recursively rebuilds affected parents, root placeholders, `ALGH`, and
+`ALGM`, then admits and records one complete `ALGS`. A non-authoritative edit
+retains the selected control `ALGC` and its embedded control `ALGW` exactly. If
+the edited dependency is beneath that control authority and would force the
+authority itself to change identity, the UI rejects without mutation until a
+coordinated control-workspace replacement exists.
+
 The reviewed fixture supplies the initial panel metadata. Once edited, the
 canonical `ALGC` inside `ALGS` and `.algc` exchange is authoritative; later
 compatible `ALGW` edits replace its embedded workspace while retaining the
@@ -177,7 +188,8 @@ recursive expansion, and deterministically flattens a component DAG to ordinary
 from the embedded dependency library and preserves them across compatible
 selected-component edits. Nested instance-definition/import workflows,
 general component-library creation, package signatures/permissions, locked
-dependency manifests, connector editing, overlapping/grouped/responsive panel
-layout policies, panel value injection during simulation or execution, probes,
-and groups/comments remain open. `ALGC` V1 grants no semantic, implementation,
-resource, timing, safety, firmware, or physical-output authority.
+dependency manifests, nested component-definition canvases,
+overlapping/grouped/responsive panel layout policies, panel value injection
+during simulation or execution, probes, and groups/comments remain open.
+`ALGC` V1 grants no semantic, implementation, resource, timing, safety,
+firmware, or physical-output authority.

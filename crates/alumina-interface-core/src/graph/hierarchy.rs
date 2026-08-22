@@ -171,6 +171,72 @@ impl GraphHierarchyDependency {
     }
 }
 
+/// One exact old-to-new component identity produced by recursive hierarchy
+/// replacement.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GraphHierarchyComponentRemap {
+    original: Digest,
+    replacement: Digest,
+}
+
+impl GraphHierarchyComponentRemap {
+    /// Return the dependency identity present before the transaction.
+    pub const fn original(self) -> Digest {
+        self.original
+    }
+
+    /// Return the dependency identity retained after the transaction.
+    pub const fn replacement(self) -> Digest {
+        self.replacement
+    }
+}
+
+/// Exact identity effects of one successful component-replacement transaction.
+/// Remaps are canonicalized by old digest and include every recursively rebuilt
+/// parent, not only the directly requested dependency.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphHierarchyReplacementReport {
+    requested_original: Digest,
+    requested_replacement: Digest,
+    remaps: Vec<GraphHierarchyComponentRemap>,
+}
+
+impl GraphHierarchyReplacementReport {
+    /// Return the dependency identity explicitly selected by the caller.
+    pub const fn requested_original(&self) -> Digest {
+        self.requested_original
+    }
+
+    /// Return the selected dependency identity after replacement.
+    pub const fn requested_replacement(&self) -> Digest {
+        self.requested_replacement
+    }
+
+    /// Borrow all changed old-to-new identities in canonical old-digest order.
+    pub fn remaps(&self) -> &[GraphHierarchyComponentRemap] {
+        &self.remaps
+    }
+
+    /// Resolve one old dependency identity when it was rebuilt recursively.
+    pub fn replacement_for(&self, original: Digest) -> Option<Digest> {
+        self.remaps
+            .binary_search_by_key(&original, |remap| remap.original)
+            .ok()
+            .map(|index| self.remaps[index].replacement)
+    }
+
+    /// Resolve an old identity through this report, retaining an unchanged
+    /// identity exactly when no remap record names it.
+    pub fn resolve(&self, original: Digest) -> Digest {
+        self.replacement_for(original).unwrap_or(original)
+    }
+
+    /// Return whether the explicitly requested component changed identity.
+    pub fn changed(&self) -> bool {
+        self.requested_original != self.requested_replacement
+    }
+}
+
 /// Canonical hierarchy authoring document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphHierarchyDocument {
@@ -346,6 +412,18 @@ impl GraphHierarchyDocument {
         original: Digest,
         replacement: GraphComponentDocument,
     ) -> Result<Digest, GraphHierarchyError> {
+        self.replace_component_with_report(original, replacement)
+            .map(|report| report.requested_replacement())
+    }
+
+    /// Perform [`Self::replace_component`] and return every exact component
+    /// identity remapped by recursive parent refresh. An exact no-op returns an
+    /// empty remap set and leaves the hierarchy unchanged.
+    pub fn replace_component_with_report(
+        &mut self,
+        original: Digest,
+        replacement: GraphComponentDocument,
+    ) -> Result<GraphHierarchyReplacementReport, GraphHierarchyError> {
         let index = self
             .dependencies
             .binary_search_by_key(&original, GraphHierarchyDependency::digest)
@@ -354,7 +432,11 @@ impl GraphHierarchyDocument {
         let replacement_digest = replacement_encoding.digest();
         if replacement_digest == original {
             if replacement_encoding == self.dependencies[index].encoding {
-                return Ok(original);
+                return Ok(GraphHierarchyReplacementReport {
+                    requested_original: original,
+                    requested_replacement: original,
+                    remaps: Vec::new(),
+                });
             }
             return Err(GraphHierarchyError::NonCanonical);
         }
@@ -410,6 +492,17 @@ impl GraphHierarchyDocument {
         if !converged {
             return Err(GraphHierarchyError::NonCanonical);
         }
+        let report = GraphHierarchyReplacementReport {
+            requested_original: original,
+            requested_replacement: replacement_digest,
+            remaps: replacements
+                .iter()
+                .map(|(original, replacement)| GraphHierarchyComponentRemap {
+                    original: *original,
+                    replacement: replacement.digest,
+                })
+                .collect(),
+        };
 
         let root_refreshes = collect_instance_refreshes(
             &self.dependencies,
@@ -455,7 +548,7 @@ impl GraphHierarchyDocument {
             instances,
         )?;
         *self = candidate;
-        Ok(replacement_digest)
+        Ok(report)
     }
 
     /// Transactionally append one root-workspace component instance using the
@@ -3081,12 +3174,15 @@ mod tests {
         replacement.replace_workspace(workspace).unwrap();
         let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
 
-        assert_eq!(
-            hierarchy
-                .replace_component(original, replacement.clone())
-                .unwrap(),
-            replacement_digest
-        );
+        let report = hierarchy
+            .replace_component_with_report(original, replacement.clone())
+            .unwrap();
+        assert!(report.changed());
+        assert_eq!(report.requested_original(), original);
+        assert_eq!(report.requested_replacement(), replacement_digest);
+        assert_eq!(report.replacement_for(original), Some(replacement_digest));
+        assert_eq!(report.resolve(original), replacement_digest);
+        assert_eq!(report.remaps().len(), 1);
         assert_eq!(hierarchy.revision(), original_revision + 1);
         assert_eq!(hierarchy.root(), &original_root);
         assert!(hierarchy.dependency(original).is_none());
@@ -3096,12 +3192,15 @@ mod tests {
         );
         assert_eq!(hierarchy.instances()[0].component(), replacement_digest);
         let replaced = hierarchy.clone();
-        assert_eq!(
-            hierarchy
-                .replace_component(replacement_digest, replacement)
-                .unwrap(),
-            replacement_digest
-        );
+        let report = hierarchy
+            .replace_component_with_report(replacement_digest, replacement)
+            .unwrap();
+        assert!(!report.changed());
+        assert_eq!(report.requested_original(), replacement_digest);
+        assert_eq!(report.requested_replacement(), replacement_digest);
+        assert!(report.remaps().is_empty());
+        assert_eq!(report.replacement_for(replacement_digest), None);
+        assert_eq!(report.resolve(replacement_digest), replacement_digest);
         assert_eq!(
             hierarchy, replaced,
             "exact replacement no-op advanced state"
@@ -3224,12 +3323,10 @@ mod tests {
         let replacement = with_second_public_input(leaf);
         let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
 
-        assert_eq!(
-            hierarchy
-                .replace_component(leaf_digest, replacement)
-                .unwrap(),
-            replacement_digest
-        );
+        let report = hierarchy
+            .replace_component_with_report(leaf_digest, replacement)
+            .unwrap();
+        assert_eq!(report.requested_replacement(), replacement_digest);
         assert_eq!(hierarchy.root(), &original_root);
         assert!(hierarchy.dependency(leaf_digest).is_none());
         assert!(hierarchy.dependency(wrapper_digest).is_none());
@@ -3240,6 +3337,15 @@ mod tests {
             .unwrap();
         let refreshed_wrapper_digest = refreshed_wrapper.digest();
         assert_ne!(refreshed_wrapper_digest, wrapper_digest);
+        assert_eq!(
+            report.replacement_for(leaf_digest),
+            Some(replacement_digest)
+        );
+        assert_eq!(
+            report.replacement_for(wrapper_digest),
+            Some(refreshed_wrapper_digest)
+        );
+        assert_eq!(report.remaps().len(), 2);
         let nested = refreshed_wrapper
             .document()
             .workspace()
