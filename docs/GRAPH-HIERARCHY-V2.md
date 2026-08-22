@@ -1,4 +1,9 @@
-# Canonical graph hierarchy and recursive flattening V2
+# Canonical graph hierarchy and recursive flattening V2 (retired)
+
+This document records the qualified V2 checkpoint and its historical exact
+identities. The current source accepts only
+[`ALGH` V3](GRAPH-HIERARCHY-V3.md); there is no V2 decoder, migration shim, or
+compatibility path.
 
 `ALGH` V2 binds authoring-only instance nodes in a root `ALGW` and canonical
 `ALGC` component definitions to exact component digests. Component definitions
@@ -7,8 +12,9 @@ bounded directed acyclic graph (DAG), and deterministic recursive flattening
 emits an ordinary canonical workspace containing only structural `ALGR` nodes
 and wires.
 
-V2 is the only hierarchy version accepted by this green-field implementation.
-There is no V1 decoder or compatibility path.
+At this checkpoint V2 was the only accepted hierarchy version, with no V1
+decoder or compatibility path. The retirement notice above describes the
+current V3-only implementation.
 
 ## Authority boundary
 

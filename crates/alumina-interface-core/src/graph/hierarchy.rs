@@ -16,25 +16,26 @@ use alumina_storage::sha256;
 use super::{
     CanonicalGraphComponentEncoding, CanonicalGraphWorkspaceEncoding, ExecutionDomain,
     GraphComponentDocument, GraphComponentError, GraphComponentInput, GraphComponentInputId,
-    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphDocument, GraphLimits,
-    GraphNodeId, GraphNodePrototype, GraphPortId, GraphWireId, GraphWorkspaceDocument,
-    GraphWorkspaceError, GraphWorkspaceLimits, NodeDefinition, NodeKind, PortDefinition,
-    WireDefinition, WireEndpoint, encode_graph_component, encode_graph_workspace,
-    replay_graph_component, replay_graph_workspace,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphDocument,
+    GraphFrontPanelBinding, GraphFrontPanelItemId, GraphLimits, GraphNodeId, GraphNodePrototype,
+    GraphPortId, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits,
+    NodeDefinition, NodeKind, NodeParameter, PortDefinition, TypedGraphValue, WireDefinition,
+    WireEndpoint, encode_graph_component, encode_graph_workspace, replay_graph_component,
+    replay_graph_workspace,
 };
 
 /// Magic bytes at the beginning of each canonical graph hierarchy.
 pub const GRAPH_HIERARCHY_MAGIC: [u8; 4] = *b"ALGH";
 
 /// Exact canonical graph-hierarchy format implemented by this source tree.
-pub const GRAPH_HIERARCHY_VERSION: u16 = 2;
+pub const GRAPH_HIERARCHY_VERSION: u16 = 3;
 
 /// Reserved authoring-only node kind used for component instances before
 /// flattening. It is never an executable semantic or firmware opcode kind.
 pub const GRAPH_COMPONENT_INSTANCE_KIND: &str = "alumina.component.instance";
 
 /// Version of the reserved authoring-only instance shape.
-pub const GRAPH_COMPONENT_INSTANCE_VERSION: u16 = 1;
+pub const GRAPH_COMPONENT_INSTANCE_VERSION: u16 = 2;
 
 const GRAPH_HIERARCHY_FLAGS: u16 = 0;
 const HIERARCHY_LIMIT_FIELD_COUNT: usize = 7;
@@ -826,6 +827,55 @@ impl GraphHierarchyDocument {
         Ok(())
     }
 
+    /// Transactionally replace one exact promoted parameter on a bound root
+    /// occurrence. The stable parameter identity is the source component's
+    /// front-panel item identity; flattening applies the retained value only
+    /// to this occurrence. An exact retained value is a byte-for-byte no-op.
+    pub fn set_root_instance_parameter(
+        &mut self,
+        node: GraphNodeId,
+        parameter: GraphFrontPanelItemId,
+        value: TypedGraphValue,
+    ) -> Result<(), GraphHierarchyError> {
+        let scope = GraphInstanceScope::Root;
+        if !self
+            .instances
+            .iter()
+            .any(|instance| instance.scope == scope && instance.node == node)
+        {
+            return Err(GraphHierarchyError::UnknownInstanceNode { scope, node });
+        }
+        let retained = self
+            .root
+            .graph()
+            .node(node)
+            .and_then(|instance| {
+                instance
+                    .parameters()
+                    .iter()
+                    .find(|candidate| candidate.id() == parameter.get())
+            })
+            .ok_or(GraphHierarchyError::UnknownInstanceParameter {
+                scope,
+                node,
+                parameter,
+            })?;
+        if retained.value() == &value {
+            return Ok(());
+        }
+        let mut root = self.root.clone();
+        root.set_parameter(node, parameter.get(), value)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Transactionally add one typed wire inside the root authoring workspace.
     pub fn connect_root_wire(
         &mut self,
@@ -997,6 +1047,7 @@ fn refresh_instance_workspace(
                 return Ok(node.clone());
             };
             let prototype = graph_component_instance_prototype(&refresh.replacement, node.label())?;
+            let parameters = refreshed_instance_parameters(node, scope, refresh)?;
             Ok(NodeDefinition::new(
                 node.id(),
                 prototype.kind().clone(),
@@ -1004,7 +1055,7 @@ fn refresh_instance_workspace(
                 prototype.domain(),
                 prototype.inputs().to_vec(),
                 prototype.outputs().to_vec(),
-                prototype.parameters().to_vec(),
+                parameters,
             ))
         })
         .collect();
@@ -1049,6 +1100,70 @@ fn refresh_instance_workspace(
         workspace.placements().to_vec(),
     )
     .map_err(Into::into)
+}
+
+fn refreshed_instance_parameters(
+    node: &NodeDefinition,
+    scope: GraphInstanceScope,
+    refresh: &ComponentInstanceRefresh,
+) -> Result<Vec<NodeParameter>, GraphHierarchyError> {
+    let original = graph_component_instance_parameters(&refresh.original)?;
+    let replacement = graph_component_instance_parameters(&refresh.replacement)?;
+    if node.parameters().len() != original.len()
+        || node
+            .parameters()
+            .iter()
+            .zip(&original)
+            .any(|(actual, default)| {
+                actual.id() != default.id()
+                    || actual.name() != default.name()
+                    || actual.value().value_type() != default.value().value_type()
+            })
+    {
+        return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
+            node: node.id(),
+            aspect: "parameters",
+        });
+    }
+
+    for (actual, default) in node.parameters().iter().zip(&original) {
+        let retained = replacement
+            .binary_search_by_key(&actual.id(), NodeParameter::id)
+            .is_ok();
+        if !retained && actual.value() != default.value() {
+            return Err(GraphHierarchyError::RemovedInstanceParameterOverride {
+                scope,
+                node: node.id(),
+                parameter: GraphFrontPanelItemId::new(actual.id()),
+            });
+        }
+    }
+
+    replacement
+        .into_iter()
+        .map(|default| {
+            let Ok(index) = original.binary_search_by_key(&default.id(), NodeParameter::id) else {
+                return Ok(default);
+            };
+            let actual = &node.parameters()[index];
+            if actual.value() == original[index].value() {
+                return Ok(default);
+            }
+            if actual.value().value_type() != default.value().value_type() {
+                return Err(GraphHierarchyError::ChangedInstanceParameterType {
+                    scope,
+                    node: node.id(),
+                    parameter: GraphFrontPanelItemId::new(default.id()),
+                });
+            }
+            Ok(NodeParameter::new(
+                default.id(),
+                default.name(),
+                actual.value().clone(),
+            ))
+        })
+        .collect()
 }
 
 fn remap_instance_input_endpoint(
@@ -1461,6 +1576,16 @@ pub enum GraphHierarchyError {
         /// Mismatched shape collection.
         aspect: &'static str,
     },
+    /// A requested root-occurrence parameter is not part of the exact public
+    /// parameter surface derived from its component.
+    UnknownInstanceParameter {
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Scoped instance node.
+        node: GraphNodeId,
+        /// Unknown stable public parameter identity.
+        parameter: GraphFrontPanelItemId,
+    },
     /// A component type registry or clock set differed from the root authority.
     SemanticContextMismatch(Digest),
     /// Component dependency edges contain a recursive cycle.
@@ -1484,6 +1609,26 @@ pub enum GraphHierarchyError {
         node: GraphNodeId,
         /// Removed stable public-output identity.
         output: GraphComponentOutputId,
+    },
+    /// Component evolution removed a public parameter whose occurrence still
+    /// retains a value different from the old definition default.
+    RemovedInstanceParameterOverride {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Removed stable public parameter identity.
+        parameter: GraphFrontPanelItemId,
+    },
+    /// Component evolution changed the exact type of a public parameter whose
+    /// occurrence still retains a non-default value.
+    ChangedInstanceParameterType {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Stable public parameter identity whose type changed.
+        parameter: GraphFrontPanelItemId,
     },
     /// Presentation translation could not fit the root canvas lattice.
     PlacementOverflow {
@@ -1596,6 +1741,14 @@ impl fmt::Display for GraphHierarchyError {
                 formatter,
                 "graph hierarchy instance node {node:?} in {scope:?} has mismatched {aspect}"
             ),
+            Self::UnknownInstanceParameter {
+                scope,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} has no public parameter {parameter:?}"
+            ),
             Self::SemanticContextMismatch(digest) => write!(
                 formatter,
                 "graph hierarchy component {digest:?} has a different type or clock context"
@@ -1622,6 +1775,22 @@ impl fmt::Display for GraphHierarchyError {
                 formatter,
                 "graph hierarchy instance node {node:?} in {scope:?} still references removed public output {output:?}"
             ),
+            Self::RemovedInstanceParameterOverride {
+                scope,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} still overrides removed public parameter {parameter:?}"
+            ),
+            Self::ChangedInstanceParameterType {
+                scope,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} overrides public parameter {parameter:?} whose type changed"
+            ),
             Self::PlacementOverflow {
                 instance,
                 component_node,
@@ -1645,6 +1814,7 @@ pub fn graph_component_instance_prototype(
     label: impl Into<String>,
 ) -> Result<GraphNodePrototype, GraphHierarchyError> {
     let (inputs, outputs) = component_instance_ports(component)?;
+    let parameters = graph_component_instance_parameters(component)?;
     Ok(GraphNodePrototype::new(
         NodeKind::new(
             GRAPH_COMPONENT_INSTANCE_KIND,
@@ -1654,8 +1824,56 @@ pub fn graph_component_instance_prototype(
         ExecutionDomain::HostExact,
         inputs,
         outputs,
-        Vec::new(),
+        parameters,
     ))
+}
+
+/// Derive the stable exact parameter surface of one component instance.
+/// Parameter-control panel item IDs and names become node-local identities and
+/// names; their current retained component values are occurrence defaults.
+pub fn graph_component_instance_parameters(
+    component: &GraphComponentDocument,
+) -> Result<Vec<NodeParameter>, GraphHierarchyError> {
+    component
+        .panel_items()
+        .iter()
+        .filter_map(|item| match item.binding() {
+            GraphFrontPanelBinding::ParameterControl { node, parameter } => {
+                Some((item, node, parameter))
+            }
+            GraphFrontPanelBinding::InputControl(_)
+            | GraphFrontPanelBinding::OutputIndicator(_) => None,
+        })
+        .map(|(item, node, parameter)| {
+            let value = component
+                .workspace()
+                .graph()
+                .node(node)
+                .and_then(|node| {
+                    node.parameters()
+                        .iter()
+                        .find(|candidate| candidate.id() == parameter)
+                })
+                .map(NodeParameter::value)
+                .cloned()
+                .ok_or(GraphHierarchyError::NonCanonical)?;
+            Ok(NodeParameter::new(item.id().get(), item.name(), value))
+        })
+        .collect()
+}
+
+/// Resolve a stable promoted instance parameter to the exact node-local
+/// parameter controlled inside its component definition.
+pub fn graph_component_instance_parameter_target(
+    component: &GraphComponentDocument,
+    parameter: GraphFrontPanelItemId,
+) -> Option<(GraphNodeId, u32)> {
+    match component.panel_item(parameter)?.binding() {
+        GraphFrontPanelBinding::ParameterControl { node, parameter } => Some((node, parameter)),
+        GraphFrontPanelBinding::InputControl(_) | GraphFrontPanelBinding::OutputIndicator(_) => {
+            None
+        }
+    }
 }
 
 /// Resolve one public input identity to its derived instance-node input port.
@@ -2297,7 +2515,17 @@ fn validate_instance_node(
             aspect: "outputs",
         });
     }
-    if !node.parameters().is_empty() {
+    if node.parameters().len() != prototype.parameters().len()
+        || node
+            .parameters()
+            .iter()
+            .zip(prototype.parameters())
+            .any(|(actual, expected)| {
+                actual.id() != expected.id()
+                    || actual.name() != expected.name()
+                    || actual.value().value_type() != expected.value().value_type()
+            })
+    {
         return Err(GraphHierarchyError::InstanceShapeMismatch {
             scope,
             node: node.id(),
@@ -2368,6 +2596,12 @@ fn flatten_instance(
     component: &GraphComponentDocument,
     wire_origins: &mut BTreeMap<GraphWireId, GraphHierarchyWireOrigin>,
 ) -> Result<FlattenedComponentCopy, GraphHierarchyError> {
+    let instance_parameters = root
+        .graph()
+        .node(instance_node)
+        .ok_or(GraphHierarchyError::NonCanonical)?
+        .parameters()
+        .to_vec();
     let placement = root
         .placement(instance_node)
         .ok_or(GraphHierarchyError::NonCanonical)?;
@@ -2387,7 +2621,16 @@ fn flatten_instance(
     }
     root.delete_node(instance_node)?;
 
-    let component_workspace = component.workspace();
+    let mut component_workspace = component.workspace().clone();
+    for parameter in instance_parameters {
+        let (node, node_parameter) = graph_component_instance_parameter_target(
+            component,
+            GraphFrontPanelItemId::new(parameter.id()),
+        )
+        .ok_or(GraphHierarchyError::NonCanonical)?;
+        component_workspace.set_parameter(node, node_parameter, parameter.value().clone())?;
+    }
+    let component_workspace = &component_workspace;
     let origin_x = component_workspace
         .placements()
         .iter()
@@ -2717,11 +2960,13 @@ mod tests {
     use crate::graph::{
         ClockDefinition, ClockKind, GraphClockId, GraphComponentInput, GraphComponentInputId,
         GraphComponentOutput, GraphComponentOutputId, GraphComponentPackageError,
-        GraphComponentPackageLimits, GraphDocument, GraphNodePlacement, GraphWireId,
+        GraphComponentPackageLimits, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
+        GraphFrontPanelItemId, GraphFrontPanelRect, GraphNodePlacement, GraphValue, GraphWireId,
         NodeDefinition, RepresentativeControlSignal, WireDefinition, analyze_graph,
         compile_representative_exact_control_graph, encode_graph_component_package,
         replay_graph_component_package,
     };
+    use hyperreal::Rational;
 
     fn endpoint(node: u32, port: u32) -> WireEndpoint {
         WireEndpoint {
@@ -2780,6 +3025,24 @@ mod tests {
         .unwrap()
     }
 
+    fn parameterized_component() -> GraphComponentDocument {
+        let mut component = component();
+        assert_eq!(
+            component
+                .add_panel_item(
+                    "proportional_gain",
+                    GraphFrontPanelBinding::ParameterControl {
+                        node: GraphNodeId::new(8),
+                        parameter: 1,
+                    },
+                    GraphFrontPanelRect::new(20, 20, 180, 48),
+                )
+                .unwrap(),
+            GraphFrontPanelItemId::new(1)
+        );
+        component
+    }
+
     fn with_second_public_input(mut component: GraphComponentDocument) -> GraphComponentDocument {
         let mut workspace = component.workspace().clone();
         workspace.disconnect(GraphWireId::new(2)).unwrap();
@@ -2834,7 +3097,7 @@ mod tests {
             prototype.domain(),
             prototype.inputs().to_vec(),
             prototype.outputs().to_vec(),
-            Vec::new(),
+            prototype.parameters().to_vec(),
         );
         let graph = GraphDocument::try_new(
             1,
@@ -2853,6 +3116,23 @@ mod tests {
             vec![GraphNodePlacement::new(GraphNodeId::new(1), 20, 20)],
         )
         .unwrap();
+        let panel_items = child
+            .panel_items()
+            .iter()
+            .filter_map(|item| match item.binding() {
+                GraphFrontPanelBinding::ParameterControl { .. } => Some(GraphFrontPanelItem::new(
+                    item.id(),
+                    item.name(),
+                    GraphFrontPanelBinding::ParameterControl {
+                        node: GraphNodeId::new(1),
+                        parameter: item.id().get(),
+                    },
+                    item.rect(),
+                )),
+                GraphFrontPanelBinding::InputControl(_)
+                | GraphFrontPanelBinding::OutputIndicator(_) => None,
+            })
+            .collect();
         GraphComponentDocument::try_new(
             GraphComponentLimits::interactive(),
             1,
@@ -2860,7 +3140,7 @@ mod tests {
             name,
             2,
             2,
-            1,
+            child.next_panel_item_id(),
             workspace,
             vec![GraphComponentInput::new(
                 GraphComponentInputId::new(1),
@@ -2872,7 +3152,7 @@ mod tests {
                 "permitted_output",
                 endpoint(1, 2),
             )],
-            Vec::new(),
+            panel_items,
         )
         .unwrap()
     }
@@ -2891,7 +3171,7 @@ mod tests {
             prototype.domain(),
             prototype.inputs().to_vec(),
             prototype.outputs().to_vec(),
-            Vec::new(),
+            prototype.parameters().to_vec(),
         );
         let child_output = &child.outputs()[1];
         let witness = fixture
@@ -3209,6 +3489,287 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replay.document(), flattened.workspace());
+    }
+
+    #[test]
+    fn promoted_parameters_are_occurrence_local_and_flatten_exactly() {
+        let leaf = parameterized_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.parameter_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            empty_root(&wrapper),
+            vec![leaf.clone(), wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let first = hierarchy
+            .add_root_instance(wrapper_digest, "First wrapper", 20, 20)
+            .unwrap();
+        let second = hierarchy
+            .add_root_instance(wrapper_digest, "Second wrapper", 420, 20)
+            .unwrap();
+        let value_type = leaf
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let exact_value = |numerator, denominator| {
+            TypedGraphValue::try_new(
+                leaf.workspace().graph().schema(),
+                value_type,
+                GraphValue::ExactRational(Rational::from(numerator) / Rational::from(denominator)),
+            )
+            .unwrap()
+        };
+        let first_value = exact_value(7, 3);
+        let second_value = exact_value(11, 5);
+        hierarchy
+            .set_root_instance_parameter(first, GraphFrontPanelItemId::new(1), first_value.clone())
+            .unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                second,
+                GraphFrontPanelItemId::new(1),
+                second_value.clone(),
+            )
+            .unwrap();
+
+        let exact_before_noop = encode_graph_hierarchy(&hierarchy).unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                second,
+                GraphFrontPanelItemId::new(1),
+                second_value.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            encode_graph_hierarchy(&hierarchy).unwrap(),
+            exact_before_noop
+        );
+        let exact_before_rejection = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            hierarchy.set_root_instance_parameter(
+                first,
+                GraphFrontPanelItemId::new(99),
+                first_value.clone(),
+            ),
+            Err(GraphHierarchyError::UnknownInstanceParameter {
+                scope: GraphInstanceScope::Root,
+                node: first,
+                parameter: GraphFrontPanelItemId::new(99),
+            })
+        );
+        assert_eq!(
+            encode_graph_hierarchy(&hierarchy).unwrap(),
+            exact_before_rejection
+        );
+
+        let flattening = flatten_graph_hierarchy(&hierarchy).unwrap();
+        for (root, expected) in [(first, &first_value), (second, &second_value)] {
+            let report = flattening
+                .instances()
+                .iter()
+                .find(|report| {
+                    report.component() == leaf_digest
+                        && report.source_path() == [root, GraphNodeId::new(1)]
+                })
+                .unwrap();
+            let flattened_node = report
+                .nodes()
+                .iter()
+                .find(|mapping| mapping.component_node() == GraphNodeId::new(8))
+                .unwrap()
+                .flattened_node();
+            let retained = flattening
+                .workspace()
+                .graph()
+                .node(flattened_node)
+                .unwrap()
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.id() == 1)
+                .unwrap()
+                .value();
+            assert_eq!(retained, expected);
+        }
+    }
+
+    #[test]
+    fn explicit_override_survives_recursive_default_evolution() {
+        let leaf = parameterized_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.parameter_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            empty_root(&wrapper),
+            vec![leaf.clone(), wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let root = hierarchy
+            .add_root_instance(wrapper_digest, "Promoted wrapper", 20, 20)
+            .unwrap();
+        let value_type = leaf
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let override_value = TypedGraphValue::try_new(
+            leaf.workspace().graph().schema(),
+            value_type,
+            GraphValue::ExactRational(Rational::from(7) / Rational::from(3)),
+        )
+        .unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                root,
+                GraphFrontPanelItemId::new(1),
+                override_value.clone(),
+            )
+            .unwrap();
+
+        let mut replacement = leaf.clone();
+        let mut replacement_workspace = replacement.workspace().clone();
+        let replacement_default = TypedGraphValue::try_new(
+            replacement_workspace.graph().schema(),
+            value_type,
+            GraphValue::ExactRational(Rational::from(13) / Rational::from(4)),
+        )
+        .unwrap();
+        replacement_workspace
+            .set_parameter(GraphNodeId::new(8), 1, replacement_default)
+            .unwrap();
+        replacement
+            .replace_workspace(replacement_workspace)
+            .unwrap();
+        let report = hierarchy
+            .replace_component_with_report(leaf_digest, replacement)
+            .unwrap();
+        let replacement_leaf = report.requested_replacement();
+        let replacement_wrapper = report.replacement_for(wrapper_digest).unwrap();
+        assert_ne!(replacement_leaf, leaf_digest);
+        assert_ne!(replacement_wrapper, wrapper_digest);
+        assert_eq!(
+            hierarchy.root().graph().node(root).unwrap().parameters()[0].value(),
+            &override_value
+        );
+
+        let flattening = flatten_graph_hierarchy(&hierarchy).unwrap();
+        let leaf_report = flattening
+            .instances()
+            .iter()
+            .find(|instance| instance.component() == replacement_leaf)
+            .unwrap();
+        let flattened = leaf_report
+            .nodes()
+            .iter()
+            .find(|mapping| mapping.component_node() == GraphNodeId::new(8))
+            .unwrap()
+            .flattened_node();
+        assert_eq!(
+            flattening
+                .workspace()
+                .graph()
+                .node(flattened)
+                .unwrap()
+                .parameters()[0]
+                .value(),
+            &override_value
+        );
+    }
+
+    #[test]
+    fn component_parameter_removal_and_type_drift_preserve_explicit_overrides() {
+        let leaf = parameterized_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&leaf),
+            vec![leaf.clone()],
+            vec![GraphComponentInstance::root(
+                GraphNodeId::new(2),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let value_type = leaf
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let override_value = TypedGraphValue::try_new(
+            leaf.workspace().graph().schema(),
+            value_type,
+            GraphValue::ExactRational(Rational::from(7) / Rational::from(3)),
+        )
+        .unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                GraphNodeId::new(2),
+                GraphFrontPanelItemId::new(1),
+                override_value,
+            )
+            .unwrap();
+        let exact = encode_graph_hierarchy(&hierarchy).unwrap();
+
+        let mut removed = leaf.clone();
+        removed
+            .remove_panel_item(GraphFrontPanelItemId::new(1))
+            .unwrap();
+        assert_eq!(
+            hierarchy.replace_component(leaf_digest, removed),
+            Err(GraphHierarchyError::RemovedInstanceParameterOverride {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                parameter: GraphFrontPanelItemId::new(1),
+            })
+        );
+        assert_eq!(encode_graph_hierarchy(&hierarchy).unwrap(), exact);
+
+        let mut changed_type = leaf;
+        changed_type
+            .update_panel_item(
+                GraphFrontPanelItemId::new(1),
+                "proportional_gain",
+                GraphFrontPanelBinding::ParameterControl {
+                    node: GraphNodeId::new(9),
+                    parameter: 1,
+                },
+                GraphFrontPanelRect::new(20, 20, 180, 48),
+            )
+            .unwrap();
+        assert_eq!(
+            hierarchy.replace_component(leaf_digest, changed_type),
+            Err(GraphHierarchyError::ChangedInstanceParameterType {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                parameter: GraphFrontPanelItemId::new(1),
+            })
+        );
+        assert_eq!(encode_graph_hierarchy(&hierarchy).unwrap(), exact);
     }
 
     #[test]
@@ -4068,12 +4629,15 @@ mod tests {
 
         let unsupported = NodeDefinition::new(
             instance.id(),
-            NodeKind::new(GRAPH_COMPONENT_INSTANCE_KIND, 2),
+            NodeKind::new(
+                GRAPH_COMPONENT_INSTANCE_KIND,
+                GRAPH_COMPONENT_INSTANCE_VERSION + 1,
+            ),
             instance.label(),
             instance.domain(),
             instance.inputs().to_vec(),
             instance.outputs().to_vec(),
-            Vec::new(),
+            instance.parameters().to_vec(),
         );
         assert_eq!(
             GraphHierarchyDocument::try_new(
@@ -4086,7 +4650,7 @@ mod tests {
             Err(GraphHierarchyError::UnsupportedInstanceVersion {
                 scope: GraphInstanceScope::Root,
                 node: GraphNodeId::new(2),
-                version: 2,
+                version: GRAPH_COMPONENT_INSTANCE_VERSION + 1,
             })
         );
     }
@@ -4537,7 +5101,7 @@ mod tests {
                 prototype.domain(),
                 prototype.inputs().to_vec(),
                 prototype.outputs().to_vec(),
-                Vec::new(),
+                prototype.parameters().to_vec(),
             )
         };
         let graph = GraphDocument::try_new(

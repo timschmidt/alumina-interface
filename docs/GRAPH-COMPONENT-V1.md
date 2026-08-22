@@ -98,6 +98,15 @@ node-local parameter IDs; its type is the retained typed value's exact root
 type. An input/output item inherits its terminal's resolved graph type. Panel
 layout never stores a float or display-derived value.
 
+`ALGH` V3 uses that explicit public surface without changing `ALGC` V1. Every
+`ParameterControl` item becomes a derived parameter on a placeholder for this
+component: the stable panel-item ID and name become the placeholder parameter
+ID and name, while the controlled parameter supplies its exact type and current
+default. A parent component can bind its own `ParameterControl` to that derived
+parameter, promoting the value through another hierarchy level. Occurrence
+values remain canonical parameters in the parent or root `ALGW`; they do not
+mutate this component definition.
+
 `GraphComponentDocument::replace_workspace` advances component revision and
 validates a complete candidate before mutation. Deleting a bound node, changing
 a mapped port, internally wiring a public input, or invalidating any panel
@@ -305,13 +314,14 @@ The retained 38,577-byte proof result has SHA-256
 
 ## Deliberately open
 
-The separate canonical [`ALGH` V2 hierarchy](GRAPH-HIERARCHY-V2.md) now binds
+The separate canonical [`ALGH` V3 hierarchy](GRAPH-HIERARCHY-V3.md) now binds
 scoped component instances by exact digest, rejects dependency cycles, bounds
 recursive expansion, and deterministically flattens a component DAG to ordinary
-`ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
-from the embedded dependency library and preserves them across compatible
-selected-component edits. Nested definition/binding exchange is implemented by
-`ALCP` V1. Package signatures/permissions, locked dependency manifests,
+`ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences,
+edits their promoted exact parameters, and preserves compatible explicit
+overrides across selected-component default evolution. Nested
+definition/binding exchange is implemented by `ALCP` V1. Package
+signatures/permissions, locked dependency manifests,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.
 `ALGC` V1 grants no semantic, implementation, resource, timing, safety,

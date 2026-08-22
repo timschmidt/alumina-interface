@@ -2476,6 +2476,7 @@ pub(crate) struct ExactControlWorkspace {
     panel_drag: Option<PanelItemDrag>,
     selected_hierarchy_component: Option<Digest>,
     selected_hierarchy_instance: Option<GraphNodeId>,
+    hierarchy_parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
     new_library_component_name: String,
     hierarchy_source_browser: HierarchySourceBrowser,
     pending_hierarchy_source: Option<WireEndpoint>,
@@ -2601,6 +2602,7 @@ impl ExactControlWorkspace {
             panel_drag: None,
             selected_hierarchy_component,
             selected_hierarchy_instance,
+            hierarchy_parameter_drafts: BTreeMap::new(),
             new_library_component_name: "user.new_component".to_owned(),
             hierarchy_source_browser: HierarchySourceBrowser::default(),
             pending_hierarchy_source: None,
@@ -3334,6 +3336,7 @@ impl ExactControlWorkspace {
             .map_or("no root instance", |(_, label)| label.as_str());
         let mut action = None;
         let mut identity_action = None;
+        let mut root_parameter_request = None;
         ui.horizontal_wrapped(|ui| {
             ui.strong("Library component");
             egui::ComboBox::from_id_salt("hierarchy_library_component")
@@ -3470,6 +3473,45 @@ impl ExactControlWorkspace {
                 action = Some(HierarchyUiAction::RemoveRoot(node));
             }
         });
+        if let Some(node_id) = self.selected_hierarchy_instance
+            && let Some(node) = component.hierarchy.document.root().graph().node(node_id)
+        {
+            let defaults = component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .find(|instance| {
+                    instance.scope() == GraphInstanceScope::Root && instance.node() == node_id
+                })
+                .and_then(|instance| {
+                    component
+                        .hierarchy
+                        .document
+                        .dependency(instance.component())
+                })
+                .and_then(|dependency| {
+                    graph_component_instance_prototype(dependency.document(), node.label()).ok()
+                });
+            let overrides = defaults.as_ref().map_or(0, |prototype| {
+                node.parameters()
+                    .iter()
+                    .zip(prototype.parameters())
+                    .filter(|(actual, default)| actual.value() != default.value())
+                    .count()
+            });
+            ui.strong("Selected root-occurrence parameters");
+            ui.weak(format!(
+                "{} promoted exact parameter(s) · {overrides} occurrence-local override(s). Stable front-panel item IDs survive recursive promotion; accepted values are applied only while flattening this source path.",
+                node.parameters().len(),
+            ));
+            root_parameter_request = show_node_parameter_editors(
+                ui,
+                component.hierarchy.document.root().graph(),
+                node,
+                &mut self.hierarchy_parameter_drafts,
+            );
+        }
         let component_file_events = selected_dependency
             .and_then(|digest| component.hierarchy.document.dependency(digest))
             .map_or_else(Vec::new, |dependency| {
@@ -3548,9 +3590,12 @@ impl ExactControlWorkspace {
         }
         if let Some(action) = action {
             self.apply_hierarchy_action(action);
-        }
-        if let Some((scope, draft)) = identity_action {
+        } else if let Some((scope, draft)) = identity_action {
             self.apply_component_identity_draft(scope, &draft);
+        } else if let Some((parameter, text)) = root_parameter_request
+            && let Some(node) = self.selected_hierarchy_instance
+        {
+            self.commit_root_instance_parameter_text(node, parameter, &text);
         }
         for event in component_file_events {
             self.handle_component_file_event(event);
@@ -5430,6 +5475,84 @@ impl ExactControlWorkspace {
         }
     }
 
+    fn commit_root_instance_parameter_text(
+        &mut self,
+        node: GraphNodeId,
+        parameter_id: u32,
+        text: &str,
+    ) {
+        let Some(current) = self.component.clone() else {
+            "root-occurrence parameter edit rejected without mutation: no hierarchy is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(parameter) = current
+            .hierarchy
+            .document
+            .root()
+            .graph()
+            .node(node)
+            .and_then(|node| {
+                node.parameters()
+                    .iter()
+                    .find(|parameter| parameter.id() == parameter_id)
+            })
+            .cloned()
+        else {
+            self.component_status = format!(
+                "root-occurrence parameter edit rejected without mutation: instance #{} parameter {parameter_id} is unavailable",
+                node.get()
+            );
+            return;
+        };
+        let value = match parse_parameter_text(
+            current.hierarchy.document.root().graph(),
+            parameter.value().value_type(),
+            text,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.component_status =
+                    format!("root-occurrence parameter edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        let canonical = parameter_edit_text(current.hierarchy.document.root().graph(), &value)
+            .unwrap_or_else(|| text.to_owned());
+        let mut document = current.hierarchy.document.clone();
+        if let Err(error) = document.set_root_instance_parameter(
+            node,
+            GraphFrontPanelItemId::new(parameter_id),
+            value,
+        ) {
+            self.component_status =
+                format!("root-occurrence parameter edit rejected without mutation: {error}");
+            return;
+        }
+        let status = format!(
+            "set root occurrence [{}] promoted parameter #{} {} to exact canonical {canonical}",
+            node.get(),
+            parameter_id,
+            parameter.name(),
+        );
+        match self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            self.selected_hierarchy_component,
+            Some(node),
+        ) {
+            Ok(_) => {
+                self.hierarchy_parameter_drafts
+                    .insert((node, parameter_id), canonical);
+            }
+            Err(error) => {
+                self.component_status =
+                    format!("root-occurrence parameter edit rejected without mutation: {error}");
+            }
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "candidate hierarchy mutation, ALGH/ALGM regeneration, complete-session admission, history recording, and commit remain one auditable transaction"
@@ -5680,6 +5803,7 @@ impl ExactControlWorkspace {
         let history = self.history_with_current_recorded()?;
         self.component = Some(candidate);
         self.history = history;
+        self.hierarchy_parameter_drafts.clear();
         self.selected_hierarchy_component = selected_component;
         self.selected_hierarchy_instance = selected_instance;
         self.reconcile_hierarchy_selection(None);
@@ -6222,6 +6346,7 @@ impl ExactControlWorkspace {
         let Some(component) = self.component.as_ref() else {
             self.selected_hierarchy_component = None;
             self.selected_hierarchy_instance = None;
+            self.hierarchy_parameter_drafts.clear();
             self.pending_hierarchy_source = None;
             self.hierarchy_drag = None;
             self.hierarchy_source_browser
@@ -6272,6 +6397,20 @@ impl ExactControlWorkspace {
         }
         self.selected_hierarchy_component = selected_component;
         self.selected_hierarchy_instance = selected_instance;
+        self.hierarchy_parameter_drafts
+            .retain(|(node, parameter), _| {
+                component
+                    .hierarchy
+                    .document
+                    .root()
+                    .graph()
+                    .node(*node)
+                    .is_some_and(|node| {
+                        node.parameters()
+                            .iter()
+                            .any(|candidate| candidate.id() == *parameter)
+                    })
+            });
         if self.pending_hierarchy_source.is_some_and(|source| {
             component
                 .hierarchy
@@ -8222,6 +8361,7 @@ impl ExactControlWorkspace {
             .as_ref()
             .map(|component| component.encoding.digest());
         self.selected_hierarchy_instance = None;
+        self.hierarchy_parameter_drafts.clear();
         self.reconcile_hierarchy_selection(None);
         self.selected_node = None;
         self.pending_hierarchy_source = None;
@@ -11022,6 +11162,29 @@ fn empty_library_component(
     .map_err(|error| error.to_string())
 }
 
+fn promoted_parameter_panel_items(
+    component: &GraphComponentDocument,
+    nested_id: GraphNodeId,
+) -> Vec<GraphFrontPanelItem> {
+    component
+        .panel_items()
+        .iter()
+        .filter_map(|item| match item.binding() {
+            GraphFrontPanelBinding::ParameterControl { .. } => Some(GraphFrontPanelItem::new(
+                item.id(),
+                item.name(),
+                GraphFrontPanelBinding::ParameterControl {
+                    node: nested_id,
+                    parameter: item.id().get(),
+                },
+                item.rect(),
+            )),
+            GraphFrontPanelBinding::InputControl(_)
+            | GraphFrontPanelBinding::OutputIndicator(_) => None,
+        })
+        .collect()
+}
+
 fn representative_wrapper_component(
     component: &GraphComponentDocument,
 ) -> Result<(GraphComponentDocument, Digest), String> {
@@ -11093,6 +11256,7 @@ fn representative_wrapper_component(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let wrapper_panel_items = promoted_parameter_panel_items(component, nested_id);
     let wrapper = GraphComponentDocument::try_new(
         GraphComponentLimits::interactive(),
         component.revision(),
@@ -11100,11 +11264,11 @@ fn representative_wrapper_component(
         "control.reference_pid_wrapper",
         component.next_input_id(),
         component.next_output_id(),
-        1,
+        component.next_panel_item_id(),
         wrapper_workspace,
         wrapper_inputs,
         wrapper_outputs,
-        Vec::new(),
+        wrapper_panel_items,
     )
     .map_err(|error| error.to_string())?;
     let wrapper_digest = encode_graph_component(&wrapper)
@@ -12056,7 +12220,14 @@ fn paint_hierarchy_root_node(
     }
     let footer = placement.map_or_else(
         || "placement unavailable".to_owned(),
-        |placement| format!("exact ({}, {})", placement.x(), placement.y()),
+        |placement| {
+            format!(
+                "exact ({}, {}) · {} promoted parameter(s)",
+                placement.x(),
+                placement.y(),
+                node.parameters().len()
+            )
+        },
     );
     painter.text(
         rect.left_bottom() + egui::vec2(10.0, -8.0),
@@ -13872,9 +14043,9 @@ mod tests {
         assert_eq!(
             initial.hierarchy.source_map.digest().0,
             [
-                0xdb, 0xfa, 0xf6, 0x92, 0x55, 0xa1, 0xa4, 0x15, 0x93, 0x29, 0x76, 0x15, 0x23, 0xfb,
-                0xe1, 0x20, 0xd8, 0xb9, 0x56, 0x54, 0x8a, 0xdb, 0x4b, 0xbf, 0x19, 0x58, 0xe7, 0x3a,
-                0xb0, 0x14, 0xbb, 0x77,
+                0xcf, 0xdd, 0x57, 0x94, 0x9b, 0xda, 0x80, 0x53, 0x87, 0x36, 0xb4, 0xad, 0xa6, 0xf2,
+                0x30, 0x62, 0x85, 0x4e, 0xe9, 0xc6, 0xee, 0x8d, 0x82, 0x90, 0x35, 0xd3, 0x16, 0xf7,
+                0xa2, 0x41, 0xcd, 0x43,
             ]
         );
         let replay = replay_graph_hierarchy_source_map(
@@ -13909,13 +14080,13 @@ mod tests {
             initial.hierarchy.flattening.instances()[1].nodes().len(),
             21
         );
-        assert_eq!(initial.hierarchy.encoding.bytes().len(), 7_124);
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 8_104);
         assert_eq!(
             initial.hierarchy.encoding.digest().0,
             [
-                0xf9, 0x75, 0x10, 0x73, 0x01, 0x58, 0x28, 0xf2, 0x01, 0x54, 0xa5, 0x53, 0x6d, 0x8b,
-                0x21, 0x7a, 0x7d, 0x38, 0x43, 0xe2, 0xd6, 0x3d, 0x3b, 0x56, 0x89, 0xfc, 0xfb, 0x8c,
-                0x23, 0x79, 0x80, 0x6a,
+                0xec, 0xd9, 0xab, 0x11, 0x55, 0x7b, 0xf6, 0xc3, 0xa5, 0x65, 0xaf, 0x45, 0x63, 0xcb,
+                0x14, 0x5b, 0xb6, 0xf1, 0xe2, 0x8e, 0xfc, 0x73, 0xd9, 0x9c, 0xcc, 0x74, 0xf7, 0x35,
+                0x47, 0x55, 0xf1, 0x98,
             ]
         );
         assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_755);
@@ -16435,16 +16606,35 @@ mod tests {
         let updated = workspace.component.as_ref().unwrap();
         let replacement = updated.encoding.digest();
         assert_ne!(replacement, original_component);
-        assert_eq!(updated.hierarchy.document.root(), authored_hierarchy.root());
+        let updated_root = updated.hierarchy.document.root().clone();
+        assert_ne!(&updated_root, authored_hierarchy.root());
         assert_eq!(
-            updated
-                .hierarchy
-                .document
-                .dependency(wrapper)
-                .unwrap()
-                .encoding(),
-            &wrapper_encoding
+            updated_root.placements(),
+            authored_hierarchy.root().placements()
         );
+        assert_eq!(
+            updated_root.next_node_id(),
+            authored_hierarchy.root().next_node_id()
+        );
+        assert_eq!(
+            updated_root.next_wire_id(),
+            authored_hierarchy.root().next_wire_id()
+        );
+        assert_eq!(
+            updated_root.graph().wires(),
+            authored_hierarchy.root().graph().wires()
+        );
+        let refreshed_wrapper = updated
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let refreshed_wrapper_digest = refreshed_wrapper.digest();
+        assert_ne!(refreshed_wrapper_digest, wrapper);
+        assert_ne!(refreshed_wrapper.encoding(), &wrapper_encoding);
+        assert!(updated.hierarchy.document.dependency(wrapper).is_none());
         assert!(
             updated
                 .hierarchy
@@ -16471,10 +16661,36 @@ mod tests {
                 .instances()
                 .iter()
                 .any(|instance| {
-                    instance.scope() == GraphInstanceScope::Component(wrapper)
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(1)
+                        && instance.component() == refreshed_wrapper_digest
+                })
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(refreshed_wrapper_digest)
                         && instance.component() == replacement
                 })
         );
+        let updated_default = updated
+            .document
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value();
+        for node in [GraphNodeId::new(1), GraphNodeId::new(2)] {
+            assert_eq!(
+                updated_root.graph().node(node).unwrap().parameters()[0].value(),
+                updated_default
+            );
+        }
         assert_eq!(workspace.selected_hierarchy_component, Some(replacement));
         assert_eq!(workspace.history.undo_len(), 2);
 
@@ -16507,8 +16723,169 @@ mod tests {
                 .hierarchy
                 .document
                 .root(),
-            authored_hierarchy.root()
+            &updated_root
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one promoted-parameter lifecycle proves two occurrence-local values, recursive flattening, atomic rejection, history, and persistence"
+    )]
+    fn root_occurrence_parameter_overrides_are_exact_promoted_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap().clone();
+        let authority = initial.encoding.clone();
+        let control_workspace = workspace.workspace_encoding.clone();
+        let probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let cached_jobs = workspace.cached_jobs.encoding.clone();
+        let wrapper = initial
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(wrapper));
+        let second = workspace.selected_hierarchy_instance.unwrap();
+        assert_eq!(second, GraphNodeId::new(2));
+        let baseline = workspace.authoring_session_encoding().unwrap();
+        let baseline_revision = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .revision();
+
+        workspace.commit_root_instance_parameter_text(GraphNodeId::new(1), 1, "7/3");
+        let first = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(first, baseline);
+        assert_eq!(workspace.history.undo_len(), 2);
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .revision(),
+            baseline_revision + 1
+        );
+        workspace.commit_root_instance_parameter_text(second, 1, "11/5");
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(final_session, first);
+        assert_eq!(workspace.history.undo_len(), 3);
+
+        let component = workspace.component.as_ref().unwrap();
+        assert_eq!(component.encoding, authority);
+        assert_eq!(workspace.workspace_encoding, control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, probes);
+        assert_eq!(workspace.cached_jobs.encoding, cached_jobs);
+        let root = component.hierarchy.document.root();
+        let exact_parameter = |node: GraphNodeId| match root
+            .graph()
+            .node(node)
+            .unwrap()
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.id() == 1)
+            .unwrap()
+            .value()
+            .value()
+        {
+            GraphValue::ExactRational(value) => value.clone(),
+            _ => panic!("promoted parameter is not exact-rational"),
+        };
+        assert_eq!(
+            exact_parameter(GraphNodeId::new(1)),
+            Rational::from(7) / Rational::from(3)
+        );
+        assert_eq!(
+            exact_parameter(second),
+            Rational::from(11) / Rational::from(5)
+        );
+        let flattened_parameter = |path: &[GraphNodeId]| {
+            let occurrence = component
+                .hierarchy
+                .flattening
+                .instances()
+                .iter()
+                .find(|occurrence| {
+                    occurrence.component() == authority.digest() && occurrence.source_path() == path
+                })
+                .unwrap();
+            let flattened = occurrence
+                .nodes()
+                .iter()
+                .find(|mapping| mapping.component_node() == GraphNodeId::new(8))
+                .unwrap()
+                .flattened_node();
+            match component
+                .hierarchy
+                .flattening
+                .workspace()
+                .graph()
+                .node(flattened)
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value()
+            {
+                GraphValue::ExactRational(value) => value.clone(),
+                _ => panic!("flattened promoted parameter is not exact-rational"),
+            }
+        };
+        assert_eq!(
+            flattened_parameter(&[GraphNodeId::new(1), GraphNodeId::new(1)]),
+            Rational::from(7) / Rational::from(3)
+        );
+        assert_eq!(
+            flattened_parameter(&[second, GraphNodeId::new(1)]),
+            Rational::from(11) / Rational::from(5)
+        );
+
+        let retained_history = workspace.history.clone();
+        workspace.mark_persisted();
+        workspace.commit_root_instance_parameter_text(second, 1, "11/5");
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        workspace.commit_root_instance_parameter_text(second, 1, "1/0");
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), first);
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
     }
 
     #[test]

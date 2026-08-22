@@ -98,6 +98,7 @@ pub use hierarchy::{
     GraphHierarchyReplacementReport, GraphHierarchyReplay, GraphHierarchyWireOrigin,
     GraphInstanceScope, encode_graph_hierarchy, flatten_graph_hierarchy,
     graph_component_instance_input_port, graph_component_instance_output_port,
+    graph_component_instance_parameter_target, graph_component_instance_parameters,
     graph_component_instance_prototype, replay_graph_hierarchy,
 };
 pub use hierarchy_source::{

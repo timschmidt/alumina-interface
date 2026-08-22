@@ -59,9 +59,12 @@ particular machine graph.
 
 Every reserved `alumina.component.instance` placeholder in every embedded
 component has exactly one binding. Parent scopes and children exist in the
-package, placeholder kind/version/ports/parameter emptiness match the bound
-child, all components share the root's exact type registry and clocks, and the
-dependency graph is acyclic and within all depth/expansion/flattening bounds.
+package, and placeholder kind/version, ports, and derived parameter
+IDs/names/types match the bound child under `ALGH` V3. Retained parameter values
+may differ from the child defaults because they are definition-level defaults
+or overrides in the parent `ALGC`. All components share the root's exact type
+registry and clocks, and the dependency graph is acyclic and within all
+depth/expansion/flattening bounds.
 Component digests and stable names are both unique within the package.
 
 Export begins at one selected dependency in an already admitted `ALGH`, walks
@@ -98,6 +101,9 @@ closure atomically.
 ## Deliberately absent
 
 `ALCP` V1 has no signatures, permissions, locked manifest, external lookup,
-partial closure, merge heuristic, identity alias, instance parameter override,
-control-authority replacement, or executable front-panel input. Those require
-separate exact formats and transactions; they are not inferred during import.
+partial closure, merge heuristic, identity alias, root placement,
+root-occurrence parameter value, control-authority replacement, or executable
+front-panel input. Nested definition-level placeholder values are already part
+of the embedded `ALGC` bytes; machine-local root values remain in the importing
+`ALGH`. The absent features require separate exact formats and transactions and
+are not inferred during import.

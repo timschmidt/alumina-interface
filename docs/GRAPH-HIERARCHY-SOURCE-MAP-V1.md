@@ -1,6 +1,6 @@
 # Canonical graph hierarchy source map V1
 
-`ALGM` V1 is a canonical, bounded sidecar for one deterministic `ALGH` V2
+`ALGM` V1 is a canonical, bounded sidecar for one deterministic `ALGH` V3
 flattening. It maps every node and wire in the resulting ordinary `ALGW` to
 exactly one authoring origin: either an identity in the root workspace or a
 local identity in one exact component occurrence.
@@ -26,6 +26,12 @@ through one or more public connector panes, the wire keeps its authoring
 origin even though each replacement receives a fresh monotonic final wire ID.
 This applies both to root wires and to wires authored in a parent component
 that cross a nested child placeholder.
+
+Promoted occurrence parameters likewise need no new provenance record. V3
+flattening writes the selected typed value into the surviving ordinary node,
+while that node's existing component occurrence path identifies exactly which
+root-to-leaf occurrence received it. Changing a value can change flattened
+workspace identity without changing the stable source origin.
 
 The in-memory flattening report retains records in final node/wire ID order.
 It supports final-to-origin and origin-to-final lookup. Duplicate origins,
@@ -81,12 +87,29 @@ encoding.
 
 ## Visible recursive proof
 
-The reference UI hierarchy remains the two-level wrapper-to-PID proof described
-in [`GRAPH-HIERARCHY-V2.md`](GRAPH-HIERARCHY-V2.md): 21 final nodes and 25 final
-wires under leaf occurrence path `[1/1]`. Its 2,550-byte `ALGM` has SHA-256
+The historical V2 reference UI hierarchy was the two-level wrapper-to-PID proof
+now extended by [`GRAPH-HIERARCHY-V3.md`](GRAPH-HIERARCHY-V3.md): 21 final nodes
+and 25 final wires under leaf occurrence path `[1/1]`. Its historical
+2,550-byte `ALGM` had SHA-256
 `dbfaf69255a1a4159329761523fbe120d8b956548adb4bbf1958e73ab014bb77`.
 For example, leaf-local node `n8` correlates to final node `n10`, and endpoint
 `n8.p1` correlates to `n10.p1`.
+
+The current V3 one-occurrence reference retains that cardinality but its source
+hierarchy and map identities are now, respectively,
+`ecd9ab11557bf6c3a565af4563cb145bb6f1e28efc73d99ccc74f7354755f198`
+and
+`cfdd57949bda80538736b4ada6f23062854ee9c6ee8d829035d316f7a241cd43`.
+The optimized promoted-parameter proof then adds a second wrapper occurrence,
+retains distinct exact values `7/3` and `11/5`, and regenerates a 42-node,
+50-wire flattened workspace at
+`902396a53f158fd0ac359d8a8874b8809e21dd0b800626b4b8fbfed4d51e45ae`.
+Its 4,988-byte `ALGM`
+`071a261b361c41708d0296bd2787c26b27247335a8e156e64d7559b98f969fe5`
+binds the exact final `ALGH`
+`e6545ea05712ce9a86b202086b5654ad1cb9e9f9f5a3a94ed7c203fd39f6a464`.
+Undo, Redo, reload, and transient root-card selection all retained or restored
+the corresponding complete canonical map instead of patching its digest.
 
 The component panel displays the map digest and total node/wire origins and
 offers bounded `.algm` download/open controls. Import performs fresh replay and
@@ -153,7 +176,7 @@ the corresponding complete map bytes rather than patching the source digest.
 The core golden also exercises both origin tags: two ordinary root nodes, one
 ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
 2,577-byte encoding has SHA-256
-`885eaed4357bdc7c3d97d2eff76321732260d6147afbacdb5e004bbd23c291e3`.
+`dffc803779d90c5170b0be1578a8666e84878c847e80b0ed473bbb5451267359`.
 
 ## Deliberately open
 
@@ -164,8 +187,8 @@ component/ALGH/ALGM branch atomically with the other authoring artifacts.
 Direct root-instance add/delete now regenerates the map from the complete
 candidate hierarchy before one `ALGS` transaction commits, so source
 correlation and the unified history cannot lag the visible instance set.
-Nested definition import with separately supplied scoped bindings, parameter
-promotion, signed dependency manifests,
-live device trace correlation, and firmware execution evidence remain separate
-work. `ALGM` V1 closes deterministic total source correlation for each
-complete, validated, freshly flattened hierarchy.
+Nested definition closure exchange and promoted occurrence parameters now use
+that same regeneration boundary. Signed dependency manifests, live device trace
+correlation, and firmware execution evidence remain separate work. `ALGM` V1
+closes deterministic total source correlation for each complete, validated,
+freshly flattened hierarchy.

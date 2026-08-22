@@ -275,11 +275,15 @@ prototype.
   accepted change replaces `ALGC` through complete `ALGH`/`ALGM`/`ALGS`
   admission and unified history while retaining the embedded workspace,
   connector pane, root hierarchy, probes, and cached-job workspace.
-  Canonical `ALGH` V2 binds scoped root/component placeholders to exact
+  Canonical `ALGH` V3 binds scoped root/component placeholders to exact
   component digests, rejects recursive definition cycles, bounds depth and
-  expanded occurrences, and deterministically flattens the visible two-level
-  wrapper/PID hierarchy to an ordinary audited 21-node/25-wire workspace with
-  fresh monotonic identities. Canonical `ALGM` V1 then maps every final node
+  expanded occurrences, and derives each placeholder's exact parameter surface
+  from stable `ParameterControl` panel-item IDs. Parent panels can promote those
+  parameters recursively; every root occurrence retains its own typed value,
+  and flattening applies that value only to the corresponding source path. The
+  visible two-level wrapper/PID hierarchy therefore becomes an ordinary audited
+  21-node/25-wire workspace with fresh monotonic identities and no opaque
+  component execution. Canonical `ALGM` V1 then maps every final node
   and wire back to one exact root or component-occurrence origin. Its import
   path freshly flattens the complete `ALGH` and regenerates every byte before
   the selected-node inspector or exact trace cursor displays source-path/final
@@ -316,10 +320,13 @@ prototype.
   `ALGW` without assigning behavior to placeholders. Bound component headers
   drag onto the exact integer presentation lattice; selecting an output and a
   type-compatible input creates one monotonic root wire, while secondary-click
-  disconnects an owned input without rewinding the wire cursor. Placement and
-  wiring candidates pass the same complete flatten/source-map/semantic/session
-  transaction, and exact duplicate imports or placements are selection-only
-  no-ops.
+  disconnects an owned input without rewinding the wire cursor. The selected
+  occurrence exposes schema-directed exact editors for its promoted parameters;
+  distinct occurrences of one definition retain distinct values, invalid text
+  is atomic, and exact no-ops create no revision or history entry. Placement,
+  wiring, and parameter candidates pass the same complete
+  flatten/source-map/semantic/session transaction, and exact duplicate imports
+  or placements are selection-only no-ops.
   A separate selected-definition canvas follows the exact non-authoritative
   dependency chosen in that library panel. It reuses the audited palette,
   stable node and wire allocators, schema-directed metadata editors, and exact
@@ -403,7 +410,7 @@ prototype.
   The component/front-panel boundary is in
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
   The component-instance/flattening boundary is in
-  [`docs/GRAPH-HIERARCHY-V2.md`](docs/GRAPH-HIERARCHY-V2.md).
+  [`docs/GRAPH-HIERARCHY-V3.md`](docs/GRAPH-HIERARCHY-V3.md).
   The reusable nested component exchange boundary is in
   [`docs/GRAPH-COMPONENT-PACKAGE-V1.md`](docs/GRAPH-COMPONENT-PACKAGE-V1.md).
   The canonical total hierarchy source-map boundary is in

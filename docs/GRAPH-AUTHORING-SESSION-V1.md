@@ -112,9 +112,10 @@ The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
 Control-workspace, probe/trigger, focused import, cached-job,
 selected-component, component-library creation/import/removal, direct
-root-instance, selected-component identity evolution, scoped child-occurrence
-rebinding, hierarchy, and source-map state—including root instance placement
-and typed root wiring—share one timeline rather than independent histories that
+root-instance, root-occurrence promoted-parameter, selected-component identity
+evolution, scoped child-occurrence rebinding, hierarchy, and source-map
+state—including root instance placement, typed root wiring, and exact
+occurrence values—share one timeline rather than independent histories that
 could be navigated into a mismatched combination.
 
 The first interactive policy retains at most 16 snapshots in each direction
@@ -197,9 +198,9 @@ exact duplicate package is selection-only UI state and leaves `ALGS` unchanged.
 The core fixture contains a 21-node/25-wire exact control workspace, an empty
 but exactly bound probe sidecar, the same workspace in the cached-job slot, one
 selected component, a complete one-instance hierarchy, and total node/wire
-provenance. Its canonical `ALGS` is 14,794 bytes with SHA-256:
+provenance. Its current V3 canonical `ALGS` is 14,794 bytes with SHA-256:
 
-`09161f22343464aef962c513be9778b0bbe5b465ebef7423006349b56accc07c`
+`96406a0c98bdec43e4f84663622fa8282fee325ab40f3c89804e45df70e26bf1`
 
 Tests require byte-for-byte replay, hierarchy-present and hierarchy-absent
 round trips, limit and structural corruption rejection, selected-workspace
@@ -230,11 +231,33 @@ history/persistence, and atomic rejection of missing connectors, cycles,
 unknown targets, or authority replacement, abandoned-redo clearing, and
 canonical nested-component closure exchange with exact duplicate no-op,
 single-revision merge, stable-name/binding conflict rejection, and atomic
-history/persistence,
+history/persistence, per-occurrence exact parameter promotion through nested
+definitions, distinct repeated-occurrence flattening, compatible default
+evolution, removal/type-drift rejection, exact no-op, invalid-literal atomicity,
+and complete history/persistence,
 transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 
-The complete browser reference session is 14,770 bytes with SHA-256
+The current optimized V3 browser reference session is 15,750 bytes with
+SHA-256
+`e473839dd8b1708fe699a8749d79b8f37672699e6ea203bff9efae1b58b30c08`.
+Its unchanged control/probe/cached-job identities remain those listed below;
+its hierarchy branch is now 8,104-byte `ALGH`
+`ecd9ab11557bf6c3a565af4563cb145bb6f1e28efc73d99ccc74f7354755f198`
+and 2,550-byte `ALGM`
+`cfdd57949bda80538736b4ada6f23062854ee9c6ee8d829035d316f7a241cd43`.
+
+Visible browser authoring added a second occurrence, retained `7/3` and `11/5`
+on the two canonical root placeholders, rejected `1/0` without changing one
+byte or history entry, restored the exact pre-edit target with Undo, restored
+the exact final target with Redo, and recovered it after a fresh reload. The
+final session is 18,805 bytes at
+`248f2e340eae9ad724253a5bc0f50b7c832da78356d2918abb5acdf3176e19ba`.
+Its exact control `ALGW`, `ALGP`, cached-job `ALGW`, and selected `ALGC` stayed
+unchanged; only the complete hierarchy/source-map branch evolved.
+
+The following complete browser reference session is retained historical V2
+qualification evidence. It was 14,770 bytes with SHA-256
 `d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`.
 It contains:
 
