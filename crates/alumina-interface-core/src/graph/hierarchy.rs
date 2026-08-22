@@ -15,11 +15,12 @@ use alumina_storage::sha256;
 
 use super::{
     CanonicalGraphComponentEncoding, CanonicalGraphWorkspaceEncoding, ExecutionDomain,
-    GraphComponentDocument, GraphComponentError, GraphComponentInputId, GraphComponentLimits,
-    GraphComponentOutputId, GraphLimits, GraphNodeId, GraphNodePrototype, GraphPortId, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits, NodeKind, PortDefinition,
-    WireEndpoint, encode_graph_component, encode_graph_workspace, replay_graph_component,
-    replay_graph_workspace,
+    GraphComponentDocument, GraphComponentError, GraphComponentInput, GraphComponentInputId,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphDocument, GraphLimits,
+    GraphNodeId, GraphNodePrototype, GraphPortId, GraphWireId, GraphWorkspaceDocument,
+    GraphWorkspaceError, GraphWorkspaceLimits, NodeDefinition, NodeKind, PortDefinition,
+    WireDefinition, WireEndpoint, encode_graph_component, encode_graph_workspace,
+    replay_graph_component, replay_graph_workspace,
 };
 
 /// Magic bytes at the beginning of each canonical graph hierarchy.
@@ -335,9 +336,11 @@ impl GraphHierarchyDocument {
         Ok(())
     }
 
-    /// Transactionally replace one exact component dependency and remap every
-    /// binding that names its old digest. Existing placeholder shapes must
-    /// remain valid under the replacement's public connector pane.
+    /// Transactionally replace one exact component dependency, refresh every
+    /// affected placeholder by stable public connector identity, and cascade
+    /// changed parent-component identities to the root. Removing a connector
+    /// that is still referenced rejects instead of reinterpreting its old
+    /// positional port as another connector.
     pub fn replace_component(
         &mut self,
         original: Digest,
@@ -355,30 +358,99 @@ impl GraphHierarchyDocument {
             }
             return Err(GraphHierarchyError::NonCanonical);
         }
-        let mut components = self.component_documents();
-        components[index] = replacement;
+
+        let mut replacements = BTreeMap::from([(
+            original,
+            ComponentReplacement {
+                digest: replacement_digest,
+                document: replacement,
+            },
+        )]);
+        let mut converged = false;
+        for _ in 0..=self.dependencies.len() {
+            let mut changed = false;
+            for dependency in &self.dependencies {
+                let parent = dependency.digest();
+                if parent == original {
+                    continue;
+                }
+                let scope = GraphInstanceScope::Component(parent);
+                let refreshes = collect_instance_refreshes(
+                    &self.dependencies,
+                    &self.instances,
+                    scope,
+                    &replacements,
+                )?;
+                if refreshes.is_empty() {
+                    continue;
+                }
+                let document =
+                    refresh_component_instances(dependency.document(), scope, &refreshes)?;
+                let encoding = encode_graph_component(&document)?;
+                if encoding.digest() == parent {
+                    if replacements.remove(&parent).is_some() {
+                        changed = true;
+                    }
+                    continue;
+                }
+                let refreshed = ComponentReplacement {
+                    digest: encoding.digest(),
+                    document,
+                };
+                if replacements.get(&parent) != Some(&refreshed) {
+                    replacements.insert(parent, refreshed);
+                    changed = true;
+                }
+            }
+            if !changed {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(GraphHierarchyError::NonCanonical);
+        }
+
+        let root_refreshes = collect_instance_refreshes(
+            &self.dependencies,
+            &self.instances,
+            GraphInstanceScope::Root,
+            &replacements,
+        )?;
+        let root =
+            refresh_instance_workspace(&self.root, GraphInstanceScope::Root, &root_refreshes)?;
+        let components = self
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                replacements.get(&dependency.digest()).map_or_else(
+                    || dependency.document().clone(),
+                    |replacement| replacement.document.clone(),
+                )
+            })
+            .collect();
         let instances = self
             .instances
             .iter()
             .map(|instance| GraphComponentInstance {
                 scope: match instance.scope {
-                    GraphInstanceScope::Component(parent) if parent == original => {
-                        GraphInstanceScope::Component(replacement_digest)
-                    }
+                    GraphInstanceScope::Component(parent) => GraphInstanceScope::Component(
+                        replacements
+                            .get(&parent)
+                            .map_or(parent, |replacement| replacement.digest),
+                    ),
                     scope => scope,
                 },
                 node: instance.node,
-                component: if instance.component == original {
-                    replacement_digest
-                } else {
-                    instance.component
-                },
+                component: replacements
+                    .get(&instance.component)
+                    .map_or(instance.component, |replacement| replacement.digest),
             })
             .collect();
         let candidate = Self::try_new(
             self.limits,
             self.next_revision()?,
-            self.root.clone(),
+            root,
             components,
             instances,
         )?;
@@ -539,6 +611,248 @@ impl GraphHierarchyDocument {
             .checked_add(1)
             .ok_or(GraphHierarchyError::IntegerOverflow("revision"))
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ComponentReplacement {
+    digest: Digest,
+    document: GraphComponentDocument,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentInstanceRefresh {
+    node: GraphNodeId,
+    original: GraphComponentDocument,
+    replacement: GraphComponentDocument,
+}
+
+fn collect_instance_refreshes(
+    dependencies: &[GraphHierarchyDependency],
+    instances: &[GraphComponentInstance],
+    scope: GraphInstanceScope,
+    replacements: &BTreeMap<Digest, ComponentReplacement>,
+) -> Result<Vec<ComponentInstanceRefresh>, GraphHierarchyError> {
+    instances
+        .iter()
+        .filter(|instance| instance.scope == scope)
+        .filter_map(|instance| {
+            replacements
+                .get(&instance.component)
+                .map(|replacement| (instance, replacement))
+        })
+        .map(|(instance, replacement)| {
+            let original = dependencies
+                .binary_search_by_key(&instance.component, GraphHierarchyDependency::digest)
+                .ok()
+                .map(|index| dependencies[index].document().clone())
+                .ok_or(GraphHierarchyError::UnknownComponent(instance.component))?;
+            Ok(ComponentInstanceRefresh {
+                node: instance.node,
+                original,
+                replacement: replacement.document.clone(),
+            })
+        })
+        .collect()
+}
+
+fn refresh_component_instances(
+    component: &GraphComponentDocument,
+    scope: GraphInstanceScope,
+    refreshes: &[ComponentInstanceRefresh],
+) -> Result<GraphComponentDocument, GraphHierarchyError> {
+    let workspace = refresh_instance_workspace(component.workspace(), scope, refreshes)?;
+    let by_node: BTreeMap<_, _> = refreshes
+        .iter()
+        .map(|refresh| (refresh.node, refresh))
+        .collect();
+    let inputs: Result<Vec<_>, GraphHierarchyError> = component
+        .inputs()
+        .iter()
+        .map(|input| {
+            Ok(GraphComponentInput::new(
+                input.id(),
+                input.name(),
+                remap_instance_input_endpoint(input.target(), scope, &by_node)?,
+            ))
+        })
+        .collect();
+    let outputs: Result<Vec<_>, GraphHierarchyError> = component
+        .outputs()
+        .iter()
+        .map(|output| {
+            Ok(GraphComponentOutput::new(
+                output.id(),
+                output.name(),
+                remap_instance_output_endpoint(output.source(), scope, &by_node)?,
+            ))
+        })
+        .collect();
+    let inputs = inputs?;
+    let outputs = outputs?;
+    if workspace == *component.workspace()
+        && inputs == component.inputs()
+        && outputs == component.outputs()
+    {
+        return Ok(component.clone());
+    }
+    GraphComponentDocument::try_new(
+        component.limits(),
+        component
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("component revision"))?,
+        component.component_version(),
+        component.name(),
+        component.next_input_id(),
+        component.next_output_id(),
+        component.next_panel_item_id(),
+        workspace,
+        inputs,
+        outputs,
+        component.panel_items().to_vec(),
+    )
+    .map_err(Into::into)
+}
+
+fn refresh_instance_workspace(
+    workspace: &GraphWorkspaceDocument,
+    scope: GraphInstanceScope,
+    refreshes: &[ComponentInstanceRefresh],
+) -> Result<GraphWorkspaceDocument, GraphHierarchyError> {
+    if refreshes.is_empty() {
+        return Ok(workspace.clone());
+    }
+    let by_node: BTreeMap<_, _> = refreshes
+        .iter()
+        .map(|refresh| (refresh.node, refresh))
+        .collect();
+    let nodes: Result<Vec<_>, GraphHierarchyError> = workspace
+        .graph()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let Some(refresh) = by_node.get(&node.id()) else {
+                return Ok(node.clone());
+            };
+            let prototype = graph_component_instance_prototype(&refresh.replacement, node.label())?;
+            Ok(NodeDefinition::new(
+                node.id(),
+                prototype.kind().clone(),
+                prototype.label(),
+                prototype.domain(),
+                prototype.inputs().to_vec(),
+                prototype.outputs().to_vec(),
+                prototype.parameters().to_vec(),
+            ))
+        })
+        .collect();
+    let wires: Result<Vec<_>, GraphHierarchyError> = workspace
+        .graph()
+        .wires()
+        .iter()
+        .map(|wire| {
+            Ok(WireDefinition::new(
+                wire.id(),
+                remap_instance_output_endpoint(wire.source(), scope, &by_node)?,
+                remap_instance_input_endpoint(wire.target(), scope, &by_node)?,
+            ))
+        })
+        .collect();
+    let nodes = nodes?;
+    let wires = wires?;
+    if nodes == workspace.graph().nodes() && wires == workspace.graph().wires() {
+        return Ok(workspace.clone());
+    }
+    let graph = GraphDocument::try_new(
+        workspace
+            .graph()
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("graph revision"))?,
+        workspace.graph().schema().clone(),
+        workspace.graph().clocks().to_vec(),
+        nodes,
+        wires,
+    )
+    .map_err(GraphWorkspaceError::from)?;
+    GraphWorkspaceDocument::try_new(
+        workspace.limits(),
+        workspace
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("workspace revision"))?,
+        workspace.next_node_id(),
+        workspace.next_wire_id(),
+        graph,
+        workspace.placements().to_vec(),
+    )
+    .map_err(Into::into)
+}
+
+fn remap_instance_input_endpoint(
+    endpoint: WireEndpoint,
+    scope: GraphInstanceScope,
+    refreshes: &BTreeMap<GraphNodeId, &ComponentInstanceRefresh>,
+) -> Result<WireEndpoint, GraphHierarchyError> {
+    let Some(refresh) = refreshes.get(&endpoint.node) else {
+        return Ok(endpoint);
+    };
+    let index = usize::try_from(endpoint.port.get())
+        .ok()
+        .and_then(|port| port.checked_sub(1))
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let input = refresh
+        .original
+        .inputs()
+        .get(index)
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let port = graph_component_instance_input_port(&refresh.replacement, input.id()).ok_or(
+        GraphHierarchyError::RemovedInstanceInput {
+            scope,
+            node: endpoint.node,
+            input: input.id(),
+        },
+    )?;
+    Ok(WireEndpoint {
+        node: endpoint.node,
+        port,
+    })
+}
+
+fn remap_instance_output_endpoint(
+    endpoint: WireEndpoint,
+    scope: GraphInstanceScope,
+    refreshes: &BTreeMap<GraphNodeId, &ComponentInstanceRefresh>,
+) -> Result<WireEndpoint, GraphHierarchyError> {
+    let Some(refresh) = refreshes.get(&endpoint.node) else {
+        return Ok(endpoint);
+    };
+    let first_output = refresh
+        .original
+        .inputs()
+        .len()
+        .checked_add(1)
+        .ok_or(GraphHierarchyError::IntegerOverflow("instance port count"))?;
+    let index = usize::try_from(endpoint.port.get())
+        .ok()
+        .and_then(|port| port.checked_sub(first_output))
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let output = refresh
+        .original
+        .outputs()
+        .get(index)
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let port = graph_component_instance_output_port(&refresh.replacement, output.id()).ok_or(
+        GraphHierarchyError::RemovedInstanceOutput {
+            scope,
+            node: endpoint.node,
+            output: output.id(),
+        },
+    )?;
+    Ok(WireEndpoint {
+        node: endpoint.node,
+        port,
+    })
 }
 
 /// Canonical hierarchy bytes paired with their SHA-256 content identity.
@@ -891,6 +1205,24 @@ pub enum GraphHierarchyError {
     DependencyCycle(Digest),
     /// A connector port could not map to a validated component terminal.
     UnknownInstancePort(WireEndpoint),
+    /// A referenced stable public input was removed during component refresh.
+    RemovedInstanceInput {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Removed stable public-input identity.
+        input: GraphComponentInputId,
+    },
+    /// A referenced stable public output was removed during component refresh.
+    RemovedInstanceOutput {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Removed stable public-output identity.
+        output: GraphComponentOutputId,
+    },
     /// Presentation translation could not fit the root canvas lattice.
     PlacementOverflow {
         /// Removed instance node.
@@ -1016,6 +1348,18 @@ impl fmt::Display for GraphHierarchyError {
                     "graph hierarchy instance port {endpoint:?} is unknown"
                 )
             }
+            Self::RemovedInstanceInput { scope, node, input } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} still references removed public input {input:?}"
+            ),
+            Self::RemovedInstanceOutput {
+                scope,
+                node,
+                output,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} still references removed public output {output:?}"
+            ),
             Self::PlacementOverflow {
                 instance,
                 component_node,
@@ -2172,6 +2516,19 @@ mod tests {
         .unwrap()
     }
 
+    fn with_second_public_input(mut component: GraphComponentDocument) -> GraphComponentDocument {
+        let mut workspace = component.workspace().clone();
+        workspace.disconnect(GraphWireId::new(2)).unwrap();
+        component.replace_workspace(workspace).unwrap();
+        assert_eq!(
+            component
+                .add_input("measurement_samples", endpoint(5, 1))
+                .unwrap(),
+            GraphComponentInputId::new(2)
+        );
+        component
+    }
+
     fn chain_component() -> GraphComponentDocument {
         GraphComponentDocument::try_new(
             GraphComponentLimits::interactive(),
@@ -2756,6 +3113,157 @@ mod tests {
             Err(GraphHierarchyError::UnknownComponent(Digest([0x72; 32])))
         );
         assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn connector_insertion_remaps_root_wires_by_stable_identity() {
+        let mut hierarchy = hierarchy();
+        let original = hierarchy.dependencies()[0].digest();
+        let original_root_revision = hierarchy.root().revision();
+        let original_graph_revision = hierarchy.root().graph().revision();
+        let replacement = with_second_public_input(hierarchy.dependencies()[0].document().clone());
+        let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
+
+        assert_eq!(
+            hierarchy.replace_component(original, replacement).unwrap(),
+            replacement_digest
+        );
+        let instance = hierarchy.root().graph().node(GraphNodeId::new(2)).unwrap();
+        assert_eq!(
+            instance
+                .inputs()
+                .iter()
+                .map(PortDefinition::id)
+                .collect::<Vec<_>>(),
+            vec![GraphPortId::new(1), GraphPortId::new(2)]
+        );
+        assert_eq!(instance.outputs()[0].id(), GraphPortId::new(3));
+        assert_eq!(
+            hierarchy
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .find(|wire| wire.id() == GraphWireId::new(2))
+                .unwrap()
+                .source(),
+            endpoint(2, 3),
+            "existing output was reinterpreted instead of remapped"
+        );
+        assert_eq!(hierarchy.root().revision(), original_root_revision + 1);
+        assert_eq!(
+            hierarchy.root().graph().revision(),
+            original_graph_revision + 1
+        );
+        assert_eq!(
+            replay_graph_hierarchy(
+                encode_graph_hierarchy(&hierarchy).unwrap().bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+    }
+
+    #[test]
+    fn referenced_connector_removal_rejects_atomically() {
+        let mut hierarchy = hierarchy();
+        let original = hierarchy.dependencies()[0].digest();
+        let mut without_output = hierarchy.dependencies()[0].document().clone();
+        without_output
+            .remove_output(GraphComponentOutputId::new(1))
+            .unwrap();
+        let retained = hierarchy.clone();
+        assert_eq!(
+            hierarchy.replace_component(original, without_output),
+            Err(GraphHierarchyError::RemovedInstanceOutput {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                output: GraphComponentOutputId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+
+        let mut without_input = hierarchy.dependencies()[0].document().clone();
+        without_input
+            .remove_input(GraphComponentInputId::new(1))
+            .unwrap();
+        assert_eq!(
+            hierarchy.replace_component(original, without_input),
+            Err(GraphHierarchyError::RemovedInstanceInput {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                input: GraphComponentInputId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn connector_refresh_cascades_parent_identity_without_root_churn() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf.clone(), wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+        let original_root = hierarchy.root().clone();
+        let replacement = with_second_public_input(leaf);
+        let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
+
+        assert_eq!(
+            hierarchy
+                .replace_component(leaf_digest, replacement)
+                .unwrap(),
+            replacement_digest
+        );
+        assert_eq!(hierarchy.root(), &original_root);
+        assert!(hierarchy.dependency(leaf_digest).is_none());
+        assert!(hierarchy.dependency(wrapper_digest).is_none());
+        let refreshed_wrapper = hierarchy
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.pid_wrapper")
+            .unwrap();
+        let refreshed_wrapper_digest = refreshed_wrapper.digest();
+        assert_ne!(refreshed_wrapper_digest, wrapper_digest);
+        let nested = refreshed_wrapper
+            .document()
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(1))
+            .unwrap();
+        assert_eq!(nested.inputs().len(), 2);
+        assert_eq!(nested.outputs()[0].id(), GraphPortId::new(3));
+        assert_eq!(
+            refreshed_wrapper.document().outputs()[0].source(),
+            endpoint(1, 3)
+        );
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(
+                    refreshed_wrapper_digest,
+                    GraphNodeId::new(1),
+                    replacement_digest,
+                )
+        }));
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::root(GraphNodeId::new(2), refreshed_wrapper_digest)
+        }));
+        flatten_graph_hierarchy(&hierarchy).unwrap();
     }
 
     #[test]

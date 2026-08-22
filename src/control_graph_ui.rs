@@ -26,8 +26,8 @@ use alumina_interface_core::graph::{
     GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument, GraphAuthoringSessionHistory,
     GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog,
     GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
-    GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInstance,
-    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
+    GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInputId,
+    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
@@ -666,6 +666,40 @@ enum PanelUiAction {
         draft: PanelItemDraft,
     },
     Remove(GraphFrontPanelItemId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ComponentConnectorSelection {
+    Input(GraphComponentInputId),
+    Output(GraphComponentOutputId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComponentConnectorDraft {
+    name: String,
+    endpoint: WireEndpoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ComponentConnectorUiAction {
+    AddInput {
+        name: String,
+        target: WireEndpoint,
+    },
+    UpdateInput {
+        input: GraphComponentInputId,
+        draft: ComponentConnectorDraft,
+    },
+    RemoveInput(GraphComponentInputId),
+    AddOutput {
+        name: String,
+        source: WireEndpoint,
+    },
+    UpdateOutput {
+        output: GraphComponentOutputId,
+        draft: ComponentConnectorDraft,
+    },
+    RemoveOutput(GraphComponentOutputId),
 }
 
 #[derive(Clone, Debug)]
@@ -2235,8 +2269,14 @@ pub(crate) struct ExactControlWorkspace {
     node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
+    component_connector_drafts: BTreeMap<ComponentConnectorSelection, ComponentConnectorDraft>,
     selected_node: Option<GraphNodeId>,
     selected_panel_item: Option<GraphFrontPanelItemId>,
+    selected_component_connector: Option<ComponentConnectorSelection>,
+    new_component_input_name: String,
+    new_component_input_target: Option<WireEndpoint>,
+    new_component_output_name: String,
+    new_component_output_source: Option<WireEndpoint>,
     new_panel_item_name: String,
     new_panel_binding: Option<GraphFrontPanelBinding>,
     panel_drag: Option<PanelItemDrag>,
@@ -2277,6 +2317,10 @@ impl ExactControlWorkspace {
         Self::try_new_with_persisted_job(persisted, &job)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the complete initial ALGS fixture and all editor-local draft state are constructed together"
+    )]
     pub(crate) fn try_new_with_persisted_job(
         persisted: Option<&str>,
         job: &CanonicalGlobalJob2,
@@ -2298,6 +2342,18 @@ impl ExactControlWorkspace {
             .panel_items()
             .first()
             .map(GraphFrontPanelItem::id);
+        let selected_component_connector = component
+            .document
+            .inputs()
+            .first()
+            .map(|input| ComponentConnectorSelection::Input(input.id()))
+            .or_else(|| {
+                component
+                    .document
+                    .outputs()
+                    .first()
+                    .map(|output| ComponentConnectorSelection::Output(output.id()))
+            });
         let probes = representative_probes(&workspace)?;
         let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
@@ -2332,8 +2388,14 @@ impl ExactControlWorkspace {
             node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
             panel_item_drafts: BTreeMap::new(),
+            component_connector_drafts: BTreeMap::new(),
             selected_node: None,
             selected_panel_item,
+            selected_component_connector,
+            new_component_input_name: String::new(),
+            new_component_input_target: None,
+            new_component_output_name: String::new(),
+            new_component_output_source: None,
             new_panel_item_name: String::new(),
             new_panel_binding: None,
             panel_drag: None,
@@ -2419,9 +2481,10 @@ impl ExactControlWorkspace {
         ));
         if let Some(component) = &self.component {
             ui.label(format!(
-                "Component: {} v{} · {} outputs / {} panel items · {} bytes",
+                "Component: {} v{} · {} inputs / {} outputs / {} panel items · {} bytes",
                 component.document.name(),
                 component.document.component_version(),
+                component.document.inputs().len(),
                 component.document.outputs().len(),
                 component.document.panel_items().len(),
                 component.encoding.bytes().len()
@@ -3569,6 +3632,133 @@ impl ExactControlWorkspace {
         Ok(true)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "six connector CRUD variants converge on one atomic ALGC/ALGH/ALGM/ALGS commit boundary"
+    )]
+    fn apply_component_connector_action(&mut self, action: ComponentConnectorUiAction) {
+        let Some(current) = self.component.clone() else {
+            "connector-pane edit rejected without mutation: no selected component is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = current.document.clone();
+        let (status, preferred, clears_input, clears_output) = match action {
+            ComponentConnectorUiAction::AddInput { name, target } => {
+                let input = match document.add_input(name, target) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        self.component_status =
+                            format!("connector-pane edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added stable public input #{} at internal endpoint #{}.{}",
+                        input.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                    Some(ComponentConnectorSelection::Input(input)),
+                    true,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::UpdateInput { input, draft } => {
+                if let Err(error) = document.update_input(input, draft.name, draft.endpoint) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("updated stable public input #{}", input.get()),
+                    Some(ComponentConnectorSelection::Input(input)),
+                    false,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::RemoveInput(input) => {
+                if let Err(error) = document.remove_input(input) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("removed stable public input #{}", input.get()),
+                    None,
+                    false,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::AddOutput { name, source } => {
+                let output = match document.add_output(name, source) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.component_status =
+                            format!("connector-pane edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added stable public output #{} at internal endpoint #{}.{}",
+                        output.get(),
+                        source.node.get(),
+                        source.port.get()
+                    ),
+                    Some(ComponentConnectorSelection::Output(output)),
+                    false,
+                    true,
+                )
+            }
+            ComponentConnectorUiAction::UpdateOutput { output, draft } => {
+                if let Err(error) = document.update_output(output, draft.name, draft.endpoint) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("updated stable public output #{}", output.get()),
+                    Some(ComponentConnectorSelection::Output(output)),
+                    false,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::RemoveOutput(output) => {
+                if let Err(error) = document.remove_output(output) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("removed stable public output #{}", output.get()),
+                    None,
+                    false,
+                    false,
+                )
+            }
+        };
+        match self.commit_component_document(&current, document, &status, self.selected_panel_item)
+        {
+            Ok(_) => {
+                if clears_input {
+                    self.new_component_input_name.clear();
+                    self.new_component_input_target = None;
+                }
+                if clears_output {
+                    self.new_component_output_name.clear();
+                    self.new_component_output_source = None;
+                }
+                self.reconcile_component_connector_selection(preferred);
+            }
+            Err(error) => {
+                self.component_status =
+                    format!("connector-pane edit rejected without mutation: {error}");
+            }
+        }
+    }
+
     fn apply_panel_action(&mut self, action: PanelUiAction) {
         let Some(current) = self.component.clone() else {
             "front-panel edit rejected without mutation: no selected component is attached"
@@ -3688,7 +3878,9 @@ impl ExactControlWorkspace {
         self.component = Some(candidate);
         self.history = history;
         self.panel_item_drafts.clear();
+        self.component_connector_drafts.clear();
         self.reconcile_hierarchy_selection(Some((original, replacement)));
+        self.reconcile_component_connector_selection(None);
         self.reconcile_panel_selection(selected_panel_item);
         self.persistence_dirty = true;
         self.persistence_attempted = false;
@@ -3874,6 +4066,307 @@ impl ExactControlWorkspace {
         }
     }
 
+    fn reconcile_component_connector_selection(
+        &mut self,
+        preferred: Option<ComponentConnectorSelection>,
+    ) {
+        let Some(component) = self.component.as_ref() else {
+            self.selected_component_connector = None;
+            self.component_connector_drafts.clear();
+            self.new_component_input_target = None;
+            self.new_component_output_source = None;
+            return;
+        };
+        let connectors = component
+            .document
+            .inputs()
+            .iter()
+            .map(|input| ComponentConnectorSelection::Input(input.id()))
+            .chain(
+                component
+                    .document
+                    .outputs()
+                    .iter()
+                    .map(|output| ComponentConnectorSelection::Output(output.id())),
+            )
+            .collect::<BTreeSet<_>>();
+        self.component_connector_drafts
+            .retain(|connector, _| connectors.contains(connector));
+        self.selected_component_connector = preferred
+            .filter(|connector| connectors.contains(connector))
+            .or_else(|| {
+                self.selected_component_connector
+                    .filter(|connector| connectors.contains(connector))
+            })
+            .or_else(|| connectors.first().copied());
+
+        let input_choices = component_input_endpoint_choices(&component.document, None);
+        if self.new_component_input_target.is_none_or(|target| {
+            input_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != target)
+        }) {
+            self.new_component_input_target = input_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+        let output_choices = component_output_endpoint_choices(&component.document, None);
+        if self.new_component_output_source.is_none_or(|source| {
+            output_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != source)
+        }) {
+            self.new_component_output_source =
+                output_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "input/output creation, stable selection, endpoint drafts, and one deferred canonical action form one connector-pane editor"
+    )]
+    fn show_component_connector_authoring(
+        &mut self,
+        ui: &mut egui::Ui,
+        component: &ComponentPackage,
+    ) -> Option<ComponentConnectorUiAction> {
+        ui.separator();
+        ui.strong("Canonical public connector authoring");
+        ui.weak(
+            "Expose an unowned internal input or any unexposed internal output under a fresh monotonic identity. Stable connector IDs, never positional ports, govern recursive ALGC placeholder and wire remapping through ALGH, ALGM, and complete ALGS history.",
+        );
+        ui.monospace(format!(
+            "{} inputs / {} outputs · next IDs {} / {}",
+            component.document.inputs().len(),
+            component.document.outputs().len(),
+            component.document.next_input_id(),
+            component.document.next_output_id(),
+        ));
+
+        let input_choices = component_input_endpoint_choices(&component.document, None);
+        if self.new_component_input_target.is_none_or(|target| {
+            input_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != target)
+        }) {
+            self.new_component_input_target = input_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("new public input name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_component_input_name)
+                    .char_limit(64)
+                    .desired_width(180.0),
+            );
+            let selected = endpoint_choice_selected_label(
+                self.new_component_input_target,
+                &input_choices,
+                "no unowned internal input",
+            );
+            egui::ComboBox::from_id_salt("new_component_input_target")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (endpoint, label) in &input_choices {
+                        ui.selectable_value(
+                            &mut self.new_component_input_target,
+                            Some(*endpoint),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    !self.new_component_input_name.is_empty()
+                        && self.new_component_input_target.is_some(),
+                    egui::Button::new("add public input"),
+                )
+                .clicked()
+                && let Some(target) = self.new_component_input_target
+            {
+                action = Some(ComponentConnectorUiAction::AddInput {
+                    name: self.new_component_input_name.clone(),
+                    target,
+                });
+            }
+        });
+
+        let output_choices = component_output_endpoint_choices(&component.document, None);
+        if self.new_component_output_source.is_none_or(|source| {
+            output_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != source)
+        }) {
+            self.new_component_output_source =
+                output_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("new public output name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_component_output_name)
+                    .char_limit(64)
+                    .desired_width(180.0),
+            );
+            let selected = endpoint_choice_selected_label(
+                self.new_component_output_source,
+                &output_choices,
+                "no unexposed internal output",
+            );
+            egui::ComboBox::from_id_salt("new_component_output_source")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (endpoint, label) in &output_choices {
+                        ui.selectable_value(
+                            &mut self.new_component_output_source,
+                            Some(*endpoint),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    !self.new_component_output_name.is_empty()
+                        && self.new_component_output_source.is_some(),
+                    egui::Button::new("add public output"),
+                )
+                .clicked()
+                && let Some(source) = self.new_component_output_source
+            {
+                action = Some(ComponentConnectorUiAction::AddOutput {
+                    name: self.new_component_output_name.clone(),
+                    source,
+                });
+            }
+        });
+
+        let mut selected = self.selected_component_connector;
+        let selected_label = selected.map_or_else(
+            || "no public connector".to_owned(),
+            |connector| component_connector_label(&component.document, connector),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("selected public connector");
+            egui::ComboBox::from_id_salt("selected_component_connector")
+                .selected_text(selected_label)
+                .show_ui(ui, |ui| {
+                    for input in component.document.inputs() {
+                        let connector = ComponentConnectorSelection::Input(input.id());
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(connector),
+                            component_connector_label(&component.document, connector),
+                        );
+                    }
+                    for output in component.document.outputs() {
+                        let connector = ComponentConnectorSelection::Output(output.id());
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(connector),
+                            component_connector_label(&component.document, connector),
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    selected.is_some(),
+                    egui::Button::new("remove public connector"),
+                )
+                .clicked()
+                && let Some(connector) = selected
+            {
+                action = Some(match connector {
+                    ComponentConnectorSelection::Input(input) => {
+                        ComponentConnectorUiAction::RemoveInput(input)
+                    }
+                    ComponentConnectorSelection::Output(output) => {
+                        ComponentConnectorUiAction::RemoveOutput(output)
+                    }
+                });
+            }
+        });
+        self.selected_component_connector = selected;
+
+        if let Some(connector) = selected {
+            let (canonical_name, canonical_endpoint, choices) = match connector {
+                ComponentConnectorSelection::Input(input) => {
+                    let input = component.document.input(input)?;
+                    (
+                        input.name(),
+                        input.target(),
+                        component_input_endpoint_choices(&component.document, Some(input.id())),
+                    )
+                }
+                ComponentConnectorSelection::Output(output) => {
+                    let output = component.document.output(output)?;
+                    (
+                        output.name(),
+                        output.source(),
+                        component_output_endpoint_choices(&component.document, Some(output.id())),
+                    )
+                }
+            };
+            let mut draft = self
+                .component_connector_drafts
+                .get(&connector)
+                .cloned()
+                .unwrap_or_else(|| ComponentConnectorDraft {
+                    name: canonical_name.to_owned(),
+                    endpoint: canonical_endpoint,
+                });
+            if choices
+                .iter()
+                .all(|(endpoint, _)| *endpoint != draft.endpoint)
+            {
+                draft = ComponentConnectorDraft {
+                    name: canonical_name.to_owned(),
+                    endpoint: canonical_endpoint,
+                };
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("stable name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .char_limit(64)
+                        .desired_width(180.0),
+                );
+                let selected_endpoint = endpoint_choice_selected_label(
+                    Some(draft.endpoint),
+                    &choices,
+                    "missing canonical endpoint",
+                );
+                egui::ComboBox::from_id_salt("selected_component_connector_endpoint")
+                    .selected_text(selected_endpoint)
+                    .show_ui(ui, |ui| {
+                        for (endpoint, label) in &choices {
+                            ui.selectable_value(&mut draft.endpoint, *endpoint, label);
+                        }
+                    });
+                if ui.button("apply connector metadata").clicked() {
+                    action = Some(match connector {
+                        ComponentConnectorSelection::Input(input) => {
+                            ComponentConnectorUiAction::UpdateInput {
+                                input,
+                                draft: draft.clone(),
+                            }
+                        }
+                        ComponentConnectorSelection::Output(output) => {
+                            ComponentConnectorUiAction::UpdateOutput {
+                                output,
+                                draft: draft.clone(),
+                            }
+                        }
+                    });
+                }
+                if ui.button("reset connector draft").clicked() {
+                    draft = ComponentConnectorDraft {
+                        name: canonical_name.to_owned(),
+                        endpoint: canonical_endpoint,
+                    };
+                }
+            });
+            self.component_connector_drafts.insert(connector, draft);
+        }
+        action
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "canonical panel layout, exact control editing, and replay-only indicators remain one auditable egui frame operation"
@@ -3963,6 +4456,12 @@ impl ExactControlWorkspace {
                     self.file_status = format!("ALGM export failed: {error}");
                 }
             }
+        }
+        self.reconcile_component_connector_selection(None);
+        if let Some(action) = self.show_component_connector_authoring(ui, &component) {
+            self.apply_component_connector_action(action);
+            ui.label(&self.component_status);
+            return;
         }
         self.reconcile_panel_selection(None);
         let binding_choices = panel_binding_choices(&component.document);
@@ -5058,6 +5557,7 @@ impl ExactControlWorkspace {
         self.reconcile_hierarchy_selection(
             prior_component_digest.zip(replacement_component_digest),
         );
+        self.reconcile_component_connector_selection(self.selected_component_connector);
         self.reconcile_panel_selection(self.selected_panel_item);
         self.replace_probe_package(probes);
         self.probe_status = probe_status;
@@ -5247,6 +5747,26 @@ impl ExactControlWorkspace {
         self.node_label_drafts.clear();
         self.probe_drafts.clear();
         self.panel_item_drafts.clear();
+        self.component_connector_drafts.clear();
+        self.selected_component_connector = self.component.as_ref().and_then(|component| {
+            component
+                .document
+                .inputs()
+                .first()
+                .map(|input| ComponentConnectorSelection::Input(input.id()))
+                .or_else(|| {
+                    component
+                        .document
+                        .outputs()
+                        .first()
+                        .map(|output| ComponentConnectorSelection::Output(output.id()))
+                })
+        });
+        self.new_component_input_name.clear();
+        self.new_component_input_target = None;
+        self.new_component_output_name.clear();
+        self.new_component_output_source = None;
+        self.reconcile_component_connector_selection(self.selected_component_connector);
         self.selected_panel_item = self
             .component
             .as_ref()
@@ -9048,6 +9568,165 @@ fn paint_grid(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
+fn component_input_endpoint_choices(
+    component: &GraphComponentDocument,
+    editing: Option<GraphComponentInputId>,
+) -> Vec<(WireEndpoint, String)> {
+    let connected = component
+        .workspace()
+        .graph()
+        .wires()
+        .iter()
+        .map(|wire| wire.target())
+        .collect::<BTreeSet<_>>();
+    let exposed = component
+        .inputs()
+        .iter()
+        .filter(|input| Some(input.id()) != editing)
+        .map(GraphComponentInput::target)
+        .collect::<BTreeSet<_>>();
+    component
+        .workspace()
+        .graph()
+        .nodes()
+        .iter()
+        .flat_map(|node| {
+            node.inputs().iter().filter_map(|port| {
+                let endpoint = WireEndpoint {
+                    node: node.id(),
+                    port: port.id(),
+                };
+                (!connected.contains(&endpoint) && !exposed.contains(&endpoint)).then(|| {
+                    (
+                        endpoint,
+                        component_endpoint_label(component, endpoint, false),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+fn component_output_endpoint_choices(
+    component: &GraphComponentDocument,
+    editing: Option<GraphComponentOutputId>,
+) -> Vec<(WireEndpoint, String)> {
+    let exposed = component
+        .outputs()
+        .iter()
+        .filter(|output| Some(output.id()) != editing)
+        .map(GraphComponentOutput::source)
+        .collect::<BTreeSet<_>>();
+    component
+        .workspace()
+        .graph()
+        .nodes()
+        .iter()
+        .flat_map(|node| {
+            node.outputs().iter().filter_map(|port| {
+                let endpoint = WireEndpoint {
+                    node: node.id(),
+                    port: port.id(),
+                };
+                (!exposed.contains(&endpoint)).then(|| {
+                    (
+                        endpoint,
+                        component_endpoint_label(component, endpoint, true),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+fn component_endpoint_label(
+    component: &GraphComponentDocument,
+    endpoint: WireEndpoint,
+    output: bool,
+) -> String {
+    let Some(node) = component.workspace().graph().node(endpoint.node) else {
+        return format!("missing #{}.{}", endpoint.node.get(), endpoint.port.get());
+    };
+    let port = if output {
+        node.outputs()
+    } else {
+        node.inputs()
+    }
+    .iter()
+    .find(|port| port.id() == endpoint.port);
+    let Some(port) = port else {
+        return format!("missing #{}.{}", endpoint.node.get(), endpoint.port.get());
+    };
+    let value_type = component
+        .workspace()
+        .graph()
+        .schema()
+        .value_type(port.value_type())
+        .map_or("unknown", TypeDefinition::name);
+    format!(
+        "#{}.{} · {} / {} · {} [t{}]",
+        endpoint.node.get(),
+        endpoint.port.get(),
+        node.label(),
+        port.name(),
+        value_type,
+        port.value_type().get(),
+    )
+}
+
+fn endpoint_choice_selected_label(
+    selected: Option<WireEndpoint>,
+    choices: &[(WireEndpoint, String)],
+    unavailable: &str,
+) -> String {
+    selected
+        .and_then(|selected| {
+            choices
+                .iter()
+                .find(|(endpoint, _)| *endpoint == selected)
+                .map(|(_, label)| label.clone())
+        })
+        .unwrap_or_else(|| unavailable.to_owned())
+}
+
+fn component_connector_label(
+    component: &GraphComponentDocument,
+    connector: ComponentConnectorSelection,
+) -> String {
+    match connector {
+        ComponentConnectorSelection::Input(id) => component.input(id).map_or_else(
+            || format!("missing input #{}", id.get()),
+            |input| {
+                let port = graph_component_instance_input_port(component, id)
+                    .map_or_else(|| "?".to_owned(), |port| port.get().to_string());
+                format!(
+                    "input #{} · instance p{} · {} → #{}.{}",
+                    id.get(),
+                    port,
+                    input.name(),
+                    input.target().node.get(),
+                    input.target().port.get(),
+                )
+            },
+        ),
+        ComponentConnectorSelection::Output(id) => component.output(id).map_or_else(
+            || format!("missing output #{}", id.get()),
+            |output| {
+                let port = graph_component_instance_output_port(component, id)
+                    .map_or_else(|| "?".to_owned(), |port| port.get().to_string());
+                format!(
+                    "output #{} · instance p{} · {} ← #{}.{}",
+                    id.get(),
+                    port,
+                    output.name(),
+                    output.source().node.get(),
+                    output.source().port.get(),
+                )
+            },
+        ),
+    }
+}
+
 fn panel_item_label(name: &str) -> String {
     name.replace('_', " ")
 }
@@ -10961,6 +11640,255 @@ mod tests {
         assert_eq!(
             (restored.history.undo_len(), restored.history.redo_len()),
             (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one connector lifecycle proves both directions, recursive stable-ID remapping, exact no-ops/rejections, history, and persistence"
+    )]
+    fn component_connector_authoring_is_recursive_monotonic_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        let first_source =
+            component_output_endpoint_choices(&initial_component.document, None)[0].0;
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddOutput {
+            name: "setpoint_diagnostic".to_owned(),
+            source: first_source,
+        });
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_output = GraphComponentOutputId::new(8);
+        let added = workspace.component.as_ref().unwrap();
+        assert_ne!(added_session, initial_session);
+        assert_eq!(added.document.next_output_id(), 9);
+        assert_eq!(
+            added.document.output(added_output).unwrap().source(),
+            first_source
+        );
+        assert_eq!(
+            workspace.selected_component_connector,
+            Some(ComponentConnectorSelection::Output(added_output))
+        );
+        assert_eq!(added.hierarchy.document.root(), &initial_root);
+        assert!(
+            added
+                .hierarchy
+                .document
+                .dependency(initial_component.encoding.digest())
+                .is_none()
+        );
+        assert!(
+            added
+                .hierarchy
+                .document
+                .dependency(initial_wrapper)
+                .is_none()
+        );
+        let refreshed_wrapper = added
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        assert!(added.hierarchy.document.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(
+                    refreshed_wrapper,
+                    GraphNodeId::new(1),
+                    added.encoding.digest(),
+                )
+        }));
+        assert!(added.hierarchy.document.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::root(GraphNodeId::new(1), refreshed_wrapper)
+        }));
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+
+        let second_source = component_output_endpoint_choices(&added.document, Some(added_output))
+            .into_iter()
+            .map(|(endpoint, _)| endpoint)
+            .find(|endpoint| *endpoint != first_source)
+            .unwrap();
+        let updated_draft = ComponentConnectorDraft {
+            name: "measurement_diagnostic".to_owned(),
+            endpoint: second_source,
+        };
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: added_output,
+            draft: updated_draft.clone(),
+        });
+        let updated_session = workspace.authoring_session_encoding().unwrap();
+        let updated = workspace.component.as_ref().unwrap();
+        let output = updated.document.output(added_output).unwrap();
+        assert_eq!(output.name(), "measurement_diagnostic");
+        assert_eq!(output.source(), second_source);
+        assert_eq!(updated.document.next_output_id(), 9);
+
+        let history_lengths = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: added_output,
+            draft: updated_draft,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+
+        let retained_history = workspace.history.clone();
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::RemoveOutput(
+            GraphComponentOutputId::new(1),
+        ));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::RemoveOutput(
+            added_output,
+        ));
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .next_output_id(),
+            9
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddOutput {
+            name: "diagnostic_final".to_owned(),
+            source: first_source,
+        });
+        let final_output = GraphComponentOutputId::new(9);
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .output(final_output)
+                .is_some()
+        );
+
+        let mut disconnected = workspace.workspace.clone();
+        let wire = disconnected.graph().wires()[0];
+        let input_target = wire.target();
+        disconnected.disconnect(wire.id()).unwrap();
+        assert!(workspace.commit_candidate(
+            disconnected,
+            "disconnected one exact input for public connector authoring"
+        ));
+        assert!(
+            component_input_endpoint_choices(
+                &workspace.component.as_ref().unwrap().document,
+                None,
+            )
+            .iter()
+            .any(|(endpoint, _)| *endpoint == input_target)
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddInput {
+            name: "setpoint_command".to_owned(),
+            target: input_target,
+        });
+        let first_input = GraphComponentInputId::new(1);
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .next_input_id(),
+            2
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateInput {
+            input: first_input,
+            draft: ComponentConnectorDraft {
+                name: "setpoint_exact".to_owned(),
+                endpoint: input_target,
+            },
+        });
+        workspace
+            .apply_component_connector_action(ComponentConnectorUiAction::RemoveInput(first_input));
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddInput {
+            name: "setpoint_final".to_owned(),
+            target: input_target,
+        });
+        let final_input = GraphComponentInputId::new(2);
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        assert_eq!(final_component.document.next_input_id(), 3);
+        assert_eq!(
+            final_component.document.input(final_input).unwrap().name(),
+            "setpoint_final"
+        );
+        assert_eq!(final_component.document.next_output_id(), 10);
+        assert!(final_component.document.output(final_output).is_some());
+
+        workspace.navigate_history(false);
+        assert_ne!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .input(final_input)
+                .is_none()
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        let restored_component = &restored.component.as_ref().unwrap().document;
+        assert_eq!(restored_component.next_input_id(), 3);
+        assert_eq!(restored_component.next_output_id(), 10);
+        assert_eq!(
+            restored_component.input(final_input).unwrap().target(),
+            input_target
+        );
+        assert_eq!(
+            restored_component.output(final_output).unwrap().source(),
+            first_source
         );
         assert!(!restored.persistence_pending());
     }
