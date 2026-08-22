@@ -31,22 +31,24 @@ use alumina_interface_core::graph::{
     GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
     GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
     GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
-    GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
+    GraphDeploymentTarget, GraphDocument, GraphFlattenedNodeProvenance,
+    GraphFlattenedWireProvenance, GraphFrontPanelBinding, GraphFrontPanelItem,
     GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDependency, GraphHierarchyDocument,
     GraphHierarchyFlattening, GraphHierarchyLimits, GraphHierarchyNodeOrigin,
-    GraphHierarchySourceMapLimits, GraphInstanceScope, GraphLimits, GraphLiteralTextLimits,
-    GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry, GraphPortId,
-    GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge, GraphProbeId,
-    GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits, GraphProbeTrigger,
-    GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry, GraphTraceEntry,
-    GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId, GraphWorkspaceDocument,
-    GraphWorkspaceLimits, InputConnectionRequirement, MAX_GRAPH_AUTHORING_SESSION_BYTES,
-    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
-    NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
-    NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
-    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
-    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue,
-    WireDefinition, WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
+    GraphHierarchySourceMapLimits, GraphHierarchyWireOrigin, GraphInstanceScope, GraphLimits,
+    GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype, GraphNodeRegistry,
+    GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument, GraphProbeEdge,
+    GraphProbeId, GraphProbeLimits, GraphProbeProjection, GraphProbeProjectionLimits,
+    GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema, GraphSimulationRegistry,
+    GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId,
+    GraphWorkspaceDocument, GraphWorkspaceLimits, InputConnectionRequirement,
+    MAX_GRAPH_AUTHORING_SESSION_BYTES, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+    MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, NodeDefinition, NodeInputChannelContract,
+    NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
+    NodeSchema, PortDefinition, RecordField, RecordFieldId, RecordValueField,
+    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
+    ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireDefinition, WireEndpoint,
+    analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
     encode_graph_hierarchy, encode_graph_hierarchy_source_map, encode_graph_probes,
     encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
@@ -263,6 +265,102 @@ impl ComponentDefinitionEditor {
         self.parameter_drafts.clear();
         self.node_label_drafts.clear();
         self.status = status;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HierarchySourceSelection {
+    Node {
+        flattened: GraphNodeId,
+        origin: GraphHierarchyNodeOrigin,
+    },
+    Wire {
+        flattened: GraphWireId,
+        origin: GraphHierarchyWireOrigin,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HierarchySourceDestination {
+    Root,
+    Component(Digest),
+}
+
+impl HierarchySourceSelection {
+    fn destination(&self) -> HierarchySourceDestination {
+        match self {
+            Self::Node {
+                origin: GraphHierarchyNodeOrigin::Root(_),
+                ..
+            }
+            | Self::Wire {
+                origin: GraphHierarchyWireOrigin::Root(_),
+                ..
+            } => HierarchySourceDestination::Root,
+            Self::Node {
+                origin: GraphHierarchyNodeOrigin::Component { component, .. },
+                ..
+            }
+            | Self::Wire {
+                origin: GraphHierarchyWireOrigin::Component { component, .. },
+                ..
+            } => HierarchySourceDestination::Component(*component),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HierarchySourceBrowser {
+    selected_node: Option<GraphNodeId>,
+    selected_wire: Option<GraphWireId>,
+    last_opened: Option<HierarchySourceSelection>,
+    scroll_pending: bool,
+    status: String,
+}
+
+impl Default for HierarchySourceBrowser {
+    fn default() -> Self {
+        Self {
+            selected_node: None,
+            selected_wire: None,
+            last_opened: None,
+            scroll_pending: false,
+            status: "choose one final flattened node or wire to open its exact ALGM source"
+                .to_owned(),
+        }
+    }
+}
+
+impl HierarchySourceBrowser {
+    fn reset(&mut self, status: impl Into<String>) {
+        self.selected_node = None;
+        self.selected_wire = None;
+        self.last_opened = None;
+        self.scroll_pending = false;
+        self.status = status.into();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HierarchyRootCanvasFocus {
+    selected_instance: Option<GraphNodeId>,
+    opened_source_node: Option<GraphNodeId>,
+    opened_source_wire: Option<GraphWireId>,
+}
+
+impl HierarchyRootCanvasFocus {
+    fn selects_node(self, node: GraphNodeId) -> bool {
+        self.selected_instance == Some(node) || self.opened_source_node == Some(node)
+    }
+
+    fn selects_wire(self, wire: &WireDefinition) -> bool {
+        self.opened_source_wire == Some(wire.id())
+            || self
+                .selected_instance
+                .is_some_and(|node| node == wire.source().node || node == wire.target().node)
+            || self
+                .opened_source_node
+                .is_some_and(|node| node == wire.source().node || node == wire.target().node)
     }
 }
 
@@ -555,6 +653,38 @@ fn hierarchy_source_path_label(path: &[GraphNodeId]) -> String {
     }
     label.push(']');
     label
+}
+
+fn hierarchy_node_origin_label(origin: &GraphHierarchyNodeOrigin) -> String {
+    match origin {
+        GraphHierarchyNodeOrigin::Root(node) => format!("root ALGW node {}", node.get()),
+        GraphHierarchyNodeOrigin::Component {
+            source_path,
+            component,
+            node,
+        } => format!(
+            "{} · ALGC {}… node {}",
+            hierarchy_source_path_label(source_path),
+            digest_prefix(component.0),
+            node.get()
+        ),
+    }
+}
+
+fn hierarchy_wire_origin_label(origin: &GraphHierarchyWireOrigin) -> String {
+    match origin {
+        GraphHierarchyWireOrigin::Root(wire) => format!("root ALGW wire {}", wire.get()),
+        GraphHierarchyWireOrigin::Component {
+            source_path,
+            component,
+            wire,
+        } => format!(
+            "{} · ALGC {}… wire {}",
+            hierarchy_source_path_label(source_path),
+            digest_prefix(component.0),
+            wire.get()
+        ),
+    }
 }
 
 fn hierarchy_origin_correlation(
@@ -2328,6 +2458,7 @@ pub(crate) struct ExactControlWorkspace {
     panel_drag: Option<PanelItemDrag>,
     selected_hierarchy_component: Option<Digest>,
     selected_hierarchy_instance: Option<GraphNodeId>,
+    hierarchy_source_browser: HierarchySourceBrowser,
     pending_hierarchy_source: Option<WireEndpoint>,
     hierarchy_drag: Option<NodeDrag>,
     pending_source: Option<WireEndpoint>,
@@ -2449,6 +2580,7 @@ impl ExactControlWorkspace {
             panel_drag: None,
             selected_hierarchy_component,
             selected_hierarchy_instance,
+            hierarchy_source_browser: HierarchySourceBrowser::default(),
             pending_hierarchy_source: None,
             hierarchy_drag: None,
             pending_source: None,
@@ -3071,11 +3203,29 @@ impl ExactControlWorkspace {
         );
     }
 
+    fn scroll_to_open_hierarchy_source(
+        &mut self,
+        ui: &egui::Ui,
+        destination: HierarchySourceDestination,
+    ) {
+        if self.hierarchy_source_browser.scroll_pending
+            && self
+                .hierarchy_source_browser
+                .last_opened
+                .as_ref()
+                .is_some_and(|selection| selection.destination() == destination)
+        {
+            ui.scroll_to_cursor(Some(egui::Align::Center));
+            self.hierarchy_source_browser.scroll_pending = false;
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the two selectors share one immutable canonical hierarchy snapshot and defer their single action until all display borrows end"
     )]
     fn show_hierarchy_authoring(&mut self, ui: &mut egui::Ui) {
+        self.scroll_to_open_hierarchy_source(ui, HierarchySourceDestination::Root);
         ui.heading("Component library / root instances");
         ui.label(
             "Choose one exact embedded ALGC dependency, instantiate it in the hierarchy root, or remove a selected root occurrence. These authoring-only placeholders flatten through ALGH/ALGM and never deploy by themselves.",
@@ -3290,6 +3440,23 @@ impl ExactControlWorkspace {
         };
         let nodes = root.graph().nodes().to_vec();
         let wires = root.graph().wires().to_vec();
+        let (opened_root_node, opened_root_wire) =
+            match self.hierarchy_source_browser.last_opened.as_ref() {
+                Some(HierarchySourceSelection::Node {
+                    origin: GraphHierarchyNodeOrigin::Root(node),
+                    ..
+                }) => (Some(*node), None),
+                Some(HierarchySourceSelection::Wire {
+                    origin: GraphHierarchyWireOrigin::Root(wire),
+                    ..
+                }) => (None, Some(*wire)),
+                _ => (None, None),
+            };
+        let focus = HierarchyRootCanvasFocus {
+            selected_instance: self.selected_hierarchy_instance,
+            opened_source_node: opened_root_node,
+            opened_source_wire: opened_root_wire,
+        };
         let mut action = None;
         let mut clicked_instance = None;
         egui::ScrollArea::both()
@@ -3312,9 +3479,8 @@ impl ExactControlWorkspace {
                         origin,
                         root.graph(),
                         &presentation,
-                        self.selected_hierarchy_instance,
-                        wire.source(),
-                        wire.target(),
+                        focus,
+                        wire,
                     );
                 }
                 for node in &nodes {
@@ -3457,7 +3623,7 @@ impl ExactControlWorkspace {
                         &painter,
                         painted_rect,
                         node,
-                        self.selected_hierarchy_instance == Some(node.id()),
+                        focus.selects_node(node.id()),
                         bound_instance,
                         root.placement(node.id()),
                     );
@@ -3477,6 +3643,380 @@ impl ExactControlWorkspace {
             self.selected_hierarchy_instance = Some(node);
         }
         action
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "node and wire provenance selectors share one immutable ALGM snapshot and defer one transient navigation action until display borrows end"
+    )]
+    fn show_hierarchy_source_browser(&mut self, ui: &mut egui::Ui, component: &ComponentPackage) {
+        self.reconcile_hierarchy_source_browser();
+        let flattened = &component.hierarchy.flattening;
+        let workspace = flattened.workspace();
+        let node_choices = flattened.node_provenance();
+        let wire_choices = flattened.wire_provenance();
+        let node_choice_label = |mapping: &GraphFlattenedNodeProvenance| {
+            let flattened = mapping.flattened_node();
+            let node_label = workspace
+                .graph()
+                .node(flattened)
+                .map_or("missing final node", NodeDefinition::label);
+            format!(
+                "final n{} {node_label} · {}",
+                flattened.get(),
+                hierarchy_node_origin_label(mapping.origin())
+            )
+        };
+        let wire_choice_label = |mapping: &GraphFlattenedWireProvenance| {
+            let flattened = mapping.flattened_wire();
+            let endpoints = workspace
+                .graph()
+                .wires()
+                .iter()
+                .find(|wire| wire.id() == flattened)
+                .map_or_else(
+                    || "missing final wire".to_owned(),
+                    |wire| {
+                        format!(
+                            "n{}.p{} → n{}.p{}",
+                            wire.source().node.get(),
+                            wire.source().port.get(),
+                            wire.target().node.get(),
+                            wire.target().port.get()
+                        )
+                    },
+                );
+            format!(
+                "final w{} {endpoints} · {}",
+                flattened.get(),
+                hierarchy_wire_origin_label(mapping.origin())
+            )
+        };
+        let selected_node_label = node_choices
+            .iter()
+            .find(|mapping| {
+                Some(mapping.flattened_node()) == self.hierarchy_source_browser.selected_node
+            })
+            .map_or_else(|| "no final node".to_owned(), node_choice_label);
+        let selected_wire_label = wire_choices
+            .iter()
+            .find(|mapping| {
+                Some(mapping.flattened_wire()) == self.hierarchy_source_browser.selected_wire
+            })
+            .map_or_else(|| "no final wire".to_owned(), wire_choice_label);
+        let mut action = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.heading("Flattened hierarchy source browser");
+                ui.weak("read-only ALGM navigation");
+            });
+            ui.label(
+                "Choose one final flattened item. Opening its exact source follows the stable occurrence path into the root or component definition and changes only transient UI selection.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Final node");
+                egui::ComboBox::from_id_salt("hierarchy_source_final_node")
+                    .width(640.0)
+                    .selected_text(selected_node_label)
+                    .show_ui(ui, |ui| {
+                        for mapping in node_choices {
+                            ui.selectable_value(
+                                &mut self.hierarchy_source_browser.selected_node,
+                                Some(mapping.flattened_node()),
+                                node_choice_label(mapping),
+                            );
+                        }
+                    });
+                if ui
+                    .add_enabled(
+                        self.hierarchy_source_browser.selected_node.is_some(),
+                        egui::Button::new("open exact node source"),
+                    )
+                    .clicked()
+                    && let Some(selected) = self.hierarchy_source_browser.selected_node
+                    && let Some(mapping) = node_choices
+                        .iter()
+                        .find(|mapping| mapping.flattened_node() == selected)
+                {
+                    action = Some(HierarchySourceSelection::Node {
+                        flattened: selected,
+                        origin: mapping.origin().clone(),
+                    });
+                }
+            });
+            if let Some(selected) = self.hierarchy_source_browser.selected_node
+                && let Some(mapping) = node_choices
+                    .iter()
+                    .find(|mapping| mapping.flattened_node() == selected)
+            {
+                ui.monospace(format!(
+                    "exact node origin: {}",
+                    hierarchy_node_origin_label(mapping.origin())
+                ));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Final wire");
+                egui::ComboBox::from_id_salt("hierarchy_source_final_wire")
+                    .width(640.0)
+                    .selected_text(selected_wire_label)
+                    .show_ui(ui, |ui| {
+                        for mapping in wire_choices {
+                            ui.selectable_value(
+                                &mut self.hierarchy_source_browser.selected_wire,
+                                Some(mapping.flattened_wire()),
+                                wire_choice_label(mapping),
+                            );
+                        }
+                    });
+                if ui
+                    .add_enabled(
+                        self.hierarchy_source_browser.selected_wire.is_some(),
+                        egui::Button::new("open exact wire source"),
+                    )
+                    .clicked()
+                    && let Some(selected) = self.hierarchy_source_browser.selected_wire
+                    && let Some(mapping) = wire_choices
+                        .iter()
+                        .find(|mapping| mapping.flattened_wire() == selected)
+                {
+                    action = Some(HierarchySourceSelection::Wire {
+                        flattened: selected,
+                        origin: mapping.origin().clone(),
+                    });
+                }
+            });
+            if let Some(selected) = self.hierarchy_source_browser.selected_wire
+                && let Some(mapping) = wire_choices
+                    .iter()
+                    .find(|mapping| mapping.flattened_wire() == selected)
+            {
+                ui.monospace(format!(
+                    "exact wire origin: {}",
+                    hierarchy_wire_origin_label(mapping.origin())
+                ));
+            }
+            ui.label(&self.hierarchy_source_browser.status);
+        });
+        if let Some(action) = action {
+            self.open_hierarchy_source(action);
+        }
+    }
+
+    fn open_hierarchy_source(&mut self, selection: HierarchySourceSelection) {
+        match self.try_open_hierarchy_source(&selection) {
+            Ok(status) => {
+                self.hierarchy_source_browser.last_opened = Some(selection);
+                self.hierarchy_source_browser.scroll_pending = true;
+                self.hierarchy_source_browser.status = status;
+            }
+            Err(error) => {
+                self.hierarchy_source_browser.status =
+                    format!("ALGM source navigation rejected without authoring mutation: {error}");
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the four exact ALGM node/wire and root/component origin variants remain visibly exhaustive at one fail-closed navigation boundary"
+    )]
+    fn try_open_hierarchy_source(
+        &mut self,
+        selection: &HierarchySourceSelection,
+    ) -> Result<String, String> {
+        let package = self
+            .component
+            .clone()
+            .ok_or_else(|| "no complete ALGH/ALGM source authority is attached".to_owned())?;
+        match selection {
+            HierarchySourceSelection::Node { flattened, origin } => {
+                if package.hierarchy.flattening.node_origin(*flattened) != Some(origin) {
+                    return Err(
+                        "the selected final node no longer has that exact origin".to_owned()
+                    );
+                }
+                match origin {
+                    GraphHierarchyNodeOrigin::Root(node) => {
+                        if package
+                            .hierarchy
+                            .document
+                            .root()
+                            .graph()
+                            .node(*node)
+                            .is_none()
+                        {
+                            return Err("the exact root source node is unavailable".to_owned());
+                        }
+                        self.pending_hierarchy_source = None;
+                        self.hierarchy_drag = None;
+                        Ok(format!(
+                            "opened final node {} as root ALGW node {}; canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            node.get()
+                        ))
+                    }
+                    GraphHierarchyNodeOrigin::Component {
+                        source_path,
+                        component,
+                        node,
+                    } => {
+                        Self::validate_component_source(
+                            &package,
+                            source_path,
+                            *component,
+                            Some(*node),
+                            None,
+                        )?;
+                        self.select_component_source(&package, source_path, *component, *node);
+                        Ok(format!(
+                            "opened final node {} at exact occurrence {} as ALGC {}… node {}; canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            hierarchy_source_path_label(source_path),
+                            digest_prefix(component.0),
+                            node.get()
+                        ))
+                    }
+                }
+            }
+            HierarchySourceSelection::Wire { flattened, origin } => {
+                if package.hierarchy.flattening.wire_origin(*flattened) != Some(origin) {
+                    return Err(
+                        "the selected final wire no longer has that exact origin".to_owned()
+                    );
+                }
+                match origin {
+                    GraphHierarchyWireOrigin::Root(wire) => {
+                        let source = package
+                            .hierarchy
+                            .document
+                            .root()
+                            .graph()
+                            .wires()
+                            .iter()
+                            .find(|candidate| candidate.id() == *wire)
+                            .ok_or_else(|| {
+                                "the exact root source wire is unavailable".to_owned()
+                            })?;
+                        self.pending_hierarchy_source = None;
+                        self.hierarchy_drag = None;
+                        Ok(format!(
+                            "opened final wire {} as root ALGW wire {} (n{}.p{} → n{}.p{}); canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            wire.get(),
+                            source.source().node.get(),
+                            source.source().port.get(),
+                            source.target().node.get(),
+                            source.target().port.get()
+                        ))
+                    }
+                    GraphHierarchyWireOrigin::Component {
+                        source_path,
+                        component,
+                        wire,
+                    } => {
+                        let source = Self::validate_component_source(
+                            &package,
+                            source_path,
+                            *component,
+                            None,
+                            Some(*wire),
+                        )?
+                        .ok_or_else(|| {
+                            "the exact component source wire is unavailable".to_owned()
+                        })?;
+                        self.select_component_source(
+                            &package,
+                            source_path,
+                            *component,
+                            source.target().node,
+                        );
+                        Ok(format!(
+                            "opened final wire {} at exact occurrence {} as ALGC {}… wire {} (n{}.p{} → n{}.p{}); canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            hierarchy_source_path_label(source_path),
+                            digest_prefix(component.0),
+                            wire.get(),
+                            source.source().node.get(),
+                            source.source().port.get(),
+                            source.target().node.get(),
+                            source.target().port.get()
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_component_source(
+        package: &ComponentPackage,
+        source_path: &[GraphNodeId],
+        source_component: Digest,
+        node: Option<GraphNodeId>,
+        wire: Option<GraphWireId>,
+    ) -> Result<Option<WireDefinition>, String> {
+        if package
+            .hierarchy
+            .document
+            .component_at_instance_path(source_path)
+            != Some(source_component)
+        {
+            return Err(
+                "the selected ALGM occurrence path no longer resolves to its exact component"
+                    .to_owned(),
+            );
+        }
+        let dependency = package
+            .hierarchy
+            .document
+            .dependency(source_component)
+            .ok_or_else(|| "the selected ALGM source component is unavailable".to_owned())?;
+        if let Some(wire) = wire {
+            return dependency
+                .document()
+                .workspace()
+                .graph()
+                .wires()
+                .iter()
+                .find(|candidate| candidate.id() == wire)
+                .copied()
+                .map(Some)
+                .ok_or_else(|| "the selected ALGM source wire is unavailable".to_owned());
+        }
+        let node = node.ok_or_else(|| "the selected ALGM source has no node".to_owned())?;
+        if dependency
+            .document()
+            .workspace()
+            .graph()
+            .node(node)
+            .is_none()
+        {
+            return Err("the selected ALGM source node is unavailable".to_owned());
+        }
+        Ok(None)
+    }
+
+    fn select_component_source(
+        &mut self,
+        package: &ComponentPackage,
+        source_path: &[GraphNodeId],
+        source_component: Digest,
+        node: GraphNodeId,
+    ) {
+        self.selected_hierarchy_component = Some(source_component);
+        self.selected_hierarchy_instance = source_path.first().copied();
+        self.pending_hierarchy_source = None;
+        self.hierarchy_drag = None;
+        self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_definition_editor();
+        if source_component == package.encoding.digest() {
+            self.selected_node = Some(node);
+            self.pending_source = None;
+            self.drag = None;
+        } else {
+            self.component_definition.selected_node = Some(node);
+            self.component_definition.pending_source = None;
+            self.component_definition.drag = None;
+        }
     }
 
     #[allow(
@@ -3532,6 +4072,7 @@ impl ExactControlWorkspace {
             ui.label(&self.component_definition.status);
             return;
         }
+        self.scroll_to_open_hierarchy_source(ui, HierarchySourceDestination::Component(scope));
         let presentation = match structural_workspace_presentation(&workspace) {
             Ok(presentation) => presentation,
             Err(error) => {
@@ -5166,6 +5707,8 @@ impl ExactControlWorkspace {
             self.selected_hierarchy_instance = None;
             self.pending_hierarchy_source = None;
             self.hierarchy_drag = None;
+            self.hierarchy_source_browser
+                .reset("no complete ALGH/ALGM source authority is attached");
             return;
         };
         let mut selected_component = self.selected_hierarchy_component;
@@ -5235,6 +5778,58 @@ impl ExactControlWorkspace {
         }) {
             self.hierarchy_drag = None;
         }
+        self.reconcile_hierarchy_source_browser();
+    }
+
+    fn reconcile_hierarchy_source_browser(&mut self) {
+        let Some(component) = self.component.as_ref() else {
+            self.hierarchy_source_browser
+                .reset("no complete ALGH/ALGM source authority is attached");
+            return;
+        };
+        let nodes = component
+            .hierarchy
+            .flattening
+            .node_provenance()
+            .iter()
+            .map(|mapping| (mapping.flattened_node(), mapping.origin().clone()))
+            .collect::<Vec<_>>();
+        let wires = component
+            .hierarchy
+            .flattening
+            .wire_provenance()
+            .iter()
+            .map(|mapping| (mapping.flattened_wire(), mapping.origin().clone()))
+            .collect::<Vec<_>>();
+        self.hierarchy_source_browser.selected_node = self
+            .hierarchy_source_browser
+            .selected_node
+            .filter(|selected| nodes.iter().any(|(node, _)| node == selected))
+            .or_else(|| nodes.first().map(|(node, _)| *node));
+        self.hierarchy_source_browser.selected_wire = self
+            .hierarchy_source_browser
+            .selected_wire
+            .filter(|selected| wires.iter().any(|(wire, _)| wire == selected))
+            .or_else(|| wires.first().map(|(wire, _)| *wire));
+        let had_opened = self.hierarchy_source_browser.last_opened.is_some();
+        let retained = self
+            .hierarchy_source_browser
+            .last_opened
+            .take()
+            .filter(|selection| match selection {
+                HierarchySourceSelection::Node { flattened, origin } => nodes
+                    .iter()
+                    .any(|(node, retained)| node == flattened && retained == origin),
+                HierarchySourceSelection::Wire { flattened, origin } => wires
+                    .iter()
+                    .any(|(wire, retained)| wire == flattened && retained == origin),
+            });
+        if retained.is_none() && had_opened {
+            "the previously opened ALGM source is absent from the current exact hierarchy"
+                .clone_into(&mut self.hierarchy_source_browser.status);
+            self.hierarchy_source_browser.scroll_pending = false;
+        }
+        self.hierarchy_source_browser.last_opened = retained;
     }
 
     fn reconcile_component_definition_editor(&mut self) {
@@ -5766,6 +6361,9 @@ impl ExactControlWorkspace {
                 }
             }
         }
+        ui.separator();
+        self.show_hierarchy_source_browser(ui, &component);
+        ui.separator();
         self.reconcile_component_connector_selection(None);
         if let Some(action) = self.show_component_connector_authoring(ui, &component) {
             self.apply_component_connector_action(action);
@@ -6240,6 +6838,16 @@ impl ExactControlWorkspace {
         reason = "canvas allocation, layered node/port interaction, preview, and deferred transactional edits remain one egui frame operation"
     )]
     fn show_graph(&mut self, ui: &mut egui::Ui, maximum_height: f32) {
+        if let Some(authoritative) = self
+            .component
+            .as_ref()
+            .map(|component| component.encoding.digest())
+        {
+            self.scroll_to_open_hierarchy_source(
+                ui,
+                HierarchySourceDestination::Component(authoritative),
+            );
+        }
         let nodes = self.workspace.graph().nodes().to_vec();
         let wires = self.workspace.graph().wires().to_vec();
         let mut clicked_node = None;
@@ -10710,10 +11318,11 @@ fn paint_hierarchy_root_wire(
     origin: egui::Vec2,
     document: &GraphDocument,
     presentation: &GraphPresentation,
-    selected_instance: Option<GraphNodeId>,
-    source: WireEndpoint,
-    target: WireEndpoint,
+    focus: HierarchyRootCanvasFocus,
+    wire: &WireDefinition,
 ) {
+    let source = wire.source();
+    let target = wire.target();
     let (Some(source_anchor), Some(target_anchor)) = (
         port_anchor(document, presentation, source, true),
         port_anchor(document, presentation, target, false),
@@ -10722,7 +11331,7 @@ fn paint_hierarchy_root_wire(
     };
     let source_anchor = source_anchor + origin;
     let target_anchor = target_anchor + origin;
-    let selected = selected_instance.is_some_and(|node| node == source.node || node == target.node);
+    let selected = focus.selects_wire(wire);
     let color = if selected {
         egui::Color32::WHITE
     } else {
@@ -12731,6 +13340,250 @@ mod tests {
         assert_eq!(hierarchy_replay.document(), &initial.hierarchy.document);
         assert_eq!(hierarchy_replay.encoding(), &initial.hierarchy.encoding);
         assert_hierarchy_source_map(initial);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exact node/wire source-navigation lifecycle proves occurrence resolution, transient selection, rejection retention, history isolation, and persistence isolation"
+    )]
+    fn flattened_source_browser_opens_exact_nodes_and_wires_without_authoring_mutation() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        workspace.reconcile_hierarchy_source_browser();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let authoritative = retained_component.encoding.digest();
+        let wrapper = retained_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        let node_mapping = retained_component.hierarchy.flattening.node_provenance()[7].clone();
+        let node_origin = node_mapping.origin().clone();
+        let GraphHierarchyNodeOrigin::Component {
+            source_path,
+            component,
+            node,
+        } = &node_origin
+        else {
+            panic!("reference final node did not retain a component origin");
+        };
+        let expected_node = *node;
+        assert_eq!(source_path, &[GraphNodeId::new(1), GraphNodeId::new(1)]);
+        assert_eq!(*component, authoritative);
+
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_hierarchy_selection(None);
+        workspace.selected_node = None;
+        let node_selection = HierarchySourceSelection::Node {
+            flattened: node_mapping.flattened_node(),
+            origin: node_origin,
+        };
+        workspace.open_hierarchy_source(node_selection.clone());
+
+        assert_eq!(workspace.selected_hierarchy_component, Some(authoritative));
+        assert_eq!(
+            workspace.selected_hierarchy_instance,
+            Some(GraphNodeId::new(1))
+        );
+        assert_eq!(workspace.selected_node, Some(expected_node));
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(node_selection)
+        );
+        assert!(workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("exact occurrence [1/1]")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        let wire_mapping = retained_component.hierarchy.flattening.wire_provenance()[0].clone();
+        let wire_origin = wire_mapping.origin().clone();
+        let GraphHierarchyWireOrigin::Component {
+            source_path,
+            component,
+            wire,
+        } = &wire_origin
+        else {
+            panic!("reference final wire did not retain a component origin");
+        };
+        assert_eq!(source_path, &[GraphNodeId::new(1), GraphNodeId::new(1)]);
+        assert_eq!(*component, authoritative);
+        let expected_target = retained_component
+            .hierarchy
+            .document
+            .dependency(*component)
+            .unwrap()
+            .document()
+            .workspace()
+            .graph()
+            .wires()
+            .iter()
+            .find(|candidate| candidate.id() == *wire)
+            .unwrap()
+            .target()
+            .node;
+        let wire_selection = HierarchySourceSelection::Wire {
+            flattened: wire_mapping.flattened_wire(),
+            origin: wire_origin,
+        };
+        workspace.open_hierarchy_source(wire_selection.clone());
+
+        assert_eq!(workspace.selected_node, Some(expected_target));
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(wire_selection.clone())
+        );
+        assert!(workspace.hierarchy_source_browser.status.contains("wire"));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.open_hierarchy_source(HierarchySourceSelection::Node {
+            flattened: node_mapping.flattened_node(),
+            origin: GraphHierarchyNodeOrigin::Root(GraphNodeId::new(99)),
+        });
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(wire_selection)
+        );
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("rejected without authoring mutation")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+    }
+
+    #[test]
+    fn flattened_source_browser_opens_private_definition_and_clears_stale_origin() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.palette_index = 0;
+        workspace.add_component_definition_node(wrapper);
+        let private_scope = workspace.component_definition.scope.unwrap();
+        let private_node = GraphNodeId::new(2);
+        let mapping = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .flattening
+            .node_provenance()
+            .iter()
+            .find(|mapping| {
+                matches!(
+                    mapping.origin(),
+                    GraphHierarchyNodeOrigin::Component {
+                        source_path,
+                        component,
+                        node,
+                    } if source_path == &[GraphNodeId::new(1)]
+                        && *component == private_scope
+                        && *node == private_node
+                )
+            })
+            .unwrap()
+            .clone();
+        let selection = HierarchySourceSelection::Node {
+            flattened: mapping.flattened_node(),
+            origin: mapping.origin().clone(),
+        };
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_hierarchy_selection(None);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.selected_node = None;
+        workspace.open_hierarchy_source(selection.clone());
+
+        assert_eq!(workspace.selected_hierarchy_component, Some(private_scope));
+        assert_eq!(
+            workspace.selected_hierarchy_instance,
+            Some(GraphNodeId::new(1))
+        );
+        assert_eq!(workspace.component_definition.scope, Some(private_scope));
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(private_node)
+        );
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(selection)
+        );
+        assert!(workspace.hierarchy_source_browser.scroll_pending);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.commit_component_definition_node_label(
+            private_scope,
+            private_node,
+            "source_navigation_remap",
+        );
+        assert_eq!(workspace.hierarchy_source_browser.last_opened, None);
+        assert!(!workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("absent from the current exact hierarchy")
+        );
     }
 
     #[test]

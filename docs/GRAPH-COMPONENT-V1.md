@@ -166,6 +166,14 @@ connectors/panel references, cycles, semantic failures, and indirect
 control-authority changes reject atomically. Deletion preserves the monotonic
 node cursor.
 
+The ALGM flattened-source browser can enter this editor without authoring. It
+revalidates a final node or wire's complete occurrence path and exact component
+digest, selects the matching library definition, and focuses the local node or
+the local wire's target node. An authoritative component source instead opens
+the main control canvas, while a root source highlights the structural root
+canvas. This source-navigation state is deliberately absent from `ALGC` and
+`ALGS`, records no history, and does not mark persistence pending.
+
 The reviewed fixture supplies the initial panel metadata. Once edited, the
 canonical `ALGC` inside `ALGS` and `.algc` exchange is authoritative; later
 compatible `ALGW` edits replace its embedded workspace while retaining the
@@ -204,9 +212,10 @@ scoped component instances by exact digest, rejects dependency cycles, bounds
 recursive expansion, and deterministically flattens a component DAG to ordinary
 `ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences
 from the embedded dependency library and preserves them across compatible
-selected-component edits. Nested instance-definition/import workflows,
+selected-component edits. Nested definition import with separately supplied
+scoped bindings,
 general component-library creation, package signatures/permissions, locked
-dependency manifests, child rebinding and source-definition traversal,
+dependency manifests, child rebinding,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.
 `ALGC` V1 grants no semantic, implementation, resource, timing, safety,

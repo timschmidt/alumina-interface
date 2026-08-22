@@ -132,6 +132,13 @@ and clears or reconciles only transient UI selections and text/drag drafts.
 Fresh startup, complete-session import, and persistence restore begin with
 empty history.
 
+Flattened-to-source navigation is also transient. Selecting an `ALGM` final
+node or wire, resolving its exact occurrence path, focusing a source editor,
+and scrolling to that editor neither encodes a field in `ALGS` nor pushes a
+history state nor marks browser persistence pending. A later canonical edit
+reconciles the retained origin against the regenerated map and clears it when
+the exact final/origin pair no longer exists.
+
 ## Browser persistence and file exchange
 
 Browser local storage uses the greenfield key
@@ -177,7 +184,9 @@ selected-library definition node/placement/wire authoring, control-authority
 isolation, atomic scoped child-occurrence add/remove/re-add with monotonic node
 identity, exact child history/persistence, rejection of live public bindings,
 cycles, ordinary placeholder deletion, and an indirect authority rewrite,
-abandoned-redo clearing, and transactional failure for corrupt,
+exact flattened node/wire source navigation with no session/history/persistence
+mutation and stale-origin reconciliation, abandoned-redo clearing, and
+transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 
 The complete browser reference session is 14,770 bytes with SHA-256

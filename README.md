@@ -283,7 +283,16 @@ prototype.
   and wire back to one exact root or component-occurrence origin. Its import
   path freshly flattens the complete `ALGH` and regenerates every byte before
   the selected-node inspector or exact trace cursor displays source-path/final
-  endpoint correlation; it grants no execution or firmware authority.
+  endpoint correlation; it grants no execution or firmware authority. A
+  visible flattened-source browser enumerates every final node and wire from
+  that fresh map. Opening one rechecks its exact final-to-origin mapping and
+  resolves every component occurrence path through the current `ALGH` before
+  scrolling to the root canvas, selected library definition, or authoritative
+  control canvas. Root items are highlighted directly; component nodes select
+  their local node and component wires select their local target node. These
+  focus, scroll, and selection facts are transient: canonical `ALGS`, history,
+  and persistence remain byte-identical, and stale provenance rejects without
+  retaining a false destination.
   The component-library panel lists exact dependencies already admitted by
   that `ALGH`, exchanges the selected dependency as canonical `.algc`, imports
   a bounded standalone leaf only after exact replay and audited graph
@@ -538,7 +547,6 @@ nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, child-occurrence
 rebinding and general component-library creation,
-interactive traversal from flattened items into their source definitions,
 connector-shape authoring/remapping, front-panel runtime injection/execution,
 responsive/grouped panel layout, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared

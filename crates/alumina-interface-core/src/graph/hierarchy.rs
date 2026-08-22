@@ -325,6 +325,23 @@ impl GraphHierarchyDocument {
         &self.instances
     }
 
+    /// Resolve a stable root-to-nested occurrence path to the exact component
+    /// instantiated at its final node. An empty, missing, or discontinuous
+    /// path has no component authority.
+    pub fn component_at_instance_path(&self, path: &[GraphNodeId]) -> Option<Digest> {
+        let mut scope = GraphInstanceScope::Root;
+        let mut resolved = None;
+        for node in path {
+            let instance = self
+                .instances
+                .iter()
+                .find(|instance| instance.scope == scope && instance.node == *node)?;
+            resolved = Some(instance.component);
+            scope = GraphInstanceScope::Component(instance.component);
+        }
+        resolved
+    }
+
     /// Return the statically proved number of recursively expanded occurrences.
     pub const fn flattened_instance_count(&self) -> usize {
         self.flattened_instances
@@ -3837,6 +3854,23 @@ mod tests {
         assert_eq!(left.flattened_instance_count(), 2);
         assert_eq!(left.flattened_node_count(), 22);
         assert_eq!(left.flattened_wire_count(), 26);
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(2)]),
+            Some(wrapper_digest)
+        );
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(2), GraphNodeId::new(1)]),
+            Some(leaf_digest)
+        );
+        assert_eq!(left.component_at_instance_path(&[]), None);
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(1)]),
+            None
+        );
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(2), GraphNodeId::new(2)]),
+            None
+        );
         assert_eq!(
             encode_graph_hierarchy(&left).unwrap(),
             encode_graph_hierarchy(&right).unwrap()

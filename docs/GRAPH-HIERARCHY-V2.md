@@ -169,6 +169,10 @@ component wire crossing a nested child. Both final-to-origin and
 origin-to-final lookup are available. The separate canonical
 [`ALGM` V1 source map](GRAPH-HIERARCHY-SOURCE-MAP-V1.md) serializes those total
 mappings and admits them only by freshly flattening the exact complete `ALGH`.
+`component_at_instance_path` independently walks a nonempty root-to-nested
+placeholder path through the scoped bindings and returns the component digest
+at its final occurrence. Missing, empty, or discontinuous paths have no
+component authority.
 
 ## First visible recursive proof
 
@@ -195,6 +199,19 @@ cursor correlate leaf-local endpoints such as `[1/1]:n8.p1` with the final
 `n10.p1`; bounded `.algm` import regenerates every byte without mutation. It
 does not substitute a collapsed placeholder into the executable editor canvas
 or claim that an instance itself can run.
+
+The adjacent flattened-source browser lists every final node and wire with its
+exact root or component-occurrence origin. Opening an item first requires the
+current flattening's final-to-origin lookup to equal the displayed origin. A
+component origin must then resolve through `component_at_instance_path`, name
+an admitted dependency, and retain the local node or wire. Component nodes
+open that exact library or authoritative definition and select the local node;
+component wires open the same definition and select the local target node.
+Root origins scroll to the structural root canvas and highlight the exact
+node or wire. One-shot scrolling, highlighting, and editor selection are UI
+state only. They do not encode `ALGS`, enter undo/redo, or mark browser
+persistence pending. A rejected or digest-remapped origin retains no false
+source selection.
 
 The adjacent component-library panel selects dependencies already present in
 the canonical hierarchy. It exports the selected dependency byte for byte,
@@ -316,8 +333,7 @@ library panel, and exact root placement/wiring is implemented on its structural
 canvas. Nested definition import with separately supplied scoped bindings,
 general library creation, parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
-flattening, child rebinding/replacement, interactive traversal from final items
-into their source definitions, coordinated descendant/control-authority
+flattening, child rebinding/replacement, coordinated descendant/control-authority
 replacement, and executable front-panel inputs remain open.
 Canonical [`ALGS` V1](GRAPH-AUTHORING-SESSION-V1.md) now persists one selected
 component with its complete ALGH/ALGM branch atomically, and unified undo/redo

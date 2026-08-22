@@ -96,6 +96,29 @@ component-local endpoints with their occurrence paths and final identities.
 At most four matching occurrences are expanded in one label; the complete map
 remains retained and any additional occurrence count is explicit.
 
+A visible source browser also enumerates every final node and wire. Its open
+action revalidates the exact mapping against the current fresh flattening and,
+for component origins, walks the complete occurrence path through current
+`ALGH` bindings before accepting the named component-local item. It scrolls to
+and focuses the exact root, private library, or authoritative control source.
+A component wire focuses its local target node while reporting both exact
+endpoints. Browser selection, destination focus, and one-shot scrolling are
+transient and never change canonical `ALGS`, history, or persistence. Stale or
+forged origins reject without replacing the last valid source; a later
+hierarchy digest remap clears an origin that no longer exists.
+
+Optimized Chromium qualification opened default final node `n3`, whose exact
+origin is authoritative component occurrence `[1/1]`, local node `n1`. The UI
+scrolled to the main control canvas and visibly selected `#1 Setpoint source`.
+It then opened final wire `w1`, whose exact origin is occurrence `[1/1]`, local
+wire `w1` from `n1.p1` to `n4.p1`; the destination visibly selected local
+target `#4 Setpoint 50 Hz to 10 Hz`. Both actions retained the exact 14,770-byte
+`ALGS` with SHA-256
+`d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`.
+A fresh reload preserved those bytes and reset the transient navigation
+status. The retained 1,849-byte browser result has SHA-256
+`c9cd2c0953e3c723610c5089131700b2dd10ed4eee0eec9584801fd31eb8b1bd`.
+
 The core golden also exercises both origin tags: two ordinary root nodes, one
 ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
 2,577-byte encoding has SHA-256
@@ -110,9 +133,9 @@ component/ALGH/ALGM branch atomically with the other authoring artifacts.
 Direct root-instance add/delete now regenerates the map from the complete
 candidate hierarchy before one `ALGS` transaction commits, so source
 correlation and the unified history cannot lag the visible instance set.
-Main-canvas wiring/movement, nested component editing, general library import,
-interactive traversal from a flattened item into nested editable component
-canvases, parameter promotion, signed dependency manifests, live device trace
-correlation, and firmware execution evidence remain separate work. `ALGM` V1
-closes deterministic total source correlation for each complete, validated,
-freshly flattened hierarchy.
+Nested definition import with separately supplied scoped bindings, general
+library creation, dedicated component-local wire selection, parameter
+promotion, signed dependency manifests, live device trace correlation, and
+firmware execution evidence remain separate work. `ALGM` V1 closes
+deterministic total source correlation for each complete, validated, freshly
+flattened hierarchy.
