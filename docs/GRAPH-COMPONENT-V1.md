@@ -169,10 +169,11 @@ node cursor.
 The ALGM flattened-source browser can enter this editor without authoring. It
 revalidates a final node or wire's complete occurrence path and exact component
 digest, selects the matching library definition, and focuses the local node or
-the local wire's target node. An authoritative component source instead opens
-the main control canvas, while a root source highlights the structural root
-canvas. This source-navigation state is deliberately absent from `ALGC` and
-`ALGS`, records no history, and does not mark persistence pending.
+distinctly highlights the exact local wire while retaining its target node in
+the existing inspector. An authoritative component source instead opens the
+main control canvas, while a root source highlights the structural root canvas.
+This source-navigation state is deliberately absent from `ALGC` and `ALGS`,
+records no history, and does not mark persistence pending.
 
 The reviewed fixture supplies the initial panel metadata. Once edited, the
 canonical `ALGC` inside `ALGS` and `.algc` exchange is authoritative; later

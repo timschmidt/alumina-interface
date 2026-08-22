@@ -101,23 +101,28 @@ action revalidates the exact mapping against the current fresh flattening and,
 for component origins, walks the complete occurrence path through current
 `ALGH` bindings before accepting the named component-local item. It scrolls to
 and focuses the exact root, private library, or authoritative control source.
-A component wire focuses its local target node while reporting both exact
-endpoints. Browser selection, destination focus, and one-shot scrolling are
-transient and never change canonical `ALGS`, history, or persistence. Stale or
-forged origins reject without replacing the last valid source; a later
-hierarchy digest remap clears an origin that no longer exists.
+A component wire is selected and distinctly highlighted by its exact local
+identity while its target node remains selected for the existing inspector and
+both exact endpoints are reported. Browser selection, destination focus, and
+one-shot scrolling are transient and never change canonical `ALGS`, history,
+or persistence. Stale or forged origins reject without replacing the last
+valid source; a later hierarchy digest remap clears an origin that no longer
+exists.
 
 Optimized Chromium qualification opened default final node `n3`, whose exact
 origin is authoritative component occurrence `[1/1]`, local node `n1`. The UI
 scrolled to the main control canvas and visibly selected `#1 Setpoint source`.
 It then opened final wire `w1`, whose exact origin is occurrence `[1/1]`, local
-wire `w1` from `n1.p1` to `n4.p1`; the destination visibly selected local
-target `#4 Setpoint 50 Hz to 10 Hz`. Both actions retained the exact 14,770-byte
-`ALGS` with SHA-256
+wire `w1` from `n1.p1` to `n4.p1`; the destination visibly reported and
+distinctly highlighted that exact local wire while retaining local target
+`#4 Setpoint 50 Hz to 10 Hz` in the inspector. A style-level regression fixes
+that selected-source stroke and arrowhead at 3.6 pixels in `LIGHT_GREEN`, ahead
+of the ordinary incident-node style. Both actions retained the exact
+14,770-byte `ALGS` with SHA-256
 `d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`.
 A fresh reload preserved those bytes and reset the transient navigation
-status. The retained 1,849-byte browser result has SHA-256
-`c9cd2c0953e3c723610c5089131700b2dd10ed4eee0eec9584801fd31eb8b1bd`.
+status. The retained 1,847-byte browser result has SHA-256
+`af12d28874bad849f93cbb71f05b4b30a643f11b896a2969f5ceefc0434782b4`.
 
 The core golden also exercises both origin tags: two ordinary root nodes, one
 ordinary root wire, and a nested leaf yield 23 node and 26 wire records. The
@@ -134,8 +139,7 @@ Direct root-instance add/delete now regenerates the map from the complete
 candidate hierarchy before one `ALGS` transaction commits, so source
 correlation and the unified history cannot lag the visible instance set.
 Nested definition import with separately supplied scoped bindings, component
-rename/version evolution, dedicated component-local wire selection, parameter
-promotion, signed dependency manifests, live device trace correlation, and
-firmware execution evidence remain separate work. `ALGM` V1 closes
-deterministic total source correlation for each complete, validated, freshly
-flattened hierarchy.
+rename/version evolution, parameter promotion, signed dependency manifests,
+live device trace correlation, and firmware execution evidence remain separate
+work. `ALGM` V1 closes deterministic total source correlation for each
+complete, validated, freshly flattened hierarchy.

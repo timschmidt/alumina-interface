@@ -3223,6 +3223,21 @@ impl ExactControlWorkspace {
         }
     }
 
+    fn opened_component_wire(&self, component: Digest) -> Option<GraphWireId> {
+        match self.hierarchy_source_browser.last_opened.as_ref() {
+            Some(HierarchySourceSelection::Wire {
+                origin:
+                    GraphHierarchyWireOrigin::Component {
+                        component: source_component,
+                        wire,
+                        ..
+                    },
+                ..
+            }) if *source_component == component => Some(*wire),
+            _ => None,
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the two selectors share one immutable canonical hierarchy snapshot and defer their single action until all display borrows end"
@@ -3952,7 +3967,7 @@ impl ExactControlWorkspace {
                             source.target().node,
                         );
                         Ok(format!(
-                            "opened final wire {} at exact occurrence {} as ALGC {}… wire {} (n{}.p{} → n{}.p{}); canonical ALGS, history, and persistence are unchanged",
+                            "opened final wire {} at exact occurrence {} as selected and highlighted ALGC {}… wire {} (n{}.p{} → n{}.p{}); canonical ALGS, history, and persistence are unchanged",
                             flattened.get(),
                             hierarchy_source_path_label(source_path),
                             digest_prefix(component.0),
@@ -4094,6 +4109,28 @@ impl ExactControlWorkspace {
             return;
         }
         self.scroll_to_open_hierarchy_source(ui, HierarchySourceDestination::Component(scope));
+        let opened_source_wire = self.opened_component_wire(scope).and_then(|wire| {
+            workspace
+                .graph()
+                .wires()
+                .iter()
+                .find(|candidate| candidate.id() == wire)
+                .copied()
+        });
+        if let Some(wire) = opened_source_wire {
+            ui.colored_label(
+                egui::Color32::LIGHT_GREEN,
+                format!(
+                    "Exact ALGM source wire w{} selected below · n{}.p{} → n{}.p{} · target node #{} remains available in the inspector",
+                    wire.id().get(),
+                    wire.source().node.get(),
+                    wire.source().port.get(),
+                    wire.target().node.get(),
+                    wire.target().port.get(),
+                    wire.target().node.get(),
+                ),
+            );
+        }
         let presentation = match structural_workspace_presentation(&workspace) {
             Ok(presentation) => presentation,
             Err(error) => {
@@ -4199,7 +4236,13 @@ impl ExactControlWorkspace {
             return;
         }
 
-        if self.show_component_definition_canvas(ui, scope, &workspace, &presentation) {
+        if self.show_component_definition_canvas(
+            ui,
+            scope,
+            &workspace,
+            &presentation,
+            opened_source_wire.map(WireDefinition::id),
+        ) {
             ui.label(&self.component_definition.status);
             return;
         }
@@ -4217,6 +4260,7 @@ impl ExactControlWorkspace {
         scope: Digest,
         workspace: &GraphWorkspaceDocument,
         presentation: &GraphPresentation,
+        opened_source_wire: Option<GraphWireId>,
     ) -> bool {
         ui.strong("Canonical selected-definition canvas");
         ui.weak(
@@ -4250,6 +4294,7 @@ impl ExactControlWorkspace {
                         workspace.graph(),
                         presentation,
                         self.component_definition.selected_node,
+                        opened_source_wire,
                         wire,
                     );
                 }
@@ -6914,14 +6959,38 @@ impl ExactControlWorkspace {
         reason = "canvas allocation, layered node/port interaction, preview, and deferred transactional edits remain one egui frame operation"
     )]
     fn show_graph(&mut self, ui: &mut egui::Ui, maximum_height: f32) {
-        if let Some(authoritative) = self
+        let authoritative = self
             .component
             .as_ref()
-            .map(|component| component.encoding.digest())
-        {
+            .map(|component| component.encoding.digest());
+        if let Some(authoritative) = authoritative {
             self.scroll_to_open_hierarchy_source(
                 ui,
                 HierarchySourceDestination::Component(authoritative),
+            );
+        }
+        let opened_source_wire = authoritative
+            .and_then(|component| self.opened_component_wire(component))
+            .and_then(|wire| {
+                self.workspace
+                    .graph()
+                    .wires()
+                    .iter()
+                    .find(|candidate| candidate.id() == wire)
+                    .copied()
+            });
+        if let Some(wire) = opened_source_wire {
+            ui.colored_label(
+                egui::Color32::LIGHT_GREEN,
+                format!(
+                    "Exact ALGM source wire w{} selected below · n{}.p{} → n{}.p{} · target node #{} remains available in the inspector",
+                    wire.id().get(),
+                    wire.source().node.get(),
+                    wire.source().port.get(),
+                    wire.target().node.get(),
+                    wire.target().port.get(),
+                    wire.target().node.get(),
+                ),
             );
         }
         let nodes = self.workspace.graph().nodes().to_vec();
@@ -6949,6 +7018,7 @@ impl ExactControlWorkspace {
                         self.workspace.graph(),
                         &self.presentation,
                         self.selected_node,
+                        opened_source_wire.map(WireDefinition::id),
                         wire,
                     );
                 }
@@ -7077,6 +7147,7 @@ impl ExactControlWorkspace {
         document: &GraphDocument,
         presentation: &GraphPresentation,
         selected_node: Option<GraphNodeId>,
+        opened_source_wire: Option<GraphWireId>,
         wire: &WireDefinition,
     ) {
         let (Some(source_anchor), Some(target_anchor)) = (
@@ -7087,14 +7158,8 @@ impl ExactControlWorkspace {
         };
         let source_anchor = source_anchor + origin;
         let target_anchor = target_anchor + origin;
-        let selected = selected_node
-            .is_some_and(|node| node == wire.source().node || node == wire.target().node);
-        let color = if selected {
-            egui::Color32::WHITE
-        } else {
-            wire_color(document, wire.source())
-        };
-        let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
+        let stroke = graph_wire_stroke(document, selected_node, opened_source_wire, wire);
+        let color = stroke.color;
         let feedback_lane = presentation
             .wires
             .get(&wire.id())
@@ -11419,6 +11484,23 @@ fn wire_color(document: &GraphDocument, source: WireEndpoint) -> egui::Color32 {
     }
 }
 
+fn graph_wire_stroke(
+    document: &GraphDocument,
+    selected_node: Option<GraphNodeId>,
+    opened_source_wire: Option<GraphWireId>,
+    wire: &WireDefinition,
+) -> egui::Stroke {
+    if opened_source_wire == Some(wire.id()) {
+        egui::Stroke::new(3.6_f32, egui::Color32::LIGHT_GREEN)
+    } else if selected_node
+        .is_some_and(|node| node == wire.source().node || node == wire.target().node)
+    {
+        egui::Stroke::new(2.4_f32, egui::Color32::WHITE)
+    } else {
+        egui::Stroke::new(1.5_f32, wire_color(document, wire.source()))
+    }
+}
+
 fn paint_hierarchy_root_wire(
     painter: &egui::Painter,
     origin: egui::Vec2,
@@ -13498,6 +13580,7 @@ mod tests {
             Some(GraphNodeId::new(1))
         );
         assert_eq!(workspace.selected_node, Some(expected_node));
+        assert_eq!(workspace.opened_component_wire(authoritative), None);
         assert_eq!(
             workspace.hierarchy_source_browser.last_opened,
             Some(node_selection)
@@ -13530,22 +13613,24 @@ mod tests {
         else {
             panic!("reference final wire did not retain a component origin");
         };
+        let expected_wire = *wire;
         assert_eq!(source_path, &[GraphNodeId::new(1), GraphNodeId::new(1)]);
         assert_eq!(*component, authoritative);
-        let expected_target = retained_component
+        let authoritative_workspace = retained_component
             .hierarchy
             .document
             .dependency(*component)
             .unwrap()
             .document()
-            .workspace()
+            .workspace();
+        let exact_wire = authoritative_workspace
             .graph()
             .wires()
             .iter()
             .find(|candidate| candidate.id() == *wire)
             .unwrap()
-            .target()
-            .node;
+            .to_owned();
+        let expected_target = exact_wire.target().node;
         let wire_selection = HierarchySourceSelection::Wire {
             flattened: wire_mapping.flattened_wire(),
             origin: wire_origin,
@@ -13553,6 +13638,19 @@ mod tests {
         workspace.open_hierarchy_source(wire_selection.clone());
 
         assert_eq!(workspace.selected_node, Some(expected_target));
+        assert_eq!(
+            workspace.opened_component_wire(authoritative),
+            Some(expected_wire)
+        );
+        assert_eq!(
+            graph_wire_stroke(
+                authoritative_workspace.graph(),
+                workspace.selected_node,
+                workspace.opened_component_wire(authoritative),
+                &exact_wire,
+            ),
+            egui::Stroke::new(3.6_f32, egui::Color32::LIGHT_GREEN)
+        );
         assert_eq!(
             workspace.hierarchy_source_browser.last_opened,
             Some(wire_selection.clone())
@@ -13576,6 +13674,10 @@ mod tests {
         assert_eq!(
             workspace.hierarchy_source_browser.last_opened,
             Some(wire_selection)
+        );
+        assert_eq!(
+            workspace.opened_component_wire(authoritative),
+            Some(expected_wire)
         );
         assert!(
             workspace
@@ -15103,7 +15205,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::too_many_lines,
-        reason = "one typed-wire lifecycle proves duplicate rejection, disconnect, and monotonic reconnection under recursive definition replacement"
+        reason = "one typed-wire lifecycle proves duplicate rejection, disconnect, monotonic reconnection, exact source focus, and stale-focus reconciliation under recursive definition replacement"
     )]
     fn selected_library_definition_typed_wires_retain_monotonic_identity() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
@@ -15233,10 +15335,87 @@ mod tests {
                 target,
             )]
         );
+        let wire_mapping = final_component
+            .hierarchy
+            .flattening
+            .wire_provenance()
+            .iter()
+            .find(|mapping| {
+                matches!(
+                    mapping.origin(),
+                    GraphHierarchyWireOrigin::Component {
+                        source_path,
+                        component,
+                        wire,
+                    } if source_path == &[GraphNodeId::new(1)]
+                        && *component == final_scope
+                        && *wire == GraphWireId::new(2)
+                )
+            })
+            .unwrap()
+            .clone();
         assert_eq!(workspace.workspace, initial_control);
         assert_eq!(final_component.document, initial_component.document);
         assert_eq!(final_component.encoding, initial_component.encoding);
         assert_eq!(final_component.hierarchy.document.root(), &initial_root);
+
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let selection = HierarchySourceSelection::Wire {
+            flattened: wire_mapping.flattened_wire(),
+            origin: wire_mapping.origin().clone(),
+        };
+        workspace.open_hierarchy_source(selection.clone());
+        assert_eq!(workspace.selected_hierarchy_component, Some(final_scope));
+        assert_eq!(workspace.component_definition.scope, Some(final_scope));
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(rate_node)
+        );
+        assert_eq!(
+            workspace.opened_component_wire(final_scope),
+            Some(GraphWireId::new(2))
+        );
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(selection)
+        );
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("selected and highlighted")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.commit_component_definition_node_label(
+            final_scope,
+            rate_node,
+            "wire_focus_digest_remap",
+        );
+        let remapped_scope = workspace.component_definition.scope.unwrap();
+        assert_ne!(remapped_scope, final_scope);
+        assert_eq!(workspace.hierarchy_source_browser.last_opened, None);
+        assert_eq!(workspace.opened_component_wire(final_scope), None);
+        assert_eq!(workspace.opened_component_wire(remapped_scope), None);
+        assert!(!workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("absent from the current exact hierarchy")
+        );
     }
 
     #[test]

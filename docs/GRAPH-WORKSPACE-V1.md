@@ -116,9 +116,10 @@ The separate ALGM source browser is read-only navigation across those editors.
 It verifies a chosen final node or wire still has the displayed exact origin,
 resolves a component occurrence path through current scoped bindings, and
 focuses the matching root, library-definition, or authoritative-control
-canvas. Its selections, highlights, and one-shot scroll request are transient;
-they do not revise an `ALGW`, replace an `ALGC`, record an `ALGS` history state,
-or dirty persistence.
+canvas. Exact component wires receive a distinct local-wire highlight while
+their target nodes remain available in the inspector. These selections,
+highlights, and one-shot scroll requests are transient; they do not revise an
+`ALGW`, replace an `ALGC`, record an `ALGS` history state, or dirty persistence.
 
 The shared parameter surface accepts bounded schema-directed Boolean,
 exact-rational, measurement-interval, canonical signed/unsigned lattice-count,

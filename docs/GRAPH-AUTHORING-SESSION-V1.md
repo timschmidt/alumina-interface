@@ -190,8 +190,9 @@ selected-library definition node/placement/wire authoring, control-authority
 isolation, atomic scoped child-occurrence add/remove/re-add with monotonic node
 identity, exact child history/persistence, rejection of live public bindings,
 cycles, ordinary placeholder deletion, and an indirect authority rewrite,
-exact flattened node/wire source navigation with no session/history/persistence
-mutation and stale-origin reconciliation, deterministic empty component
+exact flattened node/wire source navigation with distinct component-local wire
+highlighting, retained target-node inspection, no session/history/persistence
+mutation, and stale-origin reconciliation, deterministic empty component
 creation with exact schema/clock inheritance, identity-cursor initialization,
 duplicate no-op selection, immediate definition editing, history/persistence,
 and invalid/conflicting-name atomicity, abandoned-redo clearing, and

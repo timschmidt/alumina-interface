@@ -289,7 +289,8 @@ prototype.
   resolves every component occurrence path through the current `ALGH` before
   scrolling to the root canvas, selected library definition, or authoritative
   control canvas. Root items are highlighted directly; component nodes select
-  their local node and component wires select their local target node. These
+  their local node, while component wires select and distinctly highlight the
+  exact local wire and retain its target node in the existing inspector. These
   focus, scroll, and selection facts are transient: canonical `ALGS`, history,
   and persistence remain byte-identical, and stale provenance rejects without
   retaining a false destination.

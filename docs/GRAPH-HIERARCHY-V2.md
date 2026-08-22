@@ -206,12 +206,12 @@ current flattening's final-to-origin lookup to equal the displayed origin. A
 component origin must then resolve through `component_at_instance_path`, name
 an admitted dependency, and retain the local node or wire. Component nodes
 open that exact library or authoritative definition and select the local node;
-component wires open the same definition and select the local target node.
-Root origins scroll to the structural root canvas and highlight the exact
-node or wire. One-shot scrolling, highlighting, and editor selection are UI
-state only. They do not encode `ALGS`, enter undo/redo, or mark browser
-persistence pending. A rejected or digest-remapped origin retains no false
-source selection.
+component wires open the same definition, distinctly highlight the exact local
+wire, and retain the local target node in the existing inspector. Root origins
+scroll to the structural root canvas and highlight the exact node or wire.
+One-shot scrolling, highlighting, and editor selection are UI state only. They
+do not encode `ALGS`, enter undo/redo, or mark browser persistence pending. A
+rejected or digest-remapped origin retains no false source selection.
 
 The adjacent component-library panel selects dependencies already present in
 the canonical hierarchy. It exports the selected dependency byte for byte,
