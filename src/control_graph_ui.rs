@@ -785,6 +785,7 @@ enum ProbeUiAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HierarchyUiAction {
+    CreateComponent,
     AddRoot(Digest),
     RemoveRoot(GraphNodeId),
     RemoveComponent(Digest),
@@ -2458,6 +2459,7 @@ pub(crate) struct ExactControlWorkspace {
     panel_drag: Option<PanelItemDrag>,
     selected_hierarchy_component: Option<Digest>,
     selected_hierarchy_instance: Option<GraphNodeId>,
+    new_library_component_name: String,
     hierarchy_source_browser: HierarchySourceBrowser,
     pending_hierarchy_source: Option<WireEndpoint>,
     hierarchy_drag: Option<NodeDrag>,
@@ -2580,6 +2582,7 @@ impl ExactControlWorkspace {
             panel_drag: None,
             selected_hierarchy_component,
             selected_hierarchy_instance,
+            new_library_component_name: "user.new_component".to_owned(),
             hierarchy_source_browser: HierarchySourceBrowser::default(),
             pending_hierarchy_source: None,
             hierarchy_drag: None,
@@ -3350,6 +3353,24 @@ impl ExactControlWorkspace {
             } else {
                 "only exact unreferenced non-authoritative dependencies are removable"
             });
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("New library component");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_library_component_name)
+                    .desired_width(260.0)
+                    .hint_text("user.component_name"),
+            );
+            if ui
+                .add_enabled(
+                    !self.new_library_component_name.is_empty(),
+                    egui::Button::new("create empty component"),
+                )
+                .clicked()
+            {
+                action = Some(HierarchyUiAction::CreateComponent);
+            }
+            ui.weak("version 1 · shared exact schema/clocks · empty ALGW · no authority");
         });
         ui.horizontal_wrapped(|ui| {
             ui.strong("Root occurrence");
@@ -5125,7 +5146,56 @@ impl ExactControlWorkspace {
             action,
             HierarchyUiAction::ConnectRoot { .. } | HierarchyUiAction::DisconnectRoot(_)
         );
+        let clears_new_component_name = action == HierarchyUiAction::CreateComponent;
         let (status, selected_component, selected_instance) = match action {
+            HierarchyUiAction::CreateComponent => {
+                let name = self.new_library_component_name.clone();
+                let component = match empty_library_component(&name, &self.workspace) {
+                    Ok(component) => component,
+                    Err(error) => {
+                        self.component_status =
+                            format!("empty library component rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                let encoding = match encode_graph_component(&component) {
+                    Ok(encoding) => encoding,
+                    Err(error) => {
+                        self.component_status =
+                            format!("empty library component rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                let digest = encoding.digest();
+                if let Some(existing) = document.dependencies().iter().find(|dependency| {
+                    dependency.document().name() == name && dependency.digest() != digest
+                }) {
+                    self.component_status = format!(
+                        "empty library component rejected without mutation: stable name {name} already belongs to ALGC {}…",
+                        digest_prefix(existing.digest().0)
+                    );
+                    return;
+                }
+                let already_present = document.dependency(digest).is_some();
+                if let Err(error) = document.add_component(component) {
+                    self.component_status =
+                        format!("empty library component rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!(
+                        "{} deterministic empty library component {name} ALGC {}… with shared exact schema/clocks and no execution authority",
+                        if already_present {
+                            "selected existing"
+                        } else {
+                            "created"
+                        },
+                        digest_prefix(digest.0)
+                    ),
+                    Some(digest),
+                    self.selected_hierarchy_instance,
+                )
+            }
             HierarchyUiAction::AddRoot(component) => {
                 let maximum_x = document
                     .root()
@@ -5260,8 +5330,14 @@ impl ExactControlWorkspace {
             selected_component,
             selected_instance,
         ) {
-            Ok(_) if clears_pending_source => self.pending_hierarchy_source = None,
-            Ok(_) => {}
+            Ok(_) => {
+                if clears_pending_source {
+                    self.pending_hierarchy_source = None;
+                }
+                if clears_new_component_name {
+                    self.new_library_component_name.clear();
+                }
+            }
             Err(error) => {
                 self.component_status =
                     format!("hierarchy edit rejected without mutation: {error}");
@@ -10436,6 +10512,36 @@ fn representative_component_document(
     Ok((document, encoding))
 }
 
+fn empty_library_component(
+    name: &str,
+    authority: &GraphWorkspaceDocument,
+) -> Result<GraphComponentDocument, String> {
+    let graph = GraphDocument::try_new(
+        1,
+        authority.graph().schema().clone(),
+        authority.graph().clocks().to_vec(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let workspace = GraphWorkspaceDocument::try_new(authority.limits(), 1, 1, 1, graph, Vec::new())
+        .map_err(|error| error.to_string())?;
+    GraphComponentDocument::try_new(
+        GraphComponentLimits::interactive(),
+        1,
+        1,
+        name,
+        1,
+        1,
+        1,
+        workspace,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn representative_wrapper_component(
     component: &GraphComponentDocument,
 ) -> Result<(GraphComponentDocument, Digest), String> {
@@ -15597,6 +15703,214 @@ mod tests {
                 .component_status
                 .contains("rejected without mutation")
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one empty-component lifecycle proves deterministic construction, exact no-op selection, subsequent definition authoring, history, persistence, and authority isolation"
+    )]
+    fn empty_library_component_creation_is_exact_editable_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_dependencies = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .map(|dependency| dependency.encoding().clone())
+            .collect::<Vec<_>>();
+
+        workspace.mark_persisted();
+        workspace.new_library_component_name = "user.logic_cell".to_owned();
+        workspace.apply_hierarchy_action(HierarchyUiAction::CreateComponent);
+
+        let created_session = workspace.authoring_session_encoding().unwrap();
+        let created = workspace.component.as_ref().unwrap();
+        let dependency = created
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "user.logic_cell")
+            .unwrap();
+        let created_digest = dependency.digest();
+        let document = dependency.document();
+        assert_ne!(created_session, initial_session);
+        assert_eq!(workspace.new_library_component_name, "");
+        assert_eq!(document.revision(), 1);
+        assert_eq!(document.component_version(), 1);
+        assert_eq!(document.next_input_id(), 1);
+        assert_eq!(document.next_output_id(), 1);
+        assert_eq!(document.next_panel_item_id(), 1);
+        assert!(document.inputs().is_empty());
+        assert!(document.outputs().is_empty());
+        assert!(document.panel_items().is_empty());
+        assert_eq!(document.workspace().revision(), 1);
+        assert_eq!(document.workspace().next_node_id(), 1);
+        assert_eq!(document.workspace().next_wire_id(), 1);
+        assert!(document.workspace().graph().nodes().is_empty());
+        assert!(document.workspace().graph().wires().is_empty());
+        assert_eq!(
+            document.workspace().graph().schema(),
+            initial_workspace.graph().schema()
+        );
+        assert_eq!(
+            document.workspace().graph().clocks(),
+            initial_workspace.graph().clocks()
+        );
+        assert_eq!(created.document, initial_component.document);
+        assert_eq!(created.encoding, initial_component.encoding);
+        assert_eq!(created.hierarchy.document.root(), &initial_root);
+        for encoding in &initial_dependencies {
+            assert!(
+                created
+                    .hierarchy
+                    .document
+                    .dependency(encoding.digest())
+                    .is_some_and(|dependency| dependency.encoding() == encoding)
+            );
+        }
+        assert_eq!(created.hierarchy.document.dependencies().len(), 3);
+        assert_eq!(created.hierarchy.document.flattened_instance_count(), 2);
+        assert_eq!(created.hierarchy.document.flattened_node_count(), 21);
+        assert_eq!(created.hierarchy.document.flattened_wire_count(), 25);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(workspace.selected_hierarchy_component, Some(created_digest));
+        assert_eq!(workspace.component_definition.scope, Some(created_digest));
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert!(workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("created deterministic empty")
+        );
+
+        workspace.mark_persisted();
+        let created_history = workspace.history.clone();
+        workspace.new_library_component_name = "user.logic_cell".to_owned();
+        workspace.apply_hierarchy_action(HierarchyUiAction::CreateComponent);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            created_session
+        );
+        assert_eq!(workspace.history, created_history);
+        assert!(!workspace.persistence_pending());
+        assert_eq!(workspace.new_library_component_name, "");
+        assert_eq!(workspace.selected_hierarchy_component, Some(created_digest));
+        assert!(workspace.component_status.contains("selected existing"));
+        assert!(workspace.component_status.contains("already matched"));
+
+        workspace.component_definition.palette_index = 0;
+        workspace.add_component_definition_node(created_digest);
+        let edited_session = workspace.authoring_session_encoding().unwrap();
+        let edited_scope = workspace.component_definition.scope.unwrap();
+        let edited = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(edited_scope)
+            .unwrap()
+            .document();
+        assert_ne!(edited_scope, created_digest);
+        assert_eq!(edited.name(), "user.logic_cell");
+        assert_eq!(edited.workspace().graph().nodes().len(), 1);
+        assert_eq!(edited.workspace().next_node_id(), 2);
+        assert_eq!(workspace.history.undo_len(), 2);
+        assert!(workspace.persistence_pending());
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(
+            workspace.component.as_ref().unwrap().document,
+            initial_component.document
+        );
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root(),
+            &initial_root
+        );
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            created_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        assert!(
+            restored
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependencies()
+                .iter()
+                .any(|dependency| {
+                    dependency.document().name() == "user.logic_cell"
+                        && dependency.document().workspace().graph().nodes().len() == 1
+                })
+        );
+    }
+
+    #[test]
+    fn invalid_or_ambiguous_empty_component_names_are_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let invalid_names = [
+            String::new(),
+            "bad component name".to_owned(),
+            "x".repeat(65),
+            "control.reference_pid".to_owned(),
+        ];
+
+        for name in invalid_names {
+            workspace.new_library_component_name.clone_from(&name);
+            workspace.apply_hierarchy_action(HierarchyUiAction::CreateComponent);
+            assert_eq!(
+                workspace.authoring_session_encoding().unwrap(),
+                retained_session
+            );
+            assert_exact_component_package_equal(
+                workspace.component.as_ref().unwrap(),
+                &retained_component,
+            );
+            assert_eq!(workspace.history, retained_history);
+            assert!(!workspace.persistence_pending());
+            assert_eq!(workspace.new_library_component_name, name);
+            assert!(
+                workspace
+                    .component_status
+                    .contains("rejected without mutation")
+            );
+        }
     }
 
     #[test]

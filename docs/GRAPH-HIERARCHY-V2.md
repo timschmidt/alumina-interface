@@ -216,11 +216,18 @@ source selection.
 The adjacent component-library panel selects dependencies already present in
 the canonical hierarchy. It exports the selected dependency byte for byte,
 imports a bounded canonical standalone leaf only after replay and audited
-ordinary-node semantic admission, and removes only an unreferenced dependency
-that is not the selected control authority. Every complete hierarchy admission
-also audits the ordinary-node draft of every dependency, including
-unreferenced definitions; structural instance placeholders are validated by
-`ALGH` and do not acquire semantic authority from that audit.
+ordinary-node semantic admission, and constructs a named version-1 empty
+component from the current control graph's exact schema and clocks. The new
+`ALGC`, embedded `ALGW`, and embedded `ALGR` all begin at revision one, every
+monotonic identity cursor begins at one, and connectors, panel items, nodes,
+wires, and placements are empty. Invalid or overlong names and names already
+bound to a different component identity reject atomically; recreating the
+byte-identical empty component changes only the transient library selection.
+The panel removes only an unreferenced dependency that is not the selected
+control authority. Every complete hierarchy admission also audits the
+ordinary-node draft of every dependency, including unreferenced definitions;
+structural instance placeholders are validated by `ALGH` and do not acquire
+semantic authority from that audit.
 
 Adding a selected dependency places a new root placeholder to the right of the
 current root layout; deleting a selected root occurrence also deletes only its
@@ -326,12 +333,25 @@ and root `ALGW` remained byte-identical through every state. Visible Undo
 restored the exact removal state; Redo and a fresh reload restored the exact
 node-`3` state.
 
+Creating an unreferenced empty dependency advanced the reference hierarchy
+from 7,124 bytes at revision one to 7,864 bytes at revision two, with identity
+`98a27e8e59bb0c5173ac1e16f4c19bc7431a8ec782dd75fcde0ee1d970c015f2`.
+Adding its first ordinary definition node recursively replaced only that
+dependency and advanced the hierarchy to 7,979 bytes at revision three, with
+identity
+`30293eff2e855f686ee36d5b6ba297ddc9671d8fba528fe32f13217ed0e90220`.
+The root workspace and two existing dependencies remained byte-identical.
+`ALGM` correctly changed its complete-source binding on both edits, while its
+flattened-workspace identity and 2,478-byte 21-node/25-wire provenance body
+remained exact at
+`552549c14a78850b01d9c6c3e68dafc4d1ba62d3dfee5746c7e54b5309ae8e85`.
+
 ## Deliberately open
 
 Direct root-instance creation/deletion is implemented through the dedicated
 library panel, and exact root placement/wiring is implemented on its structural
 canvas. Nested definition import with separately supplied scoped bindings,
-general library creation, parameter promotion/overrides, package
+component rename/version evolution, parameter promotion/overrides, package
 signatures and permissions, locked dependency manifests, incremental
 flattening, child rebinding/replacement, coordinated descendant/control-authority
 replacement, and executable front-panel inputs remain open.

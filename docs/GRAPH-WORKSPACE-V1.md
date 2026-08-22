@@ -222,6 +222,15 @@ duplicate import is a no-op. A dependency cannot be removed while named by a
 child or parent-scope binding, and the selected control-authority component is
 never removable through this workflow.
 
+The library can also create a canonical component without an input file. A
+valid stable name deterministically produces a version-1 empty `ALGC` whose
+embedded `ALGW` and `ALGR` share the current control graph's exact schema and
+clocks, with every monotonic identity cursor initialized to one. It is selected
+immediately and can receive its first ordinary definition node through the
+same transactional authoring path. Invalid, overlong, or conflicting names
+reject atomically; an already-present byte-identical empty definition is a
+selection-only no-op.
+
 All opened ALGW bytes first pass canonical replay, embedded-limit checks, exact
 re-encoding, UI layout admission, and the fixed audited semantic registry. A
 required input may remain disconnected as a visible editor draft blocker;

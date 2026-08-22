@@ -111,10 +111,10 @@ Failed restore leaves all prior authoring state intact.
 The editor's undo/redo carrier is a bounded stack of complete canonical `ALGS`
 byte strings. It is not a second wire format and is never nested into `ALGS`.
 Control-workspace, probe/trigger, focused import, cached-job,
-selected-component, component-library, direct root-instance, hierarchy, and
-source-map state—including root instance placement and typed root wiring—share
-one timeline rather than independent histories that could be navigated into a
-mismatched combination.
+selected-component, component-library creation/import/removal, direct
+root-instance, hierarchy, and source-map state—including root instance
+placement and typed root wiring—share one timeline rather than independent
+histories that could be navigated into a mismatched combination.
 
 The first interactive policy retains at most 16 snapshots in each direction
 and 64 MiB of canonical `ALGS` bytes across both stacks. The current session is
@@ -122,6 +122,12 @@ held separately and does not count against that budget. A successful canonical
 change records its exact prior session and clears the abandoned redo branch;
 an exact no-op records nothing. Oldest complete snapshots are evicted until
 both bounds hold, without splitting any nested artifact.
+
+Creating a named empty component commits its new canonical dependency through
+this same complete-session boundary. Invalid, overlong, or conflicting names
+leave the current `ALGS`, both history stacks, and pending-persistence state
+unchanged. Selecting an already-present byte-identical empty component changes
+only ephemeral UI scope and records no history.
 
 Undo and redo replay the target through the complete core boundary, then rerun
 the application's audited graph and cached-job catalog admission before
@@ -185,7 +191,10 @@ isolation, atomic scoped child-occurrence add/remove/re-add with monotonic node
 identity, exact child history/persistence, rejection of live public bindings,
 cycles, ordinary placeholder deletion, and an indirect authority rewrite,
 exact flattened node/wire source navigation with no session/history/persistence
-mutation and stale-origin reconciliation, abandoned-redo clearing, and
+mutation and stale-origin reconciliation, deterministic empty component
+creation with exact schema/clock inheritance, identity-cursor initialization,
+duplicate no-op selection, immediate definition editing, history/persistence,
+and invalid/conflicting-name atomicity, abandoned-redo clearing, and
 transactional failure for corrupt,
 semantically-unreviewed, or catalog-inadmissible inputs and history targets.
 

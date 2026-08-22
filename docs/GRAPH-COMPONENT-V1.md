@@ -187,6 +187,16 @@ unreferenced identity is a complete-session historical edit. Nested
 definitions require scoped `ALGH` bindings that standalone `ALGC` does not
 carry, so this first file workflow deliberately admits leaf packages only.
 
+A file is not required to start a new leaf package. The same library panel can
+construct a named version-1 empty `ALGC` whose embedded `ALGW` and `ALGR` use
+the current control graph's exact schema and clocks. Component, workspace,
+node, wire, connector, and panel-item cursors all begin at one; connectors,
+panel items, nodes, wires, and placements are empty. The new dependency is
+selected immediately for ordinary definition editing. Invalid or overlong
+names and a stable name already bound to another digest reject without
+mutation; requesting the byte-identical empty component again is a
+selection-only no-op with no history or persistence write.
+
 Optimized Chromium qualification dragged panel item `#14`
 `combined_permit_indicator` by exactly `(+80, +30)` logical pixels, from
 `(460, 404, 240, 54)` to `(540, 434, 240, 54)`. The selected `ALGC` identity
@@ -205,6 +215,31 @@ visible Redo and a fresh reload restored the exact 14,770-byte moved `ALGS`
 with SHA-256
 `530db6a4d7cec74fcb3d36736c8de51cd024b4ed70b3b9c282234c48b5eaf666`.
 
+The deterministic-creation Chromium qualification began from the canonical
+14,770-byte reference `ALGS`
+(`d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`)
+and used the visible name field and create button to add
+`user.browser_component`. The resulting 15,510-byte `ALGS`
+(`991bb737edcd0a3ad1f45b5f0e05d657c4e2557deddec46288c6512f168fe0fe`)
+contains a 736-byte revision-1 `ALGC`
+`264505540b35ca004697783b0136ec2fb8f09230768355d46627af3e3c07f36f`.
+Its 612-byte `ALGW` has revision one, node/wire cursors one, no placements,
+and embeds a 548-byte revision-1 `ALGR` with no nodes or wires. A byte-prefix
+comparison through the clock section proved that `ALGR` inherited the exact
+current schema and clocks. Re-entering the same name selected that dependency
+without changing a byte or adding history.
+
+The visible selected-definition editor then created ordinary node `1`. The
+replacement revision-2 `ALGC` is 851 bytes with identity
+`b46e9dc604882ce77eebec1ebb8195fa7f4d7159558b4e4f00dcace6e6225198`;
+the complete session is 15,625 bytes with SHA-256
+`88bf2e0c9bc04d11112b3a8de865e242fd5beadbf57ab09cd4b82d235122ffa1`.
+The control workspace, probes, cached-job workspace, root workspace, control
+authority, flattened workspace, and all 21-node/25-wire provenance records
+remained exact. Visible Undo restored the empty-component session, visible
+Redo restored the one-node session, and a fresh reload retained those exact
+bytes and allowed the populated component to be selected again.
+
 ## Deliberately open
 
 The separate canonical [`ALGH` V2 hierarchy](GRAPH-HIERARCHY-V2.md) now binds
@@ -214,7 +249,7 @@ recursive expansion, and deterministically flattens a component DAG to ordinary
 from the embedded dependency library and preserves them across compatible
 selected-component edits. Nested definition import with separately supplied
 scoped bindings,
-general component-library creation, package signatures/permissions, locked
+component rename/version evolution, package signatures/permissions, locked
 dependency manifests, child rebinding,
 overlapping/grouped/responsive panel layout policies, panel value injection
 during simulation or execution, probes, and groups/comments remain open.

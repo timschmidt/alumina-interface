@@ -133,8 +133,8 @@ component/ALGH/ALGM branch atomically with the other authoring artifacts.
 Direct root-instance add/delete now regenerates the map from the complete
 candidate hierarchy before one `ALGS` transaction commits, so source
 correlation and the unified history cannot lag the visible instance set.
-Nested definition import with separately supplied scoped bindings, general
-library creation, dedicated component-local wire selection, parameter
+Nested definition import with separately supplied scoped bindings, component
+rename/version evolution, dedicated component-local wire selection, parameter
 promotion, signed dependency manifests, live device trace correlation, and
 firmware execution evidence remain separate work. `ALGM` V1 closes
 deterministic total source correlation for each complete, validated, freshly

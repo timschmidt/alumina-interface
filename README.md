@@ -296,8 +296,12 @@ prototype.
   The component-library panel lists exact dependencies already admitted by
   that `ALGH`, exchanges the selected dependency as canonical `.algc`, imports
   a bounded standalone leaf only after exact replay and audited graph
-  admission, removes only an unreferenced non-authoritative dependency, and
-  can add or delete root occurrences directly. Each action edits a cloned
+  admission, and constructs a named version-1 empty `ALGC` directly from the
+  current exact schema/clocks with all monotonic cursors at one. A conflicting
+  stable name rejects; recreating byte-identical empty content is a
+  selection-only no-op. The panel removes only an unreferenced
+  non-authoritative dependency and can add or delete root occurrences directly.
+  Each accepted action edits a cloned
   hierarchy, retains monotonic identities, regenerates and admits the complete
   `ALGH`/flattened `ALGW`/`ALGM` branch, and records the prior complete `ALGS`
   before committing. A structural root canvas renders the canonical root
@@ -546,7 +550,7 @@ physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
 logic-analyzer acquisition, analog telemetry, groups, child-occurrence
-rebinding and general component-library creation,
+rebinding, component rename/version evolution,
 connector-shape authoring/remapping, front-panel runtime injection/execution,
 responsive/grouped panel layout, executable composite
 physical-resource consumers, prepare/start job nodes, conflict-aware shared
