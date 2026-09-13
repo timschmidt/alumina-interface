@@ -68,7 +68,7 @@ independent root, and attaches an exact rational root-clock tick to every
 retained sample while preserving the original clock/tick/sequence/value.
 
 For each probe, event ordinal advances only over canonical trace entries at
-that exact output. This includes caller-owned `ExternalInput` records at an
+that exact output. This includes caller-owned `ExternalSource` records at an
 external-source output as well as modeled `NodeOutput` records; the original
 trace-origin tag remains intact. Ordinal zero is retained, then every declared
 `stride`th entry. With a matched trigger, decimated samples are admitted only

@@ -3,11 +3,12 @@
 //! The structural document and audited semantic registry still do not grant an
 //! arbitrary implementation. This module adds a second, explicit registry for
 //! explicitly supplied Stream sources, latest-at-or-before rate transitions,
-//! exact same-clock arithmetic and predicates, Boolean conjunctions, explicit
-//! read-before-write unit delays, fail-safe permit gates, and Stream sinks. The small palette is
-//! sufficient to assemble a visible discrete PID/interlock graph without
-//! hiding controller state inside an opaque implementation. It evaluates no
-//! firmware resource and grants no deployment authority.
+//! exact same-clock arithmetic and predicates, Boolean constants, conjunctions
+//! and cases, explicit read-before-write typed unit delays, fail-safe permit
+//! gates, and Stream sinks. The small palette is sufficient to assemble visible
+//! discrete PID/interlock and state-machine graphs without hiding controller
+//! state inside an opaque implementation. It evaluates no firmware resource and
+//! grants no deployment authority.
 
 use core::cmp::Ordering;
 use core::fmt;
@@ -22,8 +23,8 @@ use super::{
     GraphAnalysisLimits, GraphClockId, GraphDocument, GraphNodeId, GraphNodeRegistry, GraphPortId,
     GraphRateTransition, GraphSchema, GraphTypeId, GraphValue, GraphWireError,
     InputConnectionRequirement, NodeInputChannelKind, NodeKind, NodeRateTransitionContract,
-    NodeSchema, RateTransitionKind, TypeKind, TypedGraphValue, WireEndpoint, analyze_graph,
-    encode_graph_document,
+    NodeSchema, RateTransitionKind, TypeKind, TypedGraphValue, WireEndpoint,
+    analysis::analyze_graph_with_supplied_inputs, encode_graph_document,
 };
 
 /// Fixed host behavior admitted for one audited node kind.
@@ -104,7 +105,25 @@ pub enum GraphSimulationNodeKind {
         /// Boolean conjunction Stream output.
         output: GraphPortId,
     },
-    /// One explicit read-before-write Stream delay.
+    /// Emit one parameter-owned typed value on every output-clock tick.
+    TypedConstant {
+        /// Value parameter with the output Stream's sample type.
+        value_parameter: u32,
+        /// Typed Stream output.
+        output: GraphPortId,
+    },
+    /// Select one of two identical typed Streams with a same-clock Boolean.
+    TypedCase {
+        /// Boolean selector Stream input.
+        selector: GraphPortId,
+        /// Value selected while `selector` is false.
+        when_false: GraphPortId,
+        /// Value selected while `selector` is true.
+        when_true: GraphPortId,
+        /// Selected typed Stream output.
+        output: GraphPortId,
+    },
+    /// One explicit read-before-write typed Stream delay.
     UnitDelay {
         /// Next-state Stream input captured after current-tick evaluation.
         input: GraphPortId,
@@ -293,6 +312,58 @@ pub struct ExternalStreamSample {
     value: TypedGraphValue,
 }
 
+/// One caller-owned exact sample injected at an explicitly authorized,
+/// otherwise unowned Stream input.
+///
+/// This is a host-simulation primitive. A higher layer must derive each input
+/// authority from a canonical component front-panel binding; the simulator
+/// independently rejects nonexistent, connected, non-Stream, mistyped, or
+/// nonmonotonic inputs and grants no firmware or deployment authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InjectedInputSample {
+    input: WireEndpoint,
+    clock_tick: u64,
+    sequence: u64,
+    value: TypedGraphValue,
+}
+
+impl InjectedInputSample {
+    /// Construct one timestamped sample at an unowned input endpoint.
+    pub fn new(
+        input: WireEndpoint,
+        clock_tick: u64,
+        sequence: u64,
+        value: TypedGraphValue,
+    ) -> Self {
+        Self {
+            input,
+            clock_tick,
+            sequence,
+            value,
+        }
+    }
+
+    /// Return the exact input endpoint supplied by the caller.
+    pub const fn input(&self) -> WireEndpoint {
+        self.input
+    }
+
+    /// Return the input Stream clock tick.
+    pub const fn clock_tick(&self) -> u64 {
+        self.clock_tick
+    }
+
+    /// Return the caller-supplied monotonic sequence.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Borrow the exact typed sample payload.
+    pub const fn value(&self) -> &TypedGraphValue {
+        &self.value
+    }
+}
+
 impl ExternalStreamSample {
     /// Construct one timestamped external source sample.
     pub fn new(
@@ -333,8 +404,10 @@ impl ExternalStreamSample {
 /// Origin of one deterministic trace sample.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GraphTraceEntryKind {
-    /// Caller-owned external Stream sample.
-    ExternalInput,
+    /// Caller-owned sample emitted by an explicit external-source node.
+    ExternalSource,
+    /// Caller-owned sample injected at an authorized unowned Stream input.
+    InjectedInput,
     /// Sample emitted by an admitted fixed node implementation.
     NodeOutput,
 }
@@ -351,7 +424,7 @@ pub struct GraphTraceEntry {
 }
 
 impl GraphTraceEntry {
-    /// Return whether this is external input or modeled node output.
+    /// Return the distinct external-source, injected-input, or node-output origin.
     pub const fn kind(&self) -> GraphTraceEntryKind {
         self.kind
     }
@@ -457,6 +530,8 @@ pub enum GraphSimulationError {
     },
     /// An external sample did not name a declared external source output.
     UnknownExternalSource(WireEndpoint),
+    /// An injected sample did not name an unowned declared Stream input.
+    UnknownInjectedInput(WireEndpoint),
     /// An external sample's literal type did not match its Stream sample type.
     ExternalSampleType {
         /// Source endpoint.
@@ -575,6 +650,12 @@ impl fmt::Display for GraphSimulationError {
                     "external sample source {source:?} is not implemented"
                 )
             }
+            Self::UnknownInjectedInput(input) => {
+                write!(
+                    formatter,
+                    "injected sample input {input:?} is not an unowned Stream input"
+                )
+            }
             Self::ExternalSampleType {
                 source,
                 expected,
@@ -647,6 +728,12 @@ struct RuntimeSample {
     value: TypedGraphValue,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RuntimeStreamSource {
+    Output(WireEndpoint),
+    InjectedInput(WireEndpoint),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StreamPort {
     sample_type: GraphTypeId,
@@ -667,14 +754,43 @@ pub fn simulate_graph(
     external_samples: &[ExternalStreamSample],
     limits: GraphSimulationLimits,
 ) -> Result<GraphSimulation, GraphSimulationError> {
+    simulate_graph_with_inputs(document, registry, horizon, external_samples, &[], limits)
+}
+
+/// Evaluate the fixed host subset with explicit samples at canonical unowned
+/// Stream inputs.
+///
+/// Callers remain responsible for deriving the admitted input endpoints from a
+/// stronger authority such as a replayed component hierarchy and front-panel
+/// run document. This primitive never infers that authority from an endpoint.
+pub fn simulate_graph_with_inputs(
+    document: &GraphDocument,
+    registry: &GraphSimulationRegistry,
+    horizon: GraphSimulationHorizon,
+    external_samples: &[ExternalStreamSample],
+    injected_samples: &[InjectedInputSample],
+    limits: GraphSimulationLimits,
+) -> Result<GraphSimulation, GraphSimulationError> {
     limits.validate()?;
-    if external_samples.len() > limits.maximum_external_samples {
+    if external_samples
+        .len()
+        .checked_add(injected_samples.len())
+        .is_none_or(|count| count > limits.maximum_external_samples)
+    {
         return Err(GraphSimulationError::LimitExceeded("external sample count"));
     }
     if horizon.inclusive_root_tick > limits.maximum_root_ticks {
         return Err(GraphSimulationError::LimitExceeded("root tick horizon"));
     }
-    let analysis = analyze_graph(document, &registry.semantic)?;
+    let requested_injected_inputs = injected_samples
+        .iter()
+        .map(InjectedInputSample::input)
+        .collect::<BTreeSet<_>>();
+    let analysis = analyze_graph_with_supplied_inputs(
+        document,
+        &registry.semantic,
+        &requested_injected_inputs,
+    )?;
     let root_rate = analysis
         .clock_rate(horizon.root_clock)
         .filter(|rate| rate.root() == horizon.root_clock)
@@ -720,6 +836,8 @@ pub fn simulate_graph(
             | GraphSimulationNodeKind::ExactClamp { .. }
             | GraphSimulationNodeKind::ExactWithinInclusive { .. }
             | GraphSimulationNodeKind::BooleanAnd { .. }
+            | GraphSimulationNodeKind::TypedConstant { .. }
+            | GraphSimulationNodeKind::TypedCase { .. }
             | GraphSimulationNodeKind::UnitDelay { .. }
             | GraphSimulationNodeKind::ExactPermitGate { .. }) => {
                 clocked_nodes.push(ClockedNode {
@@ -732,10 +850,10 @@ pub fn simulate_graph(
 
     let mut sorted_external = external_samples.to_vec();
     sorted_external.sort_by_key(|sample| (sample.source, sample.clock_tick, sample.sequence));
-    let mut streams: BTreeMap<WireEndpoint, Vec<RuntimeSample>> = source_ports
+    let mut streams: BTreeMap<RuntimeStreamSource, Vec<RuntimeSample>> = source_ports
         .keys()
         .copied()
-        .map(|endpoint| (endpoint, Vec::new()))
+        .map(|endpoint| (RuntimeStreamSource::Output(endpoint), Vec::new()))
         .collect();
     let mut entries = Vec::new();
     let mut prior_by_source: BTreeMap<WireEndpoint, (u64, u64)> = BTreeMap::new();
@@ -766,7 +884,7 @@ pub fn simulate_graph(
         push_trace(
             &mut entries,
             GraphTraceEntry {
-                kind: GraphTraceEntryKind::ExternalInput,
+                kind: GraphTraceEntryKind::ExternalSource,
                 endpoint: sample.source,
                 clock: port.clock,
                 clock_tick: sample.clock_tick,
@@ -776,8 +894,64 @@ pub fn simulate_graph(
             limits,
         )?;
         streams
-            .get_mut(&sample.source)
+            .get_mut(&RuntimeStreamSource::Output(sample.source))
             .ok_or(GraphSimulationError::UnknownExternalSource(sample.source))?
+            .push(RuntimeSample {
+                clock_tick: sample.clock_tick,
+                sequence: sample.sequence,
+                value: sample.value,
+            });
+    }
+
+    let mut sorted_injected = injected_samples.to_vec();
+    sorted_injected.sort_by_key(|sample| (sample.input, sample.clock_tick, sample.sequence));
+    let mut injected_inputs = BTreeSet::new();
+    let mut prior_by_input: BTreeMap<WireEndpoint, (u64, u64)> = BTreeMap::new();
+    for sample in sorted_injected {
+        if document
+            .wires()
+            .iter()
+            .any(|wire| wire.target() == sample.input)
+        {
+            return Err(GraphSimulationError::UnknownInjectedInput(sample.input));
+        }
+        let port = stream_input(document, sample.input)?;
+        clock_rate_in_horizon(&analysis, root_rate, port.clock)?;
+        if sample.value.value_type() != port.sample_type {
+            return Err(GraphSimulationError::ExternalSampleType {
+                source: sample.input,
+                expected: port.sample_type,
+                received: sample.value.value_type(),
+            });
+        }
+        if let Some((prior_tick, prior_sequence)) =
+            prior_by_input.insert(sample.input, (sample.clock_tick, sample.sequence))
+            && (sample.clock_tick <= prior_tick || sample.sequence <= prior_sequence)
+        {
+            return Err(GraphSimulationError::ExternalSampleOrder(sample.input));
+        }
+        let time = root_time(&analysis, root_rate, port.clock, sample.clock_tick)?;
+        if time > Rational::from(horizon.inclusive_root_tick) {
+            return Err(GraphSimulationError::ExternalSampleAfterHorizon(
+                sample.input,
+            ));
+        }
+        push_trace(
+            &mut entries,
+            GraphTraceEntry {
+                kind: GraphTraceEntryKind::InjectedInput,
+                endpoint: sample.input,
+                clock: port.clock,
+                clock_tick: sample.clock_tick,
+                sequence: sample.sequence,
+                value: sample.value.clone(),
+            },
+            limits,
+        )?;
+        injected_inputs.insert(sample.input);
+        streams
+            .entry(RuntimeStreamSource::InjectedInput(sample.input))
+            .or_default()
             .push(RuntimeSample {
                 clock_tick: sample.clock_tick,
                 sequence: sample.sequence,
@@ -791,7 +965,7 @@ pub fn simulate_graph(
         let mut progressed = false;
         for (node, input, output) in pending {
             let input_endpoint = WireEndpoint { node, port: input };
-            let source = source_for_input(document, input_endpoint)?;
+            let source = source_for_input(document, input_endpoint, &injected_inputs)?;
             let Some(source_samples) = streams.get(&source) else {
                 deferred.push((node, input, output));
                 continue;
@@ -850,7 +1024,7 @@ pub fn simulate_graph(
                     limits,
                 )?;
             }
-            streams.insert(target_endpoint, generated);
+            streams.insert(RuntimeStreamSource::Output(target_endpoint), generated);
             progressed = true;
         }
         if !progressed {
@@ -868,13 +1042,14 @@ pub fn simulate_graph(
         root_rate,
         horizon,
         &clocked_nodes,
+        &injected_inputs,
         &mut streams,
         &mut entries,
         limits,
     )?;
 
     for sink in sink_nodes {
-        let source = source_for_input(document, sink)?;
+        let source = source_for_input(document, sink, &injected_inputs)?;
         if !streams.contains_key(&source) {
             return Err(GraphSimulationError::UnavailableStreamSource(sink));
         }
@@ -914,7 +1089,8 @@ fn simulate_clocked_control(
     root_rate: &super::GraphClockRate,
     horizon: GraphSimulationHorizon,
     nodes: &[ClockedNode],
-    streams: &mut BTreeMap<WireEndpoint, Vec<RuntimeSample>>,
+    injected_inputs: &BTreeSet<WireEndpoint>,
+    streams: &mut BTreeMap<RuntimeStreamSource, Vec<RuntimeSample>>,
     entries: &mut Vec<GraphTraceEntry>,
     limits: GraphSimulationLimits,
 ) -> Result<(), GraphSimulationError> {
@@ -938,7 +1114,16 @@ fn simulate_clocked_control(
     }
     for (clock, group) in groups {
         simulate_clocked_group(
-            document, analysis, root_rate, horizon, clock, &group, streams, entries, limits,
+            document,
+            analysis,
+            root_rate,
+            horizon,
+            clock,
+            &group,
+            injected_inputs,
+            streams,
+            entries,
+            limits,
         )?;
     }
     Ok(())
@@ -955,7 +1140,8 @@ fn simulate_clocked_group(
     horizon: GraphSimulationHorizon,
     clock: GraphClockId,
     nodes: &[ClockedNode],
-    streams: &mut BTreeMap<WireEndpoint, Vec<RuntimeSample>>,
+    injected_inputs: &BTreeSet<WireEndpoint>,
+    streams: &mut BTreeMap<RuntimeStreamSource, Vec<RuntimeSample>>,
     entries: &mut Vec<GraphTraceEntry>,
     limits: GraphSimulationLimits,
 ) -> Result<(), GraphSimulationError> {
@@ -980,12 +1166,12 @@ fn simulate_clocked_group(
         }
     }
 
-    let mut available: BTreeSet<WireEndpoint> = streams.keys().copied().collect();
+    let mut available: BTreeSet<RuntimeStreamSource> = streams.keys().copied().collect();
     for delay in &delays {
-        available.insert(WireEndpoint {
+        available.insert(RuntimeStreamSource::Output(WireEndpoint {
             node: delay.node,
             port: clocked_output(delay.behavior).expect("delay output is fixed"),
-        });
+        }));
     }
     let mut ordered = Vec::with_capacity(combinational.len());
     let mut pending = combinational;
@@ -1001,14 +1187,15 @@ fn simulate_clocked_group(
                         node: node.node,
                         port: *port,
                     },
+                    injected_inputs,
                 )
                 .is_ok_and(|source| available.contains(&source))
             });
             if ready {
-                available.insert(WireEndpoint {
+                available.insert(RuntimeStreamSource::Output(WireEndpoint {
                     node: node.node,
                     port: clocked_output(node.behavior).expect("clocked output is fixed"),
-                });
+                }));
                 ordered.push(node);
                 progressed = true;
             } else {
@@ -1039,9 +1226,12 @@ fn simulate_clocked_group(
                 node: node.node,
                 port: input,
             };
-            let source = source_for_input(document, target)?;
-            if !group_outputs.contains(&source) {
-                let source_port = stream_output(document, source)?;
+            let source = source_for_input(document, target, injected_inputs)?;
+            if !matches!(
+                source,
+                RuntimeStreamSource::Output(endpoint) if group_outputs.contains(&endpoint)
+            ) {
+                let source_port = runtime_stream_port(document, source)?;
                 if source_port.clock != clock || !streams.contains_key(&source) {
                     return Err(GraphSimulationError::UnavailableStreamSource(target));
                 }
@@ -1118,14 +1308,14 @@ fn simulate_clocked_group(
                 entries,
                 limits,
             )?;
-            values.insert(output, value);
+            values.insert(RuntimeStreamSource::Output(output), value);
         }
         for node in &ordered {
             let output = WireEndpoint {
                 node: node.node,
                 port: clocked_output(node.behavior).expect("clocked output is fixed"),
             };
-            let value = evaluate_clocked_node(document, *node, tick, &values)?;
+            let value = evaluate_clocked_node(document, *node, tick, injected_inputs, &values)?;
             emit_clocked_value(
                 output,
                 clock,
@@ -1135,7 +1325,7 @@ fn simulate_clocked_group(
                 entries,
                 limits,
             )?;
-            values.insert(output, value);
+            values.insert(RuntimeStreamSource::Output(output), value);
         }
         for delay in &delays {
             let GraphSimulationNodeKind::UnitDelay { input, .. } = delay.behavior else {
@@ -1145,7 +1335,7 @@ fn simulate_clocked_group(
                 node: delay.node,
                 port: input,
             };
-            let source = source_for_input(document, target)?;
+            let source = source_for_input(document, target, injected_inputs)?;
             let next =
                 values
                     .get(&source)
@@ -1162,7 +1352,7 @@ fn simulate_clocked_group(
     }
 
     for (endpoint, samples) in generated {
-        streams.insert(endpoint, samples);
+        streams.insert(RuntimeStreamSource::Output(endpoint), samples);
     }
     Ok(())
 }
@@ -1171,7 +1361,8 @@ fn evaluate_clocked_node(
     document: &GraphDocument,
     node: ClockedNode,
     tick: u64,
-    values: &BTreeMap<WireEndpoint, TypedGraphValue>,
+    injected_inputs: &BTreeSet<WireEndpoint>,
+    values: &BTreeMap<RuntimeStreamSource, TypedGraphValue>,
 ) -> Result<TypedGraphValue, GraphSimulationError> {
     let output = clocked_output(node.behavior).expect("clocked output is fixed");
     let output_port = stream_output(
@@ -1181,39 +1372,30 @@ fn evaluate_clocked_node(
             port: output,
         },
     )?;
-    let rational_input = |port| -> Result<Rational, GraphSimulationError> {
+    let typed_input = |port| -> Result<&TypedGraphValue, GraphSimulationError> {
         let target = WireEndpoint {
             node: node.node,
             port,
         };
-        let source = source_for_input(document, target)?;
-        let value = values
+        let source = source_for_input(document, target, injected_inputs)?;
+        values
             .get(&source)
             .ok_or(GraphSimulationError::MissingClockedSample {
                 input: target,
                 clock_tick: tick,
-            })?;
-        match value.value() {
+            })
+    };
+    let rational_input = |port| -> Result<Rational, GraphSimulationError> {
+        match typed_input(port)?.value() {
             GraphValue::ExactRational(value) => Ok(value.clone()),
             _ => Err(GraphSimulationError::ComputedValueOutOfBounds(node.node)),
         }
     };
     let boolean_input = |port| -> Result<bool, GraphSimulationError> {
-        let target = WireEndpoint {
-            node: node.node,
-            port,
-        };
-        let source = source_for_input(document, target)?;
-        values
-            .get(&source)
-            .and_then(|value| match value.value() {
-                GraphValue::Boolean(value) => Some(*value),
-                _ => None,
-            })
-            .ok_or(GraphSimulationError::MissingClockedSample {
-                input: target,
-                clock_tick: tick,
-            })
+        match typed_input(port)?.value() {
+            GraphValue::Boolean(value) => Ok(*value),
+            _ => Err(GraphSimulationError::ComputedValueOutOfBounds(node.node)),
+        }
     };
     let computed = match node.behavior {
         GraphSimulationNodeKind::ExactAdd { left, right, .. } => {
@@ -1278,6 +1460,35 @@ fn evaluate_clocked_node(
             let right = boolean_input(right)?;
             GraphValue::Boolean(left && right)
         }
+        GraphSimulationNodeKind::TypedConstant {
+            value_parameter, ..
+        } => {
+            let value = parameter_value(document, node.node, value_parameter)?;
+            return TypedGraphValue::try_new(
+                document.schema(),
+                output_port.sample_type,
+                value.value().clone(),
+            )
+            .map_err(|_| GraphSimulationError::ComputedValueOutOfBounds(node.node));
+        }
+        GraphSimulationNodeKind::TypedCase {
+            selector,
+            when_false,
+            when_true,
+            ..
+        } => {
+            let selected = if boolean_input(selector)? {
+                when_true
+            } else {
+                when_false
+            };
+            return TypedGraphValue::try_new(
+                document.schema(),
+                output_port.sample_type,
+                typed_input(selected)?.value().clone(),
+            )
+            .map_err(|_| GraphSimulationError::ComputedValueOutOfBounds(node.node));
+        }
         GraphSimulationNodeKind::ExactPermitGate {
             value,
             permit,
@@ -1295,7 +1506,7 @@ fn evaluate_clocked_node(
         | GraphSimulationNodeKind::LatestRateTransition { .. }
         | GraphSimulationNodeKind::StreamSink { .. }
         | GraphSimulationNodeKind::UnitDelay { .. } => {
-            unreachable!("only combinational exact nodes are evaluated here")
+            unreachable!("only combinational clocked nodes are evaluated here")
         }
     };
     TypedGraphValue::try_new(document.schema(), output_port.sample_type, computed)
@@ -1422,6 +1633,8 @@ const fn clocked_output(behavior: GraphSimulationNodeKind) -> Option<GraphPortId
         | GraphSimulationNodeKind::ExactClamp { output, .. }
         | GraphSimulationNodeKind::ExactWithinInclusive { output, .. }
         | GraphSimulationNodeKind::BooleanAnd { output, .. }
+        | GraphSimulationNodeKind::TypedConstant { output, .. }
+        | GraphSimulationNodeKind::TypedCase { output, .. }
         | GraphSimulationNodeKind::UnitDelay { output, .. }
         | GraphSimulationNodeKind::ExactPermitGate { output, .. } => Some(output),
         GraphSimulationNodeKind::ExternalStreamSource { .. }
@@ -1430,21 +1643,30 @@ const fn clocked_output(behavior: GraphSimulationNodeKind) -> Option<GraphPortId
     }
 }
 
-const fn clocked_inputs(behavior: GraphSimulationNodeKind) -> [Option<GraphPortId>; 2] {
+const fn clocked_inputs(behavior: GraphSimulationNodeKind) -> [Option<GraphPortId>; 3] {
     match behavior {
         GraphSimulationNodeKind::ExactAdd { left, right, .. }
         | GraphSimulationNodeKind::ExactSubtract { left, right, .. }
-        | GraphSimulationNodeKind::BooleanAnd { left, right, .. } => [Some(left), Some(right)],
+        | GraphSimulationNodeKind::BooleanAnd { left, right, .. } => {
+            [Some(left), Some(right), None]
+        }
+        GraphSimulationNodeKind::TypedCase {
+            selector,
+            when_false,
+            when_true,
+            ..
+        } => [Some(selector), Some(when_false), Some(when_true)],
         GraphSimulationNodeKind::ExactScale { input, .. }
         | GraphSimulationNodeKind::ExactClamp { input, .. }
         | GraphSimulationNodeKind::ExactWithinInclusive { input, .. }
-        | GraphSimulationNodeKind::UnitDelay { input, .. } => [Some(input), None],
+        | GraphSimulationNodeKind::UnitDelay { input, .. } => [Some(input), None, None],
         GraphSimulationNodeKind::ExactPermitGate { value, permit, .. } => {
-            [Some(value), Some(permit)]
+            [Some(value), Some(permit), None]
         }
+        GraphSimulationNodeKind::TypedConstant { .. } => [None, None, None],
         GraphSimulationNodeKind::ExternalStreamSource { .. }
         | GraphSimulationNodeKind::LatestRateTransition { .. }
-        | GraphSimulationNodeKind::StreamSink { .. } => [None, None],
+        | GraphSimulationNodeKind::StreamSink { .. } => [None, None, None],
     }
 }
 
@@ -1567,13 +1789,20 @@ fn clock_rate_in_horizon<'a>(
 fn source_for_input(
     document: &GraphDocument,
     input: WireEndpoint,
-) -> Result<WireEndpoint, GraphSimulationError> {
-    document
+    injected_inputs: &BTreeSet<WireEndpoint>,
+) -> Result<RuntimeStreamSource, GraphSimulationError> {
+    if let Some(source) = document
         .wires()
         .iter()
         .find(|wire| wire.target() == input)
         .map(|wire| wire.source())
-        .ok_or(GraphSimulationError::UnavailableStreamSource(input))
+    {
+        return Ok(RuntimeStreamSource::Output(source));
+    }
+    if injected_inputs.contains(&input) {
+        return Ok(RuntimeStreamSource::InjectedInput(input));
+    }
+    Err(GraphSimulationError::UnavailableStreamSource(input))
 }
 
 fn stream_output(
@@ -1590,6 +1819,32 @@ fn stream_output(
         .ok_or(GraphSimulationError::UnknownExternalSource(endpoint))?;
     stream_port(document.schema(), port.value_type())
         .ok_or(GraphSimulationError::UnknownExternalSource(endpoint))
+}
+
+fn stream_input(
+    document: &GraphDocument,
+    endpoint: WireEndpoint,
+) -> Result<StreamPort, GraphSimulationError> {
+    let node = document
+        .node(endpoint.node)
+        .ok_or(GraphSimulationError::UnknownInjectedInput(endpoint))?;
+    let port = node
+        .inputs()
+        .iter()
+        .find(|port| port.id() == endpoint.port)
+        .ok_or(GraphSimulationError::UnknownInjectedInput(endpoint))?;
+    stream_port(document.schema(), port.value_type())
+        .ok_or(GraphSimulationError::UnknownInjectedInput(endpoint))
+}
+
+fn runtime_stream_port(
+    document: &GraphDocument,
+    source: RuntimeStreamSource,
+) -> Result<StreamPort, GraphSimulationError> {
+    match source {
+        RuntimeStreamSource::Output(endpoint) => stream_output(document, endpoint),
+        RuntimeStreamSource::InjectedInput(endpoint) => stream_input(document, endpoint),
+    }
 }
 
 fn stream_port(schema: &GraphSchema, value_type: GraphTypeId) -> Option<StreamPort> {
@@ -1790,12 +2045,87 @@ fn validate_implementation(
                 return Err(invalid("same-clock Boolean conjunction shape"));
             }
         }
+        GraphSimulationNodeKind::TypedConstant {
+            value_parameter,
+            output,
+        } => {
+            let output_stream = schema
+                .outputs()
+                .iter()
+                .find(|candidate| candidate.id() == output)
+                .and_then(|port| stream_port(values, port.value_type()));
+            if !schema.inputs().is_empty()
+                || !schema.input_channels().is_empty()
+                || schema.outputs().len() != 1
+                || output_stream.is_none()
+                || schema.parameters().len() != 1
+                || parameter_type(schema, value_parameter)
+                    != output_stream.map(|port| port.sample_type)
+                || !dependency_matches(schema, output, &[])
+                || !schema.rate_transitions().is_empty()
+                || schema.state().is_some()
+            {
+                return Err(invalid("clocked typed constant shape"));
+            }
+        }
+        GraphSimulationNodeKind::TypedCase {
+            selector,
+            when_false,
+            when_true,
+            output,
+        } => {
+            let selector_stream = boolean_input_stream(schema, values, selector);
+            let false_stream = schema
+                .inputs()
+                .iter()
+                .find(|candidate| candidate.id() == when_false)
+                .and_then(|port| stream_port(values, port.value_type()));
+            let true_stream = schema
+                .inputs()
+                .iter()
+                .find(|candidate| candidate.id() == when_true)
+                .and_then(|port| stream_port(values, port.value_type()));
+            let output_stream = schema
+                .outputs()
+                .iter()
+                .find(|candidate| candidate.id() == output)
+                .and_then(|port| stream_port(values, port.value_type()));
+            let distinct =
+                selector != when_false && selector != when_true && when_false != when_true;
+            if schema.inputs().len() != 3
+                || schema.outputs().len() != 1
+                || !distinct
+                || selector_stream.is_none()
+                || false_stream.is_none()
+                || false_stream != true_stream
+                || false_stream != output_stream
+                || selector_stream.map(|port| port.clock) != false_stream.map(|port| port.clock)
+                || !required_stream_queue(schema, selector)
+                || !required_stream_queue(schema, when_false)
+                || !required_stream_queue(schema, when_true)
+                || !dependency_matches(schema, output, &[selector, when_false, when_true])
+                || !schema.parameters().is_empty()
+                || !schema.rate_transitions().is_empty()
+                || schema.state().is_some()
+            {
+                return Err(invalid("same-clock typed case shape"));
+            }
+        }
         GraphSimulationNodeKind::UnitDelay {
             input,
             initial_parameter,
             output,
         } => {
-            let stream = exact_input_stream(schema, values, input);
+            let stream = schema
+                .inputs()
+                .iter()
+                .find(|candidate| candidate.id() == input)
+                .and_then(|port| stream_port(values, port.value_type()));
+            let output_stream = schema
+                .outputs()
+                .iter()
+                .find(|candidate| candidate.id() == output)
+                .and_then(|port| stream_port(values, port.value_type()));
             let sample = stream.map(|port| port.sample_type);
             let state_matches = schema.state().is_some_and(|state| {
                 state.clock()
@@ -1810,7 +2140,7 @@ fn validate_implementation(
             if schema.inputs().len() != 1
                 || schema.outputs().len() != 1
                 || stream.is_none()
-                || stream != exact_output_stream(schema, values, output)
+                || stream != output_stream
                 || !required_stream_queue(schema, input)
                 || !dependency_matches(schema, output, &[])
                 || schema.parameters().len() != 1
@@ -1818,7 +2148,7 @@ fn validate_implementation(
                 || !schema.rate_transitions().is_empty()
                 || !state_matches
             {
-                return Err(invalid("exact unit-delay state shape"));
+                return Err(invalid("typed unit-delay state shape"));
             }
         }
         GraphSimulationNodeKind::ExactPermitGate {
@@ -2165,6 +2495,26 @@ fn simulation_registry_digest(
                 bytes.push(10);
                 put_u32(&mut bytes, left.get());
                 put_u32(&mut bytes, right.get());
+                put_u32(&mut bytes, output.get());
+            }
+            GraphSimulationNodeKind::TypedConstant {
+                value_parameter,
+                output,
+            } => {
+                bytes.push(11);
+                put_u32(&mut bytes, value_parameter);
+                put_u32(&mut bytes, output.get());
+            }
+            GraphSimulationNodeKind::TypedCase {
+                selector,
+                when_false,
+                when_true,
+                output,
+            } => {
+                bytes.push(12);
+                put_u32(&mut bytes, selector.get());
+                put_u32(&mut bytes, when_false.get());
+                put_u32(&mut bytes, when_true.get());
                 put_u32(&mut bytes, output.get());
             }
         }
@@ -2535,6 +2885,107 @@ mod tests {
     }
 
     #[test]
+    fn injected_front_panel_input_is_distinct_replayable_and_unowned() {
+        let (connected, registry) = fixture();
+        let document = GraphDocument::try_new(
+            connected.revision(),
+            connected.schema().clone(),
+            connected.clocks().to_vec(),
+            connected.nodes().to_vec(),
+            connected
+                .wires()
+                .iter()
+                .filter(|wire| wire.id() != GraphWireId::new(1))
+                .cloned()
+                .collect(),
+        )
+        .unwrap();
+        let injected = samples(&document)
+            .into_iter()
+            .map(|sample| {
+                InjectedInputSample::new(
+                    endpoint(2, 1),
+                    sample.clock_tick(),
+                    sample.sequence(),
+                    sample.value().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let limits = GraphSimulationLimits::interactive();
+        let simulation = simulate_graph_with_inputs(
+            &document,
+            &registry,
+            GraphSimulationHorizon::new(ROOT, 10),
+            &[],
+            &injected,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(simulation.entries().len(), 15);
+        let injected_entries = simulation
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind() == GraphTraceEntryKind::InjectedInput)
+            .collect::<Vec<_>>();
+        assert_eq!(injected_entries.len(), injected.len());
+        assert!(
+            injected_entries
+                .iter()
+                .all(|entry| entry.endpoint() == endpoint(2, 1))
+        );
+        assert_eq!(
+            simulation
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind() == GraphTraceEntryKind::NodeOutput)
+                .count(),
+            simulation.entries().len() - injected.len()
+        );
+
+        let trace = encode_graph_trace(&document, &simulation, limits).unwrap();
+        let replay = replay_graph_trace(trace.bytes(), &document, &registry, limits).unwrap();
+        assert_eq!(replay.simulation(), &simulation);
+        assert_eq!(replay.encoding(), &trace);
+
+        assert_eq!(
+            simulate_graph_with_inputs(
+                &connected,
+                &registry,
+                GraphSimulationHorizon::new(ROOT, 10),
+                &samples(&connected),
+                &[InjectedInputSample::new(
+                    endpoint(2, 1),
+                    0,
+                    1,
+                    injected[0].value().clone(),
+                )],
+                limits,
+            ),
+            Err(GraphSimulationError::UnknownInjectedInput(endpoint(2, 1)))
+        );
+
+        let mut nonmonotonic = injected.clone();
+        nonmonotonic[1] = InjectedInputSample::new(
+            endpoint(2, 1),
+            nonmonotonic[0].clock_tick(),
+            nonmonotonic[1].sequence(),
+            nonmonotonic[1].value().clone(),
+        );
+        assert_eq!(
+            simulate_graph_with_inputs(
+                &document,
+                &registry,
+                GraphSimulationHorizon::new(ROOT, 10),
+                &[],
+                &nonmonotonic,
+                limits,
+            ),
+            Err(GraphSimulationError::ExternalSampleOrder(endpoint(2, 1)))
+        );
+    }
+
+    #[test]
     fn simulation_registry_identity_is_canonical_across_binding_order() {
         let (document, registry) = fixture();
         let mut implementations = registry.implementations().to_vec();
@@ -2674,9 +3125,9 @@ mod tests {
         assert_eq!(
             trace.digest().0,
             [
-                0x99, 0x67, 0x72, 0x84, 0x55, 0x0e, 0x74, 0x65, 0x54, 0x10, 0x96, 0xc6, 0x75, 0xdd,
-                0xd3, 0x60, 0x41, 0x6a, 0x3f, 0x36, 0x55, 0x65, 0x3a, 0xf3, 0xc9, 0x6e, 0x6c, 0x6d,
-                0x96, 0xff, 0xa2, 0xf4,
+                0x30, 0x48, 0xb8, 0x93, 0x1d, 0xb6, 0x6a, 0x6b, 0xc4, 0x33, 0xab, 0x27, 0xbc, 0x8a,
+                0x31, 0xfd, 0x1d, 0xaf, 0x30, 0x8a, 0xc7, 0x41, 0x92, 0xb2, 0xdc, 0xcf, 0x7d, 0x54,
+                0x00, 0x3b, 0xf1, 0x95,
             ]
         );
         assert_eq!(trace.digest(), sha256(trace.bytes()).digest);

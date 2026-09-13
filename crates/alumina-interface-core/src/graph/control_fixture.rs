@@ -745,6 +745,32 @@ fn document_and_registry()
         Vec::new(),
         None,
     );
+    let exact_constant = NodeSchema::new(
+        NodeKind::new("control.exact.constant", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        Vec::new(),
+        Vec::new(),
+        vec![port(1, "value", CONTROL_VALUE_STREAM)],
+        vec![parameter_contract(1, "value", VALUE)],
+        vec![dependency(1, &[])],
+        Vec::new(),
+        None,
+    );
+    let exact_case = NodeSchema::new(
+        NodeKind::new("control.exact.case", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        vec![
+            port(1, "selector", CONTROL_BOOL_STREAM),
+            port(2, "when_false", CONTROL_VALUE_STREAM),
+            port(3, "when_true", CONTROL_VALUE_STREAM),
+        ],
+        vec![queue(1, 1), queue(2, 1), queue(3, 1)],
+        vec![port(4, "selected", CONTROL_VALUE_STREAM)],
+        Vec::new(),
+        vec![dependency(4, &[1, 2, 3])],
+        Vec::new(),
+        None,
+    );
     let boolean_and = NodeSchema::new(
         NodeKind::new("control.bool.and", 1),
         ExecutionDomainSet::HOST_EXACT,
@@ -758,6 +784,50 @@ fn document_and_registry()
         vec![dependency(3, &[1, 2])],
         Vec::new(),
         None,
+    );
+    let boolean_constant = NodeSchema::new(
+        NodeKind::new("control.bool.constant", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        Vec::new(),
+        Vec::new(),
+        vec![port(1, "value", CONTROL_BOOL_STREAM)],
+        vec![parameter_contract(1, "value", BOOL)],
+        vec![dependency(1, &[])],
+        Vec::new(),
+        None,
+    );
+    let boolean_case = NodeSchema::new(
+        NodeKind::new("control.bool.case", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        vec![
+            port(1, "selector", CONTROL_BOOL_STREAM),
+            port(2, "when_false", CONTROL_BOOL_STREAM),
+            port(3, "when_true", CONTROL_BOOL_STREAM),
+        ],
+        vec![queue(1, 1), queue(2, 1), queue(3, 1)],
+        vec![port(4, "selected", CONTROL_BOOL_STREAM)],
+        Vec::new(),
+        vec![dependency(4, &[1, 2, 3])],
+        Vec::new(),
+        None,
+    );
+    let boolean_delay = NodeSchema::new(
+        NodeKind::new("control.bool.delay", 1),
+        ExecutionDomainSet::HOST_EXACT,
+        vec![port(1, "next", CONTROL_BOOL_STREAM)],
+        vec![queue(1, 1)],
+        vec![port(2, "current", CONTROL_BOOL_STREAM)],
+        vec![parameter_contract(1, "initial", BOOL)],
+        vec![dependency(2, &[])],
+        Vec::new(),
+        Some(NodeStateContract::new(
+            CONTROL_CLOCK,
+            BOOL,
+            1,
+            GraphPortId::new(1),
+            GraphPortId::new(2),
+            8,
+        )),
     );
     let permit = NodeSchema::new(
         NodeKind::new("control.exact.permit", 1),
@@ -798,7 +868,12 @@ fn document_and_registry()
             delay,
             clamp,
             within,
+            exact_constant,
+            exact_case,
             boolean_and,
+            boolean_constant,
+            boolean_case,
+            boolean_delay,
             permit,
             sink,
         ],
@@ -881,11 +956,51 @@ fn document_and_registry()
             },
         ),
         GraphSimulationImplementation::new(
+            NodeKind::new("control.exact.constant", 1),
+            GraphSimulationNodeKind::TypedConstant {
+                value_parameter: 1,
+                output: GraphPortId::new(1),
+            },
+        ),
+        GraphSimulationImplementation::new(
+            NodeKind::new("control.exact.case", 1),
+            GraphSimulationNodeKind::TypedCase {
+                selector: GraphPortId::new(1),
+                when_false: GraphPortId::new(2),
+                when_true: GraphPortId::new(3),
+                output: GraphPortId::new(4),
+            },
+        ),
+        GraphSimulationImplementation::new(
             NodeKind::new("control.bool.and", 1),
             GraphSimulationNodeKind::BooleanAnd {
                 left: GraphPortId::new(1),
                 right: GraphPortId::new(2),
                 output: GraphPortId::new(3),
+            },
+        ),
+        GraphSimulationImplementation::new(
+            NodeKind::new("control.bool.constant", 1),
+            GraphSimulationNodeKind::TypedConstant {
+                value_parameter: 1,
+                output: GraphPortId::new(1),
+            },
+        ),
+        GraphSimulationImplementation::new(
+            NodeKind::new("control.bool.case", 1),
+            GraphSimulationNodeKind::TypedCase {
+                selector: GraphPortId::new(1),
+                when_false: GraphPortId::new(2),
+                when_true: GraphPortId::new(3),
+                output: GraphPortId::new(4),
+            },
+        ),
+        GraphSimulationImplementation::new(
+            NodeKind::new("control.bool.delay", 1),
+            GraphSimulationNodeKind::UnitDelay {
+                input: GraphPortId::new(1),
+                initial_parameter: 1,
+                output: GraphPortId::new(2),
             },
         ),
         GraphSimulationImplementation::new(
@@ -1050,18 +1165,18 @@ fn multirate_exact_pid_and_interlock_are_visible_deterministic_and_replayable() 
     assert_eq!(
         simulation.registry_digest().0,
         [
-            0xfc, 0x68, 0xd3, 0x7f, 0x27, 0x97, 0x82, 0xc5, 0xa5, 0x36, 0x8b, 0xc0, 0xe4, 0x4a,
-            0xa6, 0x95, 0xa3, 0xb2, 0xba, 0xbb, 0xfa, 0xf9, 0x67, 0xb0, 0x9c, 0xf4, 0xfc, 0x75,
-            0x28, 0x7e, 0xae, 0x83,
+            0x3c, 0xcd, 0x0a, 0xa5, 0xdb, 0xc2, 0xf7, 0x45, 0xb8, 0x97, 0xca, 0x06, 0xe9, 0xa7,
+            0x57, 0x17, 0x36, 0x5c, 0xd9, 0x77, 0xab, 0x30, 0x3e, 0x3c, 0x1c, 0xa4, 0x8b, 0xdc,
+            0xf8, 0xf7, 0xc5, 0x25,
         ]
     );
     assert_eq!(trace.bytes().len(), 8_292);
     assert_eq!(
         trace.digest().0,
         [
-            0x1a, 0x1f, 0x7e, 0x0e, 0x80, 0xe2, 0x4f, 0x11, 0x27, 0x87, 0xbf, 0xcc, 0x9d, 0x5e,
-            0x04, 0xc2, 0x01, 0x2a, 0x51, 0x22, 0xa9, 0x01, 0x3d, 0x14, 0xc9, 0x98, 0xfd, 0x6f,
-            0xbd, 0xc9, 0x5f, 0x72,
+            0xa8, 0x9c, 0x8b, 0xfa, 0x87, 0xe7, 0xdc, 0xed, 0x32, 0x8d, 0x6c, 0xb6, 0x58, 0x3a,
+            0x10, 0xa6, 0x18, 0x43, 0x17, 0x75, 0xbd, 0x3a, 0x51, 0xd2, 0xab, 0x61, 0xa5, 0x69,
+            0x97, 0xd4, 0xc1, 0x77,
         ]
     );
     let replay = super::replay_graph_trace(trace.bytes(), document, registry, limits).unwrap();
@@ -1120,6 +1235,347 @@ fn boolean_conjunction_distinguishes_each_interlock_operand() {
 
 #[cfg(test)]
 #[test]
+fn reset_dominant_boolean_state_machine_is_visible_exact_and_replayable() {
+    let (reference, registry) = document_and_registry().unwrap();
+    let schema = reference.schema().clone();
+    let nodes = vec![
+        node(
+            1,
+            "control.source.bool",
+            Vec::new(),
+            vec![port(1, "samples", SOURCE_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            2,
+            "control.source.bool",
+            Vec::new(),
+            vec![port(1, "samples", SOURCE_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            3,
+            "control.rate.bool",
+            vec![port(1, "source", SOURCE_BOOL_STREAM)],
+            vec![port(2, "target", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            4,
+            "control.rate.bool",
+            vec![port(1, "source", SOURCE_BOOL_STREAM)],
+            vec![port(2, "target", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            5,
+            "control.bool.constant",
+            Vec::new(),
+            vec![port(1, "value", CONTROL_BOOL_STREAM)],
+            vec![NodeParameter::new(
+                1,
+                "value",
+                boolean(&schema, false).unwrap(),
+            )],
+        ),
+        node(
+            6,
+            "control.bool.case",
+            vec![
+                port(1, "selector", CONTROL_BOOL_STREAM),
+                port(2, "when_false", CONTROL_BOOL_STREAM),
+                port(3, "when_true", CONTROL_BOOL_STREAM),
+            ],
+            vec![port(4, "selected", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            7,
+            "control.bool.case",
+            vec![
+                port(1, "selector", CONTROL_BOOL_STREAM),
+                port(2, "when_false", CONTROL_BOOL_STREAM),
+                port(3, "when_true", CONTROL_BOOL_STREAM),
+            ],
+            vec![port(4, "selected", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            8,
+            "control.bool.delay",
+            vec![port(1, "next", CONTROL_BOOL_STREAM)],
+            vec![port(2, "current", CONTROL_BOOL_STREAM)],
+            vec![NodeParameter::new(
+                1,
+                "initial",
+                boolean(&schema, false).unwrap(),
+            )],
+        ),
+    ];
+    let wires = [
+        (1, endpoint(1, 1), endpoint(3, 1)),
+        (2, endpoint(2, 1), endpoint(4, 1)),
+        (3, endpoint(8, 2), endpoint(6, 2)),
+        (4, endpoint(3, 2), endpoint(6, 1)),
+        (5, endpoint(3, 2), endpoint(6, 3)),
+        (6, endpoint(4, 2), endpoint(7, 1)),
+        (7, endpoint(6, 4), endpoint(7, 2)),
+        (8, endpoint(5, 1), endpoint(7, 3)),
+        (9, endpoint(7, 4), endpoint(8, 1)),
+    ]
+    .into_iter()
+    .map(|(id, source, target)| WireDefinition::new(GraphWireId::new(id), source, target))
+    .collect();
+    let document =
+        GraphDocument::try_new(1, schema, reference.clocks().to_vec(), nodes, wires).unwrap();
+    let mut input = Vec::new();
+    for tick in 0_u64..=30 {
+        let control_tick = tick / 5;
+        let (set, reset) = match control_tick {
+            1 | 5 => (true, false),
+            3 => (true, true),
+            _ => (false, false),
+        };
+        input.push(ExternalStreamSample::new(
+            endpoint(1, 1),
+            tick,
+            100 + tick,
+            boolean(document.schema(), set).unwrap(),
+        ));
+        input.push(ExternalStreamSample::new(
+            endpoint(2, 1),
+            tick,
+            200 + tick,
+            boolean(document.schema(), reset).unwrap(),
+        ));
+    }
+    let limits = GraphSimulationLimits::interactive();
+    let simulation = simulate_graph(
+        &document,
+        &registry,
+        GraphSimulationHorizon::new(ROOT, 60),
+        &input,
+        limits,
+    )
+    .unwrap();
+    assert_eq!(
+        boolean_trace(&simulation, endpoint(8, 2)),
+        [false, false, true, true, false, false, true]
+    );
+    assert_eq!(
+        boolean_trace(&simulation, endpoint(7, 4)),
+        [false, true, true, false, false, true, true]
+    );
+    assert_eq!(boolean_trace(&simulation, endpoint(5, 1)), [false; 7]);
+
+    input.reverse();
+    let reordered = simulate_graph(
+        &document,
+        &registry,
+        GraphSimulationHorizon::new(ROOT, 60),
+        &input,
+        limits,
+    )
+    .unwrap();
+    assert_eq!(reordered, simulation);
+    let trace = encode_graph_trace(&document, &simulation, limits).unwrap();
+    let replay = super::replay_graph_trace(trace.bytes(), &document, &registry, limits).unwrap();
+    assert_eq!(replay.simulation(), &simulation);
+    assert_eq!(replay.encoding(), &trace);
+}
+
+#[cfg(test)]
+#[test]
+fn reset_dominant_exact_register_preserves_rationals_and_replays() {
+    let (reference, registry) = document_and_registry().unwrap();
+    let schema = reference.schema().clone();
+    let nodes = vec![
+        node(
+            1,
+            "control.source.bool",
+            Vec::new(),
+            vec![port(1, "samples", SOURCE_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            2,
+            "control.source.bool",
+            Vec::new(),
+            vec![port(1, "samples", SOURCE_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            3,
+            "control.source.value",
+            Vec::new(),
+            vec![port(1, "samples", SOURCE_VALUE_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            4,
+            "control.rate.bool",
+            vec![port(1, "source", SOURCE_BOOL_STREAM)],
+            vec![port(2, "target", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            5,
+            "control.rate.bool",
+            vec![port(1, "source", SOURCE_BOOL_STREAM)],
+            vec![port(2, "target", CONTROL_BOOL_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            6,
+            "control.rate.value",
+            vec![port(1, "source", SOURCE_VALUE_STREAM)],
+            vec![port(2, "target", CONTROL_VALUE_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            7,
+            "control.exact.constant",
+            Vec::new(),
+            vec![port(1, "value", CONTROL_VALUE_STREAM)],
+            vec![NodeParameter::new(
+                1,
+                "value",
+                exact(&schema, VALUE, Rational::fraction(-5, 7).unwrap()).unwrap(),
+            )],
+        ),
+        node(
+            8,
+            "control.exact.case",
+            vec![
+                port(1, "selector", CONTROL_BOOL_STREAM),
+                port(2, "when_false", CONTROL_VALUE_STREAM),
+                port(3, "when_true", CONTROL_VALUE_STREAM),
+            ],
+            vec![port(4, "selected", CONTROL_VALUE_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            9,
+            "control.exact.case",
+            vec![
+                port(1, "selector", CONTROL_BOOL_STREAM),
+                port(2, "when_false", CONTROL_VALUE_STREAM),
+                port(3, "when_true", CONTROL_VALUE_STREAM),
+            ],
+            vec![port(4, "selected", CONTROL_VALUE_STREAM)],
+            Vec::new(),
+        ),
+        node(
+            10,
+            "control.exact.delay",
+            vec![port(1, "next", CONTROL_VALUE_STREAM)],
+            vec![port(2, "current", CONTROL_VALUE_STREAM)],
+            vec![NodeParameter::new(
+                1,
+                "initial",
+                exact(&schema, VALUE, Rational::fraction(7, 3).unwrap()).unwrap(),
+            )],
+        ),
+    ];
+    let wires = [
+        (1, endpoint(1, 1), endpoint(4, 1)),
+        (2, endpoint(2, 1), endpoint(5, 1)),
+        (3, endpoint(3, 1), endpoint(6, 1)),
+        (4, endpoint(4, 2), endpoint(8, 1)),
+        (5, endpoint(10, 2), endpoint(8, 2)),
+        (6, endpoint(6, 2), endpoint(8, 3)),
+        (7, endpoint(5, 2), endpoint(9, 1)),
+        (8, endpoint(8, 4), endpoint(9, 2)),
+        (9, endpoint(7, 1), endpoint(9, 3)),
+        (10, endpoint(9, 4), endpoint(10, 1)),
+    ]
+    .into_iter()
+    .map(|(id, source, target)| WireDefinition::new(GraphWireId::new(id), source, target))
+    .collect();
+    let document =
+        GraphDocument::try_new(1, schema, reference.clocks().to_vec(), nodes, wires).unwrap();
+    let mut input = Vec::new();
+    for tick in 0_u64..=30 {
+        let control_tick = tick / 5;
+        let load = matches!(control_tick, 1 | 3 | 5);
+        let reset = control_tick == 3;
+        let data = match control_tick {
+            1 => Rational::fraction(11, 5).unwrap(),
+            3 => Rational::fraction(13, 7).unwrap(),
+            5 => Rational::fraction(17, 11).unwrap(),
+            value => Rational::from(value),
+        };
+        input.push(ExternalStreamSample::new(
+            endpoint(1, 1),
+            tick,
+            100 + tick,
+            boolean(document.schema(), load).unwrap(),
+        ));
+        input.push(ExternalStreamSample::new(
+            endpoint(2, 1),
+            tick,
+            200 + tick,
+            boolean(document.schema(), reset).unwrap(),
+        ));
+        input.push(ExternalStreamSample::new(
+            endpoint(3, 1),
+            tick,
+            300 + tick,
+            exact(document.schema(), VALUE, data).unwrap(),
+        ));
+    }
+    let limits = GraphSimulationLimits::interactive();
+    let simulation = simulate_graph(
+        &document,
+        &registry,
+        GraphSimulationHorizon::new(ROOT, 60),
+        &input,
+        limits,
+    )
+    .unwrap();
+    assert_eq!(
+        rational_trace(&simulation, endpoint(10, 2)),
+        [
+            Rational::fraction(7, 3).unwrap(),
+            Rational::fraction(7, 3).unwrap(),
+            Rational::fraction(11, 5).unwrap(),
+            Rational::fraction(11, 5).unwrap(),
+            Rational::fraction(-5, 7).unwrap(),
+            Rational::fraction(-5, 7).unwrap(),
+            Rational::fraction(17, 11).unwrap(),
+        ]
+    );
+    assert_eq!(
+        rational_trace(&simulation, endpoint(9, 4)),
+        [
+            Rational::fraction(7, 3).unwrap(),
+            Rational::fraction(11, 5).unwrap(),
+            Rational::fraction(11, 5).unwrap(),
+            Rational::fraction(-5, 7).unwrap(),
+            Rational::fraction(-5, 7).unwrap(),
+            Rational::fraction(17, 11).unwrap(),
+            Rational::fraction(17, 11).unwrap(),
+        ]
+    );
+
+    input.reverse();
+    let reordered = simulate_graph(
+        &document,
+        &registry,
+        GraphSimulationHorizon::new(ROOT, 60),
+        &input,
+        limits,
+    )
+    .unwrap();
+    assert_eq!(reordered, simulation);
+    let trace = encode_graph_trace(&document, &simulation, limits).unwrap();
+    let replay = super::replay_graph_trace(trace.bytes(), &document, &registry, limits).unwrap();
+    assert_eq!(replay.simulation(), &simulation);
+    assert_eq!(replay.encoding(), &trace);
+}
+
+#[cfg(test)]
+#[test]
 fn new_interlock_primitives_reject_malformed_bindings_and_inverted_ranges() {
     let (document, registry) = document_and_registry().unwrap();
     for (kind, behavior, aspect) in [
@@ -1141,6 +1597,51 @@ fn new_interlock_primitives_reject_malformed_bindings_and_inverted_ranges() {
                 output: GraphPortId::new(3),
             },
             "same-clock Boolean conjunction shape",
+        ),
+        (
+            NodeKind::new("control.exact.constant", 1),
+            GraphSimulationNodeKind::TypedConstant {
+                value_parameter: 2,
+                output: GraphPortId::new(1),
+            },
+            "clocked typed constant shape",
+        ),
+        (
+            NodeKind::new("control.exact.case", 1),
+            GraphSimulationNodeKind::TypedCase {
+                selector: GraphPortId::new(2),
+                when_false: GraphPortId::new(1),
+                when_true: GraphPortId::new(3),
+                output: GraphPortId::new(4),
+            },
+            "same-clock typed case shape",
+        ),
+        (
+            NodeKind::new("control.bool.constant", 1),
+            GraphSimulationNodeKind::TypedConstant {
+                value_parameter: 2,
+                output: GraphPortId::new(1),
+            },
+            "clocked typed constant shape",
+        ),
+        (
+            NodeKind::new("control.bool.case", 1),
+            GraphSimulationNodeKind::TypedCase {
+                selector: GraphPortId::new(1),
+                when_false: GraphPortId::new(1),
+                when_true: GraphPortId::new(3),
+                output: GraphPortId::new(4),
+            },
+            "same-clock typed case shape",
+        ),
+        (
+            NodeKind::new("control.bool.delay", 1),
+            GraphSimulationNodeKind::UnitDelay {
+                input: GraphPortId::new(1),
+                initial_parameter: 1,
+                output: GraphPortId::new(1),
+            },
+            "typed unit-delay state shape",
         ),
     ] {
         let mut implementations = registry.implementations().to_vec();

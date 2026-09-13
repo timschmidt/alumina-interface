@@ -160,8 +160,8 @@ proofs.
 ## Fixed deterministic host simulation
 
 `GraphSimulationRegistry` is a second, explicit authority above the audited
-semantic registry. It binds exact node kind/version identities to one of eleven
-reviewed behaviors:
+semantic registry. It binds exact node kind/version identities to one of
+thirteen reviewed behaviors across eighteen fixed kind/version bindings:
 
 - caller-supplied external Stream source;
 - the audited `LatestAtOrBeforeSourceFirst` Stream transition;
@@ -171,7 +171,11 @@ reviewed behaviors:
 - exact inclusive clamp;
 - an exact inclusive-range predicate with same-unit lower and upper parameters;
 - same-clock Boolean conjunction;
-- an explicit read-before-write unit delay; and
+- a schema-generic clocked parameter constant, currently bound for Boolean and
+  exact-rational Streams;
+- a schema-generic same-clock typed case with a Boolean selector and explicit
+  false and true inputs, currently bound for Boolean and exact-rational Streams;
+- an explicit read-before-write typed unit delay; and
 - an exact-value permit gate whose false branch always selects its declared
   safe parameter.
 
@@ -210,6 +214,27 @@ in audited dependency order, and only afterward do delays capture next state.
 This admits deliberate feedback while preserving the existing combinational-
 cycle rejection. No controller state is hidden in a PID-specific opcode.
 
+The typed constant, typed case, and typed delay form the first explicit
+state-machine subset. Every case selector is a required Boolean Stream; its
+false branch, true branch, and output must be identical typed Streams on the
+selector clock. Both branches must therefore be present at every tick even
+though only the selected value is emitted. A reset-dominant Boolean set/reset
+machine is composed visibly as `set_case = case(set, current, set)`,
+`next = case(reset, set_case, false)`, and
+`current = delay(next, initial=false)`. Simultaneous set and reset selects the
+constant false branch. Its regression trace for `current` is
+`[false, false, true, true, false, false, true]`; reversed caller sample order
+and independent `ALGT` replay reproduce it exactly. These nodes remain
+`HostExact` only and grant neither a deployment binding nor an output opcode.
+
+The exact-rational specialization composes two cases and one delay as an exact
+reset-dominant register. It begins at `7/3`, loads `11/5`, resolves a concurrent
+load/reset to the explicit `-5/7` reset constant, and later loads `17/11`. Its
+prior-state trace is `[7/3, 7/3, 11/5, 11/5, -5/7, -5/7, 17/11]`. No float,
+display projection, hidden state, or type-specific evaluator participates;
+reversed caller samples and independent canonical replay reproduce the same
+typed values.
+
 The representative control fixture resamples 50 Hz setpoint, measurement, and
 permit Streams onto a 10 Hz control clock. It composes subtract, two explicit
 delays, exact scale/add, clamp, an inclusive measurement-range predicate,
@@ -230,9 +255,9 @@ complete trace byte for byte.
 The canonical fixture graph identity is
 `96a3348264a9b65d267b45f9a6419a44ee60473fd961abcf4436295e10b3735f`;
 its fixed semantic/implementation registry identity is
-`fc68d37f279782c5a5368bc0e44aa695a3b2babbfaf967b09cf4fc75287eae83`.
+`3ccd0aa5dbc2f745b897ca06e9a75717365cd977ab303e3c1ca48bdcf8f7c525`.
 The 8,292-byte trace has SHA-256
-`1a1f7e0e80e24f112787bfcc9d5e04c2012a5122a9013d14c998fd6fbdc95f72`.
+`a89c8bfa87e7dced328d6cb6583a10a618431775bd3a51d2ab61a56997d4c177`.
 
 The fixture is one fallible public core construction shared by its regression
 test and the native/WASM application; the UI does not reproduce its values or
@@ -241,9 +266,10 @@ topology. The initial workspace independently caps presentation at 256 nodes,
 current-tick dependencies, excludes only declared next-state captures from that
 acyclic rank, and routes those captures visibly as feedback. Its canonical
 `ALGW` envelope retains one bounded integer position per node and monotonic
-identity cursors. A 13-entry palette derives kind/version and port/parameter
+identity cursors. An 18-entry palette derives kind/version and port/parameter
 shape from the fixed audited schemas and exact defaults from reviewed fixture
-instances. Monotonic node creation, atomic node/incident-wire deletion, node
+instances, explicit false-safe Boolean defaults, or exact zero. Monotonic node creation,
+atomic node/incident-wire deletion, node
 drags, typed wire connect/disconnect, bounded canonical label replacement,
 concrete execution-domain replacement, and exact scalar/composite literal
 replacement mutate the draft only after complete candidate validation. Labels
@@ -340,18 +366,30 @@ behavior.
 The fixed host subset still does not model resource handles, physical side
 effects, Service/Realtime execution, deadlines, or firmware layout.
 
-`ALGT` V1 is a canonical deterministic trace. Its fixed-width header binds the
+`ALGT` V2 is a canonical deterministic trace. Its fixed-width header binds the
 canonical graph digest, the semantic/implementation registry digest, and the
-inclusive root horizon. Every entry retains origin, endpoint, clock, tick,
-sequence, and the canonical typed value. Untrusted replay bounds and decodes the
-trace, extracts only external inputs, independently reruns simulation,
+inclusive root horizon. Every entry retains one of three distinct origins—an
+external source output, a hierarchy-authorized injected input, or a modeled
+node output—plus endpoint, clock, tick, sequence, and the canonical typed
+value. Untrusted replay bounds and decodes the trace, extracts only the two
+caller-owned origins, independently reruns simulation,
 re-encodes the entire result, and requires byte-for-byte equality. The public
 `encode_typed_graph_value` boundary exposes those same schema-relative
 type-ID-plus-value bytes and their SHA-256 identity for exact in-context state
 comparison. It is deliberately not a self-describing value document: portable
 use must retain the containing graph/trace identity that binds the schema. The
 representative 1,000 Hz to 600 Hz trace is 658 bytes with SHA-256 identity
-`99677284550e7465541096c675ddd360416a3f3655653af3c96e6c6d96ffa2f4`.
+`3048b8931db66a6bc433ab27bc8a31fd1daf308ac74192b2dccf7d54003bf195`.
+
+Canonical [`ALFR` V1](GRAPH-FRONT-PANEL-RUN-V1.md) is the stronger authority
+above injected inputs. It resolves `InputControl` bindings through exact
+hierarchy occurrence paths and flattening provenance, expands exact
+sample-and-hold changes on each Stream clock, and emits an ordinary replayable
+`ALGT` V2 result without granting firmware authority. Public component outputs
+resolve recursively through the same exact hierarchy to their final Stream
+endpoint. The front panel then projects the latest bound trace sample at or
+before one transient exact rational root-clock cursor, with exact rate-domain
+conversion and no mutation of `ALFR`, `ALGT`, `ALGS`, persistence, or history.
 
 ## First fixed Service/Realtime lowering
 
@@ -528,9 +566,16 @@ recursive expansion, and deterministically flattens connector wiring to an
 ordinary workspace using fresh monotonic IDs. Stable front-panel parameter IDs
 also derive exact placeholder parameters, recurse through explicit parent panel
 bindings, and retain per-root-occurrence values through complete-session
-history. Executable front-panel input controls remain open. Multi-value state
-records, queue timeouts and
-additional policies, cases/loops/state machines, capability-generated nodes
+history. `ALFR` V1 now makes unowned Stream `InputControl` values executable in
+the host UI. Its bounded timeline editor authors multiple strictly increasing
+local-clock changes with exact schema-directed values, invalidates stale run
+evidence on every draft edit, and leaves canonical authoring-session history
+untouched. Hierarchy-resolved public Stream outputs now share a bounded exact
+rational root-time cursor and select their latest exact trace sample at or
+before it without creating new authority or saved state. Multi-value state
+records, queue timeouts and additional policies, typed cases beyond the current
+Boolean and exact-rational bindings, structured loops, general state-machine authoring tools,
+capability-generated nodes
 beyond stable Boolean inputs, multi-job prepare/start workflows and nested
 component execution, workspace collaboration/conflict handling, broader
 resource claims, general host implementation admission, measured WCET/deadline

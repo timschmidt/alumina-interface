@@ -21,6 +21,7 @@ mod component_package;
 mod control_fixture;
 mod deployment;
 mod document;
+mod front_panel_runtime;
 mod hierarchy;
 mod hierarchy_source;
 mod job_catalog;
@@ -88,6 +89,16 @@ pub use document::{
     GraphPortId, GraphWireId, NodeDefinition, NodeKind, NodeParameter, PortDefinition,
     WireDefinition, WireEndpoint,
 };
+pub use front_panel_runtime::{
+    CanonicalGraphFrontPanelRunEncoding, GRAPH_FRONT_PANEL_RUN_MAGIC,
+    GRAPH_FRONT_PANEL_RUN_VERSION, GraphFrontPanelChange, GraphFrontPanelControlKey,
+    GraphFrontPanelExecution, GraphFrontPanelInputAuthority, GraphFrontPanelInputDisposition,
+    GraphFrontPanelOutputAuthority, GraphFrontPanelOutputKey, GraphFrontPanelOutputSample,
+    GraphFrontPanelRunDocument, GraphFrontPanelRunReplay, GraphFrontPanelRuntimeError,
+    GraphFrontPanelRuntimeLimits, GraphFrontPanelSchedule, encode_graph_front_panel_run,
+    execute_graph_front_panel_run, replay_graph_front_panel_run, resolve_graph_front_panel_inputs,
+    resolve_graph_front_panel_output, sample_graph_front_panel_output_at_or_before,
+};
 pub use hierarchy::{
     CanonicalGraphHierarchyEncoding, GRAPH_COMPONENT_INSTANCE_KIND,
     GRAPH_COMPONENT_INSTANCE_VERSION, GRAPH_HIERARCHY_MAGIC, GRAPH_HIERARCHY_VERSION,
@@ -138,7 +149,8 @@ pub use realtime_replay::{
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,
     GraphSimulationImplementation, GraphSimulationLimits, GraphSimulationNodeKind,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, simulate_graph,
+    GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, InjectedInputSample,
+    simulate_graph, simulate_graph_with_inputs,
 };
 pub use storage::{GraphStorageError, GraphTypeStorageBound, GraphTypeStorageKind};
 pub use trace::{

@@ -27,6 +27,8 @@ pub const MAXIMUM_IDENTITY_BODY_BYTES: usize = 512;
 
 const AUTHENTICATION_SCHEME: &str = "hmac-sha256-v2";
 const MAXIMUM_BOARD_ID_BYTES: usize = 64;
+/// Exact embedded-interface manifest family advertised by current firmware.
+pub const INTERFACE_BUNDLE_FORMAT: &str = "alumina-web-bundle-v2";
 
 /// Credential provenance reported without disclosing any credential bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +64,7 @@ pub struct DeviceIdentity {
     credential_source: DeviceCredentialSource,
     device_id: DeviceId,
     capability: CapabilityIdentity,
+    interface_bundle: InterfaceBundleIdentity,
 }
 
 impl DeviceIdentity {
@@ -84,6 +87,30 @@ impl DeviceIdentity {
     pub const fn capability(&self) -> CapabilityIdentity {
         self.capability
     }
+
+    /// Exact browser bundle served by the running image.
+    pub const fn interface_bundle(&self) -> InterfaceBundleIdentity {
+        self.interface_bundle
+    }
+}
+
+/// Validated source and manifest identity of the browser UI embedded in an image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterfaceBundleIdentity {
+    commit: [u8; 20],
+    digest: Digest,
+}
+
+impl InterfaceBundleIdentity {
+    /// Exact 160-bit Git source commit advertised by the firmware image.
+    pub const fn commit(self) -> [u8; 20] {
+        self.commit
+    }
+
+    /// SHA-256 of the complete canonical embedded-interface manifest.
+    pub const fn digest(self) -> Digest {
+        self.digest
+    }
 }
 
 #[derive(Deserialize)]
@@ -96,6 +123,9 @@ struct DeviceIdentityWire<'a> {
     device_id: &'a str,
     capability_digest: &'a str,
     capability_document_bytes: u32,
+    interface_bundle_format: &'a str,
+    interface_commit: &'a str,
+    interface_bundle_sha256: &'a str,
 }
 
 /// Decodes and bounds the current public firmware identity schema.
@@ -135,6 +165,14 @@ pub fn decode_device_identity(bytes: &[u8]) -> Result<DeviceIdentity, DeviceIden
     {
         return Err(DeviceIdentityError::Capability);
     }
+    if wire.interface_bundle_format != INTERFACE_BUNDLE_FORMAT {
+        return Err(DeviceIdentityError::InterfaceBundle);
+    }
+    let interface_commit = decode_exact_lower_hex::<20>(wire.interface_commit)?;
+    let interface_digest = Digest(decode_exact_lower_hex::<32>(wire.interface_bundle_sha256)?);
+    if interface_commit.iter().all(|byte| *byte == 0) || interface_digest.is_zero() {
+        return Err(DeviceIdentityError::InterfaceBundle);
+    }
     Ok(DeviceIdentity {
         board_id: wire.board_id.to_owned(),
         credential_source,
@@ -142,6 +180,10 @@ pub fn decode_device_identity(bytes: &[u8]) -> Result<DeviceIdentity, DeviceIden
         capability: CapabilityIdentity {
             byte_len: wire.capability_document_bytes,
             digest,
+        },
+        interface_bundle: InterfaceBundleIdentity {
+            commit: interface_commit,
+            digest: interface_digest,
         },
     })
 }
@@ -175,6 +217,8 @@ pub enum DeviceIdentityError {
     Device,
     /// Capability digest or length was outside the interactive policy.
     Capability,
+    /// Embedded browser bundle format, source identity, or manifest digest was invalid.
+    InterfaceBundle,
     /// A fixed identity field was not exact lowercase hexadecimal.
     Hex,
 }
@@ -453,6 +497,11 @@ impl AuthenticatedHttpSession {
     /// Exact calling-document origin bound into every request and response proof.
     pub const fn origin(&self) -> CorsOrigin {
         self.origin
+    }
+
+    /// Public boot challenge to which every request proof is bound.
+    pub const fn boot_nonce(&self) -> BootNonce {
+        self.nonce
     }
 
     /// Configuration identity encoded into every native frame in this session.
@@ -755,12 +804,14 @@ mod tests {
 
     #[test]
     fn public_device_identity_is_bounded_and_semantically_strict() {
-        let bytes = br#"{"protocol_version":1,"board_id":"mks-tinybee-v1","credential_source":"development-fallback","production_armable":false,"device_id":"414c554d2d53494d3a54494e59424545","capability_digest":"1111111111111111111111111111111111111111111111111111111111111111","capability_document_bytes":3435}"#;
+        let bytes = br#"{"protocol_version":1,"board_id":"mks-tinybee-v1","credential_source":"development-fallback","production_armable":false,"device_id":"414c554d2d53494d3a54494e59424545","capability_digest":"1111111111111111111111111111111111111111111111111111111111111111","capability_document_bytes":3435,"interface_bundle_format":"alumina-web-bundle-v2","interface_commit":"2222222222222222222222222222222222222222","interface_bundle_sha256":"3333333333333333333333333333333333333333333333333333333333333333"}"#;
         let identity = decode_device_identity(bytes).unwrap();
         assert_eq!(identity.board_id(), "mks-tinybee-v1");
         assert_eq!(identity.device_id(), DeviceId(*b"ALUM-SIM:TINYBEE"));
         assert_eq!(identity.capability().byte_len, 3435);
         assert_eq!(identity.capability().digest, Digest([0x11; 32]));
+        assert_eq!(identity.interface_bundle().commit(), [0x22; 20]);
+        assert_eq!(identity.interface_bundle().digest(), Digest([0x33; 32]));
         assert_eq!(
             identity.credential_source(),
             DeviceCredentialSource::DevelopmentFallback
@@ -791,6 +842,17 @@ mod tests {
         assert_eq!(
             decode_device_identity(&uppercase),
             Err(DeviceIdentityError::Hex)
+        );
+
+        let wrong_format = bytes
+            .windows(INTERFACE_BUNDLE_FORMAT.len())
+            .position(|window| window == INTERFACE_BUNDLE_FORMAT.as_bytes())
+            .unwrap();
+        let mut wrong_format_bytes = bytes.to_vec();
+        wrong_format_bytes[wrong_format] = b'x';
+        assert_eq!(
+            decode_device_identity(&wrong_format_bytes),
+            Err(DeviceIdentityError::InterfaceBundle)
         );
     }
 

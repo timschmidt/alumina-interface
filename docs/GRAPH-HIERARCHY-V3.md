@@ -215,9 +215,10 @@ has SHA-256
 `bb21c2522b57e77f5218d20401953d497ea04fbe0a4546cf32fccc2eac3ed711`.
 That transient selection retained the final `ALGS` byte-for-byte.
 
-## Deliberately open
+## Deliberately separate
 
-Runtime values for `InputControl`, executable front-panel programs, package
-signatures and permissions, locked dependency manifests, collaboration
-journals, incremental flattening, and direct firmware interpretation remain
-outside V3. They require separate authority and canonical-format decisions.
+Runtime values for `InputControl` and executable host front-panel programs now
+belong to canonical [`ALFR` V1](GRAPH-FRONT-PANEL-RUN-V1.md), not `ALGH`.
+Package signatures and permissions, locked dependency manifests,
+collaboration journals, incremental flattening, and direct firmware
+interpretation remain outside V3.

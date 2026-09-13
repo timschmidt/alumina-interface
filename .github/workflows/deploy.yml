@@ -19,105 +19,105 @@ jobs:
       contents: write # Required to publish the gh-pages branch.
     steps:
       - name: Check out Alumina Interface
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: alumina-interface
           fetch-depth: 0
           persist-credentials: false
 
       - name: Check out Hypergraphics sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypergraphics
           path: hypergraphics
           persist-credentials: false
 
       - name: Check out Alumina firmware protocol sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/alumina-firmware
           path: alumina-firmware
           persist-credentials: false
 
       - name: Check out CSGRS sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/csgrs
           path: csgrs
           persist-credentials: false
 
       - name: Check out Hypercurve sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypercurve
           path: hypercurve
           persist-credentials: false
 
       - name: Check out Hyperlattice sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hyperlattice
           path: hyperlattice
           persist-credentials: false
 
       - name: Check out Hyperlimit sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hyperlimit
           path: hyperlimit
           persist-credentials: false
 
       - name: Check out Hypermesh sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypermesh
           path: hypermesh
           persist-credentials: false
 
       - name: Check out Hyperpath sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hyperpath
           path: hyperpath
           persist-credentials: false
 
       - name: Check out Hyperphysics sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hyperphysics
           path: hyperphysics
           persist-credentials: false
 
       - name: Check out Hyperreal sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hyperreal
           path: hyperreal
           persist-credentials: false
 
       - name: Check out Hypersdf sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypersdf
           path: hypersdf
           persist-credentials: false
 
       - name: Check out Hypersolve sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypersolve
           path: hypersolve
           persist-credentials: false
 
       - name: Check out Hypertri sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypertri
           path: hypertri
           persist-credentials: false
 
       - name: Check out Hypervoxel sibling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/hypervoxel
           path: hypervoxel

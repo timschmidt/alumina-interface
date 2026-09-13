@@ -18,46 +18,52 @@ use alumina_diagnostics::{
 use alumina_graph_ir::{GraphIrOpcode, decode_graph_resource_pair_parameter};
 use alumina_interface_core::graph::{
     CanonicalGraphAuthoringSessionEncoding, CanonicalGraphComponentEncoding,
-    CanonicalGraphDeploymentReplayEvidence1, CanonicalGraphHierarchyEncoding,
-    CanonicalGraphHierarchySourceMapEncoding, CanonicalGraphProbeEncoding,
-    CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ChannelFullPolicy,
-    ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet, GRAPH_COMPONENT_INSTANCE_KIND,
-    GRAPH_COMPONENT_INSTANCE_VERSION, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
-    GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument, GraphAuthoringSessionHistory,
-    GraphAuthoringSessionLimits, GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog,
-    GraphCachedJobCatalogLimits, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
-    GraphClockId, GraphComponentDocument, GraphComponentInput, GraphComponentInputId,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
-    GraphComponentPackageLimits, GraphDeploymentImplementation, GraphDeploymentLimits,
-    GraphDeploymentNodeKind, GraphDeploymentRegistry, GraphDeploymentReplayInput,
-    GraphDeploymentReplayLimits, GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport,
-    GraphDeploymentResourceSample, GraphDeploymentTarget, GraphDocument,
-    GraphFlattenedNodeProvenance, GraphFlattenedWireProvenance, GraphFrontPanelBinding,
-    GraphFrontPanelItem, GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDependency,
+    CanonicalGraphDeploymentReplayEvidence1, CanonicalGraphFrontPanelRunEncoding,
+    CanonicalGraphHierarchyEncoding, CanonicalGraphHierarchySourceMapEncoding,
+    CanonicalGraphProbeEncoding, CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding,
+    ChannelFullPolicy, ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet,
+    ExternalStreamSample, GRAPH_COMPONENT_INSTANCE_KIND, GRAPH_COMPONENT_INSTANCE_VERSION,
+    GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits, GraphAuthoringHierarchyInput,
+    GraphAuthoringSessionDocument, GraphAuthoringSessionHistory, GraphAuthoringSessionLimits,
+    GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog, GraphCachedJobCatalogLimits,
+    GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument,
+    GraphComponentInput, GraphComponentInputId, GraphComponentInstance, GraphComponentLimits,
+    GraphComponentOutput, GraphComponentOutputId, GraphComponentPackageLimits,
+    GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
+    GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
+    GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
+    GraphDeploymentTarget, GraphDocument, GraphFlattenedNodeProvenance,
+    GraphFlattenedWireProvenance, GraphFrontPanelBinding, GraphFrontPanelChange,
+    GraphFrontPanelControlKey, GraphFrontPanelExecution, GraphFrontPanelInputAuthority,
+    GraphFrontPanelInputDisposition, GraphFrontPanelItem, GraphFrontPanelItemId,
+    GraphFrontPanelOutputKey, GraphFrontPanelRect, GraphFrontPanelRunDocument,
+    GraphFrontPanelRuntimeLimits, GraphFrontPanelSchedule, GraphHierarchyDependency,
     GraphHierarchyDocument, GraphHierarchyFlattening, GraphHierarchyLimits,
     GraphHierarchyNodeOrigin, GraphHierarchySourceMapLimits, GraphHierarchyWireOrigin,
     GraphInstanceScope, GraphLimits, GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement,
     GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
     GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphValuePathSegment,
-    GraphWireId, GraphWorkspaceDocument, GraphWorkspaceLimits, InputConnectionRequirement,
-    MAX_GRAPH_AUTHORING_SESSION_BYTES, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
-    MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, NodeDefinition, NodeInputChannelContract,
-    NodeInputChannelKind, NodeKind, NodeOutputDependency, NodeParameter, NodeParameterContract,
-    NodeSchema, PortDefinition, RecordField, RecordFieldId, RecordValueField,
-    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId,
-    ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue, WireDefinition, WireEndpoint,
-    analyze_graph_draft, compile_representative_exact_control_graph,
+    GraphSimulationLimits, GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind,
+    GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId, GraphWorkspaceDocument,
+    GraphWorkspaceLimits, InputConnectionRequirement, MAX_GRAPH_AUTHORING_SESSION_BYTES,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
+    NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
+    NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
+    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue,
+    WireDefinition, WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
     derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
-    encode_graph_component_package, encode_graph_hierarchy, encode_graph_hierarchy_source_map,
-    encode_graph_probes, encode_graph_workspace, encode_typed_graph_value, flatten_graph_hierarchy,
+    encode_graph_component_package, encode_graph_front_panel_run, encode_graph_hierarchy,
+    encode_graph_hierarchy_source_map, encode_graph_probes, encode_graph_workspace,
+    encode_typed_graph_value, execute_graph_front_panel_run, flatten_graph_hierarchy,
     format_graph_literal_text, graph_component_instance_input_port,
     graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
     lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
     replay_graph_authoring_session, replay_graph_component, replay_graph_component_package,
     replay_graph_hierarchy_source_map, replay_graph_probes, replay_graph_workspace,
-    replay_realtime_graph_deployment, select_graph_cached_job_handle,
+    replay_realtime_graph_deployment, resolve_graph_front_panel_inputs,
+    sample_graph_front_panel_output_at_or_before, select_graph_cached_job_handle,
     select_graph_capability_node_resource, verify_graph_deployment_evidence_bytes,
 };
 use alumina_interface_core::{
@@ -643,6 +649,66 @@ struct ComponentPackage {
 }
 
 #[derive(Clone, Debug)]
+struct FrontPanelRuntimePackage {
+    document: GraphFrontPanelRunDocument,
+    encoding: CanonicalGraphFrontPanelRunEncoding,
+    execution: GraphFrontPanelExecution,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrontPanelChangeDraft {
+    tick: String,
+    value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrontPanelScheduleDraft {
+    changes: Vec<FrontPanelChangeDraft>,
+}
+
+impl FrontPanelScheduleDraft {
+    fn constant(value: impl Into<String>) -> Self {
+        Self {
+            changes: vec![FrontPanelChangeDraft {
+                tick: "0".to_owned(),
+                value: value.into(),
+            }],
+        }
+    }
+
+    fn append_change(&mut self) {
+        let next_tick = self
+            .changes
+            .last()
+            .and_then(|change| parse_front_panel_clock_tick(&change.tick).ok())
+            .and_then(|tick| tick.checked_add(1))
+            .map_or_else(String::new, |tick| tick.to_string());
+        let value = self
+            .changes
+            .last()
+            .map_or_else(String::new, |change| change.value.clone());
+        self.changes.push(FrontPanelChangeDraft {
+            tick: next_tick,
+            value,
+        });
+    }
+}
+
+impl Default for FrontPanelScheduleDraft {
+    fn default() -> Self {
+        Self::constant(String::new())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FrontPanelTimelineUiAction {
+    Add(GraphFrontPanelControlKey),
+    Remove(GraphFrontPanelControlKey, usize),
+    Reset(GraphFrontPanelControlKey),
+    Run,
+}
+
+#[derive(Clone, Debug)]
 struct HierarchyPackage {
     document: GraphHierarchyDocument,
     encoding: CanonicalGraphHierarchyEncoding,
@@ -657,6 +723,61 @@ fn hierarchy_depth(flattening: &GraphHierarchyFlattening) -> usize {
         .map(|instance| instance.source_path().len())
         .max()
         .unwrap_or(0)
+}
+
+fn front_panel_external_samples(
+    fixture: &RepresentativeExactControlGraph,
+    flattening: &GraphHierarchyFlattening,
+) -> Vec<ExternalStreamSample> {
+    let external = fixture
+        .simulation()
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind() == GraphTraceEntryKind::ExternalSource)
+        .collect::<Vec<_>>();
+    let mut samples = Vec::new();
+    for mapping in flattening.node_provenance() {
+        let source_node = match mapping.origin() {
+            GraphHierarchyNodeOrigin::Root(node)
+            | GraphHierarchyNodeOrigin::Component { node, .. } => *node,
+        };
+        let Some(source_definition) = fixture.document().node(source_node) else {
+            continue;
+        };
+        let Some(flattened_definition) = flattening
+            .workspace()
+            .graph()
+            .node(mapping.flattened_node())
+        else {
+            continue;
+        };
+        if flattened_definition.kind() != source_definition.kind() {
+            continue;
+        }
+        for entry in external
+            .iter()
+            .copied()
+            .filter(|entry| entry.endpoint().node == source_node)
+        {
+            if !flattened_definition
+                .outputs()
+                .iter()
+                .any(|port| port.id() == entry.endpoint().port)
+            {
+                continue;
+            }
+            samples.push(ExternalStreamSample::new(
+                WireEndpoint {
+                    node: mapping.flattened_node(),
+                    port: entry.endpoint().port,
+                },
+                entry.clock_tick(),
+                entry.sequence(),
+                entry.value().clone(),
+            ));
+        }
+    }
+    samples
 }
 
 fn hierarchy_source_path_label(path: &[GraphNodeId]) -> String {
@@ -991,6 +1112,8 @@ struct ComponentPanelItem {
     rect: GraphFrontPanelRect,
     value_type: GraphTypeId,
     output_text: Option<String>,
+    output_current: bool,
+    input_authority: Option<GraphFrontPanelInputAuthority>,
 }
 
 impl BoardExplorerPanel {
@@ -2460,6 +2583,11 @@ pub(crate) struct ExactControlWorkspace {
     node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
     panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
+    front_panel_schedule_drafts: BTreeMap<GraphFrontPanelControlKey, FrontPanelScheduleDraft>,
+    front_panel_runtime: Option<FrontPanelRuntimePackage>,
+    front_panel_runtime_status: String,
+    front_panel_cursor_draft: String,
+    front_panel_cursor_status: String,
     component_identity_drafts: BTreeMap<Digest, ComponentIdentityDraft>,
     component_connector_drafts: BTreeMap<ComponentConnectorSelection, ComponentConnectorDraft>,
     component_connector_scope: Option<Digest>,
@@ -2566,6 +2694,7 @@ impl ExactControlWorkspace {
         let cursor_root_tick = initial_projection
             .trigger_root_window()
             .map_or_else(|| Rational::from(0), |(_, trigger, _)| trigger.clone());
+        let front_panel_cursor_draft = front_panel_root_cursor_text(&cursor_root_tick);
         let mut result = Self {
             fixture,
             workspace,
@@ -2586,6 +2715,14 @@ impl ExactControlWorkspace {
             node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
             panel_item_drafts: BTreeMap::new(),
+            front_panel_schedule_drafts: BTreeMap::new(),
+            front_panel_runtime: None,
+            front_panel_runtime_status:
+                "author an InputControl, enter exact values, then run the canonical host panel"
+                    .to_owned(),
+            front_panel_cursor_draft,
+            front_panel_cursor_status:
+                "shared exact root cursor follows the trace until edited here".to_owned(),
             component_identity_drafts: BTreeMap::new(),
             component_connector_drafts: BTreeMap::new(),
             component_connector_scope: selected_hierarchy_component,
@@ -3257,6 +3394,105 @@ impl ExactControlWorkspace {
                 ..
             }) if *source_component == component => Some(*wire),
             _ => None,
+        }
+    }
+
+    fn show_front_panel_output_cursor(&mut self, ui: &mut egui::Ui, component: &ComponentPackage) {
+        if !component
+            .document
+            .panel_items()
+            .iter()
+            .any(|item| matches!(item.binding(), GraphFrontPanelBinding::OutputIndicator(_)))
+        {
+            return;
+        }
+        let runtime_current = self.front_panel_runtime_is_current(component);
+        let horizon = self
+            .front_panel_runtime
+            .as_ref()
+            .filter(|_| runtime_current)
+            .map_or_else(
+                || self.fixture.simulation().horizon(),
+                |runtime| runtime.document.horizon(),
+            );
+        let mut apply = false;
+        let mut requested = None;
+        let mut restore_accepted = false;
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Exact output cursor");
+            ui.monospace(format!("root c{} tick", horizon.root_clock().get()));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.front_panel_cursor_draft)
+                    .char_limit(96)
+                    .desired_width(130.0)
+                    .hint_text("canonical rational"),
+            );
+            apply = ui.button("apply cursor").clicked()
+                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            if ui.small_button("start").clicked() {
+                requested = Some((Rational::from(0), "selected run start"));
+            }
+            if ui.small_button("end").clicked() {
+                requested = Some((
+                    Rational::from(horizon.inclusive_root_tick()),
+                    "selected inclusive run horizon",
+                ));
+            }
+            if ui.small_button("restore accepted").clicked() {
+                restore_accepted = true;
+            }
+            ui.monospace(format!("0…{}", horizon.inclusive_root_tick()));
+        });
+        if restore_accepted {
+            self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+            "restored the last accepted shared exact cursor"
+                .clone_into(&mut self.front_panel_cursor_status);
+        } else if apply {
+            self.commit_front_panel_cursor_draft(horizon.inclusive_root_tick(), runtime_current);
+        }
+        if let Some((cursor, reason)) = requested {
+            self.cursor_root_tick = cursor;
+            self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+            self.front_panel_cursor_status = format!(
+                "{reason} at exact root tick {} · {}",
+                self.cursor_root_tick,
+                if runtime_current {
+                    "ALFR/ALGT output projection"
+                } else {
+                    "reference ALGT output projection"
+                },
+            );
+        }
+        ui.weak(&self.front_panel_cursor_status);
+    }
+
+    fn commit_front_panel_cursor_draft(
+        &mut self,
+        maximum_root_tick: u64,
+        runtime_current: bool,
+    ) -> bool {
+        match parse_front_panel_root_cursor(&self.front_panel_cursor_draft, maximum_root_tick) {
+            Ok(cursor) => {
+                self.cursor_root_tick = cursor;
+                self.front_panel_cursor_draft =
+                    front_panel_root_cursor_text(&self.cursor_root_tick);
+                self.front_panel_cursor_status = format!(
+                    "accepted canonical rational cursor at exact root tick {} · {}",
+                    self.cursor_root_tick,
+                    if runtime_current {
+                        "ALFR/ALGT output projection"
+                    } else {
+                        "reference ALGT output projection"
+                    },
+                );
+                true
+            }
+            Err(error) => {
+                self.front_panel_cursor_status =
+                    format!("output cursor rejected without changing inspection: {error}");
+                false
+            }
         }
     }
 
@@ -5802,6 +6038,9 @@ impl ExactControlWorkspace {
         .map_err(|error| format!("complete-session candidate rejected: {error}"))?;
         let history = self.history_with_current_recorded()?;
         self.component = Some(candidate);
+        self.front_panel_runtime = None;
+        "front-panel runtime invalidated by exact hierarchy replacement"
+            .clone_into(&mut self.front_panel_runtime_status);
         self.history = history;
         self.hierarchy_parameter_drafts.clear();
         self.selected_hierarchy_component = selected_component;
@@ -7206,6 +7445,44 @@ impl ExactControlWorkspace {
             });
             self.panel_item_drafts.insert(item_id, draft);
         }
+        let resolved_input_authorities = match resolve_graph_front_panel_inputs(
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            GraphFrontPanelRuntimeLimits::interactive(),
+        ) {
+            Ok(authorities) => authorities,
+            Err(error) => {
+                self.front_panel_runtime_status =
+                    format!("front-panel input authority rejected: {error}");
+                Vec::new()
+            }
+        };
+        let active_keys = resolved_input_authorities
+            .iter()
+            .filter(|authority| authority.is_active())
+            .map(|authority| authority.key().clone())
+            .collect::<BTreeSet<_>>();
+        self.front_panel_schedule_drafts
+            .retain(|key, _| active_keys.contains(key));
+        for key in &active_keys {
+            self.front_panel_schedule_drafts
+                .entry(key.clone())
+                .or_default();
+        }
+        let selected_occurrence = self.selected_component_occurrence_path(&component);
+        let input_authorities = resolved_input_authorities
+            .into_iter()
+            .filter(|authority| authority.component() == component.encoding.digest())
+            .filter(|authority| {
+                selected_occurrence
+                    .as_deref()
+                    .is_none_or(|path| authority.key().source_path() == path)
+            })
+            .map(|authority| (authority.key().item(), authority))
+            .collect::<BTreeMap<_, _>>();
+        self.show_front_panel_output_cursor(ui, &component);
+        let output_current =
+            self.front_panel_runtime_is_current(&component) || self.reference_trace_is_current();
         let items = component
             .document
             .panel_items()
@@ -7214,7 +7491,7 @@ impl ExactControlWorkspace {
                 let value_type = component.document.panel_item_value_type(item.id())?;
                 let output_text = match item.binding() {
                     GraphFrontPanelBinding::OutputIndicator(output) => {
-                        Some(self.component_output_text(&component.document, output))
+                        Some(self.component_output_text(&component, output))
                     }
                     GraphFrontPanelBinding::InputControl(_)
                     | GraphFrontPanelBinding::ParameterControl { .. } => None,
@@ -7226,6 +7503,8 @@ impl ExactControlWorkspace {
                     rect: item.rect(),
                     value_type,
                     output_text,
+                    output_current,
+                    input_authority: input_authorities.get(&item.id()).cloned(),
                 })
             })
             .collect::<Vec<_>>();
@@ -7414,7 +7693,7 @@ impl ExactControlWorkspace {
                                 egui::Align2::LEFT_BOTTOM,
                                 item.output_text.as_deref().unwrap_or("no exact sample"),
                                 egui::FontId::monospace(11.0),
-                                if self.reference_trace_is_current() {
+                                if item.output_current {
                                     egui::Color32::from_rgb(122, 211, 185)
                                 } else {
                                     egui::Color32::YELLOW
@@ -7422,13 +7701,75 @@ impl ExactControlWorkspace {
                             );
                         }
                         GraphFrontPanelBinding::InputControl(_) => {
-                            painter.text(
-                                rect.left_bottom() + egui::vec2(8.0, -8.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                format!("runtime input · t{}", item.value_type.get()),
-                                egui::FontId::monospace(10.0),
-                                egui::Color32::GRAY,
-                            );
+                            let Some(authority) = item.input_authority.as_ref() else {
+                                painter.text(
+                                    rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                    egui::Align2::LEFT_BOTTOM,
+                                    format!(
+                                        "unresolved occurrence · stream t{}",
+                                        item.value_type.get()
+                                    ),
+                                    egui::FontId::monospace(9.5),
+                                    egui::Color32::YELLOW,
+                                );
+                                continue;
+                            };
+                            match authority.disposition() {
+                                GraphFrontPanelInputDisposition::Active => {
+                                    let change_count = self
+                                        .front_panel_schedule_drafts
+                                        .get(authority.key())
+                                        .map_or(0, |draft| draft.changes.len());
+                                    let summary_rect = egui::Rect::from_min_max(
+                                        rect.left_top() + egui::vec2(8.0, 25.0),
+                                        rect.right_bottom() - egui::vec2(69.0, 7.0),
+                                    );
+                                    let button_rect = egui::Rect::from_min_max(
+                                        egui::pos2(summary_rect.right() + 5.0, summary_rect.top()),
+                                        rect.right_bottom() - egui::vec2(7.0, 7.0),
+                                    );
+                                    painter.text(
+                                        summary_rect.left_center(),
+                                        egui::Align2::LEFT_CENTER,
+                                        format!(
+                                            "{change_count} change(s) · c{} · t{}",
+                                            authority.clock().get(),
+                                            authority.sample_type().get(),
+                                        ),
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::from_rgb(122, 211, 185),
+                                    );
+                                    if ui.put(button_rect, egui::Button::new("timeline")).clicked()
+                                    {
+                                        clicked_panel_item = Some(item.id);
+                                    }
+                                }
+                                GraphFrontPanelInputDisposition::Connected(wire) => {
+                                    painter.text(
+                                        rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                        egui::Align2::LEFT_BOTTOM,
+                                        format!(
+                                            "inactive · structural wire #{} owns input",
+                                            wire.get()
+                                        ),
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::YELLOW,
+                                    );
+                                }
+                                GraphFrontPanelInputDisposition::Superseded(parent) => {
+                                    painter.text(
+                                        rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                        egui::Align2::LEFT_BOTTOM,
+                                        format!(
+                                            "inactive · outer {}:p{} owns input",
+                                            hierarchy_source_path_label(parent.source_path()),
+                                            parent.item().get()
+                                        ),
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::YELLOW,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -7436,23 +7777,450 @@ impl ExactControlWorkspace {
         if let Some(item) = clicked_panel_item {
             self.selected_panel_item = Some(item);
         }
+        let timeline_action = self.show_front_panel_timeline_editor(ui, &component, &items);
         ui.weak(&self.component_status);
+        ui.monospace(&self.front_panel_runtime_status);
         if let Some(action) = panel_action {
             self.apply_panel_action(action);
         } else if let Some((node, parameter, text)) = parameter_request {
             self.commit_parameter_text(node, parameter, &text);
+        } else if let Some(action) = timeline_action {
+            self.apply_front_panel_timeline_action(action);
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the bounded timeline grid, authority explanation, and exact transient actions remain one auditable egui operation"
+    )]
+    fn show_front_panel_timeline_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        component: &ComponentPackage,
+        items: &[ComponentPanelItem],
+    ) -> Option<FrontPanelTimelineUiAction> {
+        let selected = self
+            .selected_panel_item
+            .and_then(|selected| items.iter().find(|item| item.id == selected))?;
+        let GraphFrontPanelBinding::InputControl(_) = selected.binding else {
+            return None;
+        };
+        ui.separator();
+        ui.strong(format!("Exact InputControl timeline · {}", selected.name));
+        let Some(authority) = selected.input_authority.as_ref() else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "This panel item has no hierarchy-resolved occurrence authority.",
+            );
+            return None;
+        };
+        match authority.disposition() {
+            GraphFrontPanelInputDisposition::Connected(wire) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Structural wire #{} owns this input; its timeline is inactive.",
+                        wire.get()
+                    ),
+                );
+                return None;
+            }
+            GraphFrontPanelInputDisposition::Superseded(parent) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Outer occurrence {} panel item p{} owns this input.",
+                        hierarchy_source_path_label(parent.source_path()),
+                        parent.item().get(),
+                    ),
+                );
+                return None;
+            }
+            GraphFrontPanelInputDisposition::Active => {}
+        }
+
+        let limits = GraphFrontPanelRuntimeLimits::interactive();
+        let key = authority.key().clone();
+        let timeline_id = (
+            key.item().get(),
+            hierarchy_source_path_label(key.source_path()),
+        );
+        ui.weak(format!(
+            "Occurrence {} · local clock c{} · exact sample t{}. Tick 0 is mandatory; later ticks must be canonical unsigned decimals in strictly increasing order. Values are held exactly until the next change.",
+            hierarchy_source_path_label(key.source_path()),
+            authority.clock().get(),
+            authority.sample_type().get(),
+        ));
+        let value_limit = parameter_text_limit(
+            component.hierarchy.flattening.workspace().graph(),
+            authority.sample_type(),
+        );
+        let mut action = None;
+        let mut draft_changed = false;
+        {
+            let draft = self
+                .front_panel_schedule_drafts
+                .entry(key.clone())
+                .or_default();
+            if draft.changes.is_empty() {
+                draft.changes.push(FrontPanelChangeDraft {
+                    tick: "0".to_owned(),
+                    value: String::new(),
+                });
+                draft_changed = true;
+            }
+            egui::ScrollArea::vertical()
+                .id_salt(("front_panel_timeline", timeline_id.clone()))
+                .max_height(180.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    egui::Grid::new(("front_panel_timeline_grid", timeline_id))
+                        .num_columns(4)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("change");
+                            ui.strong("local tick");
+                            ui.strong("exact value");
+                            ui.end_row();
+                            for (index, change) in draft.changes.iter_mut().enumerate() {
+                                ui.monospace(format!("#{}", index + 1));
+                                if index == 0 {
+                                    ui.monospace("0 (initial)");
+                                } else if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut change.tick)
+                                            .char_limit(20)
+                                            .desired_width(92.0),
+                                    )
+                                    .changed()
+                                {
+                                    draft_changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut change.value)
+                                            .char_limit(value_limit)
+                                            .desired_width(300.0)
+                                            .hint_text(format!(
+                                                "exact t{}",
+                                                authority.sample_type().get()
+                                            )),
+                                    )
+                                    .changed()
+                                {
+                                    draft_changed = true;
+                                }
+                                if index == 0 {
+                                    ui.weak("required");
+                                } else if ui.small_button("remove").clicked() {
+                                    action = Some(FrontPanelTimelineUiAction::Remove(
+                                        key.clone(),
+                                        index,
+                                    ));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        draft.changes.len() < limits.maximum_changes_per_control,
+                        egui::Button::new("add change"),
+                    )
+                    .clicked()
+                {
+                    action = Some(FrontPanelTimelineUiAction::Add(key.clone()));
+                }
+                if ui.button("reset to constant").clicked() {
+                    action = Some(FrontPanelTimelineUiAction::Reset(key.clone()));
+                }
+                if ui.button("run exact timeline").clicked() {
+                    action = Some(FrontPanelTimelineUiAction::Run);
+                }
+                ui.monospace(format!(
+                    "{} / {} retained changes",
+                    draft.changes.len(),
+                    limits.maximum_changes_per_control,
+                ));
+            });
+        }
+        if draft_changed {
+            self.front_panel_runtime = None;
+            "front-panel timeline changed; prior ALFR/ALGT evidence invalidated until run"
+                .clone_into(&mut self.front_panel_runtime_status);
+        }
+        action
+    }
+
+    fn apply_front_panel_timeline_action(&mut self, action: FrontPanelTimelineUiAction) {
+        let limits = GraphFrontPanelRuntimeLimits::interactive();
+        match action {
+            FrontPanelTimelineUiAction::Add(key) => {
+                let draft = self.front_panel_schedule_drafts.entry(key).or_default();
+                if draft.changes.len() >= limits.maximum_changes_per_control {
+                    self.front_panel_runtime_status = format!(
+                        "front-panel timeline rejected: at most {} changes are admitted per control",
+                        limits.maximum_changes_per_control,
+                    );
+                    return;
+                }
+                draft.append_change();
+                self.front_panel_runtime = None;
+                "front-panel change added; prior ALFR/ALGT evidence invalidated until run"
+                    .clone_into(&mut self.front_panel_runtime_status);
+            }
+            FrontPanelTimelineUiAction::Remove(key, index) => {
+                let Some(draft) = self.front_panel_schedule_drafts.get_mut(&key) else {
+                    "front-panel timeline removal rejected: control draft is absent"
+                        .clone_into(&mut self.front_panel_runtime_status);
+                    return;
+                };
+                if index == 0 || index >= draft.changes.len() {
+                    "front-panel timeline removal rejected: the initial change is mandatory"
+                        .clone_into(&mut self.front_panel_runtime_status);
+                    return;
+                }
+                draft.changes.remove(index);
+                self.front_panel_runtime = None;
+                "front-panel change removed; prior ALFR/ALGT evidence invalidated until run"
+                    .clone_into(&mut self.front_panel_runtime_status);
+            }
+            FrontPanelTimelineUiAction::Reset(key) => {
+                self.front_panel_schedule_drafts
+                    .insert(key, FrontPanelScheduleDraft::default());
+                self.front_panel_runtime = None;
+                "front-panel timeline reset; enter an exact initial value before run"
+                    .clone_into(&mut self.front_panel_runtime_status);
+            }
+            FrontPanelTimelineUiAction::Run => self.rebuild_front_panel_runtime(),
+        }
+    }
+
+    fn selected_component_occurrence_path(
+        &self,
+        package: &ComponentPackage,
+    ) -> Option<Vec<GraphNodeId>> {
+        let component = package.encoding.digest();
+        let selected_root = self.selected_hierarchy_instance;
+        package
+            .hierarchy
+            .flattening
+            .instances()
+            .iter()
+            .filter(|occurrence| occurrence.component() == component)
+            .find(|occurrence| {
+                selected_root.is_some_and(|root| occurrence.source_path().first() == Some(&root))
+            })
+            .or_else(|| {
+                package
+                    .hierarchy
+                    .flattening
+                    .instances()
+                    .iter()
+                    .find(|occurrence| occurrence.component() == component)
+            })
+            .map(|occurrence| occurrence.source_path().to_vec())
+    }
+
+    fn front_panel_runtime_is_current(&self, package: &ComponentPackage) -> bool {
+        self.front_panel_runtime.as_ref().is_some_and(|runtime| {
+            runtime.document.hierarchy_digest() == package.hierarchy.encoding.digest()
+                && runtime.document.workspace_digest()
+                    == package.hierarchy.flattening.encoding().digest()
+                && runtime.document.registry_digest() == self.fixture.registry().digest()
+        })
+    }
+
+    fn front_panel_runtime_output_text(
+        &self,
+        package: &ComponentPackage,
+        output: GraphComponentOutputId,
+    ) -> Option<String> {
+        let runtime = self
+            .front_panel_runtime
+            .as_ref()
+            .filter(|_| self.front_panel_runtime_is_current(package))?;
+        let Some(path) = self.selected_component_occurrence_path(package) else {
+            return Some("selected component occurrence has no exact output path".to_owned());
+        };
+        let selected = match sample_graph_front_panel_output_at_or_before(
+            &runtime.document,
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            self.fixture.registry(),
+            &runtime.execution,
+            GraphFrontPanelOutputKey::new(path, output),
+            &self.cursor_root_tick,
+        ) {
+            Ok(Some(selected)) => selected,
+            Ok(None) => {
+                return Some(format!(
+                    "no exact sample at or before root cursor {}",
+                    self.cursor_root_tick
+                ));
+            }
+            Err(error) => return Some(format!("exact output projection rejected: {error}")),
+        };
+        let entry = selected.entry();
+        let exact = format_graph_literal_text(
+            package.hierarchy.flattening.workspace().graph().schema(),
+            entry.value(),
+            GraphLiteralTextLimits::interactive(),
+        )
+        .unwrap_or_else(|_| format!("t{} exact value", entry.value().value_type().get()));
+        Some(format!(
+            "{exact} · c{}:t{}:s{} · root {} ≤ cursor {} · ALFR {}…",
+            entry.clock().get(),
+            entry.clock_tick(),
+            entry.sequence(),
+            selected.root_tick(),
+            self.cursor_root_tick,
+            digest_prefix(runtime.encoding.digest().0),
+        ))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact draft parsing, ALFR construction, external-source remapping, execution, and trace identity form one fail-closed UI transaction"
+    )]
+    fn rebuild_front_panel_runtime(&mut self) {
+        let Some(package) = self.component.clone() else {
+            self.front_panel_runtime = None;
+            "front-panel run rejected: no component hierarchy is attached"
+                .clone_into(&mut self.front_panel_runtime_status);
+            return;
+        };
+        let limits = GraphFrontPanelRuntimeLimits::interactive();
+        let authorities = match resolve_graph_front_panel_inputs(
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            limits,
+        ) {
+            Ok(authorities) => authorities,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel authority rejected without execution: {error}");
+                return;
+            }
+        };
+        let active = authorities
+            .iter()
+            .filter(|authority| authority.is_active())
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            self.front_panel_runtime = None;
+            "front-panel run has no active InputControl authority"
+                .clone_into(&mut self.front_panel_runtime_status);
+            return;
+        }
+        let graph = package.hierarchy.flattening.workspace().graph();
+        let mut schedules = Vec::with_capacity(active.len());
+        for authority in active {
+            let Some(draft) = self.front_panel_schedule_drafts.get(authority.key()) else {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status = format!(
+                    "front-panel run awaits an exact timeline for occurrence {} item p{}",
+                    hierarchy_source_path_label(authority.key().source_path()),
+                    authority.key().item().get(),
+                );
+                return;
+            };
+            let schedule = match parse_front_panel_schedule_draft(graph, authority, draft, limits) {
+                Ok(schedule) => schedule,
+                Err(error) => {
+                    self.front_panel_runtime = None;
+                    self.front_panel_runtime_status = format!(
+                        "front-panel occurrence {} item p{} rejected exact timeline: {error}",
+                        hierarchy_source_path_label(authority.key().source_path()),
+                        authority.key().item().get(),
+                    );
+                    return;
+                }
+            };
+            schedules.push(schedule);
+        }
+        let run = match GraphFrontPanelRunDocument::try_new(
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            self.fixture.registry(),
+            self.fixture.simulation().horizon(),
+            schedules,
+            limits,
+        ) {
+            Ok(run) => run,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel run rejected before execution: {error}");
+                return;
+            }
+        };
+        let change_count = run
+            .schedules()
+            .iter()
+            .map(|schedule| schedule.changes().len())
+            .sum::<usize>();
+        let encoding = match encode_graph_front_panel_run(&run, &package.hierarchy.flattening) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel ALFR encoding rejected: {error}");
+                return;
+            }
+        };
+        let external = front_panel_external_samples(&self.fixture, &package.hierarchy.flattening);
+        let execution = match execute_graph_front_panel_run(
+            &run,
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            self.fixture.registry(),
+            &external,
+            GraphSimulationLimits::interactive(),
+        ) {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel host execution rejected: {error}");
+                return;
+            }
+        };
+        self.front_panel_runtime_status = format!(
+            "executed {change_count} exact changes as {} injected samples · ALFR {} bytes {}… · ALGT {} bytes {}…",
+            execution.injected_sample_count(),
+            encoding.bytes().len(),
+            digest_prefix(encoding.digest().0),
+            execution.trace().bytes().len(),
+            digest_prefix(execution.trace().digest().0),
+        );
+        self.front_panel_runtime = Some(FrontPanelRuntimePackage {
+            document: run,
+            encoding,
+            execution,
+        });
     }
 
     fn component_output_text(
         &self,
-        component: &GraphComponentDocument,
+        package: &ComponentPackage,
         output: GraphComponentOutputId,
     ) -> String {
+        if self.front_panel_runtime_is_current(package) {
+            return self
+                .front_panel_runtime_output_text(package, output)
+                .unwrap_or_else(|| "current ALFR output projection is unavailable".to_owned());
+        }
         if !self.reference_trace_is_current() {
             return "exact replay detached after draft edit".to_owned();
         }
-        let Some(endpoint) = component.output(output).map(GraphComponentOutput::source) else {
+        let Some(endpoint) = package
+            .document
+            .output(output)
+            .map(GraphComponentOutput::source)
+        else {
             return "unresolved output binding".to_owned();
         };
         let Some(signal) = SIGNALS
@@ -8487,6 +9255,11 @@ impl ExactControlWorkspace {
                     .map(|(_, trigger, _)| trigger.clone())
             })
             .unwrap_or_else(|| Rational::from(0));
+        self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+        self.front_panel_cursor_status = format!(
+            "shared exact cursor reset to probe trigger root tick {}",
+            self.cursor_root_tick
+        );
     }
 
     fn prepare_component_for_workspace(
@@ -9486,6 +10259,11 @@ impl ExactControlWorkspace {
             && let Some(tick) = time_axis.nearest_tick(time_plot, pointer.x)
         {
             self.cursor_root_tick = tick;
+            self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+            self.front_panel_cursor_status = format!(
+                "shared exact cursor selected from trace at root tick {}",
+                self.cursor_root_tick
+            );
         }
         if let Some(trigger_x) = trigger_root_tick
             .as_ref()
@@ -10692,18 +11470,24 @@ fn control_palette(
             .document()
             .nodes()
             .iter()
-            .find(|node| node.kind() == schema.kind())
-            .ok_or_else(|| {
-                format!(
-                    "audited palette kind {} v{} has no reviewed default instance",
+            .find(|node| node.kind() == schema.kind());
+        let (domain, parameters) = if let Some(exemplar) = exemplar {
+            if exemplar.inputs() != schema.inputs() || exemplar.outputs() != schema.outputs() {
+                return Err(format!(
+                    "audited palette kind {} v{} exemplar ports disagree with its schema",
                     schema.kind().name(),
                     schema.kind().version()
-                )
-            })?;
-        if exemplar.inputs() != schema.inputs()
-            || exemplar.outputs() != schema.outputs()
-            || !schema.allowed_domains().contains(exemplar.domain())
-            || !parameters_match_schema(exemplar.parameters(), schema.parameters())
+                ));
+            }
+            (exemplar.domain(), exemplar.parameters().to_vec())
+        } else {
+            (
+                ExecutionDomain::HostExact,
+                reviewed_uninstantiated_palette_parameters(fixture.document(), schema)?,
+            )
+        };
+        if !schema.allowed_domains().contains(domain)
+            || !parameters_match_schema(&parameters, schema.parameters())
         {
             return Err(format!(
                 "audited palette kind {} v{} disagrees with its reviewed default instance",
@@ -10717,10 +11501,10 @@ fn control_palette(
             prototype: GraphNodePrototype::new(
                 schema.kind().clone(),
                 format!("New {short}"),
-                exemplar.domain(),
+                domain,
                 schema.inputs().to_vec(),
                 schema.outputs().to_vec(),
-                exemplar.parameters().to_vec(),
+                parameters,
             ),
         });
     }
@@ -10728,6 +11512,60 @@ fn control_palette(
         return Err("audited node palette is empty".to_owned());
     }
     Ok(palette)
+}
+
+fn reviewed_uninstantiated_palette_parameters(
+    document: &GraphDocument,
+    schema: &NodeSchema,
+) -> Result<Vec<NodeParameter>, String> {
+    match (schema.kind().name(), schema.kind().version()) {
+        ("control.bool.case" | "control.exact.case", 1) => Ok(Vec::new()),
+        ("control.bool.constant" | "control.bool.delay", 1) => {
+            let contract = schema.parameters().first().ok_or_else(|| {
+                format!(
+                    "audited palette kind {} v{} has no Boolean default contract",
+                    schema.kind().name(),
+                    schema.kind().version()
+                )
+            })?;
+            let value = TypedGraphValue::try_new(
+                document.schema(),
+                contract.value_type(),
+                GraphValue::Boolean(false),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(vec![NodeParameter::new(
+                contract.id(),
+                contract.name(),
+                value,
+            )])
+        }
+        ("control.exact.constant", 1) => {
+            let contract = schema.parameters().first().ok_or_else(|| {
+                format!(
+                    "audited palette kind {} v{} has no exact default contract",
+                    schema.kind().name(),
+                    schema.kind().version()
+                )
+            })?;
+            let value = TypedGraphValue::try_new(
+                document.schema(),
+                contract.value_type(),
+                GraphValue::ExactRational(Rational::zero()),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(vec![NodeParameter::new(
+                contract.id(),
+                contract.name(),
+                value,
+            )])
+        }
+        _ => Err(format!(
+            "audited palette kind {} v{} has no reviewed default instance",
+            schema.kind().name(),
+            schema.kind().version()
+        )),
+    }
 }
 
 fn parameters_match_schema(
@@ -11342,6 +12180,101 @@ fn parse_component_behavior_version(text: &str) -> Result<u32, String> {
         );
     }
     Ok(version)
+}
+
+fn parse_front_panel_clock_tick(text: &str) -> Result<u64, String> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("local tick must be one canonical unsigned decimal u64".to_owned());
+    }
+    let tick = text
+        .parse::<u64>()
+        .map_err(|_| "local tick must fit one canonical unsigned decimal u64".to_owned())?;
+    if tick.to_string() != text {
+        return Err("local tick must be one canonical unsigned decimal u64".to_owned());
+    }
+    Ok(tick)
+}
+
+fn front_panel_root_cursor_text(cursor: &Rational) -> String {
+    let sign = if cursor < &Rational::from(0) { "-" } else { "" };
+    if cursor.is_integer() {
+        format!("{sign}{}", cursor.numerator())
+    } else {
+        format!("{sign}{}/{}", cursor.numerator(), cursor.denominator())
+    }
+}
+
+fn parse_front_panel_root_cursor(text: &str, maximum_root_tick: u64) -> Result<Rational, String> {
+    if text.is_empty() || text.len() > 96 {
+        return Err("root tick must be one bounded canonical rational".to_owned());
+    }
+    let cursor = text
+        .parse::<Rational>()
+        .map_err(|_| "root tick must be one canonical rational".to_owned())?;
+    let canonical = front_panel_root_cursor_text(&cursor);
+    if canonical != text {
+        return Err(format!(
+            "root tick is not canonical; use exact text {canonical:?}"
+        ));
+    }
+    if cursor < Rational::from(0) || cursor > Rational::from(maximum_root_tick) {
+        return Err(format!(
+            "root tick {cursor} is outside inclusive horizon 0…{maximum_root_tick}"
+        ));
+    }
+    Ok(cursor)
+}
+
+fn parse_front_panel_schedule_draft(
+    graph: &GraphDocument,
+    authority: &GraphFrontPanelInputAuthority,
+    draft: &FrontPanelScheduleDraft,
+    limits: GraphFrontPanelRuntimeLimits,
+) -> Result<GraphFrontPanelSchedule, String> {
+    if draft.changes.is_empty() {
+        return Err("timeline must retain its mandatory tick-zero change".to_owned());
+    }
+    if draft.changes.len() > limits.maximum_changes_per_control {
+        return Err(format!(
+            "timeline has {} changes; policy permits {}",
+            draft.changes.len(),
+            limits.maximum_changes_per_control,
+        ));
+    }
+    let mut changes = Vec::with_capacity(draft.changes.len());
+    let mut previous_tick = None;
+    for (index, change) in draft.changes.iter().enumerate() {
+        let row = index + 1;
+        let tick = parse_front_panel_clock_tick(&change.tick)
+            .map_err(|error| format!("change #{row} {error}"))?;
+        if index == 0 && tick != 0 {
+            return Err("change #1 must begin at local tick 0".to_owned());
+        }
+        if previous_tick.is_some_and(|previous| tick <= previous) {
+            return Err(format!(
+                "change #{row} tick {tick} is not strictly after the preceding change"
+            ));
+        }
+        if change.value.trim().is_empty() {
+            return Err(format!(
+                "change #{row} awaits an exact t{} value",
+                authority.sample_type().get(),
+            ));
+        }
+        let value = parse_graph_literal_text(
+            graph.schema(),
+            authority.sample_type(),
+            &change.value,
+            GraphLiteralTextLimits::new(parameter_text_limit(graph, authority.sample_type())),
+        )
+        .map_err(|error| format!("change #{row} exact value rejected: {error}"))?;
+        changes.push(GraphFrontPanelChange::new(tick, value));
+        previous_tick = Some(tick);
+    }
+    Ok(GraphFrontPanelSchedule::new(
+        authority.key().clone(),
+        changes,
+    ))
 }
 
 fn hierarchy_package(
@@ -13583,7 +14516,7 @@ mod tests {
         assert_eq!(trigger.trigger_tick(), 3);
         assert_eq!((trigger.first_tick(), trigger.last_tick()), (1, 5));
         assert_eq!(workspace.cursor_root_tick, Rational::from(30));
-        assert_eq!(workspace.palette.len(), 13);
+        assert_eq!(workspace.palette.len(), 18);
         assert!(workspace.palette.iter().all(|entry| {
             workspace
                 .fixture
@@ -13719,11 +14652,11 @@ mod tests {
         );
         assert_eq!(
             digest_hex(proof.deployment.actor_replay.success_evidence.digest()),
-            "a26b41965997461d109d2aeec4b562eb0d2c7c3dfe61870139c2bd2293f12147"
+            "4fb86d723322ef8193256e9b8cdd53f79bc75505eb7bc373ba52954666acc297"
         );
         assert_eq!(
             digest_hex(proof.deployment.actor_replay.fault_evidence.digest()),
-            "5e122937631516da3b57fd9f3e1f1d39a473ada6bf7dbad9c04b5121a4b89f6c"
+            "eb92f438eae3a9bfab1550375124323f7a3a5ea9963a5557ff06f34fc3cf628c"
         );
         assert_eq!(
             proof
@@ -13853,11 +14786,11 @@ mod tests {
         );
         assert_eq!(
             digest_hex(proof.deployment.actor_replay.success_evidence.digest()),
-            "cf2215451f222f8b402b85285ae889ffd67c06e7de8eb3d9c03c8d075dc2a8df"
+            "9c0460a3f982c1bcaac2c50ee3e9f9fd96276e1ad677bbb8163576c3ae6aa2b6"
         );
         assert_eq!(
             digest_hex(proof.deployment.actor_replay.fault_evidence.digest()),
-            "e99110e8980e319389b8fe7731a6087375a465e4151289c37edaec0ed133b176"
+            "0434b39e2c5eb06d207ffcfaba2e7ecd12a41ef46884a06802cacb9ad7938634"
         );
         assert_eq!(proof.workspace.next_node_id(), before_node_cursor);
         assert_eq!(proof.workspace.next_wire_id(), before_wire_cursor);
@@ -17893,6 +18826,84 @@ mod tests {
     }
 
     #[test]
+    fn typed_case_and_state_palette_defaults_are_explicit_and_transactional() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let expected = [
+            ("control.bool.constant", 0, 1, 1),
+            ("control.bool.case", 3, 1, 0),
+            ("control.bool.delay", 1, 1, 1),
+            ("control.exact.constant", 0, 1, 1),
+            ("control.exact.case", 3, 1, 0),
+        ];
+        for (offset, (kind, inputs, outputs, parameters)) in expected.into_iter().enumerate() {
+            workspace.palette_index = workspace
+                .palette
+                .iter()
+                .position(|entry| entry.prototype.kind().name() == kind)
+                .unwrap();
+            let prototype = &workspace.palette[workspace.palette_index].prototype;
+            assert_eq!(prototype.domain(), ExecutionDomain::HostExact);
+            assert_eq!(prototype.inputs().len(), inputs);
+            assert_eq!(prototype.outputs().len(), outputs);
+            assert_eq!(prototype.parameters().len(), parameters);
+            if let Some(parameter) = prototype.parameters().first() {
+                let expected = if kind == "control.exact.constant" {
+                    GraphValue::ExactRational(Rational::zero())
+                } else {
+                    GraphValue::Boolean(false)
+                };
+                assert_eq!(parameter.value().value(), &expected);
+            }
+
+            workspace.add_palette_node();
+            let created = GraphNodeId::new(22 + u32::try_from(offset).unwrap());
+            assert_eq!(workspace.selected_node, Some(created));
+            assert_eq!(
+                workspace
+                    .workspace
+                    .graph()
+                    .node(created)
+                    .unwrap()
+                    .kind()
+                    .name(),
+                kind
+            );
+        }
+        assert_eq!(workspace.workspace.graph().nodes().len(), 26);
+        assert_eq!(workspace.workspace.next_node_id(), 27);
+
+        workspace.commit_parameter_text(GraphNodeId::new(22), 1, "true");
+        assert_eq!(
+            workspace
+                .workspace
+                .graph()
+                .node(GraphNodeId::new(22))
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value(),
+            &GraphValue::Boolean(true)
+        );
+        let retained = workspace.workspace.clone();
+        workspace.commit_parameter_text(GraphNodeId::new(22), 1, "1");
+        assert_eq!(workspace.workspace, retained);
+        assert!(workspace.edit_status.contains("rejected without mutation"));
+
+        workspace.commit_parameter_text(GraphNodeId::new(25), 1, "13/7");
+        assert_eq!(
+            workspace
+                .workspace
+                .graph()
+                .node(GraphNodeId::new(25))
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value(),
+            &GraphValue::ExactRational(Rational::fraction(13, 7).unwrap())
+        );
+    }
+
+    #[test]
     fn empty_draft_remains_renderable_and_can_accept_a_palette_node() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let mut candidate = workspace.workspace.clone();
@@ -19597,6 +20608,341 @@ mod tests {
         );
         assert!(fallback.edit_status.contains("rejected atomically"));
         assert!(fallback.persistence_pending());
+    }
+
+    fn workspace_with_runtime_input_control() -> (
+        ExactControlWorkspace,
+        ComponentPackage,
+        GraphFrontPanelInputAuthority,
+    ) {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let wire = workspace
+            .workspace
+            .graph()
+            .wires()
+            .iter()
+            .find(|wire| wire.id() == GraphWireId::new(1))
+            .copied()
+            .unwrap();
+        let target = wire.target();
+        let mut disconnected = workspace.workspace.clone();
+        disconnected.disconnect(wire.id()).unwrap();
+        assert!(workspace.commit_candidate(
+            disconnected,
+            "exposed one exact Stream input for front-panel execution",
+        ));
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddInput {
+            name: "setpoint_runtime".to_owned(),
+            target,
+        });
+        let input = GraphComponentInputId::new(1);
+        workspace.apply_panel_action(PanelUiAction::Add {
+            name: "setpoint_runtime_control".to_owned(),
+            binding: GraphFrontPanelBinding::InputControl(input),
+            rect: GraphFrontPanelRect::new(20, 480, 240, 54),
+        });
+
+        let component = workspace.component.as_ref().unwrap().clone();
+        let authorities = resolve_graph_front_panel_inputs(
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            GraphFrontPanelRuntimeLimits::interactive(),
+        )
+        .unwrap();
+        let authority = authorities
+            .into_iter()
+            .find(|authority| {
+                authority.component() == component.encoding.digest()
+                    && authority.input() == input
+                    && authority.is_active()
+            })
+            .unwrap();
+        assert_eq!(authority.sample_type(), GraphTypeId::new(2));
+        (workspace, component, authority)
+    }
+
+    #[test]
+    fn authored_input_control_executes_exact_alfr_in_the_ui_layer() {
+        let (mut workspace, component, authority) = workspace_with_runtime_input_control();
+        workspace.front_panel_schedule_drafts.insert(
+            authority.key().clone(),
+            FrontPanelScheduleDraft::constant("7/2"),
+        );
+        workspace.rebuild_front_panel_runtime();
+
+        let runtime = workspace.front_panel_runtime.as_ref().unwrap();
+        assert_eq!(
+            runtime.document.hierarchy_digest(),
+            component.hierarchy.encoding.digest()
+        );
+        assert_eq!(
+            runtime.document.workspace_digest(),
+            component.hierarchy.flattening.encoding().digest()
+        );
+        assert!(runtime.execution.injected_sample_count() > 0);
+        assert!(
+            runtime
+                .execution
+                .simulation()
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == GraphTraceEntryKind::InjectedInput)
+        );
+        let replay = alumina_interface_core::graph::replay_graph_front_panel_run(
+            runtime.encoding.bytes(),
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            workspace.fixture.registry(),
+            GraphFrontPanelRuntimeLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &runtime.document);
+        assert_eq!(replay.encoding(), &runtime.encoding);
+        assert!(
+            workspace
+                .front_panel_runtime_output_text(&component, GraphComponentOutputId::new(1))
+                .is_some_and(|text| text.contains("ALFR"))
+        );
+        assert!(workspace.front_panel_runtime_status.contains("executed"));
+    }
+
+    #[test]
+    fn front_panel_output_cursor_is_exact_transient_and_runtime_bound() {
+        let (mut workspace, component, authority) = workspace_with_runtime_input_control();
+        workspace.front_panel_schedule_drafts.insert(
+            authority.key().clone(),
+            FrontPanelScheduleDraft::constant("7/2"),
+        );
+        workspace.rebuild_front_panel_runtime();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+        let retained_run = workspace
+            .front_panel_runtime
+            .as_ref()
+            .unwrap()
+            .encoding
+            .clone();
+        let retained_trace = workspace
+            .front_panel_runtime
+            .as_ref()
+            .unwrap()
+            .execution
+            .trace()
+            .clone();
+        let retained_cursor = workspace.cursor_root_tick.clone();
+        let horizon = workspace
+            .front_panel_runtime
+            .as_ref()
+            .unwrap()
+            .document
+            .horizon()
+            .inclusive_root_tick();
+
+        workspace.front_panel_cursor_draft = "02".to_owned();
+        assert!(!workspace.commit_front_panel_cursor_draft(horizon, true));
+        assert_eq!(workspace.cursor_root_tick, retained_cursor);
+        assert!(workspace.front_panel_cursor_status.contains("rejected"));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+
+        let cursor = Rational::fraction(3, 2).unwrap();
+        workspace.front_panel_cursor_draft = front_panel_root_cursor_text(&cursor);
+        assert!(workspace.commit_front_panel_cursor_draft(horizon, true));
+        assert_eq!(workspace.cursor_root_tick, cursor);
+        let text = workspace
+            .front_panel_runtime_output_text(&component, GraphComponentOutputId::new(1))
+            .unwrap();
+        assert!(text.contains(&format!("cursor {cursor}")));
+        assert!(text.contains("root "));
+        assert!(text.contains("ALFR"));
+        assert_eq!(
+            workspace.front_panel_runtime.as_ref().unwrap().encoding,
+            retained_run
+        );
+        assert_eq!(
+            workspace
+                .front_panel_runtime
+                .as_ref()
+                .unwrap()
+                .execution
+                .trace(),
+            &retained_trace
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+
+        workspace.front_panel_cursor_draft =
+            front_panel_root_cursor_text(&Rational::from(horizon + 1));
+        assert!(!workspace.commit_front_panel_cursor_draft(horizon, true));
+        assert_eq!(workspace.cursor_root_tick, cursor);
+
+        let context = egui::Context::default();
+        let frame = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_280.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    workspace.show_front_panel(ui);
+                });
+            },
+        );
+        assert!(!frame.shapes.is_empty());
+        assert!(workspace.front_panel_runtime.is_some());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression keeps draft rejection, canonical execution, replay, identity, history, and rendered-timeline evidence together"
+    )]
+    fn multi_change_front_panel_timeline_is_exact_transient_and_replayable() {
+        let (mut workspace, component, authority) = workspace_with_runtime_input_control();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+        let key = authority.key().clone();
+
+        workspace.front_panel_schedule_drafts.insert(
+            key.clone(),
+            FrontPanelScheduleDraft {
+                changes: vec![
+                    FrontPanelChangeDraft {
+                        tick: "0".to_owned(),
+                        value: "0".to_owned(),
+                    },
+                    FrontPanelChangeDraft {
+                        tick: "02".to_owned(),
+                        value: "7/2".to_owned(),
+                    },
+                ],
+            },
+        );
+        workspace.rebuild_front_panel_runtime();
+        assert!(workspace.front_panel_runtime.is_none());
+        assert!(workspace.front_panel_runtime_status.contains("canonical"));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+
+        workspace.front_panel_schedule_drafts.insert(
+            key,
+            FrontPanelScheduleDraft {
+                changes: vec![
+                    FrontPanelChangeDraft {
+                        tick: "0".to_owned(),
+                        value: "0".to_owned(),
+                    },
+                    FrontPanelChangeDraft {
+                        tick: "2".to_owned(),
+                        value: "7/2".to_owned(),
+                    },
+                    FrontPanelChangeDraft {
+                        tick: "4".to_owned(),
+                        value: "-1".to_owned(),
+                    },
+                ],
+            },
+        );
+        workspace.rebuild_front_panel_runtime();
+        let runtime = workspace.front_panel_runtime.as_ref().unwrap();
+        assert_eq!(runtime.encoding.bytes().len(), 277);
+        assert_eq!(
+            digest_hex(runtime.encoding.digest()),
+            "2199f64b09be5dfecf1f05f3f0cc72e8e307483c2453b08e125485066b899ff7"
+        );
+        assert_eq!(runtime.execution.trace().bytes().len(), 9_549);
+        assert_eq!(
+            digest_hex(runtime.execution.trace().digest()),
+            "a0c00fa14a2209130e8db10e7163bfd8f4e0007cbd6d742c920b385a2cbeb422"
+        );
+        assert_eq!(runtime.document.schedules().len(), 1);
+        assert_eq!(
+            runtime.document.schedules()[0]
+                .changes()
+                .iter()
+                .map(GraphFrontPanelChange::clock_tick)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        let injected = runtime
+            .execution
+            .simulation()
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry.kind() == GraphTraceEntryKind::InjectedInput
+                    && entry.endpoint() == authority.flattened_input()
+            })
+            .map(|entry| {
+                let GraphValue::ExactRational(value) = entry.value().value() else {
+                    panic!("timeline emitted a non-rational sample");
+                };
+                (entry.clock_tick(), value.clone())
+            })
+            .collect::<Vec<_>>();
+        assert!(injected.len() >= 5);
+        let seven_halves = "7/2".parse::<Rational>().unwrap();
+        assert!(injected.iter().all(|(tick, value)| match *tick {
+            0 | 1 => value == &Rational::from(0),
+            2 | 3 => value == &seven_halves,
+            _ => value == &Rational::from(-1),
+        }));
+        let replay = alumina_interface_core::graph::replay_graph_front_panel_run(
+            runtime.encoding.bytes(),
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            workspace.fixture.registry(),
+            GraphFrontPanelRuntimeLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &runtime.document);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(
+            workspace
+                .front_panel_runtime_status
+                .contains("3 exact changes")
+        );
+
+        workspace.selected_panel_item = Some(authority.key().item());
+        let context = egui::Context::default();
+        let frame = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_280.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    workspace.show_front_panel(ui);
+                });
+            },
+        );
+        assert!(!frame.shapes.is_empty());
+        assert_eq!(
+            workspace.front_panel_schedule_drafts[authority.key()]
+                .changes
+                .len(),
+            3
+        );
+        assert!(workspace.front_panel_runtime.is_some());
     }
 
     #[test]

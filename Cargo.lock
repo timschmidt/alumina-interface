@@ -123,6 +123,7 @@ dependencies = [
  "alumina-interface-core",
  "alumina-job",
  "alumina-machine-ir",
+ "alumina-net",
  "alumina-protocol",
  "alumina-runtime",
  "alumina-sim",
@@ -305,6 +306,7 @@ dependencies = [
  "alumina-service",
  "alumina-shift-register",
  "alumina-storage",
+ "alumina-web-assets",
  "board-mks-tinybee",
 ]
 
@@ -314,6 +316,13 @@ version = "0.1.0"
 dependencies = [
  "alumina-protocol",
  "sha2",
+]
+
+[[package]]
+name = "alumina-web-assets"
+version = "0.1.0"
+dependencies = [
+ "alumina-protocol",
 ]
 
 [[package]]

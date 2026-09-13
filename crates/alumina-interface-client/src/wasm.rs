@@ -36,6 +36,7 @@ use crate::http::{
     MAXIMUM_IDENTITY_BODY_BYTES, NATIVE_FRAME_MEDIA_TYPE, decode_authentication_challenge,
     decode_device_identity,
 };
+use crate::network::{NetworkClientError, NetworkProvisioningMachine, NetworkUpdate};
 use crate::upload::{CacheUploadError, CacheUploadMachine, CacheUploadPhase, UploadSource};
 use crate::visual::{
     VisualAssetDownloadError, VisualAssetDownloadMachine, VisualAssetDownloadPhase,
@@ -302,7 +303,10 @@ async fn open_authenticated_session_inner(
     .map_err(BrowserFetchError::Session)
 }
 
-fn browser_counter_seed() -> Result<u64, BrowserFetchError> {
+/// Create a reload-resistant nonzero browser transaction seed.
+///
+/// This is an identity namespace, not a source of authentication authority.
+pub fn browser_counter_seed() -> Result<u64, BrowserFetchError> {
     let epoch_ms = js_sys::Date::now();
     if !epoch_ms.is_finite() || epoch_ms.is_sign_negative() {
         return Err(BrowserFetchError::CounterSeed);
@@ -522,6 +526,69 @@ async fn drive_configuration_status_inner(
     model
         .accept_response(&response)
         .map_err(BrowserConfigurationError::Configuration)
+}
+
+/// Drive one authenticated AP/STA provisioning or reconciliation request.
+///
+/// A transport failure after a join/leave/recovery request never causes an
+/// immediate resend. The machine first emits `NetworkStatus`; only proof that
+/// the mutation was unobserved makes its exact retained request eligible again.
+pub async fn drive_network_step(
+    window: &Window,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    network: &mut NetworkProvisioningMachine,
+    secret: &[u8],
+) -> Result<Option<NetworkUpdate>, BrowserNetworkError> {
+    drive_network_step_inner(window, origin, session, network, secret).await
+}
+
+/// Worker-scope variant of [`drive_network_step`].
+pub async fn drive_network_step_in_worker(
+    worker: &WorkerGlobalScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    network: &mut NetworkProvisioningMachine,
+    secret: &[u8],
+) -> Result<Option<NetworkUpdate>, BrowserNetworkError> {
+    drive_network_step_inner(worker, origin, session, network, secret).await
+}
+
+async fn drive_network_step_inner(
+    scope: &impl BrowserScope,
+    origin: &DeviceOrigin,
+    session: &mut AuthenticatedHttpSession,
+    network: &mut NetworkProvisioningMachine,
+    secret: &[u8],
+) -> Result<Option<NetworkUpdate>, BrowserNetworkError> {
+    let Some(operation) = network.next_request()? else {
+        return Ok(None);
+    };
+    let request = match session.begin_request_for_config(
+        operation.operation(),
+        operation.body(),
+        operation.config_digest(),
+        secret,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            network.abandon_pending();
+            return Err(BrowserNetworkError::Session(error));
+        }
+    };
+    let response = match fetch_pending_request_inner(scope, origin, session, &request, secret).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            session.abandon_pending();
+            network.abandon_pending();
+            return Err(BrowserNetworkError::Fetch(error));
+        }
+    };
+    network
+        .accept_response(&response)
+        .map(Some)
+        .map_err(BrowserNetworkError::Network)
 }
 
 async fn drive_runtime_health_inner(
@@ -1267,6 +1334,37 @@ impl fmt::Display for BrowserConfigurationError {
 }
 
 impl std::error::Error for BrowserConfigurationError {}
+
+/// One authenticated browser network-provisioning failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrowserNetworkError {
+    /// Canonical network transaction state rejected the requested step.
+    Network(NetworkClientError),
+    /// Native/HMAC request construction failed before fetch.
+    Session(HttpSessionError),
+    /// Browser fetch or authenticated response validation failed.
+    Fetch(BrowserFetchError),
+}
+
+impl From<NetworkClientError> for BrowserNetworkError {
+    fn from(error: NetworkClientError) -> Self {
+        Self::Network(error)
+    }
+}
+
+impl fmt::Display for BrowserNetworkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Network(error) => write!(formatter, "network transaction rejected: {error}"),
+            Self::Session(error) => {
+                write!(formatter, "network request construction failed: {error}")
+            }
+            Self::Fetch(error) => write!(formatter, "network fetch failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserNetworkError {}
 
 /// One authenticated browser capability-range acquisition failure.
 #[derive(Clone, Debug, Eq, PartialEq)]

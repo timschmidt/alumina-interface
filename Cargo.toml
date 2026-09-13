@@ -68,6 +68,7 @@ alumina-interface-client.workspace = true
 alumina-interface-core.workspace = true
 alumina-job.workspace = true
 alumina-machine-ir.workspace = true
+alumina-net.workspace = true
 alumina-protocol.workspace = true
 alumina-runtime.workspace = true
 alumina-sim.workspace = true

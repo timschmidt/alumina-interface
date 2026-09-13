@@ -79,11 +79,12 @@ clock relationships, wire crossings, implementations, target capabilities, and
 deployment remain separate audited obligations.
 
 The native/WASM control workspace initializes one canonical `ALGW` from the
-audited deterministic layout. Its 13-entry palette is derived from the fixed
+audited deterministic layout. Its 16-entry palette is derived from the fixed
 simulation registry: kind/version, ports, and parameter contracts come from
-the audited node schema, while each exact initial parameter value comes from
-the lowest-ID reviewed representative instance of that kind. A kind without a
-fixed implementation or reviewed default prevents the palette from opening.
+the audited node schema, while each exact initial parameter value comes from a
+reviewed representative instance or an explicit false-safe Boolean default. A
+kind without a fixed implementation or reviewed default prevents the palette
+from opening.
 The palette never manufactures an implicit resource, device domain, parameter,
 or port.
 
