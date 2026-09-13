@@ -419,7 +419,10 @@ pub fn lower_certified_schedule_to_direct_finite_difference(
         });
     }
 
-    let metric_start = schedule.metric_path().path().start().clone();
+    let metric_start = schedule.metric_path().path().start();
+    let metric_start = metric_start
+        .coordinates()
+        .ok_or(DirectMotionError::UnsupportedRouteElement { element_index: 0 })?;
     let maximum_axis_quantization_error_mm = [
         half_lattice_unit(
             profile.axes()[0]
@@ -684,6 +687,9 @@ fn build_records(
         .try_reserve(policy.maximum_records.min(4_096))
         .map_err(|_| DirectMotionError::AllocationOverflow)?;
     let metric_start = schedule.metric_path().path().start();
+    let metric_start = metric_start
+        .coordinates()
+        .ok_or(DirectMotionError::UnsupportedRouteElement { element_index: 0 })?;
     let update_period = profile.output_quantum_cycles();
     let update_seconds =
         (Real::from(update_period) / Real::from(profile.timer_ticks_per_second()))?;

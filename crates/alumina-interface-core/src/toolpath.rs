@@ -416,7 +416,7 @@ pub fn promote_metric_path(path: &CurvePath2) -> ToolpathResult<Vec<FeedPathElem
         .iter()
         .enumerate()
         .map(|(curve_index, curve)| match curve.geometry() {
-            CurveGeometry2::Line(line) => {
+            Some(CurveGeometry2::Line(line)) => {
                 let line = LinePathSegment::new(
                     predicate_point(line.start()),
                     predicate_point(line.end()),
@@ -428,7 +428,7 @@ pub fn promote_metric_path(path: &CurvePath2) -> ToolpathResult<Vec<FeedPathElem
                 })?;
                 Ok(FeedPathElement::Line(line))
             }
-            CurveGeometry2::CircularArc(arc) => {
+            Some(CurveGeometry2::CircularArc(arc)) => {
                 let radius = arc.radius_squared().sqrt()?;
                 let direction = if arc.is_clockwise() {
                     ArcDirection::Cw
@@ -449,9 +449,9 @@ pub fn promote_metric_path(path: &CurvePath2) -> ToolpathResult<Vec<FeedPathElem
                 })?;
                 Ok(FeedPathElement::ExplicitArc(arc))
             }
-            geometry => Err(ToolpathError::UnsupportedMetricCurve {
+            _ => Err(ToolpathError::UnsupportedMetricCurve {
                 curve_index,
-                family: geometry.family(),
+                family: curve.family(),
             }),
         })
         .collect()
@@ -491,9 +491,9 @@ pub fn certify_metric_path(
 
     for (source_element, curve) in source.curves().iter().enumerate() {
         let motion_element_start = motion_curves.len();
-        let source_family = curve.geometry().family();
+        let source_family = curve.family();
         let (maximum_error_mm_exact, maximum_subdivision_depth) = match curve.geometry() {
-            CurveGeometry2::Line(_) | CurveGeometry2::CircularArc(_) => {
+            Some(CurveGeometry2::Line(_)) | Some(CurveGeometry2::CircularArc(_)) => {
                 push_motion_curve(
                     &mut motion_curves,
                     &mut source_element_by_motion,
@@ -503,7 +503,7 @@ pub fn certify_metric_path(
                 )?;
                 (Rational::zero(), 0)
             }
-            CurveGeometry2::CubicBezier(cubic) => {
+            Some(CurveGeometry2::CubicBezier(cubic)) => {
                 if maximum_source_error_mm_exact.is_zero() {
                     return Err(ToolpathError::MetricApproximationRequired {
                         curve_index: source_element,
@@ -572,10 +572,10 @@ pub fn certify_metric_path(
                     polyline.maximum_subdivision_depth,
                 )
             }
-            geometry => {
+            _ => {
                 return Err(ToolpathError::UnsupportedMetricCurve {
                     curve_index: source_element,
-                    family: geometry.family(),
+                    family: curve.family(),
                 });
             }
         };
@@ -935,7 +935,7 @@ mod tests {
         assert!(
             cubic_motion
                 .iter()
-                .all(|curve| { matches!(curve.geometry(), CurveGeometry2::Line(_)) })
+                .all(|curve| { matches!(curve.geometry(), Some(CurveGeometry2::Line(_))) })
         );
         assert!(
             (cubic_span.motion_element_start()
@@ -945,13 +945,14 @@ mod tests {
                 })
         );
 
-        let CurveGeometry2::CubicBezier(source_cubic) = source.curves()[2].geometry() else {
+        let Some(CurveGeometry2::CubicBezier(source_cubic)) = source.curves()[2].geometry() else {
             panic!("representative source must retain its cubic");
         };
-        let CurveGeometry2::Line(first_chord) = cubic_motion[0].geometry() else {
+        let Some(CurveGeometry2::Line(first_chord)) = cubic_motion[0].geometry() else {
             unreachable!();
         };
-        let CurveGeometry2::Line(last_chord) = cubic_motion[cubic_motion.len() - 1].geometry()
+        let Some(CurveGeometry2::Line(last_chord)) =
+            cubic_motion[cubic_motion.len() - 1].geometry()
         else {
             unreachable!();
         };
@@ -1011,7 +1012,7 @@ mod tests {
 
         assert!(certified.path().curves().len() > 1);
         let retains_negative_excursion = certified.path().curves().iter().any(|curve| {
-            let CurveGeometry2::Line(line) = curve.geometry() else {
+            let Some(CurveGeometry2::Line(line)) = curve.geometry() else {
                 return false;
             };
             [line.start().x(), line.end().x()].into_iter().any(|x| {
@@ -1020,7 +1021,7 @@ mod tests {
             })
         });
         let retains_positive_overshoot = certified.path().curves().iter().any(|curve| {
-            let CurveGeometry2::Line(line) = curve.geometry() else {
+            let Some(CurveGeometry2::Line(line)) = curve.geometry() else {
                 return false;
             };
             [line.start().x(), line.end().x()].into_iter().any(|x| {

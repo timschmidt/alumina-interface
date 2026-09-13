@@ -1356,7 +1356,13 @@ pub fn lower_certified_schedule_to_v1(
     let mut points = Vec::new();
     let mut cumulative_time = Real::zero();
     let mut maximum_chord_interpolation_error_mm = Real::zero();
-    let start = schedule.metric_path.path().start().clone();
+    let start = schedule
+        .metric_path
+        .path()
+        .start()
+        .coordinates()
+        .cloned()
+        .ok_or(MotionScheduleError::MetricPathMismatch)?;
     let initial_source_element = schedule
         .metric_path
         .source_element_for_motion(0)
@@ -2416,8 +2422,8 @@ fn metric_point_at_fraction(
         .get(element_index)
         .ok_or(MotionScheduleError::MetricPathMismatch)?;
     match curve.geometry() {
-        CurveGeometry2::Line(line) => Ok(line.point_at(fraction.clone())),
-        CurveGeometry2::CircularArc(arc) => {
+        Some(CurveGeometry2::Line(line)) => Ok(line.point_at(fraction.clone())),
+        Some(CurveGeometry2::CircularArc(arc)) => {
             match arc.point_at_sweep_fraction(fraction, &CurveContext::STRICT)? {
                 Classification::Decided(point) => Ok(point),
                 Classification::Uncertain(_) => Err(MotionScheduleError::MetricEvaluationUncertain),

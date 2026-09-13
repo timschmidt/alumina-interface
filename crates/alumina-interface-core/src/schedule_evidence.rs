@@ -1258,12 +1258,12 @@ fn encode_exact_path(
     push_usize(&mut encoded, path.curves().len())?;
     for (element, curve) in path.curves().iter().enumerate() {
         match curve.geometry() {
-            CurveGeometry2::Line(line) => {
+            Some(CurveGeometry2::Line(line)) => {
                 encoded.push(1);
                 push_point(&mut encoded, line.start(), element)?;
                 push_point(&mut encoded, line.end(), element)?;
             }
-            CurveGeometry2::CircularArc(arc) => {
+            Some(CurveGeometry2::CircularArc(arc)) => {
                 encoded.push(2);
                 push_point(&mut encoded, arc.start(), element)?;
                 push_point(&mut encoded, arc.end(), element)?;
@@ -1278,7 +1278,7 @@ fn encode_exact_path(
                     None => encoded.push(0),
                 }
             }
-            CurveGeometry2::CubicBezier(cubic) if domain == ExactPathDomain::Source => {
+            Some(CurveGeometry2::CubicBezier(cubic)) if domain == ExactPathDomain::Source => {
                 encoded.push(3);
                 push_point(&mut encoded, cubic.start(), element)?;
                 push_point(&mut encoded, cubic.control1(), element)?;
@@ -1313,7 +1313,7 @@ fn encode_source_approximation(
     let mut motion_cursor = 0_usize;
     let mut maximum_span_error = Rational::zero();
     for (expected_source_element, span) in metric_path.spans().iter().enumerate() {
-        let expected_family = source.curves()[expected_source_element].geometry().family();
+        let expected_family = source.curves()[expected_source_element].family();
         if span.source_element() != expected_source_element
             || span.source_family() != expected_family
             || span.motion_element_start() != motion_cursor
@@ -1362,6 +1362,7 @@ const fn curve_family_tag(family: CurveFamily2) -> u8 {
         CurveFamily2::RationalBezier => 6,
         CurveFamily2::PolynomialBSpline => 7,
         CurveFamily2::Nurbs => 8,
+        CurveFamily2::AnalyticParallel => 9,
     }
 }
 

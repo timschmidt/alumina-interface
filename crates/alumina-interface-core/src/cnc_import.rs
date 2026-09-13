@@ -627,11 +627,15 @@ pub fn import_exact_cnc_geometry(
         .first()
         .expect("empty paths were rejected")
         .start()
+        .coordinates()
+        .expect("CNC import constructs native lines and arcs")
         .clone();
     let end_mm = curves
         .last()
         .expect("empty paths were rejected")
         .end()
+        .coordinates()
+        .expect("CNC import constructs native lines and arcs")
         .clone();
     let path = CurvePath2::try_new(curves).map_err(CncGeometryImportError::Path)?;
 
@@ -1425,7 +1429,7 @@ M30
             Some(CncArcCenterMode::Incremental)
         );
 
-        let CurveGeometry2::CircularArc(arc) = imported.path().curves()[1].geometry() else {
+        let Some(CurveGeometry2::CircularArc(arc)) = imported.path().curves()[1].geometry() else {
             panic!("second imported curve must remain a native arc");
         };
         assert_eq!(arc.center(), &Point2::from_values(6, 0));
