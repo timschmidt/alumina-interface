@@ -13,7 +13,7 @@ use std::fmt;
 use alumina_machine_ir::ExecutionSegment;
 use alumina_protocol::Digest;
 use hypercurve::{
-    BezierFlatteningOptions, Classification, CurveContext, CurveError, CurvePath2, ExactCurveError,
+    BezierFlatteningOptions, CurveContext, CurveError, CurvePath2, ExactCurveError,
     Point2 as CurvePoint2, UncertaintyReason,
 };
 use hyperlimit::{PredicatePolicy, compare_reals};
@@ -363,11 +363,12 @@ pub fn compile_certified_chord_program(
         policy.maximum_subdivision_depth,
         &CurveContext::STRICT,
     )?;
-    let polyline = match source.segment_certified(&options, &CurveContext::STRICT)? {
-        Classification::Decided(polyline) => polyline,
-        Classification::Uncertain(reason) => {
-            return Err(MachineCompileError::SegmentationUncertain(reason));
+    let polyline = match source.segment_certified(&options) {
+        Ok(polyline) => polyline,
+        Err(ExactCurveError::Blocked(blocker)) => {
+            return Err(MachineCompileError::SegmentationUncertain(blocker.reason()));
         }
+        Err(error) => return Err(error.into()),
     };
 
     let maximum_axis_quantization_error_mm = [
