@@ -285,7 +285,7 @@ fn execute_all(
     Ok(simulated_start_ui_ns)
 }
 
-fn simulate_cache_delivery(
+pub(crate) fn simulate_cache_delivery(
     job: &CanonicalGlobalJob2,
 ) -> Result<Vec<ParticipantCacheReady>, RepresentativeM7SimulationError> {
     let upload_ids: Vec<_> = (0..job.participants().len())

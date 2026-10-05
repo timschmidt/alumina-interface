@@ -42,12 +42,44 @@ validation. The resulting graph must later pass semantic analysis, fixed
 implementation admission, schedule/WCET and arena proof, target/configuration
 binding, and firmware package replay. The catalog is not deployment authority.
 
+## Selector-managed rebinding
+
+`select_graph_capability_node_resource` is the only V1 parameter-edit path for
+one of these physical handles. It accepts a node ID, stable parameter ID,
+bounded schema-aware value path, and catalog index, never a device ID, digest,
+class, label, field name, or numeric pin selector. Stable record-field IDs,
+checked retained-array indices, and explicit already-active option/result
+branches identify one existing leaf.
+
+That leaf's registered type must be the exact catalog resource-handle type, and
+its current complete handle must already occur in the supplied catalog. A
+merely well-typed raw handle that is not one of those offered values therefore
+cannot bootstrap itself into selector authority. The selected replacement must
+also come from that catalog. The path API never creates a branch, grows an
+array, or resolves a display label.
+
+No other root or composite parameter leaf in the complete workspace may
+already hold the selected physical identity. A no-op, unknown
+node/parameter/entry, foreign catalog, wrong leaf type, invalid or inactive
+path, duplicate, malformed entry, workspace failure, or semantic-registry
+rejection leaves the prior workspace byte-for-byte unchanged. On success the
+function reconstructs and validates the complete root value, edits a workspace
+clone, reruns draft semantic analysis, canonically encodes it, and only then
+commits. The graph/workspace revisions and digest advance, while the node ID,
+placement, unrelated composite siblings, and both monotonic allocation cursors
+remain unchanged.
+
+This is still authoring assistance. The caller remains responsible for
+authenticating the capability/session that supplied a production catalog, and
+the later deployment boundary repeats exact target/configuration and resource
+admission.
+
 ## TinyBee offline proof
 
 The browser/native UI builds the exact MKS TinyBee V1 8 MiB capability bytes
-from the sibling `board-mks-tinybee` package. Its 3,531-byte document has
-SHA-256
-`27dcdd9ea4a1f9fcb1a4aeefb34984a4e4a0ca146c660f669bf632f98cac74af`.
+from the sibling `board-mks-tinybee` package. Its current 3,607-byte document
+has SHA-256
+`24c011c210b7a7efc3a027c926053b9ac1090f49b79b510487328887ceae5cfd`.
 The reviewed intersection exposes exactly four read-only resources, in
 canonical order:
 
@@ -58,9 +90,51 @@ canonical order:
 
 The visible target-I/O surface uses a separate Realtime workspace with an
 explicit 240 MHz reference device-cycle clock and a derived 1 kHz input clock.
-Each catalog choice can create at most one concrete resource node in that
-draft. The HostExact PID/interlock workspace has a different type/clock context
-and is never polluted with a physical handle.
+One reviewed `StableBooleanPairAll` node retains exactly two unique identities:
+
+- stable field ID 1, `resources.permit`, initially carries GPIO22; and
+- stable field ID 2, `resources.interlock`, initially carries GPIO32.
+
+GPIO33 and GPIO35 are initially free. The paired node feeds one required
+Realtime Boolean Stream sink, so every accepted draft is executable rather
+than an inert reference container. Each selection transaction reruns semantic
+analysis, derives limits from the complete capability document, lowers the
+complete graph into the fixed 4,096-byte `ALGRIR02` package, independently
+decodes the pair immediate, and requires the decoded selectors to match stable
+field order. Root and nested selectors still share whole-workspace uniqueness,
+so the same physical identity cannot occur twice. Raw resource identities
+remain visibly non-editable. This separate proof does not add physical handles
+to the authoritative HostExact PID/interlock workspace.
+
+The default GPIO22/GPIO32 draft has `ALGW` identity
+`33a0fcb7e3d35c38f6119c8e173e1a3a0a935a8019f5ff9c617a639177fe58c6` and
+lowered package identity
+`8139f4816581007d762fe48e90a1a821d9f350e3508ccebd156b4cc21c9a64d5`.
+Its exact Realtime period is 240,000 device cycles and its reviewed pair-plus-
+sink WCET total is 160 cycles. Its four-case actor transcript is 528 bytes with
+digest
+`a26b41965997461d109d2aeec4b562eb0d2c7c3dfe61870139c2bd2293f12147`;
+its 278-byte unavailable-input transcript has digest
+`5e122937631516da3b57fd9f3e1f1d39a473ada6bf7dbad9c04b5121a4b89f6c`.
+Rebinding only `resources.interlock` to GPIO35
+produces `ALGW`
+`7e4a90577c9ab9864a782ccc1b4a4f738a585746d04728930bce37a6266e866f`
+and package
+`5a7adc0101bfe25aa9ee26772268dac8e0e7504ddf647fa6956740141d92e14c`,
+while `resources.permit` remains GPIO22. Its success and fault replay identities
+become
+`cf2215451f222f8b402b85285ae889ffd67c06e7de8eb3d9c03c8d075dc2a8df`
+and
+`e99110e8980e319389b8fe7731a6087375a465e4151289c37edaec0ed133b176`.
+
+Each accepted edit now runs the actual portable fixed-memory Service/Realtime
+actors across all four conjunction inputs and an unavailable-first-input fault,
+then commits both complete canonical `ALGRREP1` artifacts with the workspace and
+lowered package. The UI exports the exact artifacts and accepts an import only
+after its current digest, identities, declared bounds, canonical input records,
+and a fresh byte-for-byte actor replay all agree. Import mutates no draft or
+session. The format and verification sequence are specified in
+[`GRAPH-DEPLOYMENT-REPLAY-V1.md`](GRAPH-DEPLOYMENT-REPLAY-V1.md).
 
 The proof deliberately uses a conspicuous offline reference `DeviceId` and
 configuration digest. It cannot identify or deploy to the connected TinyBee.
@@ -80,11 +154,27 @@ firmware admission/execution path, and appropriate safety evidence.
 
 Tests reconstruct the complete TinyBee capability document through its bounded
 range API, prove the exact four-entry order, inspect every target-bound resource
-handle, insert all four prototypes transactionally into the matching context,
-and rerun audited draft analysis. A wrong capability digest, over-limit
-document, and entry-count ceiling fail without returning a partial catalog.
-UI tests add all four concrete nodes, reject a duplicate selection without
-changing canonical bytes, and reset the separate draft.
+handle, insert all four root prototypes transactionally into the matching
+context, and rerun audited draft analysis. Root selection still proves an exact
+GPIO22-to-GPIO33 replacement, retained node/placement/cursors, changed
+canonical identity, and no-op stability.
+
+Composite core tests prove fallback-only replacement with exact sibling
+preservation. Same-node sibling duplication, a raw but
+structurally valid current handle, an inactive option, wrong root/segment,
+out-of-bounds array index, missing parameter, foreign-device catalog,
+duplicate root node, and an unreviewed semantic registry all reject without
+mutation. A wrong capability digest, over-limit document, and entry-count
+ceiling fail without returning a partial catalog. UI tests prove the executable
+pair/sink shape, stable GPIO22/GPIO32 lowering order, 4 KiB package replay,
+GPIO32-to-GPIO35 sibling-preserving re-lowering, changed ALGW/implementation/
+package identities, duplicate rejection without either identity changing, and
+reset to the exact initial executable draft. They also pin both artifact sizes
+and all four default/rebound replay identities, accept exact imports through a
+fresh actor run, reject tamper, and prove the verification-only path leaves the
+deployment unchanged. A native cross-repository test
+executes the lowered GPIO22/GPIO35 pair through the permanent firmware actor
+types and observes both reads in order on both a false and a true release.
 
 This is offline functional evidence. No Wi-Fi interface, connected board,
 motor, output, or analyzer was contacted or driven.

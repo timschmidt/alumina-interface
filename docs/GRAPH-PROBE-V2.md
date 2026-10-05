@@ -68,7 +68,7 @@ independent root, and attaches an exact rational root-clock tick to every
 retained sample while preserving the original clock/tick/sequence/value.
 
 For each probe, event ordinal advances only over canonical trace entries at
-that exact output. This includes caller-owned `ExternalInput` records at an
+that exact output. This includes caller-owned `ExternalSource` records at an
 external-source output as well as modeled `NodeOutput` records; the original
 trace-origin tag remains intact. Ordinal zero is retained, then every declared
 `stride`th entry. With a matched trigger, decimated samples are admitted only
@@ -164,20 +164,21 @@ Adding a valid output with no samples in the immutable reference `ALGT` still
 records bounded authoring intent but invents no data.
 
 The browser persists the current canonical `ALGP` together with its bound
-`ALGW` in one versioned local-storage value. Pair restore replays both artifacts
-before committing either, so a malformed sidecar or workspace-identity mismatch
-falls back without partial state. Native and browser `.algp` exchange uses the
-same 2 MiB byte admission and canonical replay boundary; import can replace
+`ALGW` and the rest of the exact authoring state in one canonical
+[`ALGS` V1 session](GRAPH-AUTHORING-SESSION-V1.md). Complete-session restore
+replays both artifacts before committing anything, so a malformed sidecar or
+workspace-identity mismatch falls back without partial state. Native and
+browser `.algp` exchange uses the same 2 MiB byte admission and canonical replay boundary; import can replace
 only the sidecar after proving the current `ALGW` identity, and importing
 identical bytes is an exact no-op. Probe, capture-policy, and trigger identity
-changes mark the pair dirty; canonical no-op edits do not. If a graph edit removes or retypes an
+changes mark the authoring session dirty; canonical no-op edits do not. If a graph edit removes or retypes an
 observed endpoint, the incompatible sidecar is visibly and atomically replaced
 with an empty sidecar bound to the revised workspace rather than persisting
-unbound probe intent. Ephemeral undo/redo retains complete canonical ALGW/ALGP
-pairs, so undo restores the exact prior probes, trigger, revisions, and graph
-binding even after such an invalidation; redo restores the exact revised pair.
-Probe metadata/trigger edits and canonical ALGP imports are pair-history
-operations too. Per-probe edit fields are transient UI state: unrelated
+unbound probe intent. Ephemeral undo/redo retains complete canonical `ALGS`
+sessions, so undo restores the exact prior probes, trigger, revisions, graph
+binding, cached-job workspace, selected component, hierarchy, and source map;
+redo restores the exact revised session. Probe metadata/trigger edits and
+canonical ALGP imports are complete-session history operations too. Per-probe edit fields are transient UI state: unrelated
 trigger or workspace-binding changes preserve a draft, while history
 navigation and file/storage restore reset fields from the replayed canonical
 sidecar.
@@ -198,6 +199,14 @@ window, per-probe decimation and retention, one cursor, and a distinct trigger
 marker; none converts a retained value into a firmware command or physical
 observation. The unchanged reference policy projects five samples for each of
 seven probes (35 aggregate) inside ticks 1–5.
+
+When the reference component participates in the validated recursive `ALGH`,
+the UI also consults its canonical
+[`ALGM` source map](GRAPH-HIERARCHY-SOURCE-MAP-V1.md) for presentation. Cursor
+labels prefix a probed component-local endpoint with its stable occurrence path
+and final flattened endpoint, for example `[1/1]:n8.p1 → flat n10.p1`. This
+does not change `ALGP`, `ALGT`, the plotted exact value, or replay authority;
+the independently replayed source map is correlation metadata only.
 
 ## Closed device claims
 

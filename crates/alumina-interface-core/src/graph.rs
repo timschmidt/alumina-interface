@@ -13,19 +13,26 @@ use alumina_protocol::{DeviceId, Digest};
 use hyperreal::Rational;
 
 mod analysis;
+mod authoring_session;
+mod authoring_session_history;
 mod capability_catalog;
 mod component;
+mod component_package;
 mod control_fixture;
 mod deployment;
 mod document;
+mod front_panel_runtime;
 mod hierarchy;
+mod hierarchy_source;
+mod job_catalog;
+mod literal_text;
 mod probe;
+mod realtime_replay;
 mod simulation;
 mod storage;
 mod trace;
 mod wire;
 mod workspace;
-mod workspace_probe_history;
 
 pub use analysis::{
     ChannelFullPolicy, CombinationalCycle, DependencyLink, ExecutionDomainSet,
@@ -36,9 +43,23 @@ pub use analysis::{
     NodeRegistryError, NodeSchema, NodeStateAllocation, NodeStateContract, RateTransitionKind,
     analyze_graph, analyze_graph_draft,
 };
+pub use authoring_session::{
+    CanonicalGraphAuthoringSessionEncoding, GRAPH_AUTHORING_SESSION_MAGIC,
+    GRAPH_AUTHORING_SESSION_VERSION, GraphAuthoringHierarchyInput, GraphAuthoringSessionDocument,
+    GraphAuthoringSessionError, GraphAuthoringSessionHierarchy, GraphAuthoringSessionLimits,
+    GraphAuthoringSessionReplay, GraphAuthoringSessionReplayLimits,
+    MAX_GRAPH_AUTHORING_SESSION_BYTES, encode_graph_authoring_session,
+    replay_graph_authoring_session,
+};
+pub use authoring_session_history::{
+    GraphAuthoringSessionHistory, GraphAuthoringSessionHistoryError,
+    GraphAuthoringSessionHistoryLimits,
+};
 pub use capability_catalog::{
     GraphCapabilityCatalogError, GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog,
-    GraphCapabilityNodeEntry, derive_graph_capability_node_catalog, graph_resource_label,
+    GraphCapabilityNodeEntry, GraphCapabilityResourceSelectionError,
+    derive_graph_capability_node_catalog, graph_resource_label,
+    select_graph_capability_node_resource,
 };
 pub use component::{
     CanonicalGraphComponentEncoding, GRAPH_COMPONENT_MAGIC, GRAPH_COMPONENT_VERSION,
@@ -46,6 +67,13 @@ pub use component::{
     GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphComponentReplay,
     GraphFrontPanelBinding, GraphFrontPanelItem, GraphFrontPanelItemId, GraphFrontPanelRect,
     encode_graph_component, replay_graph_component,
+};
+pub use component_package::{
+    CanonicalGraphComponentPackageEncoding, GRAPH_COMPONENT_PACKAGE_MAGIC,
+    GRAPH_COMPONENT_PACKAGE_VERSION, GraphComponentPackageDependency,
+    GraphComponentPackageDocument, GraphComponentPackageError, GraphComponentPackageImportReport,
+    GraphComponentPackageLimits, GraphComponentPackageReplay, encode_graph_component_package,
+    replay_graph_component_package,
 };
 pub use control_fixture::{
     RepresentativeControlSignal, RepresentativeExactControlError, RepresentativeExactControlGraph,
@@ -61,14 +89,45 @@ pub use document::{
     GraphPortId, GraphWireId, NodeDefinition, NodeKind, NodeParameter, PortDefinition,
     WireDefinition, WireEndpoint,
 };
+pub use front_panel_runtime::{
+    CanonicalGraphFrontPanelRunEncoding, GRAPH_FRONT_PANEL_RUN_MAGIC,
+    GRAPH_FRONT_PANEL_RUN_VERSION, GraphFrontPanelChange, GraphFrontPanelControlKey,
+    GraphFrontPanelExecution, GraphFrontPanelInputAuthority, GraphFrontPanelInputDisposition,
+    GraphFrontPanelOutputAuthority, GraphFrontPanelOutputKey, GraphFrontPanelOutputSample,
+    GraphFrontPanelRunDocument, GraphFrontPanelRunReplay, GraphFrontPanelRuntimeError,
+    GraphFrontPanelRuntimeLimits, GraphFrontPanelSchedule, encode_graph_front_panel_run,
+    execute_graph_front_panel_run, replay_graph_front_panel_run, resolve_graph_front_panel_inputs,
+    resolve_graph_front_panel_output, sample_graph_front_panel_output_at_or_before,
+};
 pub use hierarchy::{
     CanonicalGraphHierarchyEncoding, GRAPH_COMPONENT_INSTANCE_KIND,
     GRAPH_COMPONENT_INSTANCE_VERSION, GRAPH_HIERARCHY_MAGIC, GRAPH_HIERARCHY_VERSION,
-    GraphComponentInstance, GraphFlattenedInstance, GraphFlattenedNode, GraphHierarchyDependency,
-    GraphHierarchyDocument, GraphHierarchyError, GraphHierarchyFlattening, GraphHierarchyLimits,
-    GraphHierarchyReplay, encode_graph_hierarchy, flatten_graph_hierarchy,
+    GraphComponentInstance, GraphFlattenedInstance, GraphFlattenedNode,
+    GraphFlattenedNodeProvenance, GraphFlattenedWireProvenance, GraphHierarchyComponentRemap,
+    GraphHierarchyDependency, GraphHierarchyDocument, GraphHierarchyError,
+    GraphHierarchyFlattening, GraphHierarchyLimits, GraphHierarchyNodeOrigin,
+    GraphHierarchyReplacementReport, GraphHierarchyReplay, GraphHierarchyWireOrigin,
+    GraphInstanceScope, encode_graph_hierarchy, flatten_graph_hierarchy,
     graph_component_instance_input_port, graph_component_instance_output_port,
+    graph_component_instance_parameter_target, graph_component_instance_parameters,
     graph_component_instance_prototype, replay_graph_hierarchy,
+};
+pub use hierarchy_source::{
+    CanonicalGraphHierarchySourceMapEncoding, GRAPH_HIERARCHY_SOURCE_MAP_MAGIC,
+    GRAPH_HIERARCHY_SOURCE_MAP_VERSION, GraphHierarchySourceMapError,
+    GraphHierarchySourceMapLimits, GraphHierarchySourceMapReplay,
+    MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES, encode_graph_hierarchy_source_map,
+    replay_graph_hierarchy_source_map,
+};
+pub use job_catalog::{
+    GraphCachedJobCatalog, GraphCachedJobCatalogEntry, GraphCachedJobCatalogError,
+    GraphCachedJobCatalogLimits, GraphCachedJobHandleSelectionError,
+    GraphCachedJobPublicationEvidence, derive_graph_cached_job_catalog,
+    select_graph_cached_job_handle,
+};
+pub use literal_text::{
+    GraphLiteralTextError, GraphLiteralTextLimits, INTERACTIVE_GRAPH_LITERAL_TEXT_BYTES,
+    format_graph_literal_text, parse_graph_literal_text,
 };
 pub use probe::{
     CanonicalGraphProbeEncoding, GRAPH_PROBE_MAGIC, GRAPH_PROBE_NAME_BYTES, GRAPH_PROBE_VERSION,
@@ -78,10 +137,20 @@ pub use probe::{
     GraphProbeTrigger, GraphProbeTriggerMatch, GraphProbeTriggerResolution, encode_graph_probes,
     project_graph_probe_replay, replay_graph_probes, resolve_graph_probe_trigger,
 };
+pub use realtime_replay::{
+    CanonicalGraphDeploymentReplayEvidence1, GRAPH_DEPLOYMENT_REPLAY_MAGIC, GraphDeploymentReplay,
+    GraphDeploymentReplayError, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
+    GraphDeploymentReplayRelease, GraphDeploymentReplayReleaseOutcome,
+    GraphDeploymentResourceSample, MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_INPUTS_PER_RELEASE, MAX_GRAPH_DEPLOYMENT_REPLAY_READS_PER_RELEASE,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_RELEASES, replay_graph_deployment_evidence,
+    replay_realtime_graph_deployment, verify_graph_deployment_evidence_bytes,
+};
 pub use simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationHorizon,
     GraphSimulationImplementation, GraphSimulationLimits, GraphSimulationNodeKind,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, simulate_graph,
+    GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind, InjectedInputSample,
+    simulate_graph, simulate_graph_with_inputs,
 };
 pub use storage::{GraphStorageError, GraphTypeStorageBound, GraphTypeStorageKind};
 pub use trace::{
@@ -98,10 +167,6 @@ pub use workspace::{
     GraphNodePlacement, GraphNodePrototype, GraphWorkspaceDocument, GraphWorkspaceError,
     GraphWorkspaceHistory, GraphWorkspaceHistoryError, GraphWorkspaceHistoryLimits,
     GraphWorkspaceLimits, GraphWorkspaceReplay, encode_graph_workspace, replay_graph_workspace,
-};
-pub use workspace_probe_history::{
-    GraphWorkspaceProbeHistory, GraphWorkspaceProbeHistoryError, GraphWorkspaceProbeHistoryLimits,
-    GraphWorkspaceProbeHistoryReplay,
 };
 
 /// Stable identifier for one registered physical unit.
@@ -644,6 +709,118 @@ pub enum GraphValueKind {
     JobHandle,
 }
 
+/// One explicit step through a registered composite graph value.
+///
+/// Record fields use stable schema IDs rather than names. Option and result
+/// branches are explicit, so a selector cannot silently construct or switch a
+/// branch while addressing an identity-bearing leaf.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphValuePathSegment {
+    /// Select one present array element by its canonical zero-based position.
+    ArrayIndex(u32),
+    /// Select one required record field by stable field identity.
+    RecordField(RecordFieldId),
+    /// Descend through an existing `some` branch.
+    OptionSome,
+    /// Descend through an existing successful result branch.
+    ResultOk,
+    /// Descend through an existing error result branch.
+    ResultError,
+}
+
+/// Rejection while resolving or transactionally replacing a graph-value leaf.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphValuePathError {
+    /// The caller path exceeded the schema's composite-depth policy.
+    PathDepthExceeded {
+        /// Supplied path-segment count.
+        segments: usize,
+        /// Maximum path-segment count admitted by the schema.
+        maximum: usize,
+    },
+    /// The complete root or replacement contradicted the registered schema.
+    Schema(GraphSchemaError),
+    /// A path step did not apply to the current registered value shape.
+    InvalidSegment {
+        /// Zero-based segment position.
+        depth: usize,
+        /// Rejected explicit segment.
+        segment: GraphValuePathSegment,
+        /// Registered type at this position.
+        value_type: GraphTypeId,
+        /// Retained literal shape at this position.
+        received: GraphValueKind,
+    },
+    /// An array path selected no retained item.
+    ArrayIndexOutOfBounds {
+        /// Zero-based segment position.
+        depth: usize,
+        /// Requested canonical array index.
+        index: u32,
+        /// Retained array item count.
+        items: usize,
+    },
+    /// A record path selected no registered field.
+    UnknownRecordField {
+        /// Zero-based segment position.
+        depth: usize,
+        /// Requested stable field identity.
+        field: RecordFieldId,
+    },
+    /// The path named an option/result branch that is not currently active.
+    InactiveBranch {
+        /// Zero-based segment position.
+        depth: usize,
+        /// Explicit branch requested by the path.
+        segment: GraphValuePathSegment,
+    },
+}
+
+impl fmt::Display for GraphValuePathError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PathDepthExceeded { segments, maximum } => write!(
+                formatter,
+                "graph value path has {segments} segments, exceeding {maximum}"
+            ),
+            Self::Schema(error) => write!(formatter, "graph value path is invalid: {error}"),
+            Self::InvalidSegment {
+                depth,
+                segment,
+                value_type,
+                received,
+            } => write!(
+                formatter,
+                "graph value path segment {segment:?} at {depth} does not address type {value_type:?} carrying {received:?}"
+            ),
+            Self::ArrayIndexOutOfBounds {
+                depth,
+                index,
+                items,
+            } => write!(
+                formatter,
+                "graph value path array index {index} at {depth} is outside {items} items"
+            ),
+            Self::UnknownRecordField { depth, field } => write!(
+                formatter,
+                "graph value path record field {field:?} at {depth} is unavailable"
+            ),
+            Self::InactiveBranch { depth, segment } => write!(
+                formatter,
+                "graph value path branch {segment:?} at {depth} is not active"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphValuePathError {}
+
+impl From<GraphSchemaError> for GraphValuePathError {
+    fn from(value: GraphSchemaError) -> Self {
+        Self::Schema(value)
+    }
+}
+
 /// One root value paired with its registered type.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedGraphValue {
@@ -670,6 +847,285 @@ impl TypedGraphValue {
     /// Borrow the exact retained literal.
     pub const fn value(&self) -> &GraphValue {
         &self.value
+    }
+
+    /// Resolve one exact leaf through a bounded schema-aware value path.
+    ///
+    /// An empty path resolves the complete root. The retained root is
+    /// revalidated before traversal, and absent option/result branches are not
+    /// constructed implicitly.
+    pub fn value_at_path<'a>(
+        &'a self,
+        schema: &GraphSchema,
+        path: &[GraphValuePathSegment],
+    ) -> Result<(GraphTypeId, &'a GraphValue), GraphValuePathError> {
+        schema.validate_typed_value(self)?;
+        validate_graph_value_path_depth(schema, path)?;
+        resolve_graph_value_path(schema, self.value_type, &self.value, path, 0)
+    }
+
+    /// Return a complete typed value with one exact leaf replaced.
+    ///
+    /// This is a structural operation only. In particular, replacing a
+    /// resource or job handle does not prove catalog membership or grant any
+    /// live authority; the corresponding catalog selector must establish that
+    /// separately. The original value remains unchanged on every error.
+    pub fn replacing_value_at_path(
+        &self,
+        schema: &GraphSchema,
+        path: &[GraphValuePathSegment],
+        replacement: GraphValue,
+    ) -> Result<Self, GraphValuePathError> {
+        let (target_type, _) = self.value_at_path(schema, path)?;
+        schema.validate_value(target_type, &replacement)?;
+        let mut candidate = self.value.clone();
+        replace_graph_value_at_path(
+            schema,
+            self.value_type,
+            &mut candidate,
+            path,
+            0,
+            replacement,
+        )?;
+        Self::try_new(schema, self.value_type, candidate).map_err(Into::into)
+    }
+}
+
+fn validate_graph_value_path_depth(
+    schema: &GraphSchema,
+    path: &[GraphValuePathSegment],
+) -> Result<(), GraphValuePathError> {
+    let maximum = schema.limits().maximum_value_depth.saturating_sub(1);
+    if path.len() > maximum {
+        Err(GraphValuePathError::PathDepthExceeded {
+            segments: path.len(),
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_graph_value_path<'a>(
+    schema: &GraphSchema,
+    value_type: GraphTypeId,
+    value: &'a GraphValue,
+    path: &[GraphValuePathSegment],
+    depth: usize,
+) -> Result<(GraphTypeId, &'a GraphValue), GraphValuePathError> {
+    let Some((segment, remaining)) = path.split_first() else {
+        return Ok((value_type, value));
+    };
+    let definition = schema
+        .value_type(value_type)
+        .ok_or(GraphSchemaError::UnknownType(value_type))?;
+    match (definition.kind(), value, *segment) {
+        (
+            TypeKind::Array { element, .. },
+            GraphValue::Array(items),
+            GraphValuePathSegment::ArrayIndex(index),
+        ) => {
+            let requested = index;
+            let index = usize::try_from(requested).map_err(|_| {
+                GraphValuePathError::ArrayIndexOutOfBounds {
+                    depth,
+                    index: requested,
+                    items: items.len(),
+                }
+            })?;
+            let item = items
+                .get(index)
+                .ok_or(GraphValuePathError::ArrayIndexOutOfBounds {
+                    depth,
+                    index: requested,
+                    items: items.len(),
+                })?;
+            resolve_graph_value_path(schema, *element, item, remaining, depth + 1)
+        }
+        (
+            TypeKind::Record { fields },
+            GraphValue::Record(values),
+            GraphValuePathSegment::RecordField(field),
+        ) => {
+            let index = fields
+                .binary_search_by_key(&field, RecordField::id)
+                .map_err(|_| GraphValuePathError::UnknownRecordField { depth, field })?;
+            let registered = &fields[index];
+            let retained = values
+                .get(index)
+                .filter(|value| value.field == field)
+                .ok_or(GraphSchemaError::RecordShape)?;
+            resolve_graph_value_path(
+                schema,
+                registered.value_type(),
+                &retained.value,
+                remaining,
+                depth + 1,
+            )
+        }
+        (
+            TypeKind::Option { value: inner },
+            GraphValue::OptionSome(value),
+            GraphValuePathSegment::OptionSome,
+        ) => resolve_graph_value_path(schema, *inner, value, remaining, depth + 1),
+        (TypeKind::Option { .. }, GraphValue::OptionNone, GraphValuePathSegment::OptionSome)
+        | (TypeKind::Result { .. }, GraphValue::ResultError(_), GraphValuePathSegment::ResultOk)
+        | (TypeKind::Result { .. }, GraphValue::ResultOk(_), GraphValuePathSegment::ResultError) => {
+            Err(GraphValuePathError::InactiveBranch {
+                depth,
+                segment: *segment,
+            })
+        }
+        (
+            TypeKind::Result { ok, .. },
+            GraphValue::ResultOk(value),
+            GraphValuePathSegment::ResultOk,
+        ) => resolve_graph_value_path(schema, *ok, value, remaining, depth + 1),
+        (
+            TypeKind::Result { error, .. },
+            GraphValue::ResultError(value),
+            GraphValuePathSegment::ResultError,
+        ) => resolve_graph_value_path(schema, *error, value, remaining, depth + 1),
+        _ => Err(GraphValuePathError::InvalidSegment {
+            depth,
+            segment: *segment,
+            value_type,
+            received: value.kind(),
+        }),
+    }
+}
+
+fn replace_graph_value_at_path(
+    schema: &GraphSchema,
+    value_type: GraphTypeId,
+    value: &mut GraphValue,
+    path: &[GraphValuePathSegment],
+    depth: usize,
+    replacement: GraphValue,
+) -> Result<(), GraphValuePathError> {
+    let Some((segment, remaining)) = path.split_first() else {
+        *value = replacement;
+        return Ok(());
+    };
+    let definition = schema
+        .value_type(value_type)
+        .ok_or(GraphSchemaError::UnknownType(value_type))?;
+    let received = value.kind();
+    match (definition.kind(), *segment) {
+        (TypeKind::Array { element, .. }, GraphValuePathSegment::ArrayIndex(index)) => {
+            let GraphValue::Array(items) = value else {
+                return Err(GraphValuePathError::InvalidSegment {
+                    depth,
+                    segment: *segment,
+                    value_type,
+                    received,
+                });
+            };
+            let item_count = items.len();
+            let requested = index;
+            let index = usize::try_from(requested).map_err(|_| {
+                GraphValuePathError::ArrayIndexOutOfBounds {
+                    depth,
+                    index: requested,
+                    items: item_count,
+                }
+            })?;
+            let item = items
+                .get_mut(index)
+                .ok_or(GraphValuePathError::ArrayIndexOutOfBounds {
+                    depth,
+                    index: requested,
+                    items: item_count,
+                })?;
+            replace_graph_value_at_path(schema, *element, item, remaining, depth + 1, replacement)
+        }
+        (TypeKind::Record { fields }, GraphValuePathSegment::RecordField(field)) => {
+            let GraphValue::Record(values) = value else {
+                return Err(GraphValuePathError::InvalidSegment {
+                    depth,
+                    segment: *segment,
+                    value_type,
+                    received,
+                });
+            };
+            let index = fields
+                .binary_search_by_key(&field, RecordField::id)
+                .map_err(|_| GraphValuePathError::UnknownRecordField { depth, field })?;
+            let registered = &fields[index];
+            let retained = values
+                .get_mut(index)
+                .filter(|value| value.field == field)
+                .ok_or(GraphSchemaError::RecordShape)?;
+            replace_graph_value_at_path(
+                schema,
+                registered.value_type(),
+                &mut retained.value,
+                remaining,
+                depth + 1,
+                replacement,
+            )
+        }
+        (TypeKind::Option { value: inner }, GraphValuePathSegment::OptionSome) => match value {
+            GraphValue::OptionSome(value) => replace_graph_value_at_path(
+                schema,
+                *inner,
+                value,
+                remaining,
+                depth + 1,
+                replacement,
+            ),
+            GraphValue::OptionNone => Err(GraphValuePathError::InactiveBranch {
+                depth,
+                segment: *segment,
+            }),
+            _ => Err(GraphValuePathError::InvalidSegment {
+                depth,
+                segment: *segment,
+                value_type,
+                received,
+            }),
+        },
+        (TypeKind::Result { ok, .. }, GraphValuePathSegment::ResultOk) => match value {
+            GraphValue::ResultOk(value) => {
+                replace_graph_value_at_path(schema, *ok, value, remaining, depth + 1, replacement)
+            }
+            GraphValue::ResultError(_) => Err(GraphValuePathError::InactiveBranch {
+                depth,
+                segment: *segment,
+            }),
+            _ => Err(GraphValuePathError::InvalidSegment {
+                depth,
+                segment: *segment,
+                value_type,
+                received,
+            }),
+        },
+        (TypeKind::Result { error, .. }, GraphValuePathSegment::ResultError) => match value {
+            GraphValue::ResultError(value) => replace_graph_value_at_path(
+                schema,
+                *error,
+                value,
+                remaining,
+                depth + 1,
+                replacement,
+            ),
+            GraphValue::ResultOk(_) => Err(GraphValuePathError::InactiveBranch {
+                depth,
+                segment: *segment,
+            }),
+            _ => Err(GraphValuePathError::InvalidSegment {
+                depth,
+                segment: *segment,
+                value_type,
+                received,
+            }),
+        },
+        _ => Err(GraphValuePathError::InvalidSegment {
+            depth,
+            segment: *segment,
+            value_type,
+            received,
+        }),
     }
 }
 
@@ -1396,6 +1852,137 @@ mod tests {
                 if lower == &Rational::fraction(99, 10).unwrap()
                     && upper == &Rational::fraction(101, 10).unwrap()
         ));
+    }
+
+    #[test]
+    fn value_paths_resolve_and_replace_only_explicit_active_composite_leaves() {
+        let schema = schema();
+        let original = TypedGraphValue::try_new(
+            &schema,
+            ARRAY,
+            GraphValue::Array(vec![
+                point(Rational::fraction(1, 10).unwrap(), "origin"),
+                point(Rational::fraction(2, 10).unwrap(), "target"),
+            ]),
+        )
+        .unwrap();
+        let target_path = [
+            GraphValuePathSegment::ArrayIndex(1),
+            GraphValuePathSegment::RecordField(RecordFieldId::new(2)),
+        ];
+        let (target_type, target) = original.value_at_path(&schema, &target_path).unwrap();
+        assert_eq!(target_type, TEXT);
+        assert_eq!(target, &GraphValue::Text("target".to_owned()));
+
+        let replaced = original
+            .replacing_value_at_path(
+                &schema,
+                &target_path,
+                GraphValue::Text("machine".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(
+            replaced.value_at_path(&schema, &target_path).unwrap().1,
+            &GraphValue::Text("machine".to_owned())
+        );
+        assert_eq!(
+            original.value_at_path(&schema, &target_path).unwrap().1,
+            &GraphValue::Text("target".to_owned())
+        );
+        assert_eq!(original.value_at_path(&schema, &[]).unwrap().0, ARRAY);
+
+        let some = TypedGraphValue::try_new(
+            &schema,
+            OPTION,
+            GraphValue::OptionSome(Box::new(point(Rational::from(3), "some"))),
+        )
+        .unwrap();
+        assert!(matches!(
+            some.value_at_path(
+                &schema,
+                &[
+                    GraphValuePathSegment::OptionSome,
+                    GraphValuePathSegment::RecordField(RecordFieldId::new(1)),
+                ],
+            ),
+            Ok((EXACT_MM, GraphValue::ExactRational(_)))
+        ));
+        let ok = TypedGraphValue::try_new(
+            &schema,
+            RESULT,
+            GraphValue::ResultOk(Box::new(point(Rational::from(4), "ok"))),
+        )
+        .unwrap();
+        assert!(matches!(
+            ok.value_at_path(
+                &schema,
+                &[
+                    GraphValuePathSegment::ResultOk,
+                    GraphValuePathSegment::RecordField(RecordFieldId::new(2)),
+                ],
+            ),
+            Ok((TEXT, GraphValue::Text(value))) if value == "ok"
+        ));
+
+        assert!(matches!(
+            original.replacing_value_at_path(&schema, &target_path, GraphValue::Boolean(false),),
+            Err(GraphValuePathError::Schema(
+                GraphSchemaError::TypeMismatch { .. }
+            ))
+        ));
+        assert_eq!(
+            original.value_at_path(&schema, &[GraphValuePathSegment::ArrayIndex(9)],),
+            Err(GraphValuePathError::ArrayIndexOutOfBounds {
+                depth: 0,
+                index: 9,
+                items: 2,
+            })
+        );
+        assert_eq!(
+            original.value_at_path(
+                &schema,
+                &[
+                    GraphValuePathSegment::ArrayIndex(0),
+                    GraphValuePathSegment::RecordField(RecordFieldId::new(99)),
+                ],
+            ),
+            Err(GraphValuePathError::UnknownRecordField {
+                depth: 1,
+                field: RecordFieldId::new(99),
+            })
+        );
+        assert!(matches!(
+            original.value_at_path(
+                &schema,
+                &[GraphValuePathSegment::RecordField(RecordFieldId::new(1))],
+            ),
+            Err(GraphValuePathError::InvalidSegment { depth: 0, .. })
+        ));
+
+        let none = TypedGraphValue::try_new(&schema, OPTION, GraphValue::OptionNone).unwrap();
+        assert_eq!(
+            none.value_at_path(&schema, &[GraphValuePathSegment::OptionSome]),
+            Err(GraphValuePathError::InactiveBranch {
+                depth: 0,
+                segment: GraphValuePathSegment::OptionSome,
+            })
+        );
+        assert_eq!(
+            ok.value_at_path(&schema, &[GraphValuePathSegment::ResultError]),
+            Err(GraphValuePathError::InactiveBranch {
+                depth: 0,
+                segment: GraphValuePathSegment::ResultError,
+            })
+        );
+
+        let overdeep = vec![GraphValuePathSegment::OptionSome; schema.limits().maximum_value_depth];
+        assert_eq!(
+            none.value_at_path(&schema, &overdeep),
+            Err(GraphValuePathError::PathDepthExceeded {
+                segments: schema.limits().maximum_value_depth,
+                maximum: schema.limits().maximum_value_depth - 1,
+            })
+        );
     }
 
     #[test]

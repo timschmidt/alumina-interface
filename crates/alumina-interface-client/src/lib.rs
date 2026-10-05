@@ -17,6 +17,7 @@ pub mod diagnostics;
 pub mod graph;
 pub mod health;
 pub mod http;
+pub mod network;
 pub mod schedule;
 pub mod upload;
 pub mod visual;

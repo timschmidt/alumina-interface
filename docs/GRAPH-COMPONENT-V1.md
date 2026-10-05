@@ -42,6 +42,14 @@ connector namespace. IDs are nonzero and never duplicated. The next-ID cursors
 must exceed every retained ID and may use `u32::MAX + 1` only as an exhausted
 sentinel.
 
+The declared behavior version is component-author-controlled metadata, not the
+`ALGC` wire-format version. Canonical replay accepts any nonzero `u32` because
+historical artifacts remain independently meaningful. The authoring mutation
+is intentionally stricter: it can retain or increase the current behavior
+version, but cannot decrease it. A stable-name-only edit may therefore retain
+the behavior version. Every accepted metadata change advances component
+revision; an identical name/version pair is byte-for-byte a no-op.
+
 The first interactive policy admits at most 24 MiB total, 128 public inputs,
 128 public outputs, 256 panel items, and panel edges no greater than 1,000,000
 logical pixels. The separately replayed workspace retains its own 20 MiB,
@@ -90,11 +98,28 @@ node-local parameter IDs; its type is the retained typed value's exact root
 type. An input/output item inherits its terminal's resolved graph type. Panel
 layout never stores a float or display-derived value.
 
+`ALGH` V3 uses that explicit public surface without changing `ALGC` V1. Every
+`ParameterControl` item becomes a derived parameter on a placeholder for this
+component: the stable panel-item ID and name become the placeholder parameter
+ID and name, while the controlled parameter supplies its exact type and current
+default. A parent component can bind its own `ParameterControl` to that derived
+parameter, promoting the value through another hierarchy level. Occurrence
+values remain canonical parameters in the parent or root `ALGW`; they do not
+mutate this component definition.
+
 `GraphComponentDocument::replace_workspace` advances component revision and
 validates a complete candidate before mutation. Deleting a bound node, changing
 a mapped port, internally wiring a public input, or invalidating any panel
 binding rejects the replacement and preserves the prior component byte for
 byte.
+
+`add_panel_item`, `update_panel_item`, and `remove_panel_item` apply the same
+clone-and-reconstruct rule to panel metadata. Addition allocates only from the
+monotonic panel-item cursor. Deletion never rewinds it. Update replaces the
+stable name, exact binding, and integer rectangle together; a byte-identical
+replacement is an exact no-op. Unknown items, exhausted identity space,
+duplicate names/bindings, unresolved targets, negative/empty/overflowing
+rectangles, and document-limit failures retain the complete prior `ALGC`.
 
 ## First editor workflow
 
@@ -107,26 +132,197 @@ states. Controls
 use the same Hyperreal parsing, typed-value validation, canonical `ALGR` edit,
 history, and persistence path as the selected-node inspector.
 
-Every accepted workspace edit rebuilds and encodes the component. If an
-otherwise valid draft deletes or changes a referenced endpoint, the front panel
-detaches visibly without rejecting the `ALGW` edit. Undo or another restoring
-edit reattaches it after complete validation. Indicators never relabel stale
-trace bytes: once the embedded graph digest differs from the reference replay,
-they report that the exact replay is detached.
+Every accepted workspace edit rebuilds and encodes the selected component. A
+compatible replacement is remapped into the existing hierarchy by old and new
+exact digest, preserving authored root instances and unrelated component
+dependencies. If an otherwise valid draft deletes or changes a referenced
+endpoint, the front panel and hierarchy detach visibly without rejecting the
+`ALGW` edit. Undo or another restoring edit reattaches them after complete
+validation. Indicators never relabel stale trace bytes: once the embedded graph
+digest differs from the reference replay, they report that the exact replay is
+detached.
 
-This initial panel metadata is reconstructed from the reviewed fixture rather
-than persisted separately by the current `.algw` bridge. Canonical `ALGC` core
-bytes and replay are implemented and tested; general component file exchange is
-a later UI slice.
+The visible panel editor lists every exact public input, retained parameter,
+and public output not already owned by another item. It can add one binding
+under a validated stable name, select/remove an item, replace its name,
+binding, and integer x/y/width/height, or drag its header with one cumulative
+pointer delta rounded only at commit. Every accepted edit replaces the selected
+`ALGC` dependency, remaps its exact hierarchy bindings, freshly validates and
+flattens `ALGH`, regenerates `ALGM`, reruns ordinary-node semantic admission,
+and records the prior complete `ALGS` before committing. Panel-only changes
+retain the embedded control `ALGW`, connector pane, root workspace, unrelated
+dependencies, probes, and cached-job workspace exactly. Exact no-ops record no
+history.
+
+The visible connector editor follows the exact dependency selected in the
+`ALGH` library panel. It offers bounded endpoint choices and all six stable-ID
+input/output add, metadata-update, and reference-safe removal operations for
+the control component or another selected dependency. Every accepted library
+edit recursively rebuilds affected parents, root placeholders, `ALGH`, and
+`ALGM`, then admits and records one complete `ALGS`. A non-authoritative edit
+retains the selected control `ALGC` and its embedded control `ALGW` exactly. If
+the edited dependency is beneath that control authority and would force the
+authority itself to change identity, the UI rejects without mutation until a
+coordinated control-workspace replacement exists.
+
+The adjacent selected-definition editor opens the embedded `ALGW` of any
+selected non-authoritative dependency as its own canonical structural canvas.
+It supports the audited palette, stable node creation/deletion, exact label,
+domain, and parameter edits, integer placement drag, and monotonic typed-wire
+connect/disconnect. Transient node, wire, drag, and text-draft state is scoped
+separately from the main control canvas. It can add another dependency already
+present in the `ALGH` library as a fresh child occurrence; the parent-local
+placeholder and scoped `GraphComponentInstance` binding commit atomically.
+The placeholder inspector can also rebind that one scoped occurrence to the
+dependency chosen by the child-component selector. The placeholder's node,
+label, placement, allocation cursors, and every live endpoint whose stable
+child connector ID remains compatible are preserved. If the replacement has
+the same public placeholder shape, the parent `ALGC` remains exact and only
+its scoped `ALGH` binding changes at that boundary; otherwise affected parent
+identities are recursively replaced. Either case freshly validates and
+flattens the complete hierarchy and regenerates `ALGM` before commit. Missing
+or incompatible live connectors, cycles, limits, and an indirect rewrite of
+the complete-session control `ALGC` reject atomically. Rebinding to the already
+bound child is an exact no-op.
+`ALGH`-owned placeholders remain visible and wireable but cannot be deleted by
+the ordinary node action. A dedicated occurrence action removes the
+placeholder, incident wires, and scoped binding together, unless a public
+connector or panel item still binds that node. Each accepted edit uses the same
+full recursive replacement report and complete-session transaction as
+connector authoring. Exact no-ops create no revision or history state; invalid
+connectors/panel references, cycles, semantic failures, and indirect
+control-authority changes reject atomically. Deletion preserves the monotonic
+node cursor.
+
+The ALGM flattened-source browser can enter this editor without authoring. It
+revalidates a final node or wire's complete occurrence path and exact component
+digest, selects the matching library definition, and focuses the local node or
+distinctly highlights the exact local wire while retaining its target node in
+the existing inspector. An authoritative component source instead opens the
+main control canvas, while a root source highlights the structural root canvas.
+This source-navigation state is deliberately absent from `ALGC` and `ALGS`,
+records no history, and does not mark persistence pending.
+
+The reviewed fixture supplies the initial panel metadata. Once edited, the
+canonical `ALGC` inside `ALGS` and `.algc` exchange is authoritative; later
+compatible `ALGW` edits replace its embedded workspace while retaining the
+authored panel metadata. A standalone `.algw` file has no panel metadata and
+cannot silently reconstruct or overwrite it. The component-library panel
+exports the exact selected `ALGC` and imports a bounded canonical standalone
+leaf after full component/workspace/graph replay, exact re-encoding, audited
+ordinary-node semantics, and current `ALGH` context validation. Importing an
+exact duplicate is a no-op; importing a new identity or later removing that
+unreferenced identity is a complete-session historical edit. Nested
+definitions require scoped `ALGH` bindings that standalone `ALGC` does not
+carry, so `.algc` remains a leaf-only workflow. Canonical
+[`ALCP` V1](GRAPH-COMPONENT-PACKAGE-V1.md) supplies the selected `ALGC`, its
+complete transitive dependency closure, and those scoped bindings as one exact
+immutable exchange package.
+
+A file is not required to start a new leaf package. The same library panel can
+construct a named version-1 empty `ALGC` whose embedded `ALGW` and `ALGR` use
+the current control graph's exact schema and clocks. Component, workspace,
+node, wire, connector, and panel-item cursors all begin at one; connectors,
+panel items, nodes, wires, and placements are empty. The new dependency is
+selected immediately for ordinary definition editing. Invalid or overlong
+names and a stable name already bound to another digest reject without
+mutation; requesting the byte-identical empty component again is a
+selection-only no-op with no history or persistence write.
+
+The selected-component identity row edits an existing dependency's stable name
+and behavior version together. The visible version field accepts only the
+canonical decimal spelling of a nonzero `u32`: no signs, whitespace, leading
+zeroes, or overflow. A version regression, invalid name, or name already owned
+by another dependency rejects before mutation. An accepted edit uses the same
+recursive component-replacement report as definition and connector authoring,
+so every parent-local binding, root binding, selected digest, `ALGH`, and
+`ALGM` follows the new exact identity in one complete `ALGS` history commit.
+No alias from the old digest or stable name is retained. Control workspace,
+probes, cached-job workspace, unchanged root structure, unrelated dependency
+encodings, and the freshly flattened ordinary workspace remain exact when the
+component's public shape is unchanged. Transient identity drafts follow the
+current digest; stale flattened-source focus clears if its exact origin no
+longer exists.
+
+Optimized Chromium qualification dragged panel item `#14`
+`combined_permit_indicator` by exactly `(+80, +30)` logical pixels, from
+`(460, 404, 240, 54)` to `(540, 434, 240, 54)`. The selected `ALGC` identity
+changed from
+`10e6498ec36afc377f138cacb5c6afe2091c40749ea3c9e9d4bba8925a4f0228`
+to
+`c607de51199369cc1ff7fb40b377309511d5fcee07df1822475efe4c0383c2fd`;
+the complete `ALGH` changed to
+`93567a3cf1b27c6c14acb6ef95eeb37d16fc1aab8a62e69900ad5ccca214bcb6`
+and `ALGM` changed to
+`2bd200edb3f2be3a84e0c6b5251f0043a2be0a0f4da8dce293b02c262e4ffbd8`.
+The embedded control workspace, connector pane, root workspace, wrapper
+dependency, other fourteen panel items, probes, and cached-job workspace
+remained byte-identical. Visible Undo restored the exact reference `ALGS`;
+visible Redo and a fresh reload restored the exact 14,770-byte moved `ALGS`
+with SHA-256
+`530db6a4d7cec74fcb3d36736c8de51cd024b4ed70b3b9c282234c48b5eaf666`.
+
+The deterministic-creation Chromium qualification began from the canonical
+14,770-byte reference `ALGS`
+(`d7a5fba83da9f254eb0d50eab301129f933016a400c9d154c5f2d97d8029cf9d`)
+and used the visible name field and create button to add
+`user.browser_component`. The resulting 15,510-byte `ALGS`
+(`991bb737edcd0a3ad1f45b5f0e05d657c4e2557deddec46288c6512f168fe0fe`)
+contains a 736-byte revision-1 `ALGC`
+`264505540b35ca004697783b0136ec2fb8f09230768355d46627af3e3c07f36f`.
+Its 612-byte `ALGW` has revision one, node/wire cursors one, no placements,
+and embeds a 548-byte revision-1 `ALGR` with no nodes or wires. A byte-prefix
+comparison through the clock section proved that `ALGR` inherited the exact
+current schema and clocks. Re-entering the same name selected that dependency
+without changing a byte or adding history.
+
+The visible selected-definition editor then created ordinary node `1`. The
+replacement revision-2 `ALGC` is 851 bytes with identity
+`b46e9dc604882ce77eebec1ebb8195fa7f4d7159558b4e4f00dcace6e6225198`;
+the complete session is 15,625 bytes with SHA-256
+`88bf2e0c9bc04d11112b3a8de865e242fd5beadbf57ab09cd4b82d235122ffa1`.
+The control workspace, probes, cached-job workspace, root workspace, control
+authority, flattened workspace, and all 21-node/25-wire provenance records
+remained exact. Visible Undo restored the empty-component session, visible
+Redo restored the one-node session, and a fresh reload retained those exact
+bytes and allowed the populated component to be selected again.
+
+The optimized identity-evolution Chromium qualification began from the same
+14,770-byte reference `ALGS` and used the visible metadata row to rename
+`control.reference_pid` version 1 to `control.browser_pid_v2` version 2. Its
+4,815-byte revision-1 `ALGC`
+`10e6498ec36afc377f138cacb5c6afe2091c40749ea3c9e9d4bba8925a4f0228`
+became the 4,816-byte revision-2 `ALGC`
+`63d2873a02f832bac32a524ec57c68ce9218c22e0b327243b8d8074b2e0cdc80`.
+The 7,125-byte revision-2 `ALGH`
+`17baef8eae8b5ba3287b4b8968502ea627b34f8fc2aa9355f0ec954e94da447e`
+contains no old component digest and changes the wrapper's exact child binding
+to the replacement while retaining the 1,222-byte wrapper and root workspace
+byte-for-byte. Its regenerated 2,550-byte `ALGM`
+`71126d248b87c27b6fca5c3cdae27f129d1b39dbb525bdaae2d63f91040a5a7b`
+binds that hierarchy while retaining the exact flattened workspace identity
+`6804b964535d08b9ceead3d43891c3ae4c5aa5ce38b015c34b4b385bfa3257d4`
+and 21-node/25-wire cardinality. Control `ALGW`, probes, cached-job `ALGW`,
+root `ALGW`, connector/panel payload, and unrelated dependency remained exact.
+A second visible apply retained the evolved 14,771-byte `ALGS` byte-for-byte;
+an attempted version regression from 2 to 1 visibly rejected without mutation.
+Visible Undo restored the exact reference session, while Redo and a fresh
+reload restored the evolved session
+`78afc205232830829c5e4d5db54dacfc09e5e4e5e3fb4e7dce3b636bef7a21c4`.
+The retained 38,577-byte proof result has SHA-256
+`ae6e4c6e4edc4eda6c21e5922ad301204693d0bf6971a430a64f6ea015696092`.
 
 ## Deliberately open
 
-The separate canonical [`ALGH` V1 hierarchy](GRAPH-HIERARCHY-V1.md) now binds
-leaf component instances by exact digest and deterministically flattens them to
-ordinary `ALGW`/`ALGR`. Nested dependencies and general recursive cycle/depth
-rules, editable instance workflows, component libraries, package
-signatures/permissions, locked dependency manifests, connector editing,
-arbitrary panel editing, panel value injection during simulation, probes,
-groups/comments, and `ALGC` persistence or file exchange remain open. `ALGC` V1
-grants no semantic, implementation, resource, timing, safety, firmware, or
-physical-output authority.
+The separate canonical [`ALGH` V3 hierarchy](GRAPH-HIERARCHY-V3.md) now binds
+scoped component instances by exact digest, rejects dependency cycles, bounds
+recursive expansion, and deterministically flattens a component DAG to ordinary
+`ALGW`/`ALGR`. Its dedicated UI now creates and deletes exact root occurrences,
+edits their promoted exact parameters, and preserves compatible explicit
+overrides across selected-component default evolution. Nested
+definition/binding exchange is implemented by `ALCP` V1. Package
+signatures/permissions, locked dependency manifests,
+overlapping/grouped/responsive panel layout policies, panel value injection
+during simulation or execution, probes, and groups/comments remain open.
+`ALGC` V1 grants no semantic, implementation, resource, timing, safety,
+firmware, or physical-output authority.

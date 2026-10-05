@@ -23,9 +23,11 @@ use alumina_graph_ir::GraphIrOpcode;
 use alumina_protocol::Digest;
 
 use super::{
-    ExecutionDomain, GraphDeploymentNodeKind, GraphDeploymentRegistry, GraphDeploymentTarget,
-    GraphNodePrototype, GraphSchemaError, GraphValue, NodeKind, NodeParameter, ResourceGraphHandle,
-    TypeKind, TypedGraphValue,
+    CanonicalGraphWorkspaceEncoding, ExecutionDomain, GraphAnalysisError, GraphDeploymentNodeKind,
+    GraphDeploymentRegistry, GraphDeploymentTarget, GraphNodeId, GraphNodePrototype,
+    GraphSchemaError, GraphValue, GraphValuePathError, GraphValuePathSegment,
+    GraphWorkspaceDocument, GraphWorkspaceError, NodeDefinition, NodeKind, NodeParameter,
+    ResourceGraphHandle, TypeKind, TypedGraphValue, analyze_graph_draft, encode_graph_workspace,
 };
 
 /// Caller-owned bounds for one derived target-resource palette.
@@ -66,6 +68,7 @@ impl Default for GraphCapabilityCatalogLimits {
 pub struct GraphCapabilityNodeEntry {
     resource: GraphResourceDescriptor,
     kind: NodeKind,
+    resource_parameter: u32,
     prototype: GraphNodePrototype,
 }
 
@@ -78,6 +81,22 @@ impl GraphCapabilityNodeEntry {
     /// Return the reviewed node kind that will consume the resource handle.
     pub const fn kind(&self) -> &NodeKind {
         &self.kind
+    }
+
+    /// Return the reviewed node-local parameter that carries this resource.
+    pub const fn resource_parameter_id(&self) -> u32 {
+        self.resource_parameter
+    }
+
+    /// Borrow the exact target-bound resource parameter.
+    ///
+    /// Derived catalogs always return `Some`. The optional result keeps
+    /// consumers fail-closed if an in-memory invariant is contradicted.
+    pub fn resource_parameter(&self) -> Option<&NodeParameter> {
+        self.prototype
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.id() == self.resource_parameter)
     }
 
     /// Borrow the fully materialized, target-bound editor prototype.
@@ -120,6 +139,170 @@ impl GraphCapabilityNodeCatalog {
     /// Borrow concrete entries in canonical kind/resource order.
     pub fn entries(&self) -> &[GraphCapabilityNodeEntry] {
         &self.entries
+    }
+
+    /// Resolve the catalog entry that supplies one exact capability-bound
+    /// resource handle.
+    ///
+    /// This compares the complete device, board-package, class, and canonical
+    /// resource selector. A merely well-shaped handle is not catalog evidence.
+    pub fn entry_index_for_handle(&self, handle: ResourceGraphHandle) -> Option<usize> {
+        self.entries.iter().position(|entry| {
+            matches!(
+                entry.resource_parameter().map(|parameter| parameter.value().value()),
+                Some(GraphValue::ResourceHandle(candidate)) if *candidate == handle
+            )
+        })
+    }
+
+    /// Resolve the catalog entry that exactly supplies one existing node's
+    /// physical-resource identity.
+    ///
+    /// This checks kind, concrete execution owner, port shape, parameter ID,
+    /// name, registered type, and complete typed handle value. It does not
+    /// infer authority from the node label or a numeric resource selector.
+    pub fn entry_index_for_node(&self, node: &NodeDefinition) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| node_matches_entry(node, entry))
+    }
+}
+
+/// Rejection while replacing one catalog-managed physical-resource identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GraphCapabilityResourceSelectionError {
+    /// The requested catalog index was absent.
+    UnknownEntry(usize),
+    /// The requested graph node was absent.
+    UnknownNode(GraphNodeId),
+    /// The requested node parameter was absent.
+    UnknownParameter {
+        /// Exact graph node.
+        node: GraphNodeId,
+        /// Requested parameter identity.
+        parameter: u32,
+    },
+    /// The supplied structural path was invalid for the registered value.
+    ValuePath(GraphValuePathError),
+    /// The selected leaf was not a registered resource-handle value.
+    NotResourceHandleValue {
+        /// Exact graph node.
+        node: GraphNodeId,
+        /// Exact node-local parameter.
+        parameter: u32,
+    },
+    /// The existing leaf did not carry an exact value offered by this catalog.
+    ParameterNotCatalogBound {
+        /// Exact graph node.
+        node: GraphNodeId,
+        /// Exact node-local parameter.
+        parameter: u32,
+    },
+    /// The selected leaf already carries the requested exact catalog entry.
+    AlreadySelected {
+        /// Exact graph node.
+        node: GraphNodeId,
+        /// Exact node-local parameter.
+        parameter: u32,
+        /// Exact catalog entry.
+        entry: usize,
+    },
+    /// Another root or composite parameter leaf already carries the requested
+    /// resource identity.
+    ResourceAlreadySelected {
+        /// Exact catalog entry requested by the caller.
+        entry: usize,
+        /// Existing graph node that retains the identity.
+        node: GraphNodeId,
+        /// Existing node-local parameter that retains the identity.
+        parameter: u32,
+    },
+    /// A derived entry contradicted an internal invariant.
+    InvalidEntry {
+        /// Exact catalog entry.
+        entry: usize,
+        /// Contradictory fact.
+        aspect: &'static str,
+    },
+    /// The transactional workspace edit failed structural validation.
+    Workspace(GraphWorkspaceError),
+    /// The complete candidate failed the reviewed semantic registry.
+    Analysis(GraphAnalysisError),
+}
+
+impl fmt::Display for GraphCapabilityResourceSelectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownEntry(entry) => {
+                write!(formatter, "graph capability entry {entry} is unavailable")
+            }
+            Self::UnknownNode(node) => write!(formatter, "graph node {node:?} is unavailable"),
+            Self::UnknownParameter { node, parameter } => write!(
+                formatter,
+                "graph node {node:?} has no resource-selector parameter {parameter}"
+            ),
+            Self::ValuePath(error) => write!(
+                formatter,
+                "resource selector value path is invalid: {error}"
+            ),
+            Self::NotResourceHandleValue { node, parameter } => write!(
+                formatter,
+                "graph node {node:?} parameter {parameter} does not select a resource-handle leaf"
+            ),
+            Self::ParameterNotCatalogBound { node, parameter } => write!(
+                formatter,
+                "graph node {node:?} parameter {parameter} is not bound by this exact capability catalog"
+            ),
+            Self::AlreadySelected {
+                node,
+                parameter,
+                entry,
+            } => write!(
+                formatter,
+                "graph node {node:?} parameter {parameter} already carries capability entry {entry}"
+            ),
+            Self::ResourceAlreadySelected {
+                entry,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "capability entry {entry} is already carried by graph node {node:?} parameter {parameter}"
+            ),
+            Self::InvalidEntry { entry, aspect } => {
+                write!(
+                    formatter,
+                    "graph capability entry {entry} has invalid {aspect}"
+                )
+            }
+            Self::Workspace(error) => write!(formatter, "resource selection failed: {error}"),
+            Self::Analysis(error) => {
+                write!(
+                    formatter,
+                    "resource selection semantic analysis failed: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for GraphCapabilityResourceSelectionError {}
+
+impl From<GraphWorkspaceError> for GraphCapabilityResourceSelectionError {
+    fn from(value: GraphWorkspaceError) -> Self {
+        Self::Workspace(value)
+    }
+}
+
+impl From<GraphValuePathError> for GraphCapabilityResourceSelectionError {
+    fn from(value: GraphValuePathError) -> Self {
+        Self::ValuePath(value)
+    }
+}
+
+impl From<GraphAnalysisError> for GraphCapabilityResourceSelectionError {
+    fn from(value: GraphAnalysisError) -> Self {
+        Self::Analysis(value)
     }
 }
 
@@ -305,6 +488,7 @@ pub fn derive_graph_capability_node_catalog(
             entries.push(GraphCapabilityNodeEntry {
                 resource,
                 kind: implementation.kind().clone(),
+                resource_parameter,
                 prototype,
             });
         }
@@ -326,6 +510,175 @@ pub fn derive_graph_capability_node_catalog(
         advertised_resource_count: resources.len(),
         entries,
     })
+}
+
+/// Transactionally select a different capability-derived resource at one
+/// exact registered value path.
+///
+/// The existing leaf must already resolve to an exact entry in `catalog`; a
+/// merely well-typed but unlisted handle, label, or numeric pin therefore
+/// cannot gain selector authority. The replacement must retain the registered
+/// resource-handle type and may not duplicate an identity held by any other
+/// root or composite parameter leaf. The complete reconstructed value and
+/// candidate graph are structurally validated, semantically analyzed against
+/// `registry`, and canonically encoded before `workspace` changes.
+pub fn select_graph_capability_node_resource(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+    workspace: &mut GraphWorkspaceDocument,
+    node_id: GraphNodeId,
+    parameter_id: u32,
+    path: &[GraphValuePathSegment],
+    entry_index: usize,
+) -> Result<CanonicalGraphWorkspaceEncoding, GraphCapabilityResourceSelectionError> {
+    let entry = catalog.entries().get(entry_index).ok_or(
+        GraphCapabilityResourceSelectionError::UnknownEntry(entry_index),
+    )?;
+    let selected_parameter =
+        entry
+            .resource_parameter()
+            .ok_or(GraphCapabilityResourceSelectionError::InvalidEntry {
+                entry: entry_index,
+                aspect: "resource parameter",
+            })?;
+    let GraphValue::ResourceHandle(selected_handle) = selected_parameter.value().value() else {
+        return Err(GraphCapabilityResourceSelectionError::InvalidEntry {
+            entry: entry_index,
+            aspect: "resource value",
+        });
+    };
+    let node = workspace
+        .graph()
+        .node(node_id)
+        .ok_or(GraphCapabilityResourceSelectionError::UnknownNode(node_id))?;
+    let parameter = node
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.id() == parameter_id)
+        .ok_or(GraphCapabilityResourceSelectionError::UnknownParameter {
+            node: node_id,
+            parameter: parameter_id,
+        })?;
+    let (leaf_type, leaf) = parameter
+        .value()
+        .value_at_path(workspace.graph().schema(), path)?;
+    let Some(TypeKind::ResourceHandle { .. }) = workspace
+        .graph()
+        .schema()
+        .value_type(leaf_type)
+        .map(super::TypeDefinition::kind)
+    else {
+        return Err(
+            GraphCapabilityResourceSelectionError::NotResourceHandleValue {
+                node: node_id,
+                parameter: parameter_id,
+            },
+        );
+    };
+    if leaf_type != selected_parameter.value().value_type() {
+        return Err(
+            GraphCapabilityResourceSelectionError::ParameterNotCatalogBound {
+                node: node_id,
+                parameter: parameter_id,
+            },
+        );
+    }
+    let GraphValue::ResourceHandle(current_handle) = leaf else {
+        return Err(
+            GraphCapabilityResourceSelectionError::NotResourceHandleValue {
+                node: node_id,
+                parameter: parameter_id,
+            },
+        );
+    };
+    if catalog.entry_index_for_handle(*current_handle).is_none() {
+        return Err(
+            GraphCapabilityResourceSelectionError::ParameterNotCatalogBound {
+                node: node_id,
+                parameter: parameter_id,
+            },
+        );
+    }
+    if current_handle == selected_handle {
+        return Err(GraphCapabilityResourceSelectionError::AlreadySelected {
+            node: node_id,
+            parameter: parameter_id,
+            entry: entry_index,
+        });
+    }
+    if let Some((existing_node, existing_parameter)) =
+        workspace.graph().nodes().iter().find_map(|candidate| {
+            candidate
+                .parameters()
+                .iter()
+                .find_map(|candidate_parameter| {
+                    graph_value_contains_resource_handle(
+                        candidate_parameter.value().value(),
+                        *selected_handle,
+                    )
+                    .then_some((candidate.id(), candidate_parameter.id()))
+                })
+        })
+    {
+        return Err(
+            GraphCapabilityResourceSelectionError::ResourceAlreadySelected {
+                entry: entry_index,
+                node: existing_node,
+                parameter: existing_parameter,
+            },
+        );
+    }
+
+    let selected = parameter.value().replacing_value_at_path(
+        workspace.graph().schema(),
+        path,
+        GraphValue::ResourceHandle(*selected_handle),
+    )?;
+    let mut candidate = workspace.clone();
+    candidate.set_parameter(node_id, parameter_id, selected)?;
+    analyze_graph_draft(candidate.graph(), registry.semantic_registry())?;
+    let encoding = encode_graph_workspace(&candidate)?;
+    *workspace = candidate;
+    Ok(encoding)
+}
+
+fn graph_value_contains_resource_handle(value: &GraphValue, selected: ResourceGraphHandle) -> bool {
+    match value {
+        GraphValue::Array(values) => values
+            .iter()
+            .any(|value| graph_value_contains_resource_handle(value, selected)),
+        GraphValue::Record(fields) => fields
+            .iter()
+            .any(|field| graph_value_contains_resource_handle(&field.value, selected)),
+        GraphValue::OptionSome(value)
+        | GraphValue::ResultOk(value)
+        | GraphValue::ResultError(value) => graph_value_contains_resource_handle(value, selected),
+        GraphValue::ResourceHandle(handle) => *handle == selected,
+        GraphValue::Boolean(_)
+        | GraphValue::ExactRational(_)
+        | GraphValue::MeasurementInterval { .. }
+        | GraphValue::CanonicalI64(_)
+        | GraphValue::CanonicalU64(_)
+        | GraphValue::Text(_)
+        | GraphValue::Bytes(_)
+        | GraphValue::OptionNone
+        | GraphValue::JobHandle(_) => false,
+    }
+}
+
+fn node_matches_entry(node: &NodeDefinition, entry: &GraphCapabilityNodeEntry) -> bool {
+    let Some(expected) = entry.resource_parameter() else {
+        return false;
+    };
+    node.kind() == entry.kind()
+        && node.domain() == entry.prototype().domain()
+        && node.inputs() == entry.prototype().inputs()
+        && node.outputs() == entry.prototype().outputs()
+        && node.parameters().iter().any(|parameter| {
+            parameter.id() == expected.id()
+                && parameter.name() == expected.name()
+                && parameter.value() == expected.value()
+        })
 }
 
 /// Stable, allocation-backed display label for one typed board resource.
@@ -383,16 +736,32 @@ mod tests {
         ClockDefinition, ClockKind, ExecutionDomainSet, GraphAnalysisLimits, GraphClockId,
         GraphDeploymentImplementation, GraphDocument, GraphLimits, GraphNodeRegistry, GraphPortId,
         GraphSchema, GraphTypeId, NodeOutputDependency, NodeParameterContract, NodeSchema,
-        PortDefinition, ResourceClassId, TypeDefinition,
+        PortDefinition, RecordField, RecordFieldId, RecordValueField, ResourceClassId,
+        TypeDefinition,
     };
 
     const DEVICE: DeviceId = DeviceId([0x54; 16]);
     const BOOL: GraphTypeId = GraphTypeId::new(1);
     const STREAM: GraphTypeId = GraphTypeId::new(2);
     const RESOURCE: GraphTypeId = GraphTypeId::new(3);
+    const RESOURCE_OPTION: GraphTypeId = GraphTypeId::new(4);
+    const RESOURCE_ARRAY: GraphTypeId = GraphTypeId::new(5);
+    const RESOURCE_SET: GraphTypeId = GraphTypeId::new(6);
     const ROOT: GraphClockId = GraphClockId::new(1);
     const SAMPLE: GraphClockId = GraphClockId::new(2);
     const CLASS: ResourceClassId = ResourceClassId::new(1);
+    const PRIMARY: RecordFieldId = RecordFieldId::new(1);
+    const FALLBACK: RecordFieldId = RecordFieldId::new(2);
+    const MIRRORS: RecordFieldId = RecordFieldId::new(3);
+    const PRIMARY_PATH: [GraphValuePathSegment; 1] = [GraphValuePathSegment::RecordField(PRIMARY)];
+    const FALLBACK_PATH: [GraphValuePathSegment; 2] = [
+        GraphValuePathSegment::RecordField(FALLBACK),
+        GraphValuePathSegment::OptionSome,
+    ];
+    const MIRROR_PATH: [GraphValuePathSegment; 2] = [
+        GraphValuePathSegment::RecordField(MIRRORS),
+        GraphValuePathSegment::ArrayIndex(0),
+    ];
 
     fn capability_document() -> Vec<u8> {
         let package = &board_mks_tinybee::PACKAGE;
@@ -434,6 +803,30 @@ mod tests {
                     "resource.stable-bool",
                     TypeKind::ResourceHandle { class: CLASS },
                 ),
+                TypeDefinition::new(
+                    RESOURCE_OPTION,
+                    "resource.optional-stable-bool",
+                    TypeKind::Option { value: RESOURCE },
+                ),
+                TypeDefinition::new(
+                    RESOURCE_ARRAY,
+                    "resource.stable-bool-array",
+                    TypeKind::Array {
+                        element: RESOURCE,
+                        maximum_items: 4,
+                    },
+                ),
+                TypeDefinition::new(
+                    RESOURCE_SET,
+                    "resource.stable-bool-reference-set",
+                    TypeKind::Record {
+                        fields: vec![
+                            RecordField::new(PRIMARY, "primary", RESOURCE),
+                            RecordField::new(FALLBACK, "fallback", RESOURCE_OPTION),
+                            RecordField::new(MIRRORS, "mirrors", RESOURCE_ARRAY),
+                        ],
+                    },
+                ),
             ],
         )
         .unwrap();
@@ -469,10 +862,21 @@ mod tests {
             Vec::new(),
             None,
         );
+        let reference_schema = NodeSchema::new(
+            NodeKind::new("alumina.io.capability-reference-set", 1),
+            ExecutionDomainSet::HOST_EXACT,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![NodeParameterContract::new(1, "references", RESOURCE_SET)],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
         let semantic = GraphNodeRegistry::try_new(
             GraphAnalysisLimits::interactive(),
             &context,
-            vec![input_schema],
+            vec![input_schema, reference_schema],
         )
         .unwrap();
         GraphDeploymentRegistry::try_new(
@@ -496,6 +900,75 @@ mod tests {
             capability_digest: board_mks_tinybee::PACKAGE.board.capability_digest,
             config_digest: Digest([0x43; 32]),
         }
+    }
+
+    fn empty_workspace(registry: &GraphDeploymentRegistry) -> GraphWorkspaceDocument {
+        let context = GraphDocument::try_new(
+            0,
+            registry.semantic_registry().context_schema().clone(),
+            registry.semantic_registry().context_clocks().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        GraphWorkspaceDocument::try_new(
+            super::super::GraphWorkspaceLimits::interactive(),
+            0,
+            1,
+            1,
+            context,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn catalog_handle(catalog: &GraphCapabilityNodeCatalog, entry: usize) -> ResourceGraphHandle {
+        let GraphValue::ResourceHandle(handle) = catalog.entries()[entry]
+            .resource_parameter()
+            .unwrap()
+            .value()
+            .value()
+        else {
+            panic!("catalog parameter was not a resource handle")
+        };
+        *handle
+    }
+
+    fn reference_set_prototype(
+        catalog: &GraphCapabilityNodeCatalog,
+        registry: &GraphDeploymentRegistry,
+    ) -> GraphNodePrototype {
+        let value = TypedGraphValue::try_new(
+            registry.semantic_registry().context_schema(),
+            RESOURCE_SET,
+            GraphValue::Record(vec![
+                RecordValueField {
+                    field: PRIMARY,
+                    value: GraphValue::ResourceHandle(catalog_handle(catalog, 0)),
+                },
+                RecordValueField {
+                    field: FALLBACK,
+                    value: GraphValue::OptionSome(Box::new(GraphValue::ResourceHandle(
+                        catalog_handle(catalog, 1),
+                    ))),
+                },
+                RecordValueField {
+                    field: MIRRORS,
+                    value: GraphValue::Array(vec![GraphValue::ResourceHandle(catalog_handle(
+                        catalog, 2,
+                    ))]),
+                },
+            ]),
+        )
+        .unwrap();
+        GraphNodePrototype::new(
+            NodeKind::new("alumina.io.capability-reference-set", 1),
+            "Capability resource references",
+            ExecutionDomain::HostExact,
+            Vec::new(),
+            Vec::new(),
+            vec![NodeParameter::new(1, "references", value)],
+        )
     }
 
     #[test]
@@ -560,23 +1033,7 @@ mod tests {
             GraphCapabilityCatalogLimits::interactive(),
         )
         .unwrap();
-        let context = GraphDocument::try_new(
-            0,
-            registry.semantic_registry().context_schema().clone(),
-            registry.semantic_registry().context_clocks().to_vec(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
-        let mut workspace = super::super::GraphWorkspaceDocument::try_new(
-            super::super::GraphWorkspaceLimits::interactive(),
-            0,
-            1,
-            1,
-            context,
-            Vec::new(),
-        )
-        .unwrap();
+        let mut workspace = empty_workspace(&registry);
         for (index, entry) in catalog.entries().iter().enumerate() {
             workspace
                 .create_node(entry.instantiate(), i32::try_from(index).unwrap() * 240, 0)
@@ -587,6 +1044,498 @@ mod tests {
             super::super::analyze_graph_draft(workspace.graph(), registry.semantic_registry())
                 .unwrap();
         assert!(draft.required_unconnected_inputs().is_empty());
+    }
+
+    #[test]
+    fn catalog_resource_selection_preserves_node_identity_and_exact_authority() {
+        let registry = registry();
+        let catalog = derive_graph_capability_node_catalog(
+            &capability_document(),
+            target(),
+            &registry,
+            GraphCapabilityCatalogLimits::interactive(),
+        )
+        .unwrap();
+        let mut workspace = empty_workspace(&registry);
+        let node = workspace
+            .create_node(catalog.entries()[0].instantiate(), 17, -23)
+            .unwrap();
+        let before = encode_graph_workspace(&workspace).unwrap();
+        let before_revision = workspace.revision();
+        let before_graph_revision = workspace.graph().revision();
+        let before_node_cursor = workspace.next_node_id();
+        let before_wire_cursor = workspace.next_wire_id();
+        let before_placement = workspace.placement(node).unwrap();
+
+        let selected = select_graph_capability_node_resource(
+            &catalog,
+            &registry,
+            &mut workspace,
+            node,
+            1,
+            &[],
+            2,
+        )
+        .unwrap();
+        assert_ne!(selected, before);
+        assert_eq!(selected, encode_graph_workspace(&workspace).unwrap());
+        assert_eq!(workspace.revision(), before_revision + 1);
+        assert_eq!(workspace.graph().revision(), before_graph_revision + 1);
+        assert_eq!(workspace.next_node_id(), before_node_cursor);
+        assert_eq!(workspace.next_wire_id(), before_wire_cursor);
+        assert_eq!(workspace.placement(node), Some(before_placement));
+        assert_eq!(
+            catalog.entry_index_for_node(workspace.graph().node(node).unwrap()),
+            Some(2)
+        );
+        let GraphValue::ResourceHandle(handle) = workspace.graph().node(node).unwrap().parameters()
+            [0]
+        .value()
+        .value() else {
+            panic!("selected catalog parameter was not a resource handle")
+        };
+        assert_eq!(handle.device_id, target().device_id);
+        assert_eq!(handle.board_package_digest, target().capability_digest);
+        assert_eq!(handle.class, CLASS);
+        assert_eq!(
+            alumina_capability::decode_resource_id(&handle.resource_selector.to_le_bytes()),
+            Ok(ResourceId::Gpio(33))
+        );
+
+        let retained = selected;
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &[],
+                2,
+            ),
+            Err(GraphCapabilityResourceSelectionError::AlreadySelected {
+                node,
+                parameter: 1,
+                entry: 2,
+            })
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+    }
+
+    #[test]
+    fn catalog_resource_selection_rebinds_only_one_composite_leaf() {
+        let registry = registry();
+        let catalog = derive_graph_capability_node_catalog(
+            &capability_document(),
+            target(),
+            &registry,
+            GraphCapabilityCatalogLimits::interactive(),
+        )
+        .unwrap();
+        let mut workspace = empty_workspace(&registry);
+        let node = workspace
+            .create_node(reference_set_prototype(&catalog, &registry), 17, -23)
+            .unwrap();
+        let before = encode_graph_workspace(&workspace).unwrap();
+        let before_node_cursor = workspace.next_node_id();
+        let before_wire_cursor = workspace.next_wire_id();
+        let before_placement = workspace.placement(node);
+
+        let selected = select_graph_capability_node_resource(
+            &catalog,
+            &registry,
+            &mut workspace,
+            node,
+            1,
+            &FALLBACK_PATH,
+            3,
+        )
+        .unwrap();
+        assert_ne!(selected, before);
+        assert_eq!(selected, encode_graph_workspace(&workspace).unwrap());
+        assert_eq!(workspace.next_node_id(), before_node_cursor);
+        assert_eq!(workspace.next_wire_id(), before_wire_cursor);
+        assert_eq!(workspace.placement(node), before_placement);
+        let parameter = &workspace.graph().node(node).unwrap().parameters()[0];
+        for (path, entry) in [
+            (&PRIMARY_PATH[..], 0),
+            (&FALLBACK_PATH[..], 3),
+            (&MIRROR_PATH[..], 2),
+        ] {
+            let (_, GraphValue::ResourceHandle(handle)) = parameter
+                .value()
+                .value_at_path(workspace.graph().schema(), path)
+                .unwrap()
+            else {
+                panic!("composite path did not resolve to a resource handle")
+            };
+            assert_eq!(catalog.entry_index_for_handle(*handle), Some(entry));
+        }
+
+        let retained = selected;
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &MIRROR_PATH,
+                0,
+            ),
+            Err(
+                GraphCapabilityResourceSelectionError::ResourceAlreadySelected {
+                    entry: 0,
+                    node,
+                    parameter: 1,
+                }
+            )
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &FALLBACK_PATH,
+                3,
+            ),
+            Err(GraphCapabilityResourceSelectionError::AlreadySelected {
+                node,
+                parameter: 1,
+                entry: 3,
+            })
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+
+        let invalid_path = [GraphValuePathSegment::OptionSome];
+        assert!(matches!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &invalid_path,
+                1,
+            ),
+            Err(GraphCapabilityResourceSelectionError::ValuePath(
+                GraphValuePathError::InvalidSegment { .. }
+            ))
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &[],
+                1,
+            ),
+            Err(
+                GraphCapabilityResourceSelectionError::NotResourceHandleValue {
+                    node,
+                    parameter: 1,
+                }
+            )
+        );
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                77,
+                &[],
+                1,
+            ),
+            Err(GraphCapabilityResourceSelectionError::UnknownParameter {
+                node,
+                parameter: 77,
+            })
+        );
+        let out_of_bounds = [
+            GraphValuePathSegment::RecordField(MIRRORS),
+            GraphValuePathSegment::ArrayIndex(9),
+        ];
+        assert!(matches!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &out_of_bounds,
+                1,
+            ),
+            Err(GraphCapabilityResourceSelectionError::ValuePath(
+                GraphValuePathError::ArrayIndexOutOfBounds { .. }
+            ))
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+    }
+
+    #[test]
+    fn composite_resource_selection_rejects_inactive_and_raw_leaves_atomically() {
+        let registry = registry();
+        let catalog = derive_graph_capability_node_catalog(
+            &capability_document(),
+            target(),
+            &registry,
+            GraphCapabilityCatalogLimits::interactive(),
+        )
+        .unwrap();
+        let mut workspace = empty_workspace(&registry);
+        let node = workspace
+            .create_node(reference_set_prototype(&catalog, &registry), 0, 0)
+            .unwrap();
+        let parameter = workspace.graph().node(node).unwrap().parameters()[0].clone();
+        let GraphValue::Record(mut fields) = parameter.value().value().clone() else {
+            panic!("reference set was not a record")
+        };
+        fields
+            .iter_mut()
+            .find(|field| field.field == FALLBACK)
+            .unwrap()
+            .value = GraphValue::OptionNone;
+        let inactive = TypedGraphValue::try_new(
+            workspace.graph().schema(),
+            RESOURCE_SET,
+            GraphValue::Record(fields),
+        )
+        .unwrap();
+        workspace.set_parameter(node, 1, inactive).unwrap();
+        let retained = encode_graph_workspace(&workspace).unwrap();
+        assert!(matches!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &FALLBACK_PATH,
+                3,
+            ),
+            Err(GraphCapabilityResourceSelectionError::ValuePath(
+                GraphValuePathError::InactiveBranch { .. }
+            ))
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+
+        let mut raw_handle = catalog_handle(&catalog, 0);
+        raw_handle.resource_selector = u32::from_le_bytes(encode_resource_id(ResourceId::Gpio(2)));
+        let raw = workspace.graph().node(node).unwrap().parameters()[0]
+            .value()
+            .replacing_value_at_path(
+                workspace.graph().schema(),
+                &PRIMARY_PATH,
+                GraphValue::ResourceHandle(raw_handle),
+            )
+            .unwrap();
+        workspace.set_parameter(node, 1, raw).unwrap();
+        let retained = encode_graph_workspace(&workspace).unwrap();
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                node,
+                1,
+                &PRIMARY_PATH,
+                3,
+            ),
+            Err(
+                GraphCapabilityResourceSelectionError::ParameterNotCatalogBound {
+                    node,
+                    parameter: 1,
+                }
+            )
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+    }
+
+    #[test]
+    fn catalog_resource_selection_rejects_duplicates_and_raw_or_foreign_handles() {
+        let registry = registry();
+        let document = capability_document();
+        let catalog = derive_graph_capability_node_catalog(
+            &document,
+            target(),
+            &registry,
+            GraphCapabilityCatalogLimits::interactive(),
+        )
+        .unwrap();
+        let mut workspace = empty_workspace(&registry);
+        let first = workspace
+            .create_node(catalog.entries()[0].instantiate(), 0, 0)
+            .unwrap();
+        let second = workspace
+            .create_node(catalog.entries()[1].instantiate(), 200, 0)
+            .unwrap();
+        let retained = encode_graph_workspace(&workspace).unwrap();
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                first,
+                1,
+                &[],
+                1,
+            ),
+            Err(
+                GraphCapabilityResourceSelectionError::ResourceAlreadySelected {
+                    entry: 1,
+                    node: second,
+                    parameter: 1,
+                }
+            )
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                GraphNodeId::new(77),
+                1,
+                &[],
+                0,
+            ),
+            Err(GraphCapabilityResourceSelectionError::UnknownNode(
+                GraphNodeId::new(77)
+            ))
+        );
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                first,
+                1,
+                &[],
+                catalog.entries().len(),
+            ),
+            Err(GraphCapabilityResourceSelectionError::UnknownEntry(
+                catalog.entries().len()
+            ))
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
+
+        let expected = catalog.entries()[0].resource_parameter().unwrap();
+        let GraphValue::ResourceHandle(mut raw_handle) = expected.value().value().clone() else {
+            panic!("catalog parameter was not a resource handle")
+        };
+        raw_handle.resource_selector = u32::from_le_bytes(encode_resource_id(ResourceId::Gpio(2)));
+        let raw_value = TypedGraphValue::try_new(
+            workspace.graph().schema(),
+            expected.value().value_type(),
+            GraphValue::ResourceHandle(raw_handle),
+        )
+        .unwrap();
+        workspace
+            .set_parameter(first, expected.id(), raw_value)
+            .unwrap();
+        let raw = encode_graph_workspace(&workspace).unwrap();
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &registry,
+                &mut workspace,
+                first,
+                1,
+                &[],
+                2,
+            ),
+            Err(
+                GraphCapabilityResourceSelectionError::ParameterNotCatalogBound {
+                    node: first,
+                    parameter: 1,
+                }
+            )
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), raw);
+
+        let mut foreign_target = target();
+        foreign_target.device_id = DeviceId([0x55; 16]);
+        let foreign_catalog = derive_graph_capability_node_catalog(
+            &document,
+            foreign_target,
+            &registry,
+            GraphCapabilityCatalogLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(
+            select_graph_capability_node_resource(
+                &foreign_catalog,
+                &registry,
+                &mut workspace,
+                second,
+                1,
+                &[],
+                2,
+            ),
+            Err(
+                GraphCapabilityResourceSelectionError::ParameterNotCatalogBound {
+                    node: second,
+                    parameter: 1,
+                }
+            )
+        );
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), raw);
+    }
+
+    #[test]
+    fn catalog_resource_selection_rejects_semantic_mismatch_atomically() {
+        let registry = registry();
+        let catalog = derive_graph_capability_node_catalog(
+            &capability_document(),
+            target(),
+            &registry,
+            GraphCapabilityCatalogLimits::interactive(),
+        )
+        .unwrap();
+        let mut workspace = empty_workspace(&registry);
+        let node = workspace
+            .create_node(catalog.entries()[0].instantiate(), 0, 0)
+            .unwrap();
+        let retained = encode_graph_workspace(&workspace).unwrap();
+
+        let empty_context = GraphDocument::try_new(
+            0,
+            registry.semantic_registry().context_schema().clone(),
+            registry.semantic_registry().context_clocks().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let unreviewed_semantics = GraphNodeRegistry::try_new(
+            GraphAnalysisLimits::interactive(),
+            &empty_context,
+            Vec::new(),
+        )
+        .unwrap();
+        let unreviewed_registry =
+            GraphDeploymentRegistry::try_new(unreviewed_semantics, Vec::new()).unwrap();
+        assert!(matches!(
+            select_graph_capability_node_resource(
+                &catalog,
+                &unreviewed_registry,
+                &mut workspace,
+                node,
+                1,
+                &[],
+                1,
+            ),
+            Err(GraphCapabilityResourceSelectionError::Analysis(
+                GraphAnalysisError::UnresolvedNode { node: rejected, .. }
+            )) if rejected == node
+        ));
+        assert_eq!(encode_graph_workspace(&workspace).unwrap(), retained);
     }
 
     #[test]

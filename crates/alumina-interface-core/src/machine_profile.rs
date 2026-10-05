@@ -1549,20 +1549,20 @@ mod tests {
         assert!(
             schedule
                 .total_path_length_mm()
-                .certified_dyadic_interval(-128)
+                .certified_rational_interval(-128)
                 .is_some()
         );
         assert!(
             schedule
                 .total_traversal_time_seconds()
-                .certified_dyadic_interval(-128)
+                .certified_rational_interval(-128)
                 .is_some()
         );
         assert!(
             lowered
                 .evidence()
                 .maximum_curve_to_canonical_error_mm()
-                .certified_dyadic_interval(-128)
+                .certified_rational_interval(-128)
                 .is_some()
         );
         let cache_refined_evidence =

@@ -30,6 +30,8 @@ use alumina_interface_core::{
     Millimetres, compile_representative_global_job, compile_representative_program,
     package_canonical_program, project_for_display, representative_partition_policy,
 };
+#[cfg(target_arch = "wasm32")]
+use alumina_net::provisioning::NetworkStatusFlags;
 use eframe::egui;
 use eframe::glow::HasContext as _;
 use hypergraphics::backend::{GpuColoredMesh, UnlitProgram};
@@ -40,9 +42,9 @@ use crate::browser_worker::{
     BrowserWorkerSupervisor, ConnectedCapabilityView, ConnectedTelemetryView,
     ConnectedVisualAssetView, ConnectedWaveformView, SupervisorLifecycle,
 };
-use crate::control_graph_ui::ExactControlWorkspace;
 #[cfg(target_arch = "wasm32")]
-use crate::control_graph_ui::WORKSPACE_PAIR_STORAGE_KEY;
+use crate::control_graph_ui::AUTHORING_SESSION_STORAGE_KEY;
+use crate::control_graph_ui::ExactControlWorkspace;
 use crate::m7_simulation::{RepresentativeM7SimulationReport, run_representative_m7_simulation};
 use crate::machine_cam_ui::MachineCamDeploymentTarget;
 use crate::machine_cam_ui::MachineCamWorkspace;
@@ -51,7 +53,9 @@ use alumina_interface_client::worker::{
     CapabilityDownloadPhaseSnapshot, ClockSamplingPolicy, ConfigurationStatusAvailabilitySnapshot,
     DeviceConnectionRequest, DeviceSessionPhase, DeviceSessionSnapshot, ExecutorStackSnapshot,
     RuntimeHealthAvailabilitySnapshot, WaveformCapturePhaseSnapshot, WorkerCachedJobPhaseSnapshot,
-    WorkerCachedJobSnapshot, WorkerCommand, WorkerWaveformRequest,
+    WorkerCachedJobSnapshot, WorkerCommand, WorkerNetworkAuthenticationSnapshot,
+    WorkerNetworkClientPhaseSnapshot, WorkerNetworkJoinRequest, WorkerNetworkSnapshot,
+    WorkerWaveformRequest,
 };
 
 /// Exact connected-MCU authority consumed by the representative browser CAM compiler.
@@ -152,6 +156,10 @@ impl LiveBoardExplorerUiState {
 enum LiveDeviceAction {
     Probe(u64),
     Capture(WorkerWaveformRequest),
+    NetworkScan(u64),
+    NetworkJoin(WorkerNetworkJoinRequest),
+    NetworkLeave(u64),
+    NetworkRecoverAp(u64),
     Disconnect(u64),
 }
 
@@ -248,7 +256,9 @@ impl RenderResources {
     }
 }
 
-fn initialize_exact_control_workspace() -> (Option<ExactControlWorkspace>, Option<String>) {
+fn initialize_exact_control_workspace(
+    job: Option<&CanonicalGlobalJob2>,
+) -> (Option<ExactControlWorkspace>, Option<String>) {
     #[cfg(target_arch = "wasm32")]
     let persisted = load_persisted_exact_control_workspace();
     #[cfg(not(target_arch = "wasm32"))]
@@ -258,7 +268,13 @@ fn initialize_exact_control_workspace() -> (Option<ExactControlWorkspace>, Optio
         Ok(persisted) => (persisted, None),
         Err(error) => (None, Some(error)),
     };
-    match ExactControlWorkspace::try_new_with_persisted(persisted.as_deref()) {
+    let Some(job) = job else {
+        return (
+            None,
+            Some("exact control workspace has no canonical cached-job fixture".to_owned()),
+        );
+    };
+    match ExactControlWorkspace::try_new_with_persisted_job(persisted.as_deref(), job) {
         Ok(mut workspace) => {
             if let Some(error) = persistence_error {
                 workspace.note_persistence_error(&error);
@@ -299,6 +315,8 @@ pub struct AluminaApp {
     live_capture_cursors: BTreeMap<u64, u64>,
     #[cfg(target_arch = "wasm32")]
     live_board_explorers: BTreeMap<u64, LiveBoardExplorerUiState>,
+    #[cfg(target_arch = "wasm32")]
+    live_network_passphrases: BTreeMap<u64, String>,
     #[cfg(target_arch = "wasm32")]
     next_job_id: u64,
     #[cfg(target_arch = "wasm32")]
@@ -365,7 +383,8 @@ impl AluminaApp {
                 },
                 None => (None, None),
             };
-        let (exact_control, exact_control_error) = initialize_exact_control_workspace();
+        let (exact_control, exact_control_error) =
+            initialize_exact_control_workspace(representative_global_job.as_ref());
         let (machine_cam, machine_cam_error) = match MachineCamWorkspace::try_new() {
             Ok(workspace) => (Some(workspace), None),
             Err(error) => (None, Some(format!("machine/CAM workspace failed: {error}"))),
@@ -417,6 +436,8 @@ impl AluminaApp {
             live_capture_cursors: BTreeMap::new(),
             #[cfg(target_arch = "wasm32")]
             live_board_explorers: BTreeMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            live_network_passphrases: BTreeMap::new(),
             #[cfg(target_arch = "wasm32")]
             next_job_id: 1,
             #[cfg(target_arch = "wasm32")]
@@ -815,6 +836,10 @@ impl AluminaApp {
     ) {
         let mut actions = Vec::new();
         for snapshot in &view.devices {
+            let network = view.networks.iter().find(|network| {
+                network.connection_id == snapshot.connection_id
+                    && network.generation == snapshot.generation
+            });
             let capability = view.capabilities.iter().find(|capability| {
                 capability.connection_id() == snapshot.connection_id
                     && capability.generation() == snapshot.generation
@@ -852,10 +877,15 @@ impl AluminaApp {
                 *explorer = LiveBoardExplorerUiState::new(snapshot.generation);
                 explorer.capability_digest = capability_digest;
             }
+            let network_passphrase = self
+                .live_network_passphrases
+                .entry(snapshot.connection_id)
+                .or_default();
             show_live_device_snapshot(
                 ui,
                 LiveDeviceEvidence {
                     snapshot,
+                    network,
                     capability,
                     visuals: &visuals,
                     telemetry,
@@ -863,6 +893,7 @@ impl AluminaApp {
                 },
                 explorer,
                 cursor,
+                network_passphrase,
                 &mut actions,
             );
         }
@@ -877,6 +908,17 @@ impl AluminaApp {
                     && snapshot.generation == explorer.generation
             })
         });
+        self.live_network_passphrases
+            .retain(|connection_id, passphrase| {
+                let live = view
+                    .devices
+                    .iter()
+                    .any(|snapshot| snapshot.connection_id == *connection_id);
+                if !live {
+                    erase_secret_text(passphrase);
+                }
+                live
+            });
         self.apply_live_actions(actions);
     }
 
@@ -1073,7 +1115,7 @@ impl AluminaApp {
         if !workspace.persistence_pending() {
             return;
         }
-        let persisted = match workspace.persisted_workspace_pair() {
+        let persisted = match workspace.persisted_authoring_session() {
             Ok(persisted) => persisted,
             Err(error) => {
                 workspace.note_persistence_error(&error);
@@ -1082,7 +1124,7 @@ impl AluminaApp {
         };
         let result = browser_local_storage().and_then(|storage| {
             storage
-                .set_item(WORKSPACE_PAIR_STORAGE_KEY, &persisted)
+                .set_item(AUTHORING_SESSION_STORAGE_KEY, &persisted)
                 .map_err(|value| browser_value_text(&value))
         });
         match result {
@@ -1097,6 +1139,16 @@ impl AluminaApp {
             let command = match action {
                 LiveDeviceAction::Probe(connection_id) => WorkerCommand::ProbeNow { connection_id },
                 LiveDeviceAction::Capture(request) => WorkerCommand::CaptureWaveform { request },
+                LiveDeviceAction::NetworkScan(connection_id) => {
+                    WorkerCommand::NetworkScan { connection_id }
+                }
+                LiveDeviceAction::NetworkJoin(request) => WorkerCommand::NetworkJoin { request },
+                LiveDeviceAction::NetworkLeave(connection_id) => {
+                    WorkerCommand::NetworkLeave { connection_id }
+                }
+                LiveDeviceAction::NetworkRecoverAp(connection_id) => {
+                    WorkerCommand::NetworkRecoverAp { connection_id }
+                }
                 LiveDeviceAction::Disconnect(connection_id) => {
                     WorkerCommand::Disconnect { connection_id }
                 }
@@ -1282,6 +1334,7 @@ fn show_live_job_snapshot(ui: &mut egui::Ui, job: &WorkerCachedJobSnapshot) {
 #[derive(Clone, Copy)]
 struct LiveDeviceEvidence<'a> {
     snapshot: &'a DeviceSessionSnapshot,
+    network: Option<&'a WorkerNetworkSnapshot>,
     capability: Option<&'a ConnectedCapabilityView>,
     visuals: &'a [&'a ConnectedVisualAssetView],
     telemetry: Option<&'a ConnectedTelemetryView>,
@@ -1294,19 +1347,21 @@ fn show_live_device_snapshot(
     evidence: LiveDeviceEvidence<'_>,
     explorer: &mut LiveBoardExplorerUiState,
     capture_cursor: &mut u64,
+    network_passphrase: &mut String,
     actions: &mut Vec<LiveDeviceAction>,
 ) {
     let LiveDeviceEvidence {
         snapshot,
+        network,
         capability,
         visuals,
         telemetry,
         waveform,
     } = evidence;
     ui.separator();
-    ui.collapsing(
-        format!("{} — {:?}", snapshot.label, snapshot.phase),
-        |ui| {
+    egui::CollapsingHeader::new(format!("{} — {:?}", snapshot.label, snapshot.phase))
+        .id_salt(("live_device_snapshot", snapshot.connection_id))
+        .show(ui, |ui| {
             ui.label(format!("origin: {}", snapshot.origin));
             ui.label(format!("session generation: {}", snapshot.generation));
             if let Some(boot_id) = snapshot.boot_id {
@@ -1320,7 +1375,23 @@ fn show_live_device_snapshot(
                     identity.credential_source,
                     identity.credential_source.production_armable()
                 ));
+                ui.monospace(format!(
+                    "embedded interface: commit {}… · bundle {}…",
+                    encode_hex(&identity.interface_commit[..6]),
+                    encode_hex(&identity.interface_bundle_digest[..6])
+                ));
             }
+            // Network access is the prerequisite for every other remote tool.
+            // Keep provisioning above high-volume capability and telemetry
+            // evidence so it remains reachable without chasing a moving scroll
+            // offset while the session is still qualifying its clock.
+            show_live_network_status(
+                ui,
+                snapshot.connection_id,
+                network,
+                network_passphrase,
+                actions,
+            );
             ui.label(format!(
                 "clock samples: {} accepted / {} rejected",
                 snapshot.accepted_samples, snapshot.rejected_samples
@@ -1381,8 +1452,7 @@ fn show_live_device_snapshot(
                     }
                 });
             }
-        },
-    );
+        });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1418,6 +1488,174 @@ fn show_live_device_actions(
             actions.push(LiveDeviceAction::Disconnect(snapshot.connection_id));
         }
     });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_network_status(
+    ui: &mut egui::Ui,
+    connection_id: u64,
+    network: Option<&WorkerNetworkSnapshot>,
+    passphrase: &mut String,
+    actions: &mut Vec<LiveDeviceAction>,
+) {
+    ui.separator();
+    ui.strong("Authenticated Wi-Fi provisioning");
+    let Some(network) = network else {
+        ui.label("Credential-free network status is awaiting worker acquisition.");
+        return;
+    };
+    let idle = network.client_phase == WorkerNetworkClientPhaseSnapshot::Idle;
+    ui.label(format!("transaction state: {:?}", network.client_phase));
+    if let Some(status) = &network.status {
+        ui.label(format!(
+            "radio: {:?} · station: {:?} · generation {}",
+            status.phase, status.station_link, status.generation
+        ));
+        if status.contains(NetworkStatusFlags::AP_EXPECTED) {
+            ui.label("Protected recovery AP remains expected during infrastructure mode.");
+        } else {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Recovery AP is not currently expected; explicit radio recovery is required.",
+            );
+        }
+        if let Some(ssid) = &status.ssid {
+            ui.label(format!(
+                "selected WLAN: {ssid} · {:?} · channel {} · {} dBm",
+                status.authentication, status.channel, status.signal_dbm
+            ));
+        }
+        if status.contains(NetworkStatusFlags::STATION_IPV4_READY) {
+            ui.label(format!(
+                "infrastructure IPv4: {}.{}.{}.{}/{} · gateway {}.{}.{}.{}",
+                status.ipv4_address[0],
+                status.ipv4_address[1],
+                status.ipv4_address[2],
+                status.ipv4_address[3],
+                status.ipv4_prefix,
+                status.ipv4_gateway[0],
+                status.ipv4_gateway[1],
+                status.ipv4_gateway[2],
+                status.ipv4_gateway[3]
+            ));
+        }
+        if status.contains(NetworkStatusFlags::STATION_CONFIGURED)
+            && !status.contains(NetworkStatusFlags::CREDENTIALS_DURABLE)
+        {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Infrastructure credentials are volatile in this firmware build and will not survive reboot.",
+            );
+        }
+        if status.contains(NetworkStatusFlags::LAST_OPERATION_FAILED) {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("latest network operation: {:?}", status.last_failure),
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(idle, egui::Button::new("Scan WLANs"))
+                .clicked()
+            {
+                actions.push(LiveDeviceAction::NetworkScan(connection_id));
+            }
+            let configured = status.contains(NetworkStatusFlags::STATION_CONFIGURED);
+            if ui
+                .add_enabled(idle && configured, egui::Button::new("Leave WLAN"))
+                .clicked()
+            {
+                actions.push(LiveDeviceAction::NetworkLeave(connection_id));
+            }
+            if ui
+                .add_enabled(idle, egui::Button::new("Recover device AP"))
+                .clicked()
+            {
+                actions.push(LiveDeviceAction::NetworkRecoverAp(connection_id));
+            }
+        });
+    } else {
+        ui.label("Initial authenticated network status has not completed.");
+    }
+
+    if let Some(scan) = &network.scan {
+        ui.label(format!(
+            "scan generation {} · {} result{}{}",
+            scan.scan_generation,
+            scan.entries.len(),
+            if scan.entries.len() == 1 { "" } else { "s" },
+            if scan.truncated { " · truncated" } else { "" }
+        ));
+        let protected = scan.entries.iter().any(|entry| {
+            !matches!(
+                entry.authentication,
+                WorkerNetworkAuthenticationSnapshot::Open
+                    | WorkerNetworkAuthenticationSnapshot::Unsupported
+            )
+        });
+        if protected {
+            ui.add(
+                egui::TextEdit::singleline(passphrase)
+                    .password(true)
+                    .hint_text("WLAN passphrase (kept out of worker snapshots)"),
+            );
+        }
+        for entry in &scan.entries {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{} · {:?} · ch {} · {} dBm · {}",
+                    entry.ssid,
+                    entry.authentication,
+                    entry.channel,
+                    entry.signal_dbm,
+                    encode_hex(&entry.bssid)
+                ));
+                let passphrase_valid = match entry.authentication {
+                    WorkerNetworkAuthenticationSnapshot::Open => true,
+                    WorkerNetworkAuthenticationSnapshot::Wpa2Personal
+                    | WorkerNetworkAuthenticationSnapshot::Wpa3Personal
+                    | WorkerNetworkAuthenticationSnapshot::Wpa2Wpa3Personal => {
+                        (8..=63).contains(&passphrase.len())
+                    }
+                    WorkerNetworkAuthenticationSnapshot::Unsupported => false,
+                };
+                if ui
+                    .add_enabled(idle && passphrase_valid, egui::Button::new("Join"))
+                    .clicked()
+                {
+                    let credential =
+                        if entry.authentication == WorkerNetworkAuthenticationSnapshot::Open {
+                            Vec::new()
+                        } else {
+                            passphrase.as_bytes().to_vec()
+                        };
+                    actions.push(LiveDeviceAction::NetworkJoin(WorkerNetworkJoinRequest {
+                        connection_id,
+                        scan_generation: scan.scan_generation,
+                        bssid: entry.bssid,
+                        passphrase: credential,
+                    }));
+                    erase_secret_text(passphrase);
+                }
+            });
+        }
+    }
+    if network.consecutive_failures != 0 {
+        ui.label(format!(
+            "consecutive network transport/validation failures: {}",
+            network.consecutive_failures
+        ));
+    }
+    if let Some(error) = &network.last_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn erase_secret_text(secret: &mut String) {
+    let zeros = "\0".repeat(secret.len());
+    secret.replace_range(.., &zeros);
+    secret.clear();
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2726,7 +2964,7 @@ fn browser_local_storage() -> Result<web_sys::Storage, String> {
 #[cfg(target_arch = "wasm32")]
 fn load_persisted_exact_control_workspace() -> Result<Option<String>, String> {
     browser_local_storage()?
-        .get_item(WORKSPACE_PAIR_STORAGE_KEY)
+        .get_item(AUTHORING_SESSION_STORAGE_KEY)
         .map_err(|value| browser_value_text(&value))
 }
 
@@ -2748,7 +2986,12 @@ impl eframe::App for AluminaApp {
         egui::SidePanel::right("live_mcu_status")
             .resizable(true)
             .default_width(380.0)
-            .show(context, |ui| self.show_live_control(ui));
+            .show(context, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("live_mcu_status_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.show_live_control(ui));
+            });
 
         egui::CentralPanel::default().show(context, |ui| match self.workspace_view {
             WorkspaceView::MachineCam => match self.machine_cam.as_mut() {

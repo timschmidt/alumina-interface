@@ -315,6 +315,7 @@ impl GraphWorkspaceDocument {
     }
 
     /// Transactionally move one node and advance only the workspace revision.
+    /// An exact no-op does not advance the revision.
     pub fn move_node(
         &mut self,
         node: GraphNodeId,
@@ -323,14 +324,17 @@ impl GraphWorkspaceDocument {
     ) -> Result<(), GraphWorkspaceError> {
         validate_coordinate(x, self.limits)?;
         validate_coordinate(y, self.limits)?;
-        let revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
         let mut placements = self.placements.clone();
         let index = placements
             .binary_search_by_key(&node, |placement| placement.node)
             .map_err(|_| GraphWorkspaceError::UnknownNode(node))?;
+        if placements[index].x() == x && placements[index].y() == y {
+            return Ok(());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(GraphWorkspaceError::RevisionOverflow("workspace"))?;
         placements[index] = GraphNodePlacement::new(node, x, y);
         let candidate = Self::try_new(
             self.limits,
@@ -449,8 +453,71 @@ impl GraphWorkspaceDocument {
         Ok(removed_wires)
     }
 
+    /// Transactionally replace one user-facing node label.
+    ///
+    /// Labels remain canonical graph metadata but never behavior identity.
+    /// Complete document validation enforces the embedded UTF-8 byte ceiling,
+    /// rejects empty/control-bearing text, and leaves the workspace unchanged
+    /// on failure. An exact no-op does not advance either revision.
+    pub fn set_node_label(
+        &mut self,
+        node_id: GraphNodeId,
+        label: impl Into<String>,
+    ) -> Result<(), GraphWorkspaceError> {
+        let label = label.into();
+        let node = self
+            .graph
+            .node(node_id)
+            .ok_or(GraphWorkspaceError::UnknownNode(node_id))?;
+        if node.label() == label {
+            return Ok(());
+        }
+        let replacement = NodeDefinition::new(
+            node.id(),
+            node.kind().clone(),
+            label,
+            node.domain(),
+            node.inputs().to_vec(),
+            node.outputs().to_vec(),
+            node.parameters().to_vec(),
+        );
+        self.replace_node(replacement)
+    }
+
+    /// Transactionally replace one node's concrete execution placement.
+    ///
+    /// This structural boundary rejects zero device identities and preserves
+    /// every other node fact. Audited kind/domain admission, cross-domain
+    /// synchronous wires, clocks, opcodes, and target capability remain a
+    /// separate semantic/deployment obligation. An exact no-op does not
+    /// advance either revision.
+    pub fn set_node_domain(
+        &mut self,
+        node_id: GraphNodeId,
+        domain: ExecutionDomain,
+    ) -> Result<(), GraphWorkspaceError> {
+        let node = self
+            .graph
+            .node(node_id)
+            .ok_or(GraphWorkspaceError::UnknownNode(node_id))?;
+        if node.domain() == domain {
+            return Ok(());
+        }
+        let replacement = NodeDefinition::new(
+            node.id(),
+            node.kind().clone(),
+            node.label(),
+            domain,
+            node.inputs().to_vec(),
+            node.outputs().to_vec(),
+            node.parameters().to_vec(),
+        );
+        self.replace_node(replacement)
+    }
+
     /// Transactionally replace one exact parameter value while preserving its
-    /// stable ID, name, and registered root type.
+    /// stable ID, name, and registered root type. An exact no-op does not
+    /// advance either revision.
     pub fn set_parameter(
         &mut self,
         node_id: GraphNodeId,
@@ -474,6 +541,9 @@ impl GraphWorkspaceDocument {
         if expected != received {
             return Err(GraphWorkspaceError::ParameterTypeMismatch { expected, received });
         }
+        if parameter.value() == &value {
+            return Ok(());
+        }
         *parameter = NodeParameter::new(parameter.id(), parameter.name(), value);
         let replacement = NodeDefinition::new(
             node.id(),
@@ -484,6 +554,14 @@ impl GraphWorkspaceDocument {
             node.outputs().to_vec(),
             parameters,
         );
+        self.replace_node(replacement)
+    }
+
+    fn replace_node(&mut self, replacement: NodeDefinition) -> Result<(), GraphWorkspaceError> {
+        let node_id = replacement.id();
+        if self.graph.node(node_id).is_none() {
+            return Err(GraphWorkspaceError::UnknownNode(node_id));
+        }
         let graph_revision = self
             .graph
             .revision()
@@ -498,7 +576,7 @@ impl GraphWorkspaceDocument {
             .nodes()
             .iter()
             .map(|node| {
-                if node.id() == node_id {
+                if node.id() == replacement.id() {
                     replacement.clone()
                 } else {
                     node.clone()
@@ -1349,9 +1427,11 @@ impl<'a> Decoder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use alumina_protocol::DeviceId;
+
     use super::*;
     use crate::graph::{
-        GraphPortId, GraphValue, RepresentativeControlSignal, analyze_graph,
+        GraphAnalysisError, GraphPortId, GraphValue, RepresentativeControlSignal, analyze_graph,
         compile_representative_exact_control_graph,
     };
     use hyperreal::Rational;
@@ -1451,12 +1531,132 @@ mod tests {
         );
         assert_ne!(encode_graph_workspace(&workspace).unwrap().digest(), before);
 
+        let unchanged = workspace.clone();
+        workspace.move_node(GraphNodeId::new(1), 321, 654).unwrap();
+        assert_eq!(workspace, unchanged);
+
         let retained = workspace.clone();
         assert_eq!(
             workspace
                 .move_node(GraphNodeId::new(1), i32::MAX, 0)
                 .unwrap_err(),
             GraphWorkspaceError::LimitExceeded("canvas coordinate")
+        );
+        assert_eq!(workspace, retained);
+    }
+
+    #[test]
+    fn node_labels_are_bounded_canonical_metadata_and_edit_transactionally() {
+        let mut workspace = workspace();
+        let node = GraphNodeId::new(8);
+        let initial_graph_digest = workspace.graph_digest();
+        let initial_placement = workspace.placement(node);
+        let initial_node_cursor = workspace.next_node_id();
+        let initial_wire_cursor = workspace.next_wire_id();
+
+        workspace
+            .set_node_label(node, "Exact gain stage α")
+            .unwrap();
+        assert_eq!(
+            workspace.graph().node(node).unwrap().label(),
+            "Exact gain stage α"
+        );
+        assert_eq!(workspace.graph().revision(), 2);
+        assert_eq!(workspace.revision(), 8);
+        assert_ne!(workspace.graph_digest(), initial_graph_digest);
+        assert_eq!(workspace.placement(node), initial_placement);
+        assert_eq!(workspace.next_node_id(), initial_node_cursor);
+        assert_eq!(workspace.next_wire_id(), initial_wire_cursor);
+
+        let retained = workspace.clone();
+        workspace
+            .set_node_label(node, "Exact gain stage α")
+            .unwrap();
+        assert_eq!(workspace, retained);
+        for invalid in [
+            String::new(),
+            "control\ncharacter".to_owned(),
+            "x".repeat(workspace.graph().schema().limits().maximum_label_bytes + 1),
+        ] {
+            assert_eq!(
+                workspace.set_node_label(node, invalid).unwrap_err(),
+                GraphWorkspaceError::GraphDocument(GraphDocumentError::InvalidName("node label"))
+            );
+            assert_eq!(workspace, retained);
+        }
+        assert_eq!(
+            workspace
+                .set_node_label(GraphNodeId::new(99), "unknown")
+                .unwrap_err(),
+            GraphWorkspaceError::UnknownNode(GraphNodeId::new(99))
+        );
+        assert_eq!(workspace, retained);
+        let encoding = encode_graph_workspace(&workspace).unwrap();
+        assert_eq!(
+            replay_graph_workspace(
+                encoding.bytes(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &workspace
+        );
+    }
+
+    #[test]
+    fn node_domain_edit_is_structural_and_semantic_authority_remains_separate() {
+        let mut workspace = workspace();
+        let node = GraphNodeId::new(8);
+        let device_id = DeviceId([0x42; 16]);
+        let placement = workspace.placement(node);
+        let node_cursor = workspace.next_node_id();
+        let wire_cursor = workspace.next_wire_id();
+        workspace
+            .set_node_domain(node, ExecutionDomain::Service { device_id })
+            .unwrap();
+        assert_eq!(
+            workspace.graph().node(node).unwrap().domain(),
+            ExecutionDomain::Service { device_id }
+        );
+        assert_eq!(workspace.placement(node), placement);
+        assert_eq!(workspace.next_node_id(), node_cursor);
+        assert_eq!(workspace.next_wire_id(), wire_cursor);
+        assert!(matches!(
+            analyze_graph(
+                workspace.graph(),
+                compile_representative_exact_control_graph()
+                    .unwrap()
+                    .registry()
+                    .semantic_registry(),
+            ),
+            Err(GraphAnalysisError::DomainNotAllowed {
+                node: rejected,
+                domain: ExecutionDomain::Service { device_id: rejected_device },
+            }) if rejected == node && rejected_device == device_id
+        ));
+
+        let retained = workspace.clone();
+        workspace
+            .set_node_domain(node, ExecutionDomain::Service { device_id })
+            .unwrap();
+        assert_eq!(workspace, retained);
+        assert_eq!(
+            workspace
+                .set_node_domain(
+                    node,
+                    ExecutionDomain::Realtime {
+                        device_id: DeviceId([0; 16]),
+                    },
+                )
+                .unwrap_err(),
+            GraphWorkspaceError::GraphDocument(GraphDocumentError::InvalidDomain)
+        );
+        assert_eq!(
+            workspace
+                .set_node_domain(GraphNodeId::new(99), ExecutionDomain::HostExact)
+                .unwrap_err(),
+            GraphWorkspaceError::UnknownNode(GraphNodeId::new(99))
         );
         assert_eq!(workspace, retained);
     }
@@ -1598,6 +1798,19 @@ mod tests {
                 .value(),
             &GraphValue::ExactRational(Rational::fraction(3, 2).unwrap())
         );
+
+        let unchanged = workspace.clone();
+        let exact_no_op = workspace
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .clone();
+        workspace
+            .set_parameter(GraphNodeId::new(8), 1, exact_no_op)
+            .unwrap();
+        assert_eq!(workspace, unchanged);
 
         let retained = workspace.clone();
         let other_type = workspace

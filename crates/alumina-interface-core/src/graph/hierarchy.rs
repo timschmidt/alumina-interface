@@ -1,8 +1,9 @@
 //! Canonical component-library bindings and deterministic hierarchy flattening.
 //!
-//! `ALGH` binds authoring-only instance nodes in one root `ALGW` to exact
-//! canonical `ALGC` dependencies. Flattening removes every instance node and
-//! produces an ordinary workspace containing only the component's structural
+//! `ALGH` binds authoring-only instance nodes in a root `ALGW` and canonical
+//! `ALGC` dependencies to exact component identities. The resulting dependency
+//! graph must be acyclic and bounded. Flattening recursively removes every
+//! instance node and produces an ordinary workspace containing only structural
 //! `ALGR` nodes and wires. Neither the hierarchy package nor flattening admits
 //! node semantics, implementations, resources, timing, or deployment.
 
@@ -14,9 +15,11 @@ use alumina_storage::sha256;
 
 use super::{
     CanonicalGraphComponentEncoding, CanonicalGraphWorkspaceEncoding, ExecutionDomain,
-    GraphComponentDocument, GraphComponentError, GraphComponentInputId, GraphComponentLimits,
-    GraphComponentOutputId, GraphLimits, GraphNodeId, GraphNodePrototype, GraphPortId,
-    GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits, NodeKind, PortDefinition,
+    GraphComponentDocument, GraphComponentError, GraphComponentInput, GraphComponentInputId,
+    GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId, GraphDocument,
+    GraphFrontPanelBinding, GraphFrontPanelItemId, GraphLimits, GraphNodeId, GraphNodePrototype,
+    GraphPortId, GraphWireId, GraphWorkspaceDocument, GraphWorkspaceError, GraphWorkspaceLimits,
+    NodeDefinition, NodeKind, NodeParameter, PortDefinition, TypedGraphValue, WireDefinition,
     WireEndpoint, encode_graph_component, encode_graph_workspace, replay_graph_component,
     replay_graph_workspace,
 };
@@ -25,17 +28,17 @@ use super::{
 pub const GRAPH_HIERARCHY_MAGIC: [u8; 4] = *b"ALGH";
 
 /// Exact canonical graph-hierarchy format implemented by this source tree.
-pub const GRAPH_HIERARCHY_VERSION: u16 = 1;
+pub const GRAPH_HIERARCHY_VERSION: u16 = 3;
 
 /// Reserved authoring-only node kind used for component instances before
 /// flattening. It is never an executable semantic or firmware opcode kind.
 pub const GRAPH_COMPONENT_INSTANCE_KIND: &str = "alumina.component.instance";
 
 /// Version of the reserved authoring-only instance shape.
-pub const GRAPH_COMPONENT_INSTANCE_VERSION: u16 = 1;
+pub const GRAPH_COMPONENT_INSTANCE_VERSION: u16 = 2;
 
 const GRAPH_HIERARCHY_FLAGS: u16 = 0;
-const HIERARCHY_LIMIT_FIELD_COUNT: usize = 5;
+const HIERARCHY_LIMIT_FIELD_COUNT: usize = 7;
 
 /// Caller-owned and embedded bounds for one hierarchy and its flattened result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,8 +47,12 @@ pub struct GraphHierarchyLimits {
     pub maximum_hierarchy_bytes: usize,
     /// Maximum distinct canonical component dependencies.
     pub maximum_components: usize,
-    /// Maximum component instances in the root workspace.
-    pub maximum_instances: usize,
+    /// Maximum scoped instance bindings retained in the package.
+    pub maximum_instance_bindings: usize,
+    /// Maximum recursively expanded instance path depth.
+    pub maximum_nesting_depth: usize,
+    /// Maximum component occurrences expanded into the root workspace.
+    pub maximum_expanded_instances: usize,
     /// Maximum nodes after complete flattening.
     pub maximum_flattened_nodes: usize,
     /// Maximum wires after complete flattening.
@@ -59,7 +66,9 @@ impl GraphHierarchyLimits {
         Self {
             maximum_hierarchy_bytes: 32 * 1024 * 1024,
             maximum_components: 64,
-            maximum_instances: 256,
+            maximum_instance_bindings: 4_096,
+            maximum_nesting_depth: 32,
+            maximum_expanded_instances: 4_096,
             maximum_flattened_nodes: 4_096,
             maximum_flattened_wires: 8_192,
         }
@@ -68,7 +77,9 @@ impl GraphHierarchyLimits {
     fn validate(self) -> Result<(), GraphHierarchyError> {
         if self.maximum_hierarchy_bytes == 0
             || self.maximum_components == 0
-            || self.maximum_instances == 0
+            || self.maximum_instance_bindings == 0
+            || self.maximum_nesting_depth == 0
+            || self.maximum_expanded_instances == 0
             || self.maximum_flattened_nodes == 0
             || self.maximum_flattened_wires == 0
         {
@@ -85,21 +96,48 @@ impl Default for GraphHierarchyLimits {
     }
 }
 
-/// Exact binding from one root authoring node to a canonical component digest.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Workspace scope containing one authoring-only component instance.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GraphInstanceScope {
+    /// Top-level hierarchy workspace.
+    Root,
+    /// Canonical component workspace named by its exact `ALGC` digest.
+    Component(Digest),
+}
+
+/// Exact binding from one scoped authoring node to a canonical component digest.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct GraphComponentInstance {
+    scope: GraphInstanceScope,
     node: GraphNodeId,
     component: Digest,
 }
 
 impl GraphComponentInstance {
-    /// Construct an instance binding. Complete hierarchy validation resolves
-    /// the node, dependency, and exact derived connector shape.
-    pub const fn new(node: GraphNodeId, component: Digest) -> Self {
-        Self { node, component }
+    /// Bind one root-workspace placeholder to an exact component.
+    pub const fn root(node: GraphNodeId, component: Digest) -> Self {
+        Self {
+            scope: GraphInstanceScope::Root,
+            node,
+            component,
+        }
     }
 
-    /// Return the root-workspace instance-node identity.
+    /// Bind one placeholder inside an exact parent component.
+    pub const fn nested(parent: Digest, node: GraphNodeId, component: Digest) -> Self {
+        Self {
+            scope: GraphInstanceScope::Component(parent),
+            node,
+            component,
+        }
+    }
+
+    /// Return the exact workspace containing the placeholder node.
+    pub const fn scope(self) -> GraphInstanceScope {
+        self.scope
+    }
+
+    /// Return the placeholder identity inside [`Self::scope`].
     pub const fn node(self) -> GraphNodeId {
         self.node
     }
@@ -134,6 +172,72 @@ impl GraphHierarchyDependency {
     }
 }
 
+/// One exact old-to-new component identity produced by recursive hierarchy
+/// replacement.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GraphHierarchyComponentRemap {
+    original: Digest,
+    replacement: Digest,
+}
+
+impl GraphHierarchyComponentRemap {
+    /// Return the dependency identity present before the transaction.
+    pub const fn original(self) -> Digest {
+        self.original
+    }
+
+    /// Return the dependency identity retained after the transaction.
+    pub const fn replacement(self) -> Digest {
+        self.replacement
+    }
+}
+
+/// Exact identity effects of one successful component-replacement transaction.
+/// Remaps are canonicalized by old digest and include every recursively rebuilt
+/// parent, not only the directly requested dependency.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphHierarchyReplacementReport {
+    requested_original: Digest,
+    requested_replacement: Digest,
+    remaps: Vec<GraphHierarchyComponentRemap>,
+}
+
+impl GraphHierarchyReplacementReport {
+    /// Return the dependency identity explicitly selected by the caller.
+    pub const fn requested_original(&self) -> Digest {
+        self.requested_original
+    }
+
+    /// Return the selected dependency identity after replacement.
+    pub const fn requested_replacement(&self) -> Digest {
+        self.requested_replacement
+    }
+
+    /// Borrow all changed old-to-new identities in canonical old-digest order.
+    pub fn remaps(&self) -> &[GraphHierarchyComponentRemap] {
+        &self.remaps
+    }
+
+    /// Resolve one old dependency identity when it was rebuilt recursively.
+    pub fn replacement_for(&self, original: Digest) -> Option<Digest> {
+        self.remaps
+            .binary_search_by_key(&original, |remap| remap.original)
+            .ok()
+            .map(|index| self.remaps[index].replacement)
+    }
+
+    /// Resolve an old identity through this report, retaining an unchanged
+    /// identity exactly when no remap record names it.
+    pub fn resolve(&self, original: Digest) -> Digest {
+        self.replacement_for(original).unwrap_or(original)
+    }
+
+    /// Return whether the explicitly requested component changed identity.
+    pub fn changed(&self) -> bool {
+        self.requested_original != self.requested_replacement
+    }
+}
+
 /// Canonical hierarchy authoring document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphHierarchyDocument {
@@ -143,6 +247,7 @@ pub struct GraphHierarchyDocument {
     root_digest: Digest,
     dependencies: Vec<GraphHierarchyDependency>,
     instances: Vec<GraphComponentInstance>,
+    flattened_instances: usize,
     flattened_nodes: usize,
     flattened_wires: usize,
 }
@@ -160,8 +265,8 @@ impl GraphHierarchyDocument {
         if components.len() > limits.maximum_components {
             return Err(GraphHierarchyError::LimitExceeded("component count"));
         }
-        if instances.len() > limits.maximum_instances {
-            return Err(GraphHierarchyError::LimitExceeded("instance count"));
+        if instances.len() > limits.maximum_instance_bindings {
+            return Err(GraphHierarchyError::LimitExceeded("instance binding count"));
         }
         let root_digest = encode_graph_workspace(&root)?.digest();
         let mut dependencies = Vec::with_capacity(components.len());
@@ -175,8 +280,8 @@ impl GraphHierarchyDocument {
                 return Err(GraphHierarchyError::DuplicateComponent(pair[0].digest()));
             }
         }
-        instances.sort_unstable_by_key(|instance| instance.node);
-        let (flattened_nodes, flattened_wires) =
+        instances.sort_unstable();
+        let (flattened_instances, flattened_nodes, flattened_wires) =
             validate_hierarchy(&root, &dependencies, &instances, limits)?;
         Ok(Self {
             limits,
@@ -185,6 +290,7 @@ impl GraphHierarchyDocument {
             root_digest,
             dependencies,
             instances,
+            flattened_instances,
             flattened_nodes,
             flattened_wires,
         })
@@ -215,9 +321,31 @@ impl GraphHierarchyDocument {
         &self.dependencies
     }
 
-    /// Borrow instance bindings in root-node order.
+    /// Borrow bindings in canonical scope/node/component order.
     pub fn instances(&self) -> &[GraphComponentInstance] {
         &self.instances
+    }
+
+    /// Resolve a stable root-to-nested occurrence path to the exact component
+    /// instantiated at its final node. An empty, missing, or discontinuous
+    /// path has no component authority.
+    pub fn component_at_instance_path(&self, path: &[GraphNodeId]) -> Option<Digest> {
+        let mut scope = GraphInstanceScope::Root;
+        let mut resolved = None;
+        for node in path {
+            let instance = self
+                .instances
+                .iter()
+                .find(|instance| instance.scope == scope && instance.node == *node)?;
+            resolved = Some(instance.component);
+            scope = GraphInstanceScope::Component(instance.component);
+        }
+        resolved
+    }
+
+    /// Return the statically proved number of recursively expanded occurrences.
+    pub const fn flattened_instance_count(&self) -> usize {
+        self.flattened_instances
     }
 
     /// Return the statically proved final node count.
@@ -237,6 +365,871 @@ impl GraphHierarchyDocument {
             .ok()
             .map(|index| &self.dependencies[index])
     }
+
+    /// Transactionally retain one additional exact component dependency. An
+    /// encoding already present in the library is an exact no-op.
+    pub fn add_component(
+        &mut self,
+        component: GraphComponentDocument,
+    ) -> Result<Digest, GraphHierarchyError> {
+        let encoding = encode_graph_component(&component)?;
+        let digest = encoding.digest();
+        if let Some(existing) = self.dependency(digest) {
+            if existing.encoding == encoding {
+                return Ok(digest);
+            }
+            return Err(GraphHierarchyError::NonCanonical);
+        }
+        let mut components = self.component_documents();
+        components.push(component);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.root.clone(),
+            components,
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(digest)
+    }
+
+    /// Transactionally remove one unreferenced exact dependency. A component
+    /// remains in use when any binding names it as either containing scope or
+    /// child component.
+    pub fn remove_component(&mut self, component: Digest) -> Result<(), GraphHierarchyError> {
+        let index = self
+            .dependencies
+            .binary_search_by_key(&component, GraphHierarchyDependency::digest)
+            .map_err(|_| GraphHierarchyError::UnknownComponent(component))?;
+        if self.instances.iter().any(|instance| {
+            instance.component == component
+                || instance.scope == GraphInstanceScope::Component(component)
+        }) {
+            return Err(GraphHierarchyError::ComponentInUse(component));
+        }
+        let mut components = self.component_documents();
+        components.remove(index);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.root.clone(),
+            components,
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally replace one exact component dependency, refresh every
+    /// affected placeholder by stable public connector identity, and cascade
+    /// changed parent-component identities to the root. Removing a connector
+    /// that is still referenced rejects instead of reinterpreting its old
+    /// positional port as another connector.
+    pub fn replace_component(
+        &mut self,
+        original: Digest,
+        replacement: GraphComponentDocument,
+    ) -> Result<Digest, GraphHierarchyError> {
+        self.replace_component_with_report(original, replacement)
+            .map(|report| report.requested_replacement())
+    }
+
+    /// Perform [`Self::replace_component`] and return every exact component
+    /// identity remapped by recursive parent refresh. An exact no-op returns an
+    /// empty remap set and leaves the hierarchy unchanged.
+    pub fn replace_component_with_report(
+        &mut self,
+        original: Digest,
+        replacement: GraphComponentDocument,
+    ) -> Result<GraphHierarchyReplacementReport, GraphHierarchyError> {
+        let instances = self.instances.clone();
+        self.replace_component_with_instances(original, replacement, instances)
+    }
+
+    fn replace_component_with_instances(
+        &mut self,
+        original: Digest,
+        replacement: GraphComponentDocument,
+        instances: Vec<GraphComponentInstance>,
+    ) -> Result<GraphHierarchyReplacementReport, GraphHierarchyError> {
+        let index = self
+            .dependencies
+            .binary_search_by_key(&original, GraphHierarchyDependency::digest)
+            .map_err(|_| GraphHierarchyError::UnknownComponent(original))?;
+        let replacement_encoding = encode_graph_component(&replacement)?;
+        let replacement_digest = replacement_encoding.digest();
+        if replacement_digest == original {
+            if replacement_encoding == self.dependencies[index].encoding
+                && instances == self.instances
+            {
+                return Ok(GraphHierarchyReplacementReport {
+                    requested_original: original,
+                    requested_replacement: original,
+                    remaps: Vec::new(),
+                });
+            }
+            return Err(GraphHierarchyError::NonCanonical);
+        }
+
+        let mut replacements = BTreeMap::from([(
+            original,
+            ComponentReplacement {
+                digest: replacement_digest,
+                document: replacement,
+            },
+        )]);
+        let mut converged = false;
+        for _ in 0..=self.dependencies.len() {
+            let mut changed = false;
+            for dependency in &self.dependencies {
+                let parent = dependency.digest();
+                if parent == original {
+                    continue;
+                }
+                let scope = GraphInstanceScope::Component(parent);
+                let refreshes = collect_instance_refreshes(
+                    &self.dependencies,
+                    &instances,
+                    scope,
+                    &replacements,
+                )?;
+                if refreshes.is_empty() {
+                    continue;
+                }
+                let document =
+                    refresh_component_instances(dependency.document(), scope, &refreshes)?;
+                let encoding = encode_graph_component(&document)?;
+                if encoding.digest() == parent {
+                    if replacements.remove(&parent).is_some() {
+                        changed = true;
+                    }
+                    continue;
+                }
+                let refreshed = ComponentReplacement {
+                    digest: encoding.digest(),
+                    document,
+                };
+                if replacements.get(&parent) != Some(&refreshed) {
+                    replacements.insert(parent, refreshed);
+                    changed = true;
+                }
+            }
+            if !changed {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(GraphHierarchyError::NonCanonical);
+        }
+        let report = GraphHierarchyReplacementReport {
+            requested_original: original,
+            requested_replacement: replacement_digest,
+            remaps: replacements
+                .iter()
+                .map(|(original, replacement)| GraphHierarchyComponentRemap {
+                    original: *original,
+                    replacement: replacement.digest,
+                })
+                .collect(),
+        };
+
+        let root_refreshes = collect_instance_refreshes(
+            &self.dependencies,
+            &instances,
+            GraphInstanceScope::Root,
+            &replacements,
+        )?;
+        let root =
+            refresh_instance_workspace(&self.root, GraphInstanceScope::Root, &root_refreshes)?;
+        let components = self
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                replacements.get(&dependency.digest()).map_or_else(
+                    || dependency.document().clone(),
+                    |replacement| replacement.document.clone(),
+                )
+            })
+            .collect();
+        let instances = instances
+            .iter()
+            .map(|instance| GraphComponentInstance {
+                scope: match instance.scope {
+                    GraphInstanceScope::Component(parent) => GraphInstanceScope::Component(
+                        replacements
+                            .get(&parent)
+                            .map_or(parent, |replacement| replacement.digest),
+                    ),
+                    scope => scope,
+                },
+                node: instance.node,
+                component: replacements
+                    .get(&instance.component)
+                    .map_or(instance.component, |replacement| replacement.digest),
+            })
+            .collect();
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            components,
+            instances,
+        )?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Transactionally append one child-component occurrence to an exact
+    /// parent component workspace. The new placeholder node and its scoped
+    /// hierarchy binding are validated and committed together; the returned
+    /// report includes every recursively remapped parent identity.
+    pub fn add_nested_instance(
+        &mut self,
+        parent: Digest,
+        component: Digest,
+        label: impl Into<String>,
+        x: i32,
+        y: i32,
+    ) -> Result<(GraphNodeId, GraphHierarchyReplacementReport), GraphHierarchyError> {
+        let mut replacement = self
+            .dependency(parent)
+            .ok_or(GraphHierarchyError::UnknownComponent(parent))?
+            .document
+            .clone();
+        let child = self
+            .dependency(component)
+            .ok_or(GraphHierarchyError::UnknownComponent(component))?
+            .document
+            .clone();
+        let prototype = graph_component_instance_prototype(&child, label)?;
+        let mut workspace = replacement.workspace().clone();
+        let node = workspace.create_node(prototype, x, y)?;
+        replacement.replace_workspace(workspace)?;
+        let mut instances = self.instances.clone();
+        instances.push(GraphComponentInstance::nested(parent, node, component));
+        let report = self.replace_component_with_instances(parent, replacement, instances)?;
+        Ok((node, report))
+    }
+
+    /// Transactionally rebind one existing child occurrence to another exact
+    /// library dependency. The parent-local placeholder keeps its node,
+    /// label, placement, and monotonic allocation cursors. Live wires and
+    /// public connector bindings are remapped by stable child connector ID;
+    /// removing or changing an incompatible live connector rejects the whole
+    /// candidate. A same-component rebind is an exact no-op.
+    ///
+    /// If both child definitions derive the same placeholder shape, only the
+    /// scoped hierarchy binding changes and the returned component-remap set
+    /// is empty. Otherwise the report contains every recursively changed
+    /// parent identity.
+    pub fn rebind_nested_instance(
+        &mut self,
+        parent: Digest,
+        node: GraphNodeId,
+        component: Digest,
+    ) -> Result<GraphHierarchyReplacementReport, GraphHierarchyError> {
+        let scope = GraphInstanceScope::Component(parent);
+        let instance_index = self
+            .instances
+            .binary_search_by_key(&(scope, node), |instance| (instance.scope, instance.node))
+            .map_err(|_| GraphHierarchyError::UnknownInstanceNode { scope, node })?;
+        let original_component = self.instances[instance_index].component;
+        if original_component == component {
+            return Ok(GraphHierarchyReplacementReport {
+                requested_original: parent,
+                requested_replacement: parent,
+                remaps: Vec::new(),
+            });
+        }
+        let parent_document = self
+            .dependency(parent)
+            .ok_or(GraphHierarchyError::UnknownComponent(parent))?
+            .document
+            .clone();
+        let original_document = self
+            .dependency(original_component)
+            .ok_or(GraphHierarchyError::UnknownComponent(original_component))?
+            .document
+            .clone();
+        let replacement_document = self
+            .dependency(component)
+            .ok_or(GraphHierarchyError::UnknownComponent(component))?
+            .document
+            .clone();
+        let replacement_parent = refresh_component_instances(
+            &parent_document,
+            scope,
+            &[ComponentInstanceRefresh {
+                node,
+                original: original_document,
+                replacement: replacement_document,
+            }],
+        )?;
+        let mut instances = self.instances.clone();
+        instances[instance_index].component = component;
+        if replacement_parent == parent_document {
+            let candidate = Self::try_new(
+                self.limits,
+                self.next_revision()?,
+                self.root.clone(),
+                self.component_documents(),
+                instances,
+            )?;
+            *self = candidate;
+            return Ok(GraphHierarchyReplacementReport {
+                requested_original: parent,
+                requested_replacement: parent,
+                remaps: Vec::new(),
+            });
+        }
+        self.replace_component_with_instances(parent, replacement_parent, instances)
+    }
+
+    /// Transactionally remove one child-component occurrence and all wires
+    /// incident to its parent-local placeholder. Public connector or panel
+    /// bindings that still name the node reject before either the parent
+    /// workspace or scoped hierarchy binding can change.
+    pub fn remove_nested_instance(
+        &mut self,
+        parent: Digest,
+        node: GraphNodeId,
+    ) -> Result<(usize, GraphHierarchyReplacementReport), GraphHierarchyError> {
+        let scope = GraphInstanceScope::Component(parent);
+        if !self
+            .instances
+            .iter()
+            .any(|instance| instance.scope == scope && instance.node == node)
+        {
+            return Err(GraphHierarchyError::UnknownInstanceNode { scope, node });
+        }
+        let mut replacement = self
+            .dependency(parent)
+            .ok_or(GraphHierarchyError::UnknownComponent(parent))?
+            .document
+            .clone();
+        let mut workspace = replacement.workspace().clone();
+        let removed_wires = workspace.delete_node(node)?;
+        replacement.replace_workspace(workspace)?;
+        let instances = self
+            .instances
+            .iter()
+            .copied()
+            .filter(|instance| !(instance.scope == scope && instance.node == node))
+            .collect();
+        let report = self.replace_component_with_instances(parent, replacement, instances)?;
+        Ok((removed_wires, report))
+    }
+
+    /// Transactionally append one root-workspace component instance using the
+    /// root workspace's monotonic node allocator.
+    pub fn add_root_instance(
+        &mut self,
+        component: Digest,
+        label: impl Into<String>,
+        x: i32,
+        y: i32,
+    ) -> Result<GraphNodeId, GraphHierarchyError> {
+        let dependency = self
+            .dependency(component)
+            .ok_or(GraphHierarchyError::UnknownComponent(component))?
+            .document
+            .clone();
+        let prototype = graph_component_instance_prototype(&dependency, label)?;
+        let mut root = self.root.clone();
+        let node = root.create_node(prototype, x, y)?;
+        let mut instances = self.instances.clone();
+        instances.push(GraphComponentInstance::root(node, component));
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            instances,
+        )?;
+        *self = candidate;
+        Ok(node)
+    }
+
+    /// Transactionally remove one root-workspace component instance and all
+    /// of its root-level incident wires. Component library dependencies remain
+    /// available for other occurrences.
+    pub fn remove_root_instance(
+        &mut self,
+        node: GraphNodeId,
+    ) -> Result<usize, GraphHierarchyError> {
+        if !self
+            .instances
+            .iter()
+            .any(|instance| instance.scope == GraphInstanceScope::Root && instance.node == node)
+        {
+            return Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Root,
+                node,
+            });
+        }
+        let mut root = self.root.clone();
+        let removed_wires = root.delete_node(node)?;
+        let instances = self
+            .instances
+            .iter()
+            .copied()
+            .filter(|instance| {
+                !(instance.scope == GraphInstanceScope::Root && instance.node == node)
+            })
+            .collect();
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            instances,
+        )?;
+        *self = candidate;
+        Ok(removed_wires)
+    }
+
+    /// Transactionally move one bound root component placeholder on the exact
+    /// integer authoring canvas.
+    pub fn move_root_instance(
+        &mut self,
+        node: GraphNodeId,
+        x: i32,
+        y: i32,
+    ) -> Result<(), GraphHierarchyError> {
+        if !self
+            .instances
+            .iter()
+            .any(|instance| instance.scope == GraphInstanceScope::Root && instance.node == node)
+        {
+            return Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Root,
+                node,
+            });
+        }
+        if self
+            .root
+            .placement(node)
+            .is_some_and(|placement| placement.x() == x && placement.y() == y)
+        {
+            return Ok(());
+        }
+        let mut root = self.root.clone();
+        root.move_node(node, x, y)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally replace one exact promoted parameter on a bound root
+    /// occurrence. The stable parameter identity is the source component's
+    /// front-panel item identity; flattening applies the retained value only
+    /// to this occurrence. An exact retained value is a byte-for-byte no-op.
+    pub fn set_root_instance_parameter(
+        &mut self,
+        node: GraphNodeId,
+        parameter: GraphFrontPanelItemId,
+        value: TypedGraphValue,
+    ) -> Result<(), GraphHierarchyError> {
+        let scope = GraphInstanceScope::Root;
+        if !self
+            .instances
+            .iter()
+            .any(|instance| instance.scope == scope && instance.node == node)
+        {
+            return Err(GraphHierarchyError::UnknownInstanceNode { scope, node });
+        }
+        let retained = self
+            .root
+            .graph()
+            .node(node)
+            .and_then(|instance| {
+                instance
+                    .parameters()
+                    .iter()
+                    .find(|candidate| candidate.id() == parameter.get())
+            })
+            .ok_or(GraphHierarchyError::UnknownInstanceParameter {
+                scope,
+                node,
+                parameter,
+            })?;
+        if retained.value() == &value {
+            return Ok(());
+        }
+        let mut root = self.root.clone();
+        root.set_parameter(node, parameter.get(), value)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally add one typed wire inside the root authoring workspace.
+    pub fn connect_root_wire(
+        &mut self,
+        source: WireEndpoint,
+        target: WireEndpoint,
+    ) -> Result<GraphWireId, GraphHierarchyError> {
+        let mut root = self.root.clone();
+        let wire = root.connect(source, target)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(wire)
+    }
+
+    /// Transactionally remove one exact wire from the root authoring
+    /// workspace without rewinding its monotonic wire cursor.
+    pub fn disconnect_root_wire(&mut self, wire: GraphWireId) -> Result<(), GraphHierarchyError> {
+        let mut root = self.root.clone();
+        root.disconnect(wire)?;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            root,
+            self.component_documents(),
+            self.instances.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn component_documents(&self) -> Vec<GraphComponentDocument> {
+        self.dependencies
+            .iter()
+            .map(|dependency| dependency.document.clone())
+            .collect()
+    }
+
+    fn next_revision(&self) -> Result<u64, GraphHierarchyError> {
+        self.revision
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("revision"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ComponentReplacement {
+    digest: Digest,
+    document: GraphComponentDocument,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentInstanceRefresh {
+    node: GraphNodeId,
+    original: GraphComponentDocument,
+    replacement: GraphComponentDocument,
+}
+
+fn collect_instance_refreshes(
+    dependencies: &[GraphHierarchyDependency],
+    instances: &[GraphComponentInstance],
+    scope: GraphInstanceScope,
+    replacements: &BTreeMap<Digest, ComponentReplacement>,
+) -> Result<Vec<ComponentInstanceRefresh>, GraphHierarchyError> {
+    instances
+        .iter()
+        .filter(|instance| instance.scope == scope)
+        .filter_map(|instance| {
+            replacements
+                .get(&instance.component)
+                .map(|replacement| (instance, replacement))
+        })
+        .map(|(instance, replacement)| {
+            let original = dependencies
+                .binary_search_by_key(&instance.component, GraphHierarchyDependency::digest)
+                .ok()
+                .map(|index| dependencies[index].document().clone())
+                .ok_or(GraphHierarchyError::UnknownComponent(instance.component))?;
+            Ok(ComponentInstanceRefresh {
+                node: instance.node,
+                original,
+                replacement: replacement.document.clone(),
+            })
+        })
+        .collect()
+}
+
+fn refresh_component_instances(
+    component: &GraphComponentDocument,
+    scope: GraphInstanceScope,
+    refreshes: &[ComponentInstanceRefresh],
+) -> Result<GraphComponentDocument, GraphHierarchyError> {
+    let workspace = refresh_instance_workspace(component.workspace(), scope, refreshes)?;
+    let by_node: BTreeMap<_, _> = refreshes
+        .iter()
+        .map(|refresh| (refresh.node, refresh))
+        .collect();
+    let inputs: Result<Vec<_>, GraphHierarchyError> = component
+        .inputs()
+        .iter()
+        .map(|input| {
+            Ok(GraphComponentInput::new(
+                input.id(),
+                input.name(),
+                remap_instance_input_endpoint(input.target(), scope, &by_node)?,
+            ))
+        })
+        .collect();
+    let outputs: Result<Vec<_>, GraphHierarchyError> = component
+        .outputs()
+        .iter()
+        .map(|output| {
+            Ok(GraphComponentOutput::new(
+                output.id(),
+                output.name(),
+                remap_instance_output_endpoint(output.source(), scope, &by_node)?,
+            ))
+        })
+        .collect();
+    let inputs = inputs?;
+    let outputs = outputs?;
+    if workspace == *component.workspace()
+        && inputs == component.inputs()
+        && outputs == component.outputs()
+    {
+        return Ok(component.clone());
+    }
+    GraphComponentDocument::try_new(
+        component.limits(),
+        component
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("component revision"))?,
+        component.component_version(),
+        component.name(),
+        component.next_input_id(),
+        component.next_output_id(),
+        component.next_panel_item_id(),
+        workspace,
+        inputs,
+        outputs,
+        component.panel_items().to_vec(),
+    )
+    .map_err(Into::into)
+}
+
+fn refresh_instance_workspace(
+    workspace: &GraphWorkspaceDocument,
+    scope: GraphInstanceScope,
+    refreshes: &[ComponentInstanceRefresh],
+) -> Result<GraphWorkspaceDocument, GraphHierarchyError> {
+    if refreshes.is_empty() {
+        return Ok(workspace.clone());
+    }
+    let by_node: BTreeMap<_, _> = refreshes
+        .iter()
+        .map(|refresh| (refresh.node, refresh))
+        .collect();
+    let nodes: Result<Vec<_>, GraphHierarchyError> = workspace
+        .graph()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let Some(refresh) = by_node.get(&node.id()) else {
+                return Ok(node.clone());
+            };
+            let prototype = graph_component_instance_prototype(&refresh.replacement, node.label())?;
+            let parameters = refreshed_instance_parameters(node, scope, refresh)?;
+            Ok(NodeDefinition::new(
+                node.id(),
+                prototype.kind().clone(),
+                prototype.label(),
+                prototype.domain(),
+                prototype.inputs().to_vec(),
+                prototype.outputs().to_vec(),
+                parameters,
+            ))
+        })
+        .collect();
+    let wires: Result<Vec<_>, GraphHierarchyError> = workspace
+        .graph()
+        .wires()
+        .iter()
+        .map(|wire| {
+            Ok(WireDefinition::new(
+                wire.id(),
+                remap_instance_output_endpoint(wire.source(), scope, &by_node)?,
+                remap_instance_input_endpoint(wire.target(), scope, &by_node)?,
+            ))
+        })
+        .collect();
+    let nodes = nodes?;
+    let wires = wires?;
+    if nodes == workspace.graph().nodes() && wires == workspace.graph().wires() {
+        return Ok(workspace.clone());
+    }
+    let graph = GraphDocument::try_new(
+        workspace
+            .graph()
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("graph revision"))?,
+        workspace.graph().schema().clone(),
+        workspace.graph().clocks().to_vec(),
+        nodes,
+        wires,
+    )
+    .map_err(GraphWorkspaceError::from)?;
+    GraphWorkspaceDocument::try_new(
+        workspace.limits(),
+        workspace
+            .revision()
+            .checked_add(1)
+            .ok_or(GraphHierarchyError::IntegerOverflow("workspace revision"))?,
+        workspace.next_node_id(),
+        workspace.next_wire_id(),
+        graph,
+        workspace.placements().to_vec(),
+    )
+    .map_err(Into::into)
+}
+
+fn refreshed_instance_parameters(
+    node: &NodeDefinition,
+    scope: GraphInstanceScope,
+    refresh: &ComponentInstanceRefresh,
+) -> Result<Vec<NodeParameter>, GraphHierarchyError> {
+    let original = graph_component_instance_parameters(&refresh.original)?;
+    let replacement = graph_component_instance_parameters(&refresh.replacement)?;
+    if node.parameters().len() != original.len()
+        || node
+            .parameters()
+            .iter()
+            .zip(&original)
+            .any(|(actual, default)| {
+                actual.id() != default.id()
+                    || actual.name() != default.name()
+                    || actual.value().value_type() != default.value().value_type()
+            })
+    {
+        return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
+            node: node.id(),
+            aspect: "parameters",
+        });
+    }
+
+    for (actual, default) in node.parameters().iter().zip(&original) {
+        let retained = replacement
+            .binary_search_by_key(&actual.id(), NodeParameter::id)
+            .is_ok();
+        if !retained && actual.value() != default.value() {
+            return Err(GraphHierarchyError::RemovedInstanceParameterOverride {
+                scope,
+                node: node.id(),
+                parameter: GraphFrontPanelItemId::new(actual.id()),
+            });
+        }
+    }
+
+    replacement
+        .into_iter()
+        .map(|default| {
+            let Ok(index) = original.binary_search_by_key(&default.id(), NodeParameter::id) else {
+                return Ok(default);
+            };
+            let actual = &node.parameters()[index];
+            if actual.value() == original[index].value() {
+                return Ok(default);
+            }
+            if actual.value().value_type() != default.value().value_type() {
+                return Err(GraphHierarchyError::ChangedInstanceParameterType {
+                    scope,
+                    node: node.id(),
+                    parameter: GraphFrontPanelItemId::new(default.id()),
+                });
+            }
+            Ok(NodeParameter::new(
+                default.id(),
+                default.name(),
+                actual.value().clone(),
+            ))
+        })
+        .collect()
+}
+
+fn remap_instance_input_endpoint(
+    endpoint: WireEndpoint,
+    scope: GraphInstanceScope,
+    refreshes: &BTreeMap<GraphNodeId, &ComponentInstanceRefresh>,
+) -> Result<WireEndpoint, GraphHierarchyError> {
+    let Some(refresh) = refreshes.get(&endpoint.node) else {
+        return Ok(endpoint);
+    };
+    let index = usize::try_from(endpoint.port.get())
+        .ok()
+        .and_then(|port| port.checked_sub(1))
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let input = refresh
+        .original
+        .inputs()
+        .get(index)
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let port = graph_component_instance_input_port(&refresh.replacement, input.id()).ok_or(
+        GraphHierarchyError::RemovedInstanceInput {
+            scope,
+            node: endpoint.node,
+            input: input.id(),
+        },
+    )?;
+    Ok(WireEndpoint {
+        node: endpoint.node,
+        port,
+    })
+}
+
+fn remap_instance_output_endpoint(
+    endpoint: WireEndpoint,
+    scope: GraphInstanceScope,
+    refreshes: &BTreeMap<GraphNodeId, &ComponentInstanceRefresh>,
+) -> Result<WireEndpoint, GraphHierarchyError> {
+    let Some(refresh) = refreshes.get(&endpoint.node) else {
+        return Ok(endpoint);
+    };
+    let first_output = refresh
+        .original
+        .inputs()
+        .len()
+        .checked_add(1)
+        .ok_or(GraphHierarchyError::IntegerOverflow("instance port count"))?;
+    let index = usize::try_from(endpoint.port.get())
+        .ok()
+        .and_then(|port| port.checked_sub(first_output))
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let output = refresh
+        .original
+        .outputs()
+        .get(index)
+        .ok_or(GraphHierarchyError::UnknownInstancePort(endpoint))?;
+    let port = graph_component_instance_output_port(&refresh.replacement, output.id()).ok_or(
+        GraphHierarchyError::RemovedInstanceOutput {
+            scope,
+            node: endpoint.node,
+            output: output.id(),
+        },
+    )?;
+    Ok(WireEndpoint {
+        node: endpoint.node,
+        port,
+    })
 }
 
 /// Canonical hierarchy bytes paired with their SHA-256 content identity.
@@ -294,6 +1287,96 @@ pub struct GraphFlattenedNode {
     flattened_node: GraphNodeId,
 }
 
+/// Stable authoring origin of one final flattened node.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GraphHierarchyNodeOrigin {
+    /// Ordinary node retained directly from the root workspace.
+    Root(GraphNodeId),
+    /// Surviving node copied from one exact component occurrence.
+    Component {
+        /// Root instance ID followed by nested component-local instance IDs.
+        source_path: Vec<GraphNodeId>,
+        /// Exact component definition containing `node`.
+        component: Digest,
+        /// Component-local node identity.
+        node: GraphNodeId,
+    },
+}
+
+impl GraphHierarchyNodeOrigin {
+    /// Borrow the component occurrence path, or return `None` for a root node.
+    pub fn source_path(&self) -> Option<&[GraphNodeId]> {
+        match self {
+            Self::Root(_) => None,
+            Self::Component { source_path, .. } => Some(source_path),
+        }
+    }
+}
+
+/// Total provenance record for one node in the final flattened workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFlattenedNodeProvenance {
+    origin: GraphHierarchyNodeOrigin,
+    flattened_node: GraphNodeId,
+}
+
+impl GraphFlattenedNodeProvenance {
+    /// Borrow the exact root or component authoring origin.
+    pub const fn origin(&self) -> &GraphHierarchyNodeOrigin {
+        &self.origin
+    }
+
+    /// Return the final monotonic root-workspace node identity.
+    pub const fn flattened_node(&self) -> GraphNodeId {
+        self.flattened_node
+    }
+}
+
+/// Stable authoring origin of one final flattened wire.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GraphHierarchyWireOrigin {
+    /// Wire authored directly in the root workspace.
+    Root(GraphWireId),
+    /// Wire copied from one exact component occurrence.
+    Component {
+        /// Root instance ID followed by nested component-local instance IDs.
+        source_path: Vec<GraphNodeId>,
+        /// Exact component definition containing `wire`.
+        component: Digest,
+        /// Component-local wire identity.
+        wire: GraphWireId,
+    },
+}
+
+impl GraphHierarchyWireOrigin {
+    /// Borrow the component occurrence path, or return `None` for a root wire.
+    pub fn source_path(&self) -> Option<&[GraphNodeId]> {
+        match self {
+            Self::Root(_) => None,
+            Self::Component { source_path, .. } => Some(source_path),
+        }
+    }
+}
+
+/// Total provenance record for one wire in the final flattened workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFlattenedWireProvenance {
+    origin: GraphHierarchyWireOrigin,
+    flattened_wire: GraphWireId,
+}
+
+impl GraphFlattenedWireProvenance {
+    /// Borrow the exact root or component authoring origin.
+    pub const fn origin(&self) -> &GraphHierarchyWireOrigin {
+        &self.origin
+    }
+
+    /// Return the final monotonic root-workspace wire identity.
+    pub const fn flattened_wire(&self) -> GraphWireId {
+        self.flattened_wire
+    }
+}
+
 impl GraphFlattenedNode {
     /// Return the node identity inside its source `ALGC`.
     pub const fn component_node(self) -> GraphNodeId {
@@ -310,14 +1393,21 @@ impl GraphFlattenedNode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphFlattenedInstance {
     instance_node: GraphNodeId,
+    source_path: Vec<GraphNodeId>,
     component: Digest,
     nodes: Vec<GraphFlattenedNode>,
 }
 
 impl GraphFlattenedInstance {
-    /// Return the removed root instance identity.
+    /// Return the removed root or transient flattened instance identity.
+    /// Prefer [`Self::source_path`] as the stable authoring identity.
     pub const fn instance_node(&self) -> GraphNodeId {
         self.instance_node
+    }
+
+    /// Borrow the stable source path: root node followed by nested local nodes.
+    pub fn source_path(&self) -> &[GraphNodeId] {
+        &self.source_path
     }
 
     /// Return the exact source component identity.
@@ -338,6 +1428,8 @@ pub struct GraphHierarchyFlattening {
     workspace: GraphWorkspaceDocument,
     encoding: CanonicalGraphWorkspaceEncoding,
     instances: Vec<GraphFlattenedInstance>,
+    node_provenance: Vec<GraphFlattenedNodeProvenance>,
+    wire_provenance: Vec<GraphFlattenedWireProvenance>,
 }
 
 impl GraphHierarchyFlattening {
@@ -356,9 +1448,51 @@ impl GraphHierarchyFlattening {
         &self.encoding
     }
 
-    /// Borrow mappings in original instance-node order.
+    /// Borrow mappings in deterministic depth-first source-path order.
     pub fn instances(&self) -> &[GraphFlattenedInstance] {
         &self.instances
+    }
+
+    /// Borrow total node provenance in final flattened-node order.
+    pub fn node_provenance(&self) -> &[GraphFlattenedNodeProvenance] {
+        &self.node_provenance
+    }
+
+    /// Borrow total wire provenance in final flattened-wire order.
+    pub fn wire_provenance(&self) -> &[GraphFlattenedWireProvenance] {
+        &self.wire_provenance
+    }
+
+    /// Resolve one final node to its stable authoring origin.
+    pub fn node_origin(&self, node: GraphNodeId) -> Option<&GraphHierarchyNodeOrigin> {
+        self.node_provenance
+            .binary_search_by_key(&node, GraphFlattenedNodeProvenance::flattened_node)
+            .ok()
+            .map(|index| self.node_provenance[index].origin())
+    }
+
+    /// Resolve one final wire to its stable authoring origin.
+    pub fn wire_origin(&self, wire: GraphWireId) -> Option<&GraphHierarchyWireOrigin> {
+        self.wire_provenance
+            .binary_search_by_key(&wire, GraphFlattenedWireProvenance::flattened_wire)
+            .ok()
+            .map(|index| self.wire_provenance[index].origin())
+    }
+
+    /// Resolve one stable authoring origin to its final node identity.
+    pub fn flattened_node(&self, origin: &GraphHierarchyNodeOrigin) -> Option<GraphNodeId> {
+        self.node_provenance
+            .iter()
+            .find(|mapping| mapping.origin() == origin)
+            .map(GraphFlattenedNodeProvenance::flattened_node)
+    }
+
+    /// Resolve one stable authoring origin to its final wire identity.
+    pub fn flattened_wire(&self, origin: &GraphHierarchyWireOrigin) -> Option<GraphWireId> {
+        self.wire_provenance
+            .iter()
+            .find(|mapping| mapping.origin() == origin)
+            .map(GraphFlattenedWireProvenance::flattened_wire)
     }
 
     /// Consume the report and return the flattened workspace.
@@ -392,39 +1526,110 @@ pub enum GraphHierarchyError {
     DuplicateComponent(Digest),
     /// An instance referenced a dependency absent from the library.
     UnknownComponent(Digest),
-    /// Two bindings referenced the same root node.
-    DuplicateInstance(GraphNodeId),
-    /// An instance binding referenced no root node.
-    UnknownInstanceNode(GraphNodeId),
+    /// A requested dependency removal still had a parent-scope or child binding.
+    ComponentInUse(Digest),
+    /// A nested binding named a parent component absent from the library.
+    UnknownInstanceScope(Digest),
+    /// Two bindings referenced the same node in one scope.
+    DuplicateInstance {
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Duplicated placeholder node.
+        node: GraphNodeId,
+    },
+    /// An instance binding referenced no node in its scope.
+    UnknownInstanceNode {
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Unknown placeholder node.
+        node: GraphNodeId,
+    },
     /// A binding referenced a normal node rather than the reserved instance kind.
-    NotComponentInstance(GraphNodeId),
+    NotComponentInstance {
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Non-instance node.
+        node: GraphNodeId,
+    },
     /// The reserved instance name used a version this hierarchy cannot derive.
     UnsupportedInstanceVersion {
-        /// Root authoring node.
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Scoped authoring node.
         node: GraphNodeId,
         /// Unsupported structural version.
         version: u16,
     },
     /// A reserved authoring instance node had no exact dependency binding.
-    MissingInstanceBinding(GraphNodeId),
+    MissingInstanceBinding {
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Unbound placeholder node.
+        node: GraphNodeId,
+    },
     /// A reserved instance node contradicted its component-derived shape.
     InstanceShapeMismatch {
-        /// Root instance node.
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Scoped instance node.
         node: GraphNodeId,
         /// Mismatched shape collection.
         aspect: &'static str,
     },
+    /// A requested root-occurrence parameter is not part of the exact public
+    /// parameter surface derived from its component.
+    UnknownInstanceParameter {
+        /// Exact containing workspace.
+        scope: GraphInstanceScope,
+        /// Scoped instance node.
+        node: GraphNodeId,
+        /// Unknown stable public parameter identity.
+        parameter: GraphFrontPanelItemId,
+    },
     /// A component type registry or clock set differed from the root authority.
     SemanticContextMismatch(Digest),
-    /// V1 dependencies must be leaf components and contained another instance.
-    NestedComponentInstance {
-        /// Source component identity.
-        component: Digest,
-        /// Forbidden internal instance node.
-        node: GraphNodeId,
-    },
+    /// Component dependency edges contain a recursive cycle.
+    DependencyCycle(Digest),
     /// A connector port could not map to a validated component terminal.
     UnknownInstancePort(WireEndpoint),
+    /// A referenced stable public input was removed during component refresh.
+    RemovedInstanceInput {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Removed stable public-input identity.
+        input: GraphComponentInputId,
+    },
+    /// A referenced stable public output was removed during component refresh.
+    RemovedInstanceOutput {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Removed stable public-output identity.
+        output: GraphComponentOutputId,
+    },
+    /// Component evolution removed a public parameter whose occurrence still
+    /// retains a value different from the old definition default.
+    RemovedInstanceParameterOverride {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Removed stable public parameter identity.
+        parameter: GraphFrontPanelItemId,
+    },
+    /// Component evolution changed the exact type of a public parameter whose
+    /// occurrence still retains a non-default value.
+    ChangedInstanceParameterType {
+        /// Exact workspace containing the affected placeholder.
+        scope: GraphInstanceScope,
+        /// Affected placeholder node.
+        node: GraphNodeId,
+        /// Stable public parameter identity whose type changed.
+        parameter: GraphFrontPanelItemId,
+    },
     /// Presentation translation could not fit the root canvas lattice.
     PlacementOverflow {
         /// Removed instance node.
@@ -488,45 +1693,69 @@ impl fmt::Display for GraphHierarchyError {
             Self::UnknownComponent(digest) => {
                 write!(formatter, "graph hierarchy component {digest:?} is unknown")
             }
-            Self::DuplicateInstance(node) => {
-                write!(
-                    formatter,
-                    "graph hierarchy instance node {node:?} is duplicated"
-                )
-            }
-            Self::UnknownInstanceNode(node) => {
-                write!(
-                    formatter,
-                    "graph hierarchy instance node {node:?} is unknown"
-                )
-            }
-            Self::NotComponentInstance(node) => {
-                write!(
-                    formatter,
-                    "graph hierarchy node {node:?} is not a component instance"
-                )
-            }
-            Self::UnsupportedInstanceVersion { node, version } => write!(
+            Self::ComponentInUse(digest) => write!(
                 formatter,
-                "graph hierarchy instance node {node:?} uses unsupported version {version}"
+                "graph hierarchy component {digest:?} is still referenced"
             ),
-            Self::MissingInstanceBinding(node) => {
+            Self::UnknownInstanceScope(component) => write!(
+                formatter,
+                "graph hierarchy instance scope component {component:?} is unknown"
+            ),
+            Self::DuplicateInstance { scope, node } => {
                 write!(
                     formatter,
-                    "graph hierarchy instance node {node:?} has no binding"
+                    "graph hierarchy instance node {node:?} is duplicated in {scope:?}"
                 )
             }
-            Self::InstanceShapeMismatch { node, aspect } => write!(
+            Self::UnknownInstanceNode { scope, node } => {
+                write!(
+                    formatter,
+                    "graph hierarchy instance node {node:?} is unknown in {scope:?}"
+                )
+            }
+            Self::NotComponentInstance { scope, node } => {
+                write!(
+                    formatter,
+                    "graph hierarchy node {node:?} in {scope:?} is not a component instance"
+                )
+            }
+            Self::UnsupportedInstanceVersion {
+                scope,
+                node,
+                version,
+            } => write!(
                 formatter,
-                "graph hierarchy instance node {node:?} has mismatched {aspect}"
+                "graph hierarchy instance node {node:?} in {scope:?} uses unsupported version {version}"
+            ),
+            Self::MissingInstanceBinding { scope, node } => {
+                write!(
+                    formatter,
+                    "graph hierarchy instance node {node:?} in {scope:?} has no binding"
+                )
+            }
+            Self::InstanceShapeMismatch {
+                scope,
+                node,
+                aspect,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} has mismatched {aspect}"
+            ),
+            Self::UnknownInstanceParameter {
+                scope,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} has no public parameter {parameter:?}"
             ),
             Self::SemanticContextMismatch(digest) => write!(
                 formatter,
                 "graph hierarchy component {digest:?} has a different type or clock context"
             ),
-            Self::NestedComponentInstance { component, node } => write!(
+            Self::DependencyCycle(component) => write!(
                 formatter,
-                "graph hierarchy leaf component {component:?} contains instance node {node:?}"
+                "graph hierarchy component dependency cycle re-enters {component:?}"
             ),
             Self::UnknownInstancePort(endpoint) => {
                 write!(
@@ -534,6 +1763,34 @@ impl fmt::Display for GraphHierarchyError {
                     "graph hierarchy instance port {endpoint:?} is unknown"
                 )
             }
+            Self::RemovedInstanceInput { scope, node, input } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} still references removed public input {input:?}"
+            ),
+            Self::RemovedInstanceOutput {
+                scope,
+                node,
+                output,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} still references removed public output {output:?}"
+            ),
+            Self::RemovedInstanceParameterOverride {
+                scope,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} still overrides removed public parameter {parameter:?}"
+            ),
+            Self::ChangedInstanceParameterType {
+                scope,
+                node,
+                parameter,
+            } => write!(
+                formatter,
+                "graph hierarchy instance node {node:?} in {scope:?} overrides public parameter {parameter:?} whose type changed"
+            ),
             Self::PlacementOverflow {
                 instance,
                 component_node,
@@ -557,6 +1814,7 @@ pub fn graph_component_instance_prototype(
     label: impl Into<String>,
 ) -> Result<GraphNodePrototype, GraphHierarchyError> {
     let (inputs, outputs) = component_instance_ports(component)?;
+    let parameters = graph_component_instance_parameters(component)?;
     Ok(GraphNodePrototype::new(
         NodeKind::new(
             GRAPH_COMPONENT_INSTANCE_KIND,
@@ -566,8 +1824,56 @@ pub fn graph_component_instance_prototype(
         ExecutionDomain::HostExact,
         inputs,
         outputs,
-        Vec::new(),
+        parameters,
     ))
+}
+
+/// Derive the stable exact parameter surface of one component instance.
+/// Parameter-control panel item IDs and names become node-local identities and
+/// names; their current retained component values are occurrence defaults.
+pub fn graph_component_instance_parameters(
+    component: &GraphComponentDocument,
+) -> Result<Vec<NodeParameter>, GraphHierarchyError> {
+    component
+        .panel_items()
+        .iter()
+        .filter_map(|item| match item.binding() {
+            GraphFrontPanelBinding::ParameterControl { node, parameter } => {
+                Some((item, node, parameter))
+            }
+            GraphFrontPanelBinding::InputControl(_)
+            | GraphFrontPanelBinding::OutputIndicator(_) => None,
+        })
+        .map(|(item, node, parameter)| {
+            let value = component
+                .workspace()
+                .graph()
+                .node(node)
+                .and_then(|node| {
+                    node.parameters()
+                        .iter()
+                        .find(|candidate| candidate.id() == parameter)
+                })
+                .map(NodeParameter::value)
+                .cloned()
+                .ok_or(GraphHierarchyError::NonCanonical)?;
+            Ok(NodeParameter::new(item.id().get(), item.name(), value))
+        })
+        .collect()
+}
+
+/// Resolve a stable promoted instance parameter to the exact node-local
+/// parameter controlled inside its component definition.
+pub fn graph_component_instance_parameter_target(
+    component: &GraphComponentDocument,
+    parameter: GraphFrontPanelItemId,
+) -> Option<(GraphNodeId, u32)> {
+    match component.panel_item(parameter)?.binding() {
+        GraphFrontPanelBinding::ParameterControl { node, parameter } => Some((node, parameter)),
+        GraphFrontPanelBinding::InputControl(_) | GraphFrontPanelBinding::OutputIndicator(_) => {
+            None
+        }
+    }
 }
 
 /// Resolve one public input identity to its derived instance-node input port.
@@ -633,6 +1939,13 @@ pub fn encode_graph_hierarchy(
             .map_err(|_| GraphHierarchyError::IntegerOverflow("instance count"))?,
     );
     for instance in &document.instances {
+        match instance.scope {
+            GraphInstanceScope::Root => encoder.u8(0),
+            GraphInstanceScope::Component(component) => {
+                encoder.u8(1);
+                encoder.bytes(&component.0);
+            }
+        }
         encoder.u32(instance.node.get());
         encoder.bytes(&instance.component.0);
     }
@@ -712,15 +2025,32 @@ pub fn replay_graph_hierarchy(
             .into_document(),
         );
     }
-    let instance_count = decoder.count(limits.maximum_instances, "instance count")?;
+    let instance_count =
+        decoder.count(limits.maximum_instance_bindings, "instance binding count")?;
     let mut instances = Vec::with_capacity(instance_count);
     for _ in 0..instance_count {
+        let scope = match decoder.u8()? {
+            0 => GraphInstanceScope::Root,
+            1 => {
+                let digest: [u8; 32] = decoder
+                    .take(32)?
+                    .try_into()
+                    .map_err(|_| GraphHierarchyError::Truncated)?;
+                GraphInstanceScope::Component(Digest(digest))
+            }
+            _ => return Err(GraphHierarchyError::NonCanonical),
+        };
         let node = GraphNodeId::new(decoder.u32()?);
         let digest: [u8; 32] = decoder
             .take(32)?
             .try_into()
             .map_err(|_| GraphHierarchyError::Truncated)?;
-        instances.push(GraphComponentInstance::new(node, Digest(digest)));
+        instances.push(match scope {
+            GraphInstanceScope::Root => GraphComponentInstance::root(node, Digest(digest)),
+            GraphInstanceScope::Component(parent) => {
+                GraphComponentInstance::nested(parent, node, Digest(digest))
+            }
+        });
     }
     if !decoder.is_empty() {
         return Err(GraphHierarchyError::TrailingBytes);
@@ -740,16 +2070,28 @@ pub fn flatten_graph_hierarchy(
 ) -> Result<GraphHierarchyFlattening, GraphHierarchyError> {
     let source_digest = encode_graph_hierarchy(hierarchy)?.digest();
     let mut workspace = hierarchy.root.clone();
-    let mut reports = Vec::with_capacity(hierarchy.instances.len());
-    for instance in &hierarchy.instances {
-        let dependency = hierarchy
-            .dependency(instance.component)
-            .ok_or(GraphHierarchyError::UnknownComponent(instance.component))?;
-        reports.push(flatten_instance(
+    let mut reports = Vec::with_capacity(hierarchy.flattened_instances);
+    let mut wire_origins = workspace
+        .graph()
+        .wires()
+        .iter()
+        .map(|wire| (wire.id(), GraphHierarchyWireOrigin::Root(wire.id())))
+        .collect::<BTreeMap<_, _>>();
+    for instance in hierarchy
+        .instances
+        .iter()
+        .copied()
+        .filter(|instance| instance.scope == GraphInstanceScope::Root)
+    {
+        flatten_instance_tree(
             &mut workspace,
-            *instance,
-            dependency.document(),
-        )?);
+            hierarchy,
+            instance.node,
+            instance,
+            vec![instance.node],
+            &mut reports,
+            &mut wire_origins,
+        )?;
     }
     if workspace.graph().nodes().len() != hierarchy.flattened_nodes {
         return Err(GraphHierarchyError::NonCanonical);
@@ -765,13 +2107,124 @@ pub fn flatten_graph_hierarchy(
     {
         return Err(GraphHierarchyError::NonCanonical);
     }
+    if reports.len() != hierarchy.flattened_instances {
+        return Err(GraphHierarchyError::NonCanonical);
+    }
+    if wire_origins.len() != workspace.graph().wires().len()
+        || !workspace
+            .graph()
+            .wires()
+            .iter()
+            .all(|wire| wire_origins.contains_key(&wire.id()))
+    {
+        return Err(GraphHierarchyError::NonCanonical);
+    }
+    let mut node_origins = hierarchy
+        .root
+        .graph()
+        .nodes()
+        .iter()
+        .filter(|node| !has_component_instance_name(node))
+        .map(|node| (node.id(), GraphHierarchyNodeOrigin::Root(node.id())))
+        .collect::<BTreeMap<_, _>>();
+    for report in &reports {
+        for mapping in report.nodes() {
+            if node_origins
+                .insert(
+                    mapping.flattened_node(),
+                    GraphHierarchyNodeOrigin::Component {
+                        source_path: report.source_path.clone(),
+                        component: report.component,
+                        node: mapping.component_node(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(GraphHierarchyError::NonCanonical);
+            }
+        }
+    }
+    if node_origins.len() != workspace.graph().nodes().len()
+        || !workspace
+            .graph()
+            .nodes()
+            .iter()
+            .all(|node| node_origins.contains_key(&node.id()))
+    {
+        return Err(GraphHierarchyError::NonCanonical);
+    }
+    let node_provenance = node_origins
+        .into_iter()
+        .map(|(flattened_node, origin)| GraphFlattenedNodeProvenance {
+            origin,
+            flattened_node,
+        })
+        .collect();
+    let wire_provenance = wire_origins
+        .into_iter()
+        .map(|(flattened_wire, origin)| GraphFlattenedWireProvenance {
+            origin,
+            flattened_wire,
+        })
+        .collect();
     let encoding = encode_graph_workspace(&workspace)?;
     Ok(GraphHierarchyFlattening {
         source_digest,
         workspace,
         encoding,
         instances: reports,
+        node_provenance,
+        wire_provenance,
     })
+}
+
+fn flatten_instance_tree(
+    root: &mut GraphWorkspaceDocument,
+    hierarchy: &GraphHierarchyDocument,
+    instance_node: GraphNodeId,
+    binding: GraphComponentInstance,
+    source_path: Vec<GraphNodeId>,
+    reports: &mut Vec<GraphFlattenedInstance>,
+    wire_origins: &mut BTreeMap<GraphWireId, GraphHierarchyWireOrigin>,
+) -> Result<(), GraphHierarchyError> {
+    if source_path.len() > hierarchy.limits.maximum_nesting_depth {
+        return Err(GraphHierarchyError::LimitExceeded("nesting depth"));
+    }
+    let dependency = hierarchy
+        .dependency(binding.component)
+        .ok_or(GraphHierarchyError::UnknownComponent(binding.component))?;
+    let copied = flatten_instance(
+        root,
+        instance_node,
+        binding.component,
+        source_path.clone(),
+        dependency.document(),
+        wire_origins,
+    )?;
+    let node_map = copied.node_map;
+    reports.push(copied.report);
+    for nested in hierarchy
+        .instances
+        .iter()
+        .copied()
+        .filter(|instance| instance.scope == GraphInstanceScope::Component(binding.component))
+    {
+        let nested_node = *node_map
+            .get(&nested.node)
+            .ok_or(GraphHierarchyError::NonCanonical)?;
+        let mut nested_path = source_path.clone();
+        nested_path.push(nested.node);
+        flatten_instance_tree(
+            root,
+            hierarchy,
+            nested_node,
+            nested,
+            nested_path,
+            reports,
+            wire_origins,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_hierarchy(
@@ -779,65 +2232,108 @@ fn validate_hierarchy(
     dependencies: &[GraphHierarchyDependency],
     instances: &[GraphComponentInstance],
     limits: GraphHierarchyLimits,
-) -> Result<(usize, usize), GraphHierarchyError> {
-    let mut prior_instance = None;
-    let mut bound_nodes = BTreeSet::new();
-    let mut flattened_nodes = root.graph().nodes().len();
-    let mut flattened_wires = root.graph().wires().len();
-    for node in root
-        .graph()
-        .nodes()
-        .iter()
-        .filter(|node| has_component_instance_name(node))
-    {
-        if node.kind().version() != GRAPH_COMPONENT_INSTANCE_VERSION {
-            return Err(GraphHierarchyError::UnsupportedInstanceVersion {
-                node: node.id(),
-                version: node.kind().version(),
-            });
-        }
-    }
+) -> Result<(usize, usize, usize), GraphHierarchyError> {
     for dependency in dependencies {
         validate_dependency_context(root, dependency)?;
     }
+
+    let mut prior_instance = None;
+    let mut bound_nodes = BTreeSet::new();
     for instance in instances {
+        let key = (instance.scope, instance.node);
         if instance.node.get() == 0 {
-            return Err(GraphHierarchyError::UnknownInstanceNode(instance.node));
+            return Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: instance.scope,
+                node: instance.node,
+            });
         }
-        if prior_instance == Some(instance.node) {
-            return Err(GraphHierarchyError::DuplicateInstance(instance.node));
+        if prior_instance == Some(key) {
+            return Err(GraphHierarchyError::DuplicateInstance {
+                scope: instance.scope,
+                node: instance.node,
+            });
         }
-        prior_instance = Some(instance.node);
-        let node = root
-            .graph()
-            .node(instance.node)
-            .ok_or(GraphHierarchyError::UnknownInstanceNode(instance.node))?;
-        if !is_component_instance_node(node) {
-            return Err(GraphHierarchyError::NotComponentInstance(instance.node));
+        prior_instance = Some(key);
+        let workspace = workspace_for_scope(root, dependencies, instance.scope)?;
+        let node = workspace.graph().node(instance.node).ok_or(
+            GraphHierarchyError::UnknownInstanceNode {
+                scope: instance.scope,
+                node: instance.node,
+            },
+        )?;
+        if !has_component_instance_name(node) {
+            return Err(GraphHierarchyError::NotComponentInstance {
+                scope: instance.scope,
+                node: instance.node,
+            });
+        }
+        if node.kind().version() != GRAPH_COMPONENT_INSTANCE_VERSION {
+            return Err(GraphHierarchyError::UnsupportedInstanceVersion {
+                scope: instance.scope,
+                node: instance.node,
+                version: node.kind().version(),
+            });
         }
         let dependency = dependency_by_digest(dependencies, instance.component)
             .ok_or(GraphHierarchyError::UnknownComponent(instance.component))?;
-        validate_instance_node(node, dependency.document())?;
-        bound_nodes.insert(instance.node);
-        flattened_nodes = flattened_nodes
-            .checked_sub(1)
-            .and_then(|count| {
-                count.checked_add(dependency.document().workspace().graph().nodes().len())
-            })
-            .ok_or(GraphHierarchyError::IntegerOverflow("flattened node count"))?;
-        flattened_wires = flattened_wires
-            .checked_add(dependency.document().workspace().graph().wires().len())
-            .ok_or(GraphHierarchyError::IntegerOverflow("flattened wire count"))?;
+        validate_instance_node(instance.scope, node, dependency.document())?;
+        bound_nodes.insert(key);
     }
-    for node in root
+
+    validate_scope_placeholders(GraphInstanceScope::Root, root, &bound_nodes)?;
+    for dependency in dependencies {
+        validate_scope_placeholders(
+            GraphInstanceScope::Component(dependency.digest()),
+            dependency.document().workspace(),
+            &bound_nodes,
+        )?;
+    }
+
+    let mut memo = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    for dependency in dependencies {
+        let expansion = component_expansion(
+            dependency.digest(),
+            dependencies,
+            instances,
+            &mut memo,
+            &mut visiting,
+        )?;
+        if expansion.depth > limits.maximum_nesting_depth {
+            return Err(GraphHierarchyError::LimitExceeded("nesting depth"));
+        }
+    }
+
+    let root_bindings = instances
+        .iter()
+        .filter(|instance| instance.scope == GraphInstanceScope::Root)
+        .collect::<Vec<_>>();
+    let mut flattened_instances = 0_usize;
+    let mut flattened_nodes = root
         .graph()
         .nodes()
-        .iter()
-        .filter(|node| is_component_instance_node(node))
-    {
-        if !bound_nodes.contains(&node.id()) {
-            return Err(GraphHierarchyError::MissingInstanceBinding(node.id()));
-        }
+        .len()
+        .checked_sub(root_bindings.len())
+        .ok_or(GraphHierarchyError::IntegerOverflow("flattened node count"))?;
+    let mut flattened_wires = root.graph().wires().len();
+    for instance in root_bindings {
+        let expansion = *memo
+            .get(&instance.component)
+            .ok_or(GraphHierarchyError::UnknownComponent(instance.component))?;
+        flattened_instances = flattened_instances.checked_add(expansion.instances).ok_or(
+            GraphHierarchyError::IntegerOverflow("expanded instance count"),
+        )?;
+        flattened_nodes = flattened_nodes
+            .checked_add(expansion.nodes)
+            .ok_or(GraphHierarchyError::IntegerOverflow("flattened node count"))?;
+        flattened_wires = flattened_wires
+            .checked_add(expansion.wires)
+            .ok_or(GraphHierarchyError::IntegerOverflow("flattened wire count"))?;
+    }
+    if flattened_instances > limits.maximum_expanded_instances {
+        return Err(GraphHierarchyError::LimitExceeded(
+            "expanded instance count",
+        ));
     }
     if flattened_nodes > limits.maximum_flattened_nodes
         || flattened_nodes > root.graph().schema().limits().maximum_nodes
@@ -850,7 +2346,7 @@ fn validate_hierarchy(
     {
         return Err(GraphHierarchyError::LimitExceeded("flattened wire count"));
     }
-    Ok((flattened_nodes, flattened_wires))
+    Ok((flattened_instances, flattened_nodes, flattened_wires))
 }
 
 fn validate_dependency_context(
@@ -865,17 +2361,112 @@ fn validate_dependency_context(
             dependency.digest(),
         ));
     }
-    if let Some(node) = component
-        .workspace()
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ComponentExpansion {
+    instances: usize,
+    nodes: usize,
+    wires: usize,
+    depth: usize,
+}
+
+fn component_expansion(
+    component: Digest,
+    dependencies: &[GraphHierarchyDependency],
+    instances: &[GraphComponentInstance],
+    memo: &mut BTreeMap<Digest, ComponentExpansion>,
+    visiting: &mut BTreeSet<Digest>,
+) -> Result<ComponentExpansion, GraphHierarchyError> {
+    if let Some(expansion) = memo.get(&component) {
+        return Ok(*expansion);
+    }
+    if !visiting.insert(component) {
+        return Err(GraphHierarchyError::DependencyCycle(component));
+    }
+    let dependency = dependency_by_digest(dependencies, component)
+        .ok_or(GraphHierarchyError::UnknownComponent(component))?;
+    let nested = instances
+        .iter()
+        .filter(|instance| instance.scope == GraphInstanceScope::Component(component))
+        .collect::<Vec<_>>();
+    let mut expansion = ComponentExpansion {
+        instances: 1,
+        nodes: dependency
+            .document()
+            .workspace()
+            .graph()
+            .nodes()
+            .len()
+            .checked_sub(nested.len())
+            .ok_or(GraphHierarchyError::IntegerOverflow(
+                "component flattened node count",
+            ))?,
+        wires: dependency.document().workspace().graph().wires().len(),
+        depth: 1,
+    };
+    for instance in nested {
+        let child =
+            component_expansion(instance.component, dependencies, instances, memo, visiting)?;
+        expansion.instances = expansion.instances.checked_add(child.instances).ok_or(
+            GraphHierarchyError::IntegerOverflow("expanded instance count"),
+        )?;
+        expansion.nodes = expansion.nodes.checked_add(child.nodes).ok_or(
+            GraphHierarchyError::IntegerOverflow("component flattened node count"),
+        )?;
+        expansion.wires = expansion.wires.checked_add(child.wires).ok_or(
+            GraphHierarchyError::IntegerOverflow("component flattened wire count"),
+        )?;
+        expansion.depth = expansion.depth.max(
+            child
+                .depth
+                .checked_add(1)
+                .ok_or(GraphHierarchyError::IntegerOverflow("nesting depth"))?,
+        );
+    }
+    visiting.remove(&component);
+    memo.insert(component, expansion);
+    Ok(expansion)
+}
+
+fn workspace_for_scope<'a>(
+    root: &'a GraphWorkspaceDocument,
+    dependencies: &'a [GraphHierarchyDependency],
+    scope: GraphInstanceScope,
+) -> Result<&'a GraphWorkspaceDocument, GraphHierarchyError> {
+    match scope {
+        GraphInstanceScope::Root => Ok(root),
+        GraphInstanceScope::Component(component) => dependency_by_digest(dependencies, component)
+            .map(|dependency| dependency.document().workspace())
+            .ok_or(GraphHierarchyError::UnknownInstanceScope(component)),
+    }
+}
+
+fn validate_scope_placeholders(
+    scope: GraphInstanceScope,
+    workspace: &GraphWorkspaceDocument,
+    bound_nodes: &BTreeSet<(GraphInstanceScope, GraphNodeId)>,
+) -> Result<(), GraphHierarchyError> {
+    for node in workspace
         .graph()
         .nodes()
         .iter()
-        .find(|node| has_component_instance_name(node))
+        .filter(|node| has_component_instance_name(node))
     {
-        return Err(GraphHierarchyError::NestedComponentInstance {
-            component: dependency.digest(),
-            node: node.id(),
-        });
+        if node.kind().version() != GRAPH_COMPONENT_INSTANCE_VERSION {
+            return Err(GraphHierarchyError::UnsupportedInstanceVersion {
+                scope,
+                node: node.id(),
+                version: node.kind().version(),
+            });
+        }
+        if !bound_nodes.contains(&(scope, node.id())) {
+            return Err(GraphHierarchyError::MissingInstanceBinding {
+                scope,
+                node: node.id(),
+            });
+        }
     }
     Ok(())
 }
@@ -891,45 +2482,57 @@ fn dependency_by_digest(
 }
 
 fn validate_instance_node(
+    scope: GraphInstanceScope,
     node: &super::NodeDefinition,
     component: &GraphComponentDocument,
 ) -> Result<(), GraphHierarchyError> {
     let prototype = graph_component_instance_prototype(component, node.label())?;
     if node.kind() != prototype.kind() {
         return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
             node: node.id(),
             aspect: "kind",
         });
     }
     if node.domain() != prototype.domain() {
         return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
             node: node.id(),
             aspect: "domain",
         });
     }
     if node.inputs() != prototype.inputs() {
         return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
             node: node.id(),
             aspect: "inputs",
         });
     }
     if node.outputs() != prototype.outputs() {
         return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
             node: node.id(),
             aspect: "outputs",
         });
     }
-    if !node.parameters().is_empty() {
+    if node.parameters().len() != prototype.parameters().len()
+        || node
+            .parameters()
+            .iter()
+            .zip(prototype.parameters())
+            .any(|(actual, expected)| {
+                actual.id() != expected.id()
+                    || actual.name() != expected.name()
+                    || actual.value().value_type() != expected.value().value_type()
+            })
+    {
         return Err(GraphHierarchyError::InstanceShapeMismatch {
+            scope,
             node: node.id(),
             aspect: "parameters",
         });
     }
     Ok(())
-}
-
-fn is_component_instance_node(node: &super::NodeDefinition) -> bool {
-    has_component_instance_name(node) && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION
 }
 
 fn has_component_instance_name(node: &super::NodeDefinition) -> bool {
@@ -980,24 +2583,54 @@ fn component_instance_ports(
     Ok((inputs, outputs))
 }
 
+struct FlattenedComponentCopy {
+    report: GraphFlattenedInstance,
+    node_map: BTreeMap<GraphNodeId, GraphNodeId>,
+}
+
 fn flatten_instance(
     root: &mut GraphWorkspaceDocument,
-    instance: GraphComponentInstance,
+    instance_node: GraphNodeId,
+    component_digest: Digest,
+    source_path: Vec<GraphNodeId>,
     component: &GraphComponentDocument,
-) -> Result<GraphFlattenedInstance, GraphHierarchyError> {
+    wire_origins: &mut BTreeMap<GraphWireId, GraphHierarchyWireOrigin>,
+) -> Result<FlattenedComponentCopy, GraphHierarchyError> {
+    let instance_parameters = root
+        .graph()
+        .node(instance_node)
+        .ok_or(GraphHierarchyError::NonCanonical)?
+        .parameters()
+        .to_vec();
     let placement = root
-        .placement(instance.node)
-        .ok_or(GraphHierarchyError::UnknownInstanceNode(instance.node))?;
-    let incident = root
+        .placement(instance_node)
+        .ok_or(GraphHierarchyError::NonCanonical)?;
+    let incident_wires = root
         .graph()
         .wires()
         .iter()
         .copied()
-        .filter(|wire| wire.source().node == instance.node || wire.target().node == instance.node)
+        .filter(|wire| wire.source().node == instance_node || wire.target().node == instance_node)
         .collect::<Vec<_>>();
-    root.delete_node(instance.node)?;
+    let mut incident = Vec::with_capacity(incident_wires.len());
+    for wire in incident_wires {
+        let origin = wire_origins
+            .remove(&wire.id())
+            .ok_or(GraphHierarchyError::NonCanonical)?;
+        incident.push((wire, origin));
+    }
+    root.delete_node(instance_node)?;
 
-    let component_workspace = component.workspace();
+    let mut component_workspace = component.workspace().clone();
+    for parameter in instance_parameters {
+        let (node, node_parameter) = graph_component_instance_parameter_target(
+            component,
+            GraphFrontPanelItemId::new(parameter.id()),
+        )
+        .ok_or(GraphHierarchyError::NonCanonical)?;
+        component_workspace.set_parameter(node, node_parameter, parameter.value().clone())?;
+    }
+    let component_workspace = &component_workspace;
     let origin_x = component_workspace
         .placements()
         .iter()
@@ -1020,14 +2653,14 @@ fn flatten_instance(
             placement.x(),
             component_placement.x(),
             origin_x,
-            instance.node,
+            instance_node,
             node.id(),
         )?;
         let y = translated_coordinate(
             placement.y(),
             component_placement.y(),
             origin_y,
-            instance.node,
+            instance_node,
             node.id(),
         )?;
         let prototype = GraphNodePrototype::new(
@@ -1040,34 +2673,56 @@ fn flatten_instance(
         );
         let flattened = root.create_node(prototype, x, y)?;
         node_map.insert(node.id(), flattened);
-        nodes.push(GraphFlattenedNode {
-            component_node: node.id(),
-            flattened_node: flattened,
-        });
+        if !has_component_instance_name(node) {
+            nodes.push(GraphFlattenedNode {
+                component_node: node.id(),
+                flattened_node: flattened,
+            });
+        }
     }
     for wire in component_workspace.graph().wires() {
-        root.connect(
+        let flattened_wire = root.connect(
             remap_component_endpoint(wire.source(), &node_map)?,
             remap_component_endpoint(wire.target(), &node_map)?,
         )?;
+        if wire_origins
+            .insert(
+                flattened_wire,
+                GraphHierarchyWireOrigin::Component {
+                    source_path: source_path.clone(),
+                    component: component_digest,
+                    wire: wire.id(),
+                },
+            )
+            .is_some()
+        {
+            return Err(GraphHierarchyError::NonCanonical);
+        }
     }
-    for wire in incident {
-        let source = if wire.source().node == instance.node {
+    for (wire, origin) in incident {
+        let source = if wire.source().node == instance_node {
             remap_public_output(component, wire.source(), &node_map)?
         } else {
             wire.source()
         };
-        let target = if wire.target().node == instance.node {
+        let target = if wire.target().node == instance_node {
             remap_public_input(component, wire.target(), &node_map)?
         } else {
             wire.target()
         };
-        root.connect(source, target)?;
+        let flattened_wire = root.connect(source, target)?;
+        if wire_origins.insert(flattened_wire, origin).is_some() {
+            return Err(GraphHierarchyError::NonCanonical);
+        }
     }
-    Ok(GraphFlattenedInstance {
-        instance_node: instance.node,
-        component: instance.component,
-        nodes,
+    Ok(FlattenedComponentCopy {
+        report: GraphFlattenedInstance {
+            instance_node,
+            source_path,
+            component: component_digest,
+            nodes,
+        },
+        node_map,
     })
 }
 
@@ -1142,7 +2797,9 @@ fn encode_limits(
     for value in [
         limits.maximum_hierarchy_bytes,
         limits.maximum_components,
-        limits.maximum_instances,
+        limits.maximum_instance_bindings,
+        limits.maximum_nesting_depth,
+        limits.maximum_expanded_instances,
         limits.maximum_flattened_nodes,
         limits.maximum_flattened_wires,
     ] {
@@ -1163,16 +2820,20 @@ fn decode_limits(decoder: &mut Decoder<'_>) -> Result<GraphHierarchyLimits, Grap
     Ok(GraphHierarchyLimits {
         maximum_hierarchy_bytes: values[0],
         maximum_components: values[1],
-        maximum_instances: values[2],
-        maximum_flattened_nodes: values[3],
-        maximum_flattened_wires: values[4],
+        maximum_instance_bindings: values[2],
+        maximum_nesting_depth: values[3],
+        maximum_expanded_instances: values[4],
+        maximum_flattened_nodes: values[5],
+        maximum_flattened_wires: values[6],
     })
 }
 
 const fn limits_within(embedded: GraphHierarchyLimits, admission: GraphHierarchyLimits) -> bool {
     embedded.maximum_hierarchy_bytes <= admission.maximum_hierarchy_bytes
         && embedded.maximum_components <= admission.maximum_components
-        && embedded.maximum_instances <= admission.maximum_instances
+        && embedded.maximum_instance_bindings <= admission.maximum_instance_bindings
+        && embedded.maximum_nesting_depth <= admission.maximum_nesting_depth
+        && embedded.maximum_expanded_instances <= admission.maximum_expanded_instances
         && embedded.maximum_flattened_nodes <= admission.maximum_flattened_nodes
         && embedded.maximum_flattened_wires <= admission.maximum_flattened_wires
 }
@@ -1183,6 +2844,10 @@ struct Encoder(Vec<u8>);
 impl Encoder {
     fn bytes(&mut self, value: &[u8]) {
         self.0.extend_from_slice(value);
+    }
+
+    fn u8(&mut self, value: u8) {
+        self.0.push(value);
     }
 
     fn u16(&mut self, value: u16) {
@@ -1231,6 +2896,10 @@ impl<'a> Decoder<'a> {
             .ok_or(GraphHierarchyError::Truncated)?;
         self.cursor = end;
         Ok(result)
+    }
+
+    fn u8(&mut self) -> Result<u8, GraphHierarchyError> {
+        Ok(self.take(1)?[0])
     }
 
     fn u16(&mut self) -> Result<u16, GraphHierarchyError> {
@@ -1290,10 +2959,14 @@ mod tests {
     use super::*;
     use crate::graph::{
         ClockDefinition, ClockKind, GraphClockId, GraphComponentInput, GraphComponentInputId,
-        GraphComponentOutput, GraphComponentOutputId, GraphDocument, GraphNodePlacement,
-        GraphWireId, NodeDefinition, RepresentativeControlSignal, WireDefinition, analyze_graph,
-        compile_representative_exact_control_graph,
+        GraphComponentOutput, GraphComponentOutputId, GraphComponentPackageError,
+        GraphComponentPackageLimits, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
+        GraphFrontPanelItemId, GraphFrontPanelRect, GraphNodePlacement, GraphValue, GraphWireId,
+        NodeDefinition, RepresentativeControlSignal, WireDefinition, analyze_graph,
+        compile_representative_exact_control_graph, encode_graph_component_package,
+        replay_graph_component_package,
     };
+    use hyperreal::Rational;
 
     fn endpoint(node: u32, port: u32) -> WireEndpoint {
         WireEndpoint {
@@ -1352,6 +3025,37 @@ mod tests {
         .unwrap()
     }
 
+    fn parameterized_component() -> GraphComponentDocument {
+        let mut component = component();
+        assert_eq!(
+            component
+                .add_panel_item(
+                    "proportional_gain",
+                    GraphFrontPanelBinding::ParameterControl {
+                        node: GraphNodeId::new(8),
+                        parameter: 1,
+                    },
+                    GraphFrontPanelRect::new(20, 20, 180, 48),
+                )
+                .unwrap(),
+            GraphFrontPanelItemId::new(1)
+        );
+        component
+    }
+
+    fn with_second_public_input(mut component: GraphComponentDocument) -> GraphComponentDocument {
+        let mut workspace = component.workspace().clone();
+        workspace.disconnect(GraphWireId::new(2)).unwrap();
+        component.replace_workspace(workspace).unwrap();
+        assert_eq!(
+            component
+                .add_input("measurement_samples", endpoint(5, 1))
+                .unwrap(),
+            GraphComponentInputId::new(2)
+        );
+        component
+    }
+
     fn chain_component() -> GraphComponentDocument {
         GraphComponentDocument::try_new(
             GraphComponentLimits::interactive(),
@@ -1379,6 +3083,174 @@ mod tests {
                     endpoint(2, 1),
                 ),
             ],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn wrapper_component(child: &GraphComponentDocument, name: &str) -> GraphComponentDocument {
+        let prototype = graph_component_instance_prototype(child, "Nested child").unwrap();
+        let instance = NodeDefinition::new(
+            GraphNodeId::new(1),
+            prototype.kind().clone(),
+            "Nested child",
+            prototype.domain(),
+            prototype.inputs().to_vec(),
+            prototype.outputs().to_vec(),
+            prototype.parameters().to_vec(),
+        );
+        let graph = GraphDocument::try_new(
+            1,
+            child.workspace().graph().schema().clone(),
+            child.workspace().graph().clocks().to_vec(),
+            vec![instance],
+            Vec::new(),
+        )
+        .unwrap();
+        let workspace = GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            1,
+            2,
+            1,
+            graph,
+            vec![GraphNodePlacement::new(GraphNodeId::new(1), 20, 20)],
+        )
+        .unwrap();
+        let panel_items = child
+            .panel_items()
+            .iter()
+            .filter_map(|item| match item.binding() {
+                GraphFrontPanelBinding::ParameterControl { .. } => Some(GraphFrontPanelItem::new(
+                    item.id(),
+                    item.name(),
+                    GraphFrontPanelBinding::ParameterControl {
+                        node: GraphNodeId::new(1),
+                        parameter: item.id().get(),
+                    },
+                    item.rect(),
+                )),
+                GraphFrontPanelBinding::InputControl(_)
+                | GraphFrontPanelBinding::OutputIndicator(_) => None,
+            })
+            .collect();
+        GraphComponentDocument::try_new(
+            GraphComponentLimits::interactive(),
+            1,
+            1,
+            name,
+            2,
+            2,
+            child.next_panel_item_id(),
+            workspace,
+            vec![GraphComponentInput::new(
+                GraphComponentInputId::new(1),
+                "setpoint_samples",
+                endpoint(1, 1),
+            )],
+            vec![GraphComponentOutput::new(
+                GraphComponentOutputId::new(1),
+                "permitted_output",
+                endpoint(1, 2),
+            )],
+            panel_items,
+        )
+        .unwrap()
+    }
+
+    fn wired_wrapper_component(
+        child: &GraphComponentDocument,
+        name: &str,
+    ) -> GraphComponentDocument {
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        let nested_id = GraphNodeId::new(1);
+        let prototype = graph_component_instance_prototype(child, "Nested child").unwrap();
+        let nested = NodeDefinition::new(
+            nested_id,
+            prototype.kind().clone(),
+            "Nested child",
+            prototype.domain(),
+            prototype.inputs().to_vec(),
+            prototype.outputs().to_vec(),
+            prototype.parameters().to_vec(),
+        );
+        let child_output = &child.outputs()[1];
+        let witness = fixture
+            .document()
+            .wires()
+            .iter()
+            .find(|wire| wire.source() == child_output.source())
+            .unwrap();
+        let witness_target = fixture.document().node(witness.target().node).unwrap();
+        let target_id = GraphNodeId::new(2);
+        let target = NodeDefinition::new(
+            target_id,
+            witness_target.kind().clone(),
+            "Wrapper-local sink",
+            witness_target.domain(),
+            witness_target.inputs().to_vec(),
+            witness_target.outputs().to_vec(),
+            witness_target.parameters().to_vec(),
+        );
+        let nested_output = graph_component_instance_output_port(child, child_output.id()).unwrap();
+        let graph = GraphDocument::try_new(
+            1,
+            child.workspace().graph().schema().clone(),
+            child.workspace().graph().clocks().to_vec(),
+            vec![nested, target],
+            vec![WireDefinition::new(
+                GraphWireId::new(1),
+                WireEndpoint {
+                    node: nested_id,
+                    port: nested_output,
+                },
+                WireEndpoint {
+                    node: target_id,
+                    port: witness.target().port,
+                },
+            )],
+        )
+        .unwrap();
+        let workspace = GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            1,
+            3,
+            2,
+            graph,
+            vec![
+                GraphNodePlacement::new(nested_id, 20, 20),
+                GraphNodePlacement::new(target_id, 400, 20),
+            ],
+        )
+        .unwrap();
+        GraphComponentDocument::try_new(
+            GraphComponentLimits::interactive(),
+            1,
+            1,
+            name,
+            2,
+            2,
+            1,
+            workspace,
+            vec![GraphComponentInput::new(
+                GraphComponentInputId::new(1),
+                "setpoint_samples",
+                WireEndpoint {
+                    node: nested_id,
+                    port: GraphPortId::new(1),
+                },
+            )],
+            vec![GraphComponentOutput::new(
+                GraphComponentOutputId::new(1),
+                "permitted_output",
+                WireEndpoint {
+                    node: nested_id,
+                    port: graph_component_instance_output_port(
+                        child,
+                        GraphComponentOutputId::new(1),
+                    )
+                    .unwrap(),
+                },
+            )],
             Vec::new(),
         )
         .unwrap()
@@ -1445,7 +3317,27 @@ mod tests {
             1,
             root(&component),
             vec![component],
-            vec![GraphComponentInstance::new(GraphNodeId::new(2), digest)],
+            vec![GraphComponentInstance::root(GraphNodeId::new(2), digest)],
+        )
+        .unwrap()
+    }
+
+    fn empty_root(component: &GraphComponentDocument) -> GraphWorkspaceDocument {
+        let graph = GraphDocument::try_new(
+            1,
+            component.workspace().graph().schema().clone(),
+            component.workspace().graph().clocks().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            1,
+            1,
+            1,
+            graph,
+            Vec::new(),
         )
         .unwrap()
     }
@@ -1497,6 +3389,7 @@ mod tests {
         );
         assert_eq!(hierarchy.flattened_node_count(), 22);
         assert_eq!(hierarchy.flattened_wire_count(), 26);
+        assert_eq!(hierarchy.flattened_instance_count(), 1);
         let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
         let replay = replay_graph_hierarchy(
             encoding.bytes(),
@@ -1514,6 +3407,16 @@ mod tests {
         assert_eq!(flattened.workspace().graph().nodes().len(), 22);
         assert_eq!(flattened.workspace().graph().wires().len(), 26);
         assert_eq!(flattened.instances().len(), 1);
+        assert_eq!(flattened.node_provenance().len(), 22);
+        assert_eq!(flattened.wire_provenance().len(), 26);
+        assert_eq!(
+            flattened.node_origin(GraphNodeId::new(1)),
+            Some(&GraphHierarchyNodeOrigin::Root(GraphNodeId::new(1)))
+        );
+        assert_eq!(
+            flattened.instances()[0].source_path(),
+            [GraphNodeId::new(2)]
+        );
         assert_eq!(flattened.instances()[0].nodes().len(), 20);
         let map = flattened.instances()[0].nodes();
         let remapped_four = map
@@ -1526,6 +3429,35 @@ mod tests {
             .find(|mapping| mapping.component_node() == GraphNodeId::new(18))
             .unwrap()
             .flattened_node();
+        let component_origin = GraphHierarchyNodeOrigin::Component {
+            source_path: vec![GraphNodeId::new(2)],
+            component: hierarchy.dependencies()[0].digest(),
+            node: GraphNodeId::new(4),
+        };
+        assert_eq!(
+            flattened.node_origin(remapped_four),
+            Some(&component_origin)
+        );
+        assert_eq!(
+            flattened.flattened_node(&component_origin),
+            Some(remapped_four)
+        );
+        let root_wire_origin = GraphHierarchyWireOrigin::Root(GraphWireId::new(1));
+        let flattened_root_wire = flattened.flattened_wire(&root_wire_origin).unwrap();
+        assert_eq!(
+            flattened.wire_origin(flattened_root_wire),
+            Some(&root_wire_origin)
+        );
+        let component_wire_origin = GraphHierarchyWireOrigin::Component {
+            source_path: vec![GraphNodeId::new(2)],
+            component: hierarchy.dependencies()[0].digest(),
+            wire: component.workspace().graph().wires()[0].id(),
+        };
+        let flattened_component_wire = flattened.flattened_wire(&component_wire_origin).unwrap();
+        assert_eq!(
+            flattened.wire_origin(flattened_component_wire),
+            Some(&component_wire_origin)
+        );
         assert!(flattened.workspace().graph().wires().iter().any(|wire| {
             wire.source() == endpoint(1, 1)
                 && wire.target()
@@ -1560,6 +3492,1062 @@ mod tests {
     }
 
     #[test]
+    fn promoted_parameters_are_occurrence_local_and_flatten_exactly() {
+        let leaf = parameterized_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.parameter_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            empty_root(&wrapper),
+            vec![leaf.clone(), wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let first = hierarchy
+            .add_root_instance(wrapper_digest, "First wrapper", 20, 20)
+            .unwrap();
+        let second = hierarchy
+            .add_root_instance(wrapper_digest, "Second wrapper", 420, 20)
+            .unwrap();
+        let value_type = leaf
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let exact_value = |numerator, denominator| {
+            TypedGraphValue::try_new(
+                leaf.workspace().graph().schema(),
+                value_type,
+                GraphValue::ExactRational(Rational::from(numerator) / Rational::from(denominator)),
+            )
+            .unwrap()
+        };
+        let first_value = exact_value(7, 3);
+        let second_value = exact_value(11, 5);
+        hierarchy
+            .set_root_instance_parameter(first, GraphFrontPanelItemId::new(1), first_value.clone())
+            .unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                second,
+                GraphFrontPanelItemId::new(1),
+                second_value.clone(),
+            )
+            .unwrap();
+
+        let exact_before_noop = encode_graph_hierarchy(&hierarchy).unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                second,
+                GraphFrontPanelItemId::new(1),
+                second_value.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            encode_graph_hierarchy(&hierarchy).unwrap(),
+            exact_before_noop
+        );
+        let exact_before_rejection = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            hierarchy.set_root_instance_parameter(
+                first,
+                GraphFrontPanelItemId::new(99),
+                first_value.clone(),
+            ),
+            Err(GraphHierarchyError::UnknownInstanceParameter {
+                scope: GraphInstanceScope::Root,
+                node: first,
+                parameter: GraphFrontPanelItemId::new(99),
+            })
+        );
+        assert_eq!(
+            encode_graph_hierarchy(&hierarchy).unwrap(),
+            exact_before_rejection
+        );
+
+        let flattening = flatten_graph_hierarchy(&hierarchy).unwrap();
+        for (root, expected) in [(first, &first_value), (second, &second_value)] {
+            let report = flattening
+                .instances()
+                .iter()
+                .find(|report| {
+                    report.component() == leaf_digest
+                        && report.source_path() == [root, GraphNodeId::new(1)]
+                })
+                .unwrap();
+            let flattened_node = report
+                .nodes()
+                .iter()
+                .find(|mapping| mapping.component_node() == GraphNodeId::new(8))
+                .unwrap()
+                .flattened_node();
+            let retained = flattening
+                .workspace()
+                .graph()
+                .node(flattened_node)
+                .unwrap()
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.id() == 1)
+                .unwrap()
+                .value();
+            assert_eq!(retained, expected);
+        }
+    }
+
+    #[test]
+    fn explicit_override_survives_recursive_default_evolution() {
+        let leaf = parameterized_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.parameter_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            empty_root(&wrapper),
+            vec![leaf.clone(), wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let root = hierarchy
+            .add_root_instance(wrapper_digest, "Promoted wrapper", 20, 20)
+            .unwrap();
+        let value_type = leaf
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let override_value = TypedGraphValue::try_new(
+            leaf.workspace().graph().schema(),
+            value_type,
+            GraphValue::ExactRational(Rational::from(7) / Rational::from(3)),
+        )
+        .unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                root,
+                GraphFrontPanelItemId::new(1),
+                override_value.clone(),
+            )
+            .unwrap();
+
+        let mut replacement = leaf.clone();
+        let mut replacement_workspace = replacement.workspace().clone();
+        let replacement_default = TypedGraphValue::try_new(
+            replacement_workspace.graph().schema(),
+            value_type,
+            GraphValue::ExactRational(Rational::from(13) / Rational::from(4)),
+        )
+        .unwrap();
+        replacement_workspace
+            .set_parameter(GraphNodeId::new(8), 1, replacement_default)
+            .unwrap();
+        replacement
+            .replace_workspace(replacement_workspace)
+            .unwrap();
+        let report = hierarchy
+            .replace_component_with_report(leaf_digest, replacement)
+            .unwrap();
+        let replacement_leaf = report.requested_replacement();
+        let replacement_wrapper = report.replacement_for(wrapper_digest).unwrap();
+        assert_ne!(replacement_leaf, leaf_digest);
+        assert_ne!(replacement_wrapper, wrapper_digest);
+        assert_eq!(
+            hierarchy.root().graph().node(root).unwrap().parameters()[0].value(),
+            &override_value
+        );
+
+        let flattening = flatten_graph_hierarchy(&hierarchy).unwrap();
+        let leaf_report = flattening
+            .instances()
+            .iter()
+            .find(|instance| instance.component() == replacement_leaf)
+            .unwrap();
+        let flattened = leaf_report
+            .nodes()
+            .iter()
+            .find(|mapping| mapping.component_node() == GraphNodeId::new(8))
+            .unwrap()
+            .flattened_node();
+        assert_eq!(
+            flattening
+                .workspace()
+                .graph()
+                .node(flattened)
+                .unwrap()
+                .parameters()[0]
+                .value(),
+            &override_value
+        );
+    }
+
+    #[test]
+    fn component_parameter_removal_and_type_drift_preserve_explicit_overrides() {
+        let leaf = parameterized_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&leaf),
+            vec![leaf.clone()],
+            vec![GraphComponentInstance::root(
+                GraphNodeId::new(2),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let value_type = leaf
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .value_type();
+        let override_value = TypedGraphValue::try_new(
+            leaf.workspace().graph().schema(),
+            value_type,
+            GraphValue::ExactRational(Rational::from(7) / Rational::from(3)),
+        )
+        .unwrap();
+        hierarchy
+            .set_root_instance_parameter(
+                GraphNodeId::new(2),
+                GraphFrontPanelItemId::new(1),
+                override_value,
+            )
+            .unwrap();
+        let exact = encode_graph_hierarchy(&hierarchy).unwrap();
+
+        let mut removed = leaf.clone();
+        removed
+            .remove_panel_item(GraphFrontPanelItemId::new(1))
+            .unwrap();
+        assert_eq!(
+            hierarchy.replace_component(leaf_digest, removed),
+            Err(GraphHierarchyError::RemovedInstanceParameterOverride {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                parameter: GraphFrontPanelItemId::new(1),
+            })
+        );
+        assert_eq!(encode_graph_hierarchy(&hierarchy).unwrap(), exact);
+
+        let mut changed_type = leaf;
+        changed_type
+            .update_panel_item(
+                GraphFrontPanelItemId::new(1),
+                "proportional_gain",
+                GraphFrontPanelBinding::ParameterControl {
+                    node: GraphNodeId::new(9),
+                    parameter: 1,
+                },
+                GraphFrontPanelRect::new(20, 20, 180, 48),
+            )
+            .unwrap();
+        assert_eq!(
+            hierarchy.replace_component(leaf_digest, changed_type),
+            Err(GraphHierarchyError::ChangedInstanceParameterType {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                parameter: GraphFrontPanelItemId::new(1),
+            })
+        );
+        assert_eq!(encode_graph_hierarchy(&hierarchy).unwrap(), exact);
+    }
+
+    #[test]
+    fn root_instance_lifecycle_is_transactional_and_never_reuses_node_ids() {
+        let mut hierarchy = hierarchy();
+        let component = hierarchy.dependencies()[0].digest();
+        let original_revision = hierarchy.revision();
+        let added = hierarchy
+            .add_root_instance(component, "Second PID leaf", 1_200, 100)
+            .unwrap();
+        assert_eq!(added, GraphNodeId::new(4));
+        assert_eq!(hierarchy.revision(), original_revision + 1);
+        assert_eq!(hierarchy.instances().len(), 2);
+        assert_eq!(hierarchy.flattened_instance_count(), 2);
+        assert_eq!(hierarchy.root().next_node_id(), 5);
+        assert_eq!(
+            hierarchy
+                .instances()
+                .iter()
+                .find(|instance| instance.node() == added),
+            Some(&GraphComponentInstance::root(added, component))
+        );
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+
+        assert_eq!(hierarchy.remove_root_instance(added).unwrap(), 0);
+        assert_eq!(hierarchy.instances().len(), 1);
+        assert_eq!(hierarchy.root().next_node_id(), 5);
+        let next = hierarchy
+            .add_root_instance(component, "Third PID leaf", 1_200, 100)
+            .unwrap();
+        assert_eq!(next, GraphNodeId::new(5));
+
+        let retained = hierarchy.clone();
+        assert_eq!(
+            hierarchy.add_root_instance(Digest([0x91; 32]), "Unknown", 0, 0),
+            Err(GraphHierarchyError::UnknownComponent(Digest([0x91; 32])))
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.remove_root_instance(GraphNodeId::new(1)),
+            Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn nested_instance_lifecycle_is_transactional_monotonic_and_recursive() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf, wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+        let initial_root = hierarchy.root().clone();
+        let initial_revision = hierarchy.revision();
+        let initial_instances = hierarchy.flattened_instance_count();
+        let initial_nodes = hierarchy.flattened_node_count();
+
+        let (added, report) = hierarchy
+            .add_nested_instance(wrapper_digest, leaf_digest, "Second PID leaf", 420, 35)
+            .unwrap();
+        assert_eq!(added, GraphNodeId::new(2));
+        assert_eq!(report.requested_original(), wrapper_digest);
+        let added_wrapper = report.requested_replacement();
+        assert_ne!(added_wrapper, wrapper_digest);
+        assert_eq!(report.resolve(wrapper_digest), added_wrapper);
+        assert_eq!(report.remaps().len(), 1);
+        assert_eq!(hierarchy.revision(), initial_revision + 1);
+        assert_eq!(hierarchy.root(), &initial_root);
+        assert_eq!(hierarchy.flattened_instance_count(), initial_instances + 1);
+        assert!(hierarchy.flattened_node_count() > initial_nodes);
+        assert_eq!(hierarchy.dependencies().len(), 2);
+        assert!(hierarchy.dependency(leaf_digest).is_some());
+        let added_document = hierarchy.dependency(added_wrapper).unwrap().document();
+        assert_eq!(added_document.workspace().next_node_id(), 3);
+        assert_eq!(
+            added_document.workspace().placement(added),
+            Some(GraphNodePlacement::new(added, 420, 35))
+        );
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::nested(added_wrapper, added, leaf_digest)
+        }));
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::root(GraphNodeId::new(2), added_wrapper)
+        }));
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(added_wrapper, GraphNodeId::new(1), leaf_digest)
+        }));
+        flatten_graph_hierarchy(&hierarchy).unwrap();
+
+        let (removed_wires, removal) = hierarchy
+            .remove_nested_instance(added_wrapper, added)
+            .unwrap();
+        assert_eq!(removed_wires, 0);
+        let removed_wrapper = removal.requested_replacement();
+        assert_ne!(removed_wrapper, added_wrapper);
+        assert_eq!(hierarchy.revision(), initial_revision + 2);
+        assert_eq!(hierarchy.root(), &initial_root);
+        assert_eq!(hierarchy.flattened_instance_count(), initial_instances);
+        assert_eq!(hierarchy.flattened_node_count(), initial_nodes);
+        assert_eq!(
+            hierarchy
+                .dependency(removed_wrapper)
+                .unwrap()
+                .document()
+                .workspace()
+                .next_node_id(),
+            3
+        );
+        assert!(!hierarchy.instances().iter().any(|instance| {
+            instance.scope() == GraphInstanceScope::Component(removed_wrapper)
+                && instance.node() == added
+        }));
+
+        let (next, next_report) = hierarchy
+            .add_nested_instance(removed_wrapper, leaf_digest, "Third PID leaf", 420, 35)
+            .unwrap();
+        assert_eq!(next, GraphNodeId::new(3));
+        assert_eq!(hierarchy.root(), &initial_root);
+        assert_eq!(
+            hierarchy
+                .dependency(next_report.requested_replacement())
+                .unwrap()
+                .document()
+                .workspace()
+                .next_node_id(),
+            4
+        );
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+    }
+
+    #[test]
+    fn nested_instance_rebinding_preserves_identity_and_refreshes_stable_connectors() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let mut alias = leaf.clone();
+        alias
+            .update_identity_metadata("control.pid_leaf_alias", 1)
+            .unwrap();
+        let alias_digest = encode_graph_component(&alias).unwrap().digest();
+        let mut expanded = with_second_public_input(leaf.clone());
+        expanded
+            .update_identity_metadata("control.pid_leaf_expanded", 1)
+            .unwrap();
+        let expanded_digest = encode_graph_component(&expanded).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf, alias, expanded, wrapper.clone()],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+        let initial_root = hierarchy.root().clone();
+        let initial_revision = hierarchy.revision();
+
+        let alias_report = hierarchy
+            .rebind_nested_instance(wrapper_digest, GraphNodeId::new(1), alias_digest)
+            .unwrap();
+        assert_eq!(alias_report.requested_original(), wrapper_digest);
+        assert_eq!(alias_report.requested_replacement(), wrapper_digest);
+        assert!(alias_report.remaps().is_empty());
+        assert_eq!(hierarchy.revision(), initial_revision + 1);
+        assert_eq!(hierarchy.root(), &initial_root);
+        assert_eq!(
+            hierarchy.dependency(wrapper_digest).unwrap().document(),
+            &wrapper
+        );
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), alias_digest)
+        }));
+        let rebound = hierarchy.clone();
+        let noop = hierarchy
+            .rebind_nested_instance(wrapper_digest, GraphNodeId::new(1), alias_digest)
+            .unwrap();
+        assert!(noop.remaps().is_empty());
+        assert_eq!(hierarchy, rebound);
+
+        let expanded_report = hierarchy
+            .rebind_nested_instance(wrapper_digest, GraphNodeId::new(1), expanded_digest)
+            .unwrap();
+        let refreshed_wrapper = expanded_report.resolve(wrapper_digest);
+        assert_ne!(refreshed_wrapper, wrapper_digest);
+        assert_eq!(expanded_report.remaps().len(), 1);
+        assert_eq!(hierarchy.revision(), initial_revision + 2);
+        assert_eq!(hierarchy.root(), &initial_root);
+        assert!(hierarchy.dependency(wrapper_digest).is_none());
+        let refreshed = hierarchy.dependency(refreshed_wrapper).unwrap().document();
+        assert_eq!(refreshed.workspace().next_node_id(), 2);
+        assert_eq!(refreshed.workspace().next_wire_id(), 1);
+        assert_eq!(
+            refreshed.workspace().placement(GraphNodeId::new(1)),
+            Some(GraphNodePlacement::new(GraphNodeId::new(1), 20, 20))
+        );
+        let placeholder = refreshed
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(1))
+            .unwrap();
+        assert_eq!(placeholder.label(), "Nested child");
+        assert_eq!(placeholder.inputs().len(), 2);
+        assert_eq!(placeholder.outputs().len(), 1);
+        assert_eq!(placeholder.outputs()[0].id(), GraphPortId::new(3));
+        assert_eq!(refreshed.inputs()[0].target(), endpoint(1, 1));
+        assert_eq!(refreshed.outputs()[0].source(), endpoint(1, 3));
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(
+                    refreshed_wrapper,
+                    GraphNodeId::new(1),
+                    expanded_digest,
+                )
+        }));
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::root(GraphNodeId::new(2), refreshed_wrapper)
+        }));
+        let flattened = flatten_graph_hierarchy(&hierarchy).unwrap();
+        assert!(flattened.instances().iter().any(|instance| {
+            instance.component() == expanded_digest
+                && instance.source_path() == [GraphNodeId::new(2), GraphNodeId::new(1)]
+        }));
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+    }
+
+    #[test]
+    fn nested_instance_rebinding_rejects_missing_connectors_cycles_and_unknowns() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let mut missing_output = leaf.clone();
+        missing_output
+            .remove_output(GraphComponentOutputId::new(1))
+            .unwrap();
+        missing_output
+            .update_identity_metadata("control.pid_leaf_without_output", 1)
+            .unwrap();
+        let missing_output_digest = encode_graph_component(&missing_output).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf, missing_output, wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+        let retained = hierarchy.clone();
+
+        assert_eq!(
+            hierarchy.rebind_nested_instance(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                missing_output_digest,
+            ),
+            Err(GraphHierarchyError::RemovedInstanceOutput {
+                scope: GraphInstanceScope::Component(wrapper_digest),
+                node: GraphNodeId::new(1),
+                output: GraphComponentOutputId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+        assert!(matches!(
+            hierarchy.rebind_nested_instance(wrapper_digest, GraphNodeId::new(1), wrapper_digest,),
+            Err(GraphHierarchyError::DependencyCycle(_))
+        ));
+        assert_eq!(hierarchy, retained);
+        let unknown = Digest([0x91; 32]);
+        assert_eq!(
+            hierarchy.rebind_nested_instance(wrapper_digest, GraphNodeId::new(1), unknown,),
+            Err(GraphHierarchyError::UnknownComponent(unknown))
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.rebind_nested_instance(wrapper_digest, GraphNodeId::new(99), leaf_digest,),
+            Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Component(wrapper_digest),
+                node: GraphNodeId::new(99),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn nested_instance_edits_reject_live_bindings_cycles_and_unknown_scopes() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf, wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+
+        let retained = hierarchy.clone();
+        assert!(
+            hierarchy
+                .remove_nested_instance(wrapper_digest, GraphNodeId::new(1))
+                .is_err(),
+            "public connector bindings allowed their child occurrence to disappear"
+        );
+        assert_eq!(hierarchy, retained);
+
+        assert!(matches!(
+            hierarchy.add_nested_instance(
+                leaf_digest,
+                wrapper_digest,
+                "Would close a component cycle",
+                0,
+                0,
+            ),
+            Err(GraphHierarchyError::DependencyCycle(_))
+        ));
+        assert_eq!(hierarchy, retained);
+
+        let unknown = Digest([0x91; 32]);
+        assert_eq!(
+            hierarchy.add_nested_instance(unknown, leaf_digest, "Unknown parent", 0, 0,),
+            Err(GraphHierarchyError::UnknownComponent(unknown))
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.add_nested_instance(wrapper_digest, unknown, "Unknown child", 0, 0,),
+            Err(GraphHierarchyError::UnknownComponent(unknown))
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.remove_nested_instance(wrapper_digest, GraphNodeId::new(99)),
+            Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Component(wrapper_digest),
+                node: GraphNodeId::new(99),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn root_instance_placement_and_typed_wires_are_transactional_and_monotonic() {
+        let mut hierarchy = hierarchy();
+        let original_revision = hierarchy.revision();
+        let original_graph_digest = hierarchy.root().graph_digest();
+        let instance = GraphNodeId::new(2);
+
+        hierarchy.move_root_instance(instance, 450, 175).unwrap();
+        assert_eq!(hierarchy.revision(), original_revision + 1);
+        assert_eq!(
+            hierarchy.root().placement(instance),
+            Some(GraphNodePlacement::new(instance, 450, 175))
+        );
+        assert_eq!(hierarchy.root().graph_digest(), original_graph_digest);
+        let moved = hierarchy.clone();
+        hierarchy.move_root_instance(instance, 450, 175).unwrap();
+        assert_eq!(hierarchy, moved, "exact placement no-op advanced state");
+
+        hierarchy.disconnect_root_wire(GraphWireId::new(1)).unwrap();
+        assert_eq!(hierarchy.revision(), original_revision + 2);
+        assert_eq!(hierarchy.root().next_wire_id(), 3);
+        assert_eq!(hierarchy.flattened_wire_count(), 25);
+        assert!(
+            hierarchy
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .all(|wire| wire.id() != GraphWireId::new(1))
+        );
+
+        let replacement = hierarchy
+            .connect_root_wire(endpoint(1, 1), endpoint(2, 1))
+            .unwrap();
+        assert_eq!(replacement, GraphWireId::new(3));
+        assert_eq!(hierarchy.revision(), original_revision + 3);
+        assert_eq!(hierarchy.root().next_wire_id(), 4);
+        assert_eq!(hierarchy.flattened_wire_count(), 26);
+        assert!(hierarchy.root().graph().wires().iter().any(|wire| {
+            wire.id() == replacement
+                && wire.source() == endpoint(1, 1)
+                && wire.target() == endpoint(2, 1)
+        }));
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+
+        let retained = hierarchy.clone();
+        assert!(
+            hierarchy
+                .connect_root_wire(endpoint(1, 1), endpoint(2, 1))
+                .is_err()
+        );
+        assert_eq!(hierarchy, retained);
+        assert!(
+            hierarchy
+                .disconnect_root_wire(GraphWireId::new(99))
+                .is_err()
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.move_root_instance(GraphNodeId::new(1), 0, 0),
+            Err(GraphHierarchyError::UnknownInstanceNode {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn component_replacement_remaps_exact_bindings_and_preserves_root_authoring() {
+        let mut hierarchy = hierarchy();
+        let original = hierarchy.dependencies()[0].digest();
+        let original_root = hierarchy.root().clone();
+        let original_revision = hierarchy.revision();
+        let mut replacement = hierarchy.dependencies()[0].document().clone();
+        let mut workspace = replacement.workspace().clone();
+        let node = workspace.graph().nodes()[0].id();
+        let placement = workspace.placement(node).unwrap();
+        workspace
+            .move_node(node, placement.x() + 7, placement.y() - 3)
+            .unwrap();
+        replacement.replace_workspace(workspace).unwrap();
+        let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
+
+        let report = hierarchy
+            .replace_component_with_report(original, replacement.clone())
+            .unwrap();
+        assert!(report.changed());
+        assert_eq!(report.requested_original(), original);
+        assert_eq!(report.requested_replacement(), replacement_digest);
+        assert_eq!(report.replacement_for(original), Some(replacement_digest));
+        assert_eq!(report.resolve(original), replacement_digest);
+        assert_eq!(report.remaps().len(), 1);
+        assert_eq!(hierarchy.revision(), original_revision + 1);
+        assert_eq!(hierarchy.root(), &original_root);
+        assert!(hierarchy.dependency(original).is_none());
+        assert_eq!(
+            hierarchy.dependency(replacement_digest).unwrap().document(),
+            &replacement
+        );
+        assert_eq!(hierarchy.instances()[0].component(), replacement_digest);
+        let replaced = hierarchy.clone();
+        let report = hierarchy
+            .replace_component_with_report(replacement_digest, replacement)
+            .unwrap();
+        assert!(!report.changed());
+        assert_eq!(report.requested_original(), replacement_digest);
+        assert_eq!(report.requested_replacement(), replacement_digest);
+        assert!(report.remaps().is_empty());
+        assert_eq!(report.replacement_for(replacement_digest), None);
+        assert_eq!(report.resolve(replacement_digest), replacement_digest);
+        assert_eq!(
+            hierarchy, replaced,
+            "exact replacement no-op advanced state"
+        );
+
+        let retained = hierarchy.clone();
+        assert_eq!(
+            hierarchy.replace_component(Digest([0x72; 32]), component()),
+            Err(GraphHierarchyError::UnknownComponent(Digest([0x72; 32])))
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn connector_insertion_remaps_root_wires_by_stable_identity() {
+        let mut hierarchy = hierarchy();
+        let original = hierarchy.dependencies()[0].digest();
+        let original_root_revision = hierarchy.root().revision();
+        let original_graph_revision = hierarchy.root().graph().revision();
+        let replacement = with_second_public_input(hierarchy.dependencies()[0].document().clone());
+        let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
+
+        assert_eq!(
+            hierarchy.replace_component(original, replacement).unwrap(),
+            replacement_digest
+        );
+        let instance = hierarchy.root().graph().node(GraphNodeId::new(2)).unwrap();
+        assert_eq!(
+            instance
+                .inputs()
+                .iter()
+                .map(PortDefinition::id)
+                .collect::<Vec<_>>(),
+            vec![GraphPortId::new(1), GraphPortId::new(2)]
+        );
+        assert_eq!(instance.outputs()[0].id(), GraphPortId::new(3));
+        assert_eq!(
+            hierarchy
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .find(|wire| wire.id() == GraphWireId::new(2))
+                .unwrap()
+                .source(),
+            endpoint(2, 3),
+            "existing output was reinterpreted instead of remapped"
+        );
+        assert_eq!(hierarchy.root().revision(), original_root_revision + 1);
+        assert_eq!(
+            hierarchy.root().graph().revision(),
+            original_graph_revision + 1
+        );
+        assert_eq!(
+            replay_graph_hierarchy(
+                encode_graph_hierarchy(&hierarchy).unwrap().bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+    }
+
+    #[test]
+    fn referenced_connector_removal_rejects_atomically() {
+        let mut hierarchy = hierarchy();
+        let original = hierarchy.dependencies()[0].digest();
+        let mut without_output = hierarchy.dependencies()[0].document().clone();
+        without_output
+            .remove_output(GraphComponentOutputId::new(1))
+            .unwrap();
+        let retained = hierarchy.clone();
+        assert_eq!(
+            hierarchy.replace_component(original, without_output),
+            Err(GraphHierarchyError::RemovedInstanceOutput {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                output: GraphComponentOutputId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+
+        let mut without_input = hierarchy.dependencies()[0].document().clone();
+        without_input
+            .remove_input(GraphComponentInputId::new(1))
+            .unwrap();
+        assert_eq!(
+            hierarchy.replace_component(original, without_input),
+            Err(GraphHierarchyError::RemovedInstanceInput {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+                input: GraphComponentInputId::new(1),
+            })
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
+    fn connector_refresh_cascades_parent_identity_without_root_churn() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf.clone(), wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+        let original_root = hierarchy.root().clone();
+        let replacement = with_second_public_input(leaf);
+        let replacement_digest = encode_graph_component(&replacement).unwrap().digest();
+
+        let report = hierarchy
+            .replace_component_with_report(leaf_digest, replacement)
+            .unwrap();
+        assert_eq!(report.requested_replacement(), replacement_digest);
+        assert_eq!(hierarchy.root(), &original_root);
+        assert!(hierarchy.dependency(leaf_digest).is_none());
+        assert!(hierarchy.dependency(wrapper_digest).is_none());
+        let refreshed_wrapper = hierarchy
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.pid_wrapper")
+            .unwrap();
+        let refreshed_wrapper_digest = refreshed_wrapper.digest();
+        assert_ne!(refreshed_wrapper_digest, wrapper_digest);
+        assert_eq!(
+            report.replacement_for(leaf_digest),
+            Some(replacement_digest)
+        );
+        assert_eq!(
+            report.replacement_for(wrapper_digest),
+            Some(refreshed_wrapper_digest)
+        );
+        assert_eq!(report.remaps().len(), 2);
+        let nested = refreshed_wrapper
+            .document()
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(1))
+            .unwrap();
+        assert_eq!(nested.inputs().len(), 2);
+        assert_eq!(nested.outputs()[0].id(), GraphPortId::new(3));
+        assert_eq!(
+            refreshed_wrapper.document().outputs()[0].source(),
+            endpoint(1, 3)
+        );
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(
+                    refreshed_wrapper_digest,
+                    GraphNodeId::new(1),
+                    replacement_digest,
+                )
+        }));
+        assert!(hierarchy.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::root(GraphNodeId::new(2), refreshed_wrapper_digest)
+        }));
+        flatten_graph_hierarchy(&hierarchy).unwrap();
+    }
+
+    #[test]
+    fn unreferenced_component_library_lifecycle_is_transactional_and_exact() {
+        let mut hierarchy = hierarchy();
+        let original_root = hierarchy.root().clone();
+        let original_counts = (
+            hierarchy.flattened_instance_count(),
+            hierarchy.flattened_node_count(),
+            hierarchy.flattened_wire_count(),
+        );
+        let original_revision = hierarchy.revision();
+        let mut extra = component();
+        let mut workspace = extra.workspace().clone();
+        let node = workspace.graph().nodes()[0].id();
+        let placement = workspace.placement(node).unwrap();
+        workspace
+            .move_node(node, placement.x() + 31, placement.y() + 17)
+            .unwrap();
+        extra.replace_workspace(workspace).unwrap();
+        let digest = encode_graph_component(&extra).unwrap().digest();
+
+        assert_eq!(hierarchy.add_component(extra.clone()).unwrap(), digest);
+        assert_eq!(hierarchy.revision(), original_revision + 1);
+        assert_eq!(hierarchy.dependencies().len(), 2);
+        assert_eq!(hierarchy.dependency(digest).unwrap().document(), &extra);
+        assert_eq!(hierarchy.root(), &original_root);
+        assert_eq!(
+            (
+                hierarchy.flattened_instance_count(),
+                hierarchy.flattened_node_count(),
+                hierarchy.flattened_wire_count(),
+            ),
+            original_counts
+        );
+        let encoding = encode_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &hierarchy
+        );
+
+        let added = hierarchy.clone();
+        assert_eq!(hierarchy.add_component(extra).unwrap(), digest);
+        assert_eq!(hierarchy, added, "exact duplicate import advanced state");
+
+        hierarchy.remove_component(digest).unwrap();
+        assert_eq!(hierarchy.revision(), original_revision + 2);
+        assert_eq!(hierarchy.dependencies().len(), 1);
+        assert!(hierarchy.dependency(digest).is_none());
+        assert_eq!(hierarchy.root(), &original_root);
+        assert_eq!(
+            (
+                hierarchy.flattened_instance_count(),
+                hierarchy.flattened_node_count(),
+                hierarchy.flattened_wire_count(),
+            ),
+            original_counts
+        );
+    }
+
+    #[test]
+    fn referenced_and_unknown_component_removal_preserve_the_library() {
+        let mut hierarchy = hierarchy();
+        let referenced = hierarchy.dependencies()[0].digest();
+        let retained = hierarchy.clone();
+        assert_eq!(
+            hierarchy.remove_component(referenced),
+            Err(GraphHierarchyError::ComponentInUse(referenced))
+        );
+        assert_eq!(hierarchy, retained);
+        assert_eq!(
+            hierarchy.remove_component(Digest([0xb4; 32])),
+            Err(GraphHierarchyError::UnknownComponent(Digest([0xb4; 32])))
+        );
+        assert_eq!(hierarchy, retained);
+    }
+
+    #[test]
     fn unresolved_missing_and_misshaped_instances_fail_before_flattening() {
         let initial_component = component();
         let digest = encode_graph_component(&initial_component).unwrap().digest();
@@ -1572,9 +4560,10 @@ mod tests {
                 vec![initial_component.clone()],
                 Vec::new(),
             ),
-            Err(GraphHierarchyError::MissingInstanceBinding(
-                GraphNodeId::new(2)
-            ))
+            Err(GraphHierarchyError::MissingInstanceBinding {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+            })
         );
         assert_eq!(
             GraphHierarchyDocument::try_new(
@@ -1582,7 +4571,7 @@ mod tests {
                 1,
                 initial_root.clone(),
                 vec![initial_component.clone()],
-                vec![GraphComponentInstance::new(
+                vec![GraphComponentInstance::root(
                     GraphNodeId::new(2),
                     Digest([9; 32]),
                 )],
@@ -1596,11 +4585,14 @@ mod tests {
                 initial_root,
                 vec![initial_component],
                 vec![
-                    GraphComponentInstance::new(GraphNodeId::new(2), digest),
-                    GraphComponentInstance::new(GraphNodeId::new(2), digest),
+                    GraphComponentInstance::root(GraphNodeId::new(2), digest),
+                    GraphComponentInstance::root(GraphNodeId::new(2), digest),
                 ],
             ),
-            Err(GraphHierarchyError::DuplicateInstance(GraphNodeId::new(2)))
+            Err(GraphHierarchyError::DuplicateInstance {
+                scope: GraphInstanceScope::Root,
+                node: GraphNodeId::new(2),
+            })
         );
 
         let component = component();
@@ -1626,9 +4618,10 @@ mod tests {
                 1,
                 root_with_replacement(&root, wrong_shape),
                 vec![component.clone()],
-                vec![GraphComponentInstance::new(GraphNodeId::new(2), digest)],
+                vec![GraphComponentInstance::root(GraphNodeId::new(2), digest)],
             ),
             Err(GraphHierarchyError::InstanceShapeMismatch {
+                scope: GraphInstanceScope::Root,
                 node: GraphNodeId::new(2),
                 aspect: "outputs",
             })
@@ -1636,12 +4629,15 @@ mod tests {
 
         let unsupported = NodeDefinition::new(
             instance.id(),
-            NodeKind::new(GRAPH_COMPONENT_INSTANCE_KIND, 2),
+            NodeKind::new(
+                GRAPH_COMPONENT_INSTANCE_KIND,
+                GRAPH_COMPONENT_INSTANCE_VERSION + 1,
+            ),
             instance.label(),
             instance.domain(),
             instance.inputs().to_vec(),
             instance.outputs().to_vec(),
-            Vec::new(),
+            instance.parameters().to_vec(),
         );
         assert_eq!(
             GraphHierarchyDocument::try_new(
@@ -1649,94 +4645,315 @@ mod tests {
                 1,
                 root_with_replacement(&root, unsupported),
                 vec![component],
-                Vec::new(),
+                vec![GraphComponentInstance::root(GraphNodeId::new(2), digest)],
             ),
             Err(GraphHierarchyError::UnsupportedInstanceVersion {
+                scope: GraphInstanceScope::Root,
                 node: GraphNodeId::new(2),
-                version: 2,
+                version: GRAPH_COMPONENT_INSTANCE_VERSION + 1,
             })
         );
     }
 
     #[test]
-    fn dependency_order_is_canonical_and_nested_leaf_instances_reject() {
-        let first = component();
-        let first_digest = encode_graph_component(&first).unwrap().digest();
-        let root = root(&first);
-        let instances = vec![GraphComponentInstance::new(
-            GraphNodeId::new(2),
-            first_digest,
-        )];
-        let mut second = first.clone();
-        let mut moved = second.workspace().clone();
-        moved.move_node(GraphNodeId::new(2), 777, 888).unwrap();
-        second.replace_workspace(moved).unwrap();
+    fn dependency_and_binding_order_is_canonical_and_nested_dag_flattens() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let wrapper_root = root(&wrapper);
+        let bindings = vec![
+            GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+            GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+        ];
         let left = GraphHierarchyDocument::try_new(
             GraphHierarchyLimits::interactive(),
             1,
-            root.clone(),
-            vec![first.clone(), second.clone()],
-            instances.clone(),
+            wrapper_root.clone(),
+            vec![leaf.clone(), wrapper.clone()],
+            bindings.clone(),
         )
         .unwrap();
         let right = GraphHierarchyDocument::try_new(
             GraphHierarchyLimits::interactive(),
             1,
-            root.clone(),
-            vec![second, first.clone()],
-            instances,
+            wrapper_root,
+            vec![wrapper, leaf],
+            bindings.into_iter().rev().collect(),
         )
         .unwrap();
         assert_eq!(left, right);
+        assert_eq!(left.flattened_instance_count(), 2);
+        assert_eq!(left.flattened_node_count(), 22);
+        assert_eq!(left.flattened_wire_count(), 26);
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(2)]),
+            Some(wrapper_digest)
+        );
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(2), GraphNodeId::new(1)]),
+            Some(leaf_digest)
+        );
+        assert_eq!(left.component_at_instance_path(&[]), None);
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(1)]),
+            None
+        );
+        assert_eq!(
+            left.component_at_instance_path(&[GraphNodeId::new(2), GraphNodeId::new(2)]),
+            None
+        );
         assert_eq!(
             encode_graph_hierarchy(&left).unwrap(),
             encode_graph_hierarchy(&right).unwrap()
         );
 
-        let mut nested = first;
-        let mut nested_workspace = nested.workspace().clone();
-        nested_workspace
-            .create_node(
-                GraphNodePrototype::new(
-                    NodeKind::new(
-                        GRAPH_COMPONENT_INSTANCE_KIND,
-                        GRAPH_COMPONENT_INSTANCE_VERSION,
-                    ),
-                    "Forbidden nested instance",
-                    ExecutionDomain::HostExact,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-                10,
-                10,
+        let flattened = flatten_graph_hierarchy(&left).unwrap();
+        assert_eq!(flattened.workspace().graph().nodes().len(), 22);
+        assert_eq!(flattened.workspace().graph().wires().len(), 26);
+        assert_eq!(flattened.instances().len(), 2);
+        assert_eq!(
+            flattened.instances()[0].source_path(),
+            [GraphNodeId::new(2)]
+        );
+        assert!(flattened.instances()[0].nodes().is_empty());
+        assert_eq!(
+            flattened.instances()[1].source_path(),
+            [GraphNodeId::new(2), GraphNodeId::new(1)]
+        );
+        assert_eq!(flattened.instances()[1].nodes().len(), 20);
+        assert_eq!(flattened.node_provenance().len(), 22);
+        assert_eq!(flattened.wire_provenance().len(), 26);
+        assert_eq!(
+            flattened
+                .node_provenance()
+                .iter()
+                .filter(|mapping| matches!(
+                    mapping.origin(),
+                    GraphHierarchyNodeOrigin::Component { source_path, .. }
+                        if source_path == &[GraphNodeId::new(2), GraphNodeId::new(1)]
+                ))
+                .count(),
+            20
+        );
+        assert_eq!(
+            flattened
+                .wire_provenance()
+                .iter()
+                .filter(|mapping| matches!(
+                    mapping.origin(),
+                    GraphHierarchyWireOrigin::Component { source_path, .. }
+                        if source_path == &[GraphNodeId::new(2), GraphNodeId::new(1)]
+                ))
+                .count(),
+            24
+        );
+        assert!(flattened.node_provenance().iter().all(|mapping| {
+            !matches!(
+                mapping.origin(),
+                GraphHierarchyNodeOrigin::Component { source_path, .. }
+                    if source_path == &[GraphNodeId::new(2)]
             )
-            .unwrap();
-        nested.replace_workspace(nested_workspace).unwrap();
-        let nested_digest = encode_graph_component(&nested).unwrap().digest();
-        let nested_node = nested
-            .workspace()
-            .graph()
-            .nodes()
-            .iter()
-            .find(|node| node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND)
+        }));
+        assert!(
+            !flattened
+                .workspace()
+                .graph()
+                .nodes()
+                .iter()
+                .any(has_component_instance_name)
+        );
+        let fixture = compile_representative_exact_control_graph().unwrap();
+        assert!(
+            analyze_graph(
+                flattened.workspace().graph(),
+                fixture.registry().semantic_registry()
+            )
+            .is_ok()
+        );
+
+        let encoding = encode_graph_hierarchy(&left).unwrap();
+        assert_eq!(
+            replay_graph_hierarchy(
+                encoding.bytes(),
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
             .unwrap()
-            .id();
+            .document(),
+            &left
+        );
+    }
+
+    #[test]
+    fn nested_reconnection_preserves_parent_component_wire_origin() {
+        let leaf = chain_component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wired_wrapper_component(&leaf, "control.wired_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let hierarchy = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf, wrapper],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+
+        let flattened = flatten_graph_hierarchy(&hierarchy).unwrap();
+        assert_eq!(flattened.node_provenance().len(), 23);
+        assert_eq!(flattened.wire_provenance().len(), 27);
+        let parent_origin = GraphHierarchyWireOrigin::Component {
+            source_path: vec![GraphNodeId::new(2)],
+            component: wrapper_digest,
+            wire: GraphWireId::new(1),
+        };
+        let final_wire = flattened.flattened_wire(&parent_origin).unwrap();
+        assert_eq!(flattened.wire_origin(final_wire), Some(&parent_origin));
+        assert_eq!(
+            flattened
+                .wire_provenance()
+                .iter()
+                .filter(|mapping| matches!(
+                    mapping.origin(),
+                    GraphHierarchyWireOrigin::Component { source_path, .. }
+                        if source_path == &[GraphNodeId::new(2)]
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cycles_depth_and_expanded_instance_limits_fail_before_flattening() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let wrapper_root = root(&wrapper);
+        let bindings = vec![
+            GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+            GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+        ];
+        let mut depth_limits = GraphHierarchyLimits::interactive();
+        depth_limits.maximum_nesting_depth = 1;
+        assert_eq!(
+            GraphHierarchyDocument::try_new(
+                depth_limits,
+                1,
+                wrapper_root.clone(),
+                vec![leaf.clone(), wrapper.clone()],
+                bindings.clone(),
+            ),
+            Err(GraphHierarchyError::LimitExceeded("nesting depth"))
+        );
+        let mut expansion_limits = GraphHierarchyLimits::interactive();
+        expansion_limits.maximum_expanded_instances = 1;
+        assert_eq!(
+            GraphHierarchyDocument::try_new(
+                expansion_limits,
+                1,
+                wrapper_root,
+                vec![leaf, wrapper],
+                bindings,
+            ),
+            Err(GraphHierarchyError::LimitExceeded(
+                "expanded instance count"
+            ))
+        );
+
+        let leaf = component();
+        let first = wrapper_component(&leaf, "control.cycle_a");
+        let second = wrapper_component(&leaf, "control.cycle_b");
+        let first_digest = encode_graph_component(&first).unwrap().digest();
+        let second_digest = encode_graph_component(&second).unwrap().digest();
+        let cycle_at = first_digest.min(second_digest);
         assert_eq!(
             GraphHierarchyDocument::try_new(
                 GraphHierarchyLimits::interactive(),
                 1,
-                root,
-                vec![nested],
-                vec![GraphComponentInstance::new(
-                    GraphNodeId::new(2),
-                    nested_digest,
-                )],
+                root(&first),
+                vec![first, second],
+                vec![
+                    GraphComponentInstance::root(GraphNodeId::new(2), first_digest),
+                    GraphComponentInstance::nested(
+                        first_digest,
+                        GraphNodeId::new(1),
+                        second_digest,
+                    ),
+                    GraphComponentInstance::nested(
+                        second_digest,
+                        GraphNodeId::new(1),
+                        first_digest,
+                    ),
+                ],
             ),
-            Err(GraphHierarchyError::NestedComponentInstance {
-                component: nested_digest,
-                node: nested_node,
+            Err(GraphHierarchyError::DependencyCycle(cycle_at))
+        );
+    }
+
+    #[test]
+    fn nested_bindings_are_total_unique_and_scoped_to_known_components() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.pid_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let wrapper_root = root(&wrapper);
+        let root_binding = GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest);
+
+        assert_eq!(
+            GraphHierarchyDocument::try_new(
+                GraphHierarchyLimits::interactive(),
+                1,
+                wrapper_root.clone(),
+                vec![leaf.clone(), wrapper.clone()],
+                vec![root_binding],
+            ),
+            Err(GraphHierarchyError::MissingInstanceBinding {
+                scope: GraphInstanceScope::Component(wrapper_digest),
+                node: GraphNodeId::new(1),
             })
+        );
+
+        let nested =
+            GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest);
+        assert_eq!(
+            GraphHierarchyDocument::try_new(
+                GraphHierarchyLimits::interactive(),
+                1,
+                wrapper_root.clone(),
+                vec![leaf.clone(), wrapper.clone()],
+                vec![root_binding, nested, nested],
+            ),
+            Err(GraphHierarchyError::DuplicateInstance {
+                scope: GraphInstanceScope::Component(wrapper_digest),
+                node: GraphNodeId::new(1),
+            })
+        );
+
+        let unknown_parent = Digest([0xff; 32]);
+        assert_eq!(
+            GraphHierarchyDocument::try_new(
+                GraphHierarchyLimits::interactive(),
+                1,
+                wrapper_root,
+                vec![leaf, wrapper],
+                vec![
+                    root_binding,
+                    nested,
+                    GraphComponentInstance::nested(
+                        unknown_parent,
+                        GraphNodeId::new(1),
+                        leaf_digest,
+                    ),
+                ],
+            ),
+            Err(GraphHierarchyError::UnknownInstanceScope(unknown_parent))
         );
     }
 
@@ -1772,6 +4989,47 @@ mod tests {
                 GraphLimits::interactive(),
             ),
             Err(GraphHierarchyError::InvalidMagic)
+        );
+        let mut old_version = encoding.bytes().to_vec();
+        old_version[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        assert_eq!(
+            replay_graph_hierarchy(
+                &old_version,
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphHierarchyError::UnsupportedVersion(1))
+        );
+        let mut decoder = Decoder::new(encoding.bytes());
+        decoder.take(4).unwrap();
+        decoder.u16().unwrap();
+        decoder.u16().unwrap();
+        for _ in 0..HIERARCHY_LIMIT_FIELD_COUNT {
+            decoder.u64().unwrap();
+        }
+        decoder.u64().unwrap();
+        let root_length = usize::try_from(decoder.u32().unwrap()).unwrap();
+        decoder.take(root_length).unwrap();
+        let component_count = decoder.u32().unwrap();
+        for _ in 0..component_count {
+            let component_length = usize::try_from(decoder.u32().unwrap()).unwrap();
+            decoder.take(component_length).unwrap();
+        }
+        assert_eq!(decoder.u32().unwrap(), 1);
+        let scope_tag_offset = decoder.cursor;
+        let mut bad_scope_tag = encoding.bytes().to_vec();
+        bad_scope_tag[scope_tag_offset] = 2;
+        assert_eq!(
+            replay_graph_hierarchy(
+                &bad_scope_tag,
+                GraphHierarchyLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphHierarchyError::NonCanonical)
         );
         let mut trailing = encoding.bytes().to_vec();
         trailing.push(0);
@@ -1823,7 +5081,7 @@ mod tests {
                 1,
                 changed_root,
                 vec![component],
-                vec![GraphComponentInstance::new(GraphNodeId::new(2), digest)],
+                vec![GraphComponentInstance::root(GraphNodeId::new(2), digest)],
             ),
             Err(GraphHierarchyError::SemanticContextMismatch(digest))
         );
@@ -1843,7 +5101,7 @@ mod tests {
                 prototype.domain(),
                 prototype.inputs().to_vec(),
                 prototype.outputs().to_vec(),
-                Vec::new(),
+                prototype.parameters().to_vec(),
             )
         };
         let graph = GraphDocument::try_new(
@@ -1879,8 +5137,8 @@ mod tests {
             root,
             vec![component],
             vec![
-                GraphComponentInstance::new(GraphNodeId::new(1), digest),
-                GraphComponentInstance::new(GraphNodeId::new(2), digest),
+                GraphComponentInstance::root(GraphNodeId::new(1), digest),
+                GraphComponentInstance::root(GraphNodeId::new(2), digest),
             ],
         )
         .unwrap();
@@ -1911,5 +5169,293 @@ mod tests {
                         port: GraphPortId::new(1),
                     }
         }));
+    }
+
+    #[test]
+    fn exact_nested_component_package_round_trips_and_merges_once() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let wrapper = wrapper_component(&leaf, "control.package_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let mut unrelated = leaf.clone();
+        unrelated
+            .update_identity_metadata("control.unrelated_leaf", 1)
+            .unwrap();
+        let unrelated_digest = encode_graph_component(&unrelated).unwrap().digest();
+        let source = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            7,
+            root(&wrapper),
+            vec![leaf.clone(), wrapper.clone(), unrelated],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest),
+            ],
+        )
+        .unwrap();
+
+        let package = source
+            .export_component_package(wrapper_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        assert_eq!(package.root(), wrapper_digest);
+        assert_eq!(package.dependencies().len(), 2);
+        assert!(
+            package
+                .dependencies()
+                .iter()
+                .all(|dependency| dependency.digest() != unrelated_digest)
+        );
+        assert_eq!(package.instances().len(), 1);
+        assert_eq!(package.expanded_instance_count(), 2);
+        let encoding = encode_graph_component_package(&package).unwrap();
+        let replay = replay_graph_component_package(
+            encoding.bytes(),
+            GraphComponentPackageLimits::interactive(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &package);
+        assert_eq!(replay.encoding(), &encoding);
+
+        let destination_root = empty_root(&leaf);
+        let mut destination = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            11,
+            destination_root.clone(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let report = destination
+            .import_component_package(replay.document())
+            .unwrap();
+        assert!(report.changed());
+        assert_eq!(report.root(), wrapper_digest);
+        assert_eq!(report.added_components().len(), 2);
+        assert_eq!(report.added_instance_bindings(), 1);
+        assert_eq!(destination.revision(), 12);
+        assert_eq!(destination.root(), &destination_root);
+        assert_eq!(destination.dependencies().len(), 2);
+        assert_eq!(destination.instances().len(), 1);
+
+        let imported = destination.clone();
+        let duplicate = destination
+            .import_component_package(replay.document())
+            .unwrap();
+        assert!(!duplicate.changed());
+        assert!(duplicate.added_components().is_empty());
+        assert_eq!(duplicate.added_instance_bindings(), 0);
+        assert_eq!(destination, imported);
+
+        assert_eq!(
+            destination
+                .add_root_instance(wrapper_digest, "Imported wrapper", 12, 18)
+                .unwrap(),
+            GraphNodeId::new(1)
+        );
+        let flattened = flatten_graph_hierarchy(&destination).unwrap();
+        assert_eq!(
+            flattened.workspace().graph().nodes().len(),
+            package.flattened_node_count()
+        );
+        assert_eq!(
+            flattened.workspace().graph().wires().len(),
+            package.flattened_wire_count()
+        );
+    }
+
+    #[test]
+    fn component_package_conflicts_reject_atomically() {
+        let leaf_a = component();
+        let leaf_a_digest = encode_graph_component(&leaf_a).unwrap().digest();
+        let mut leaf_b = leaf_a.clone();
+        leaf_b
+            .update_identity_metadata("control.package_leaf_b", 1)
+            .unwrap();
+        let leaf_b_digest = encode_graph_component(&leaf_b).unwrap().digest();
+        let wrapper = wrapper_component(&leaf_a, "control.package_conflict_wrapper");
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let source = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            1,
+            root(&wrapper),
+            vec![leaf_a.clone(), wrapper.clone()],
+            vec![
+                GraphComponentInstance::root(GraphNodeId::new(2), wrapper_digest),
+                GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_a_digest),
+            ],
+        )
+        .unwrap();
+        let package = source
+            .export_component_package(wrapper_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        let mut destination = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            3,
+            empty_root(&leaf_a),
+            vec![leaf_b, wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_b_digest,
+            )],
+        )
+        .unwrap();
+        let retained = destination.clone();
+        assert_eq!(
+            destination.import_component_package(&package),
+            Err(GraphComponentPackageError::BindingConflict {
+                parent: wrapper_digest,
+                node: GraphNodeId::new(1),
+                existing: leaf_b_digest,
+                incoming: leaf_a_digest,
+            })
+        );
+        assert_eq!(destination, retained);
+
+        let leaf_package = source
+            .export_component_package(leaf_a_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        let mut same_name = leaf_a.clone();
+        let mut workspace = same_name.workspace().clone();
+        let node = workspace.graph().nodes()[0].id();
+        let placement = workspace.placement(node).unwrap();
+        workspace
+            .move_node(node, placement.x() + 1, placement.y())
+            .unwrap();
+        same_name.replace_workspace(workspace).unwrap();
+        let same_name_digest = encode_graph_component(&same_name).unwrap().digest();
+        let mut destination = GraphHierarchyDocument::try_new(
+            GraphHierarchyLimits::interactive(),
+            5,
+            empty_root(&leaf_a),
+            vec![same_name],
+            Vec::new(),
+        )
+        .unwrap();
+        let retained = destination.clone();
+        assert_eq!(
+            destination.import_component_package(&leaf_package),
+            Err(GraphComponentPackageError::StableNameConflict {
+                name: "control.pid_leaf".to_owned(),
+                existing: same_name_digest,
+                incoming: leaf_a_digest,
+            })
+        );
+        assert_eq!(destination, retained);
+    }
+
+    #[test]
+    fn component_package_replay_and_closure_fail_closed() {
+        let leaf = component();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let hierarchy = hierarchy();
+        let package = hierarchy
+            .export_component_package(leaf_digest, GraphComponentPackageLimits::interactive())
+            .unwrap();
+        let encoding = encode_graph_component_package(&package).unwrap();
+
+        let mut invalid_magic = encoding.bytes().to_vec();
+        invalid_magic[0] ^= 0xff;
+        assert_eq!(
+            replay_graph_component_package(
+                &invalid_magic,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::InvalidMagic)
+        );
+        let mut unsupported_version = encoding.bytes().to_vec();
+        unsupported_version[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        assert_eq!(
+            replay_graph_component_package(
+                &unsupported_version,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::UnsupportedVersion(2))
+        );
+        let mut unknown_root = encoding.bytes().to_vec();
+        unknown_root[64..96].fill(0xff);
+        assert_eq!(
+            replay_graph_component_package(
+                &unknown_root,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::UnknownRoot(Digest([0xff; 32])))
+        );
+        let mut trailing = encoding.bytes().to_vec();
+        trailing.push(0);
+        assert_eq!(
+            replay_graph_component_package(
+                &trailing,
+                GraphComponentPackageLimits::interactive(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::TrailingBytes)
+        );
+        let mut tight_admission = GraphComponentPackageLimits::interactive();
+        tight_admission.maximum_components = 1;
+        assert_eq!(
+            replay_graph_component_package(
+                encoding.bytes(),
+                tight_admission,
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            ),
+            Err(GraphComponentPackageError::LimitExceeded(
+                "embedded admission limit"
+            ))
+        );
+
+        let mut unrelated = leaf.clone();
+        unrelated
+            .update_identity_metadata("control.package_unreachable", 1)
+            .unwrap();
+        let unrelated_digest = encode_graph_component(&unrelated).unwrap().digest();
+        assert_eq!(
+            crate::graph::GraphComponentPackageDocument::try_new(
+                GraphComponentPackageLimits::interactive(),
+                leaf_digest,
+                vec![leaf.clone(), unrelated],
+                Vec::new(),
+            ),
+            Err(GraphComponentPackageError::UnreachableComponent(
+                unrelated_digest
+            ))
+        );
+        assert_eq!(
+            crate::graph::GraphComponentPackageDocument::try_new(
+                GraphComponentPackageLimits::interactive(),
+                leaf_digest,
+                vec![leaf],
+                vec![GraphComponentInstance::root(
+                    GraphNodeId::new(1),
+                    leaf_digest,
+                )],
+            ),
+            Err(GraphComponentPackageError::RootBinding)
+        );
+        assert_eq!(
+            crate::graph::GraphComponentPackageDocument::try_new(
+                GraphComponentPackageLimits::interactive(),
+                leaf_digest,
+                vec![component(), component()],
+                Vec::new(),
+            ),
+            Err(GraphComponentPackageError::DuplicateComponent(leaf_digest))
+        );
     }
 }

@@ -1058,7 +1058,7 @@ fn project_coefficient(
     let scaled = ideal_steps * Real::from(FINITE_DIFFERENCE_ONE_STEP);
     let precision = -i32::from(precision_bits);
     let interval = scaled
-        .certified_dyadic_interval(precision)
+        .certified_rational_interval(precision)
         .ok_or(DirectMotionError::CoefficientApproximationAborted)?;
     let lower = round_rational_ties_even(&interval[0])?;
     let upper = round_rational_ties_even(&interval[1])?;

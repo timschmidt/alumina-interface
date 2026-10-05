@@ -729,7 +729,7 @@ fn project_coefficient(
         })?;
     let scaled = ideal * Real::from(scale);
     let interval = scaled
-        .certified_dyadic_interval(-i32::from(precision_bits))
+        .certified_rational_interval(-i32::from(precision_bits))
         .ok_or(ServoMotionError::ProjectionAborted {
             span,
             axis,

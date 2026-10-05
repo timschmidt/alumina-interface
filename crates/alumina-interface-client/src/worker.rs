@@ -18,6 +18,11 @@ use alumina_job::{
     DecodedMachineJobManifest, JOB_DESCRIPTOR_WIRE_BYTES, JobDescriptor, JobNetworkPolicy,
 };
 use alumina_machine_ir::MAX_EXECUTION_AXES;
+use alumina_net::NetworkPhase;
+use alumina_net::provisioning::{
+    MAX_NETWORK_SCAN_RESULTS, NetworkAuthentication, NetworkFailure, NetworkScanEntry,
+    NetworkScanResult, NetworkStatus, NetworkStatusFlags, StationLinkState,
+};
 use alumina_protocol::{DeviceCycle, DeviceId, Digest};
 use alumina_runtime::health::{
     RuntimeHealthFlags, RuntimeHealthSnapshot as WireRuntimeHealthSnapshot,
@@ -31,11 +36,12 @@ use crate::configuration::ConfigurationStatusAvailability;
 use crate::diagnostics::{TelemetryClientPhase, WaveformClientPhase};
 use crate::health::{RuntimeHealthAvailability, RuntimeHealthView};
 use crate::http::{DeviceCredentialSource, DeviceIdentity};
+use crate::network::NetworkClientPhase;
 use crate::schedule::ParticipantSchedulePhase;
 use crate::upload::{CacheUploadPhase, OwnedUploadSource};
 
 /// Exact JSON message schema shared by the browser UI and its control worker.
-pub const WORKER_SCHEMA_VERSION: u16 = 13;
+pub const WORKER_SCHEMA_VERSION: u16 = 15;
 /// Maximum clock-history records retained and copied into one UI snapshot.
 pub const MAXIMUM_CLOCK_HISTORY: usize = 64;
 /// Maximum UTF-8 bytes retained in one worker diagnostic field.
@@ -427,6 +433,59 @@ impl Drop for DeviceConnectionRequest {
     }
 }
 
+/// Credential-bearing selection of one exact worker-retained scan entry.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerNetworkJoinRequest {
+    /// UI-local connection owning the authenticated network state.
+    pub connection_id: u64,
+    /// Exact scan generation from which the BSSID was selected.
+    pub scan_generation: u32,
+    /// Exact selected basic-service-set MAC address.
+    pub bssid: [u8; 6],
+    /// UTF-8 passphrase bytes; empty is valid only for a selected open WLAN.
+    pub passphrase: Vec<u8>,
+}
+
+impl WorkerNetworkJoinRequest {
+    /// Validate transport bounds before looking up the retained scan entry.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0
+            || self.scan_generation == 0
+            || self.bssid == [0; 6]
+            || self.passphrase.len() > 63
+            || core::str::from_utf8(&self.passphrase).is_err()
+        {
+            Err(WorkerContractError::NetworkRequest)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Borrow the validated UTF-8 passphrase inside the worker only.
+    pub fn passphrase(&self) -> Result<&str, WorkerContractError> {
+        core::str::from_utf8(&self.passphrase).map_err(|_| WorkerContractError::NetworkRequest)
+    }
+}
+
+impl fmt::Debug for WorkerNetworkJoinRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerNetworkJoinRequest")
+            .field("connection_id", &self.connection_id)
+            .field("scan_generation", &self.scan_generation)
+            .field("bssid", &self.bssid)
+            .field("passphrase", &"[redacted]")
+            .finish()
+    }
+}
+
+impl Drop for WorkerNetworkJoinRequest {
+    fn drop(&mut self) {
+        self.passphrase.fill(0);
+    }
+}
+
 /// One command delivered from the rendering/UI realm to the control worker.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -445,6 +504,26 @@ pub enum WorkerCommand {
     CaptureWaveform {
         /// Complete bounded capture request; the worker supplies trusted context.
         request: WorkerWaveformRequest,
+    },
+    /// Scan visible infrastructure WLANs without disabling the recovery AP.
+    NetworkScan {
+        /// UI-local authenticated connection identity.
+        connection_id: u64,
+    },
+    /// Join one exact BSSID retained from the named scan generation.
+    NetworkJoin {
+        /// Credential-bearing request consumed only by the worker.
+        request: WorkerNetworkJoinRequest,
+    },
+    /// Leave infrastructure WLAN mode while preserving the recovery AP.
+    NetworkLeave {
+        /// UI-local authenticated connection identity.
+        connection_id: u64,
+    },
+    /// Explicitly recreate the protected recovery AP.
+    NetworkRecoverAp {
+        /// UI-local authenticated connection identity.
+        connection_id: u64,
     },
     /// Validate and stage one exact compiled job through immutable cache and prepare.
     StageCachedJob {
@@ -471,6 +550,439 @@ pub enum WorkerCommand {
         /// UI-local stable connection identity.
         connection_id: u64,
     },
+}
+
+/// Portable AP/STA supervisor phase in a worker snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerNetworkPhaseSnapshot {
+    /// Radio has no assumed state.
+    Reset,
+    /// Protected AP is starting.
+    AccessPointStarting,
+    /// Protected AP is ready for provisioning.
+    Provisioning,
+    /// Infrastructure association is underway while the AP remains expected.
+    StationJoining,
+    /// Recovery AP and addressed infrastructure station coexist.
+    AccessPointAndStation,
+    /// The protected AP must be recreated.
+    Recovering,
+}
+
+impl From<NetworkPhase> for WorkerNetworkPhaseSnapshot {
+    fn from(value: NetworkPhase) -> Self {
+        match value {
+            NetworkPhase::Reset => Self::Reset,
+            NetworkPhase::AccessPointStarting => Self::AccessPointStarting,
+            NetworkPhase::Provisioning => Self::Provisioning,
+            NetworkPhase::StationJoining => Self::StationJoining,
+            NetworkPhase::AccessPointAndStation => Self::AccessPointAndStation,
+            NetworkPhase::Recovering => Self::Recovering,
+        }
+    }
+}
+
+impl From<WorkerNetworkPhaseSnapshot> for NetworkPhase {
+    fn from(value: WorkerNetworkPhaseSnapshot) -> Self {
+        match value {
+            WorkerNetworkPhaseSnapshot::Reset => Self::Reset,
+            WorkerNetworkPhaseSnapshot::AccessPointStarting => Self::AccessPointStarting,
+            WorkerNetworkPhaseSnapshot::Provisioning => Self::Provisioning,
+            WorkerNetworkPhaseSnapshot::StationJoining => Self::StationJoining,
+            WorkerNetworkPhaseSnapshot::AccessPointAndStation => Self::AccessPointAndStation,
+            WorkerNetworkPhaseSnapshot::Recovering => Self::Recovering,
+        }
+    }
+}
+
+/// Portable WLAN authentication family in a worker snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerNetworkAuthenticationSnapshot {
+    /// No passphrase.
+    Open,
+    /// WPA2-Personal.
+    Wpa2Personal,
+    /// WPA3-Personal.
+    Wpa3Personal,
+    /// WPA2/WPA3 transition mode.
+    Wpa2Wpa3Personal,
+    /// Visible but unsupported authentication.
+    Unsupported,
+}
+
+impl From<NetworkAuthentication> for WorkerNetworkAuthenticationSnapshot {
+    fn from(value: NetworkAuthentication) -> Self {
+        match value {
+            NetworkAuthentication::Open => Self::Open,
+            NetworkAuthentication::Wpa2Personal => Self::Wpa2Personal,
+            NetworkAuthentication::Wpa3Personal => Self::Wpa3Personal,
+            NetworkAuthentication::Wpa2Wpa3Personal => Self::Wpa2Wpa3Personal,
+            NetworkAuthentication::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+impl From<WorkerNetworkAuthenticationSnapshot> for NetworkAuthentication {
+    fn from(value: WorkerNetworkAuthenticationSnapshot) -> Self {
+        match value {
+            WorkerNetworkAuthenticationSnapshot::Open => Self::Open,
+            WorkerNetworkAuthenticationSnapshot::Wpa2Personal => Self::Wpa2Personal,
+            WorkerNetworkAuthenticationSnapshot::Wpa3Personal => Self::Wpa3Personal,
+            WorkerNetworkAuthenticationSnapshot::Wpa2Wpa3Personal => Self::Wpa2Wpa3Personal,
+            WorkerNetworkAuthenticationSnapshot::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+/// Infrastructure link/address progress in a worker snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStationLinkSnapshot {
+    /// Station interface is inactive.
+    Disabled,
+    /// Station interface is available but disconnected.
+    Disconnected,
+    /// Association is underway.
+    Associating,
+    /// Layer-two association completed without a proven address.
+    Associated,
+    /// Association and DHCP IPv4 configuration completed.
+    Addressed,
+}
+
+impl From<StationLinkState> for WorkerStationLinkSnapshot {
+    fn from(value: StationLinkState) -> Self {
+        match value {
+            StationLinkState::Disabled => Self::Disabled,
+            StationLinkState::Disconnected => Self::Disconnected,
+            StationLinkState::Associating => Self::Associating,
+            StationLinkState::Associated => Self::Associated,
+            StationLinkState::Addressed => Self::Addressed,
+        }
+    }
+}
+
+impl From<WorkerStationLinkSnapshot> for StationLinkState {
+    fn from(value: WorkerStationLinkSnapshot) -> Self {
+        match value {
+            WorkerStationLinkSnapshot::Disabled => Self::Disabled,
+            WorkerStationLinkSnapshot::Disconnected => Self::Disconnected,
+            WorkerStationLinkSnapshot::Associating => Self::Associating,
+            WorkerStationLinkSnapshot::Associated => Self::Associated,
+            WorkerStationLinkSnapshot::Addressed => Self::Addressed,
+        }
+    }
+}
+
+/// Stable non-secret network failure class in a worker snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerNetworkFailureSnapshot {
+    /// No retained failure.
+    None,
+    /// Scan failed.
+    Scan,
+    /// Association was rejected or lost.
+    Association,
+    /// DHCP did not establish an address.
+    Dhcp,
+    /// Radio driver rejected an operation.
+    Driver,
+    /// A bounded deadline expired.
+    Timeout,
+    /// Durable storage failed.
+    Storage,
+    /// A transaction was interrupted or superseded.
+    Interrupted,
+}
+
+impl From<NetworkFailure> for WorkerNetworkFailureSnapshot {
+    fn from(value: NetworkFailure) -> Self {
+        match value {
+            NetworkFailure::None => Self::None,
+            NetworkFailure::Scan => Self::Scan,
+            NetworkFailure::Association => Self::Association,
+            NetworkFailure::Dhcp => Self::Dhcp,
+            NetworkFailure::Driver => Self::Driver,
+            NetworkFailure::Timeout => Self::Timeout,
+            NetworkFailure::Storage => Self::Storage,
+            NetworkFailure::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+impl From<WorkerNetworkFailureSnapshot> for NetworkFailure {
+    fn from(value: WorkerNetworkFailureSnapshot) -> Self {
+        match value {
+            WorkerNetworkFailureSnapshot::None => Self::None,
+            WorkerNetworkFailureSnapshot::Scan => Self::Scan,
+            WorkerNetworkFailureSnapshot::Association => Self::Association,
+            WorkerNetworkFailureSnapshot::Dhcp => Self::Dhcp,
+            WorkerNetworkFailureSnapshot::Driver => Self::Driver,
+            WorkerNetworkFailureSnapshot::Timeout => Self::Timeout,
+            WorkerNetworkFailureSnapshot::Storage => Self::Storage,
+            WorkerNetworkFailureSnapshot::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+/// Credential-free canonical network state projected across the worker boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerNetworkStatusSnapshot {
+    /// Supervisor phase.
+    pub phase: WorkerNetworkPhaseSnapshot,
+    /// Monotonic network generation.
+    pub generation: u32,
+    /// Latest complete scan generation.
+    pub scan_generation: u32,
+    /// Latest mutation transaction.
+    pub last_transaction_id: u64,
+    /// Infrastructure link state.
+    pub station_link: WorkerStationLinkSnapshot,
+    /// Selected authentication family.
+    pub authentication: WorkerNetworkAuthenticationSnapshot,
+    /// Exact canonical non-secret status flags.
+    pub flags: u8,
+    /// Associated channel, or zero.
+    pub channel: u8,
+    /// Associated RSSI, or `i8::MIN`.
+    pub signal_dbm: i8,
+    /// IPv4 prefix, or zero.
+    pub ipv4_prefix: u8,
+    /// IPv4 address, or all zero.
+    pub ipv4_address: [u8; 4],
+    /// IPv4 gateway, or all zero.
+    pub ipv4_gateway: [u8; 4],
+    /// Selected BSSID, or all zero.
+    pub bssid: [u8; 6],
+    /// Latest stable failure class.
+    pub last_failure: WorkerNetworkFailureSnapshot,
+    /// Selected SSID, if configured.
+    pub ssid: Option<String>,
+}
+
+impl WorkerNetworkStatusSnapshot {
+    /// Project one independently validated canonical status.
+    pub fn from_status(status: NetworkStatus) -> Self {
+        Self {
+            phase: status.phase.into(),
+            generation: status.generation,
+            scan_generation: status.scan_generation,
+            last_transaction_id: status.last_transaction_id,
+            station_link: status.station_link.into(),
+            authentication: status.authentication.into(),
+            flags: status.flags.0,
+            channel: status.channel,
+            signal_dbm: status.signal_dbm,
+            ipv4_prefix: status.ipv4_prefix,
+            ipv4_address: status.ipv4_address,
+            ipv4_gateway: status.ipv4_gateway,
+            bssid: status.bssid,
+            last_failure: status.last_failure.into(),
+            ssid: status.ssid().map(str::to_owned),
+        }
+    }
+
+    /// Whether one canonical status flag is present.
+    pub const fn contains(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+
+    fn validate(&self) -> Result<(), WorkerContractError> {
+        NetworkStatus::try_new(
+            self.phase.into(),
+            self.generation,
+            self.scan_generation,
+            self.last_transaction_id,
+            self.station_link.into(),
+            self.authentication.into(),
+            NetworkStatusFlags(self.flags),
+            self.channel,
+            self.signal_dbm,
+            self.ipv4_prefix,
+            self.ipv4_address,
+            self.ipv4_gateway,
+            self.bssid,
+            self.last_failure.into(),
+            self.ssid.as_deref(),
+        )
+        .map(|_| ())
+        .map_err(|_| WorkerContractError::NetworkSnapshot)
+    }
+}
+
+/// One credential-free visible WLAN projected across the worker boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerNetworkScanEntrySnapshot {
+    /// Validated UTF-8 SSID.
+    pub ssid: String,
+    /// Advertised authentication.
+    pub authentication: WorkerNetworkAuthenticationSnapshot,
+    /// Primary channel.
+    pub channel: u8,
+    /// Received signal strength in dBm.
+    pub signal_dbm: i8,
+    /// Exact basic-service-set MAC address.
+    pub bssid: [u8; 6],
+}
+
+impl WorkerNetworkScanEntrySnapshot {
+    fn from_entry(entry: NetworkScanEntry) -> Self {
+        Self {
+            ssid: entry.ssid().to_owned(),
+            authentication: entry.authentication.into(),
+            channel: entry.channel,
+            signal_dbm: entry.signal_dbm,
+            bssid: entry.bssid,
+        }
+    }
+
+    fn entry(&self) -> Result<NetworkScanEntry, WorkerContractError> {
+        NetworkScanEntry::try_new(
+            &self.ssid,
+            self.authentication.into(),
+            self.channel,
+            self.signal_dbm,
+            self.bssid,
+        )
+        .map_err(|_| WorkerContractError::NetworkSnapshot)
+    }
+}
+
+/// Complete bounded visible-WLAN scan projected across the worker boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerNetworkScanSnapshot {
+    /// Caller transaction identity.
+    pub transaction_id: u64,
+    /// Network generation sampled by the device.
+    pub network_generation: u32,
+    /// Monotonic scan generation.
+    pub scan_generation: u32,
+    /// Device cycle at retention.
+    pub captured_at_cycle: u64,
+    /// Whether more entries existed than the fixed response budget.
+    pub truncated: bool,
+    /// Canonically strongest-first visible WLANs.
+    pub entries: Vec<WorkerNetworkScanEntrySnapshot>,
+}
+
+impl WorkerNetworkScanSnapshot {
+    /// Project one complete canonical scan.
+    pub fn from_scan(scan: NetworkScanResult) -> Self {
+        Self {
+            transaction_id: scan.transaction_id,
+            network_generation: scan.network_generation,
+            scan_generation: scan.scan_generation,
+            captured_at_cycle: scan.captured_at_cycle,
+            truncated: scan.truncated(),
+            entries: scan
+                .entries()
+                .iter()
+                .copied()
+                .map(WorkerNetworkScanEntrySnapshot::from_entry)
+                .collect(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.entries.len() > MAX_NETWORK_SCAN_RESULTS {
+            return Err(WorkerContractError::NetworkSnapshot);
+        }
+        let entries = self
+            .entries
+            .iter()
+            .map(WorkerNetworkScanEntrySnapshot::entry)
+            .collect::<Result<Vec<_>, _>>()?;
+        let canonical = NetworkScanResult::try_new(
+            self.transaction_id,
+            self.network_generation,
+            self.scan_generation,
+            self.captured_at_cycle,
+            &entries,
+            self.truncated,
+        )
+        .map_err(|_| WorkerContractError::NetworkSnapshot)?;
+        if canonical
+            .entries()
+            .iter()
+            .copied()
+            .map(WorkerNetworkScanEntrySnapshot::from_entry)
+            .ne(self.entries.iter().cloned())
+        {
+            return Err(WorkerContractError::NetworkSnapshot);
+        }
+        Ok(())
+    }
+}
+
+/// Credential-free complete replacement network view for one connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerNetworkClientPhaseSnapshot {
+    /// No transaction is selected.
+    Idle,
+    /// One exact request is ready for transport.
+    Ready,
+    /// One authenticated response is pending.
+    AwaitingResponse,
+    /// An ambiguous mutation must be inspected before retry.
+    Reconciling,
+}
+
+impl From<NetworkClientPhase> for WorkerNetworkClientPhaseSnapshot {
+    fn from(value: NetworkClientPhase) -> Self {
+        match value {
+            NetworkClientPhase::Idle => Self::Idle,
+            NetworkClientPhase::Ready => Self::Ready,
+            NetworkClientPhase::AwaitingResponse => Self::AwaitingResponse,
+            NetworkClientPhase::Reconciling => Self::Reconciling,
+        }
+    }
+}
+
+/// Credential-free complete replacement network view for one connection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerNetworkSnapshot {
+    /// UI-local connection identity.
+    pub connection_id: u64,
+    /// Exact worker session generation.
+    pub generation: u64,
+    /// Client transaction lifecycle label.
+    pub client_phase: WorkerNetworkClientPhaseSnapshot,
+    /// Latest canonical network state.
+    pub status: Option<WorkerNetworkStatusSnapshot>,
+    /// Latest complete bounded scan.
+    pub scan: Option<WorkerNetworkScanSnapshot>,
+    /// Consecutive transport/semantic failures.
+    pub consecutive_failures: u32,
+    /// Latest bounded credential-free failure text.
+    pub last_error: Option<String>,
+}
+
+impl WorkerNetworkSnapshot {
+    /// Independently validate a worker-to-renderer network replacement.
+    pub fn validate(&self) -> Result<(), WorkerContractError> {
+        if self.connection_id == 0
+            || self.generation == 0
+            || (self.consecutive_failures == 0) != self.last_error.is_none()
+            || !diagnostic_is_valid(self.last_error.as_deref())
+        {
+            return Err(WorkerContractError::NetworkSnapshot);
+        }
+        if let Some(status) = &self.status {
+            status.validate()?;
+        }
+        if let Some(scan) = &self.scan {
+            scan.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Versioned command envelope. Unknown schema versions must be rejected.
@@ -1085,17 +1597,24 @@ pub struct DeviceIdentitySnapshot {
     pub credential_source: CredentialSourceSnapshot,
     /// Exact capability identity claimed by the running image.
     pub capability: CapabilityIdentitySnapshot,
+    /// Exact Git source identity of the embedded browser interface.
+    pub interface_commit: [u8; 20],
+    /// SHA-256 of the complete canonical embedded-interface manifest.
+    pub interface_bundle_digest: [u8; 32],
 }
 
 impl DeviceIdentitySnapshot {
     /// Projects a validated public response into the worker schema.
     #[must_use]
     pub fn from_identity(identity: &DeviceIdentity) -> Self {
+        let interface = identity.interface_bundle();
         Self {
             board_id: identity.board_id().to_owned(),
             device_id: identity.device_id().0,
             credential_source: identity.credential_source().into(),
             capability: CapabilityIdentitySnapshot::from_identity(identity.capability()),
+            interface_commit: interface.commit(),
+            interface_bundle_digest: interface.digest().0,
         }
     }
 
@@ -1107,6 +1626,8 @@ impl DeviceIdentitySnapshot {
                 byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
             })
             || self.device_id.iter().all(|byte| *byte == 0)
+            || self.interface_commit.iter().all(|byte| *byte == 0)
+            || self.interface_bundle_digest.iter().all(|byte| *byte == 0)
         {
             return Err(WorkerContractError::DeviceIdentity);
         }
@@ -2094,6 +2615,11 @@ pub enum WorkerEvent {
         /// Redacted worker-owned state.
         snapshot: Box<DeviceSessionSnapshot>,
     },
+    /// Complete credential-free replacement network view for one connection.
+    NetworkSnapshot {
+        /// Worker-owned AP/STA transaction and scan state.
+        network: Box<WorkerNetworkSnapshot>,
+    },
     /// Complete replacement snapshot for the one worker-owned cached job.
     JobSnapshot {
         /// Redacted exact cache and schedule state.
@@ -2186,6 +2712,9 @@ impl WorkerEventEnvelope {
         if let WorkerEvent::Snapshot { snapshot } = &self.event {
             snapshot.validate()?;
         }
+        if let WorkerEvent::NetworkSnapshot { network } = &self.event {
+            network.validate()?;
+        }
         if let WorkerEvent::JobSnapshot { snapshot } = &self.event {
             snapshot.validate()?;
         }
@@ -2218,6 +2747,10 @@ pub enum WorkerContractError {
     Origin,
     /// HMAC secret was empty or exceeded the bounded worker allowance.
     Secret,
+    /// Credential-bearing network command failed its bounded transport contract.
+    NetworkRequest,
+    /// Credential-free network snapshot was internally inconsistent.
+    NetworkSnapshot,
     /// Exact affine-clock estimator policy was invalid.
     ClockPolicy,
     /// Automatic heartbeat period was outside the supported range.
@@ -2264,6 +2797,8 @@ impl fmt::Display for WorkerContractError {
             Self::Label => formatter.write_str("device label is not bounded and canonical"),
             Self::Origin => formatter.write_str("device origin is not bounded"),
             Self::Secret => formatter.write_str("device authentication secret is not bounded"),
+            Self::NetworkRequest => formatter.write_str("network request is invalid"),
+            Self::NetworkSnapshot => formatter.write_str("network snapshot is invalid"),
             Self::ClockPolicy => formatter.write_str("clock sampling policy is invalid"),
             Self::HeartbeatInterval => {
                 formatter.write_str("heartbeat interval must be 100 through 60000 ms")
@@ -2314,6 +2849,7 @@ mod tests {
         SubscriptionId, TelemetrySubscribeFlags, TelemetrySubscribeRequest,
         decode_telemetry_subscribe, encode_telemetry_subscribe, telemetry_subscribe_encoded_len,
     };
+    use alumina_net::NetworkSupervisor;
     use alumina_service::diagnostics::DiagnosticServiceState;
     use alumina_sim::diagnostics::{
         SIMULATED_DIAGNOSTIC_PROVIDERS, simulated_resource_overview,
@@ -2382,6 +2918,8 @@ mod tests {
             device_id: *b"ALUM-SIM:TINYBEE",
             credential_source: CredentialSourceSnapshot::DevelopmentFallback,
             capability: CapabilityIdentitySnapshot::from_identity(capability),
+            interface_commit: [0x21; 20],
+            interface_bundle_digest: [0x31; 32],
         }
     }
 
@@ -2443,6 +2981,58 @@ mod tests {
         let debug = format!("{decoded:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("private test secret"));
+    }
+
+    #[test]
+    fn network_command_debug_is_redacted_and_snapshot_is_credential_free() {
+        let join = WorkerNetworkJoinRequest {
+            connection_id: 7,
+            scan_generation: 3,
+            bssid: [0x02, 0xa1, 0x51, 0, 0, 1],
+            passphrase: b"alumina-lab-secret".to_vec(),
+        };
+        assert_eq!(join.validate(), Ok(()));
+        let command = WorkerCommandEnvelope::current(WorkerCommand::NetworkJoin {
+            request: join.clone(),
+        });
+        let debug = format!("{command:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("alumina-lab-secret"));
+
+        let mut supervisor = NetworkSupervisor::new();
+        supervisor.begin_access_point().unwrap();
+        supervisor.access_point_ready().unwrap();
+        let status = NetworkStatus::provisioning(supervisor);
+        let entry = NetworkScanEntry::try_new(
+            "Alumina Lab",
+            NetworkAuthentication::Wpa2Personal,
+            6,
+            -36,
+            join.bssid,
+        )
+        .unwrap();
+        let scan =
+            NetworkScanResult::try_new(2, status.generation, 3, 100, &[entry], false).unwrap();
+        let event = WorkerEventEnvelope::current(WorkerEvent::NetworkSnapshot {
+            network: Box::new(WorkerNetworkSnapshot {
+                connection_id: 7,
+                generation: 1,
+                client_phase: WorkerNetworkClientPhaseSnapshot::Idle,
+                status: Some(WorkerNetworkStatusSnapshot::from_status(status)),
+                scan: Some(WorkerNetworkScanSnapshot::from_scan(scan)),
+                consecutive_failures: 0,
+                last_error: None,
+            }),
+        });
+        let json = serde_json::to_vec(&event).unwrap();
+        assert!(
+            !json
+                .windows(b"alumina-lab-secret".len())
+                .any(|window| window == b"alumina-lab-secret")
+        );
+        let decoded: WorkerEventEnvelope = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.validate(), Ok(()));
     }
 
     #[test]
@@ -2578,7 +3168,7 @@ mod tests {
         let decoded: WorkerEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, event);
         assert_eq!(decoded.validate(), Ok(()));
-        assert_eq!(WORKER_SCHEMA_VERSION, 13);
+        assert_eq!(WORKER_SCHEMA_VERSION, 15);
     }
 
     #[test]

@@ -2195,7 +2195,7 @@ mod tests {
         assert!(
             samples
                 .iter()
-                .all(|sample| sample.entry().kind() == GraphTraceEntryKind::ExternalInput)
+                .all(|sample| sample.entry().kind() == GraphTraceEntryKind::ExternalSource)
         );
         assert_eq!(samples[0].root_tick(), &Rational::from(36));
         assert_eq!(samples[2].root_tick(), &Rational::from(40));

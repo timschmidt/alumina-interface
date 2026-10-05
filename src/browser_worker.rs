@@ -34,15 +34,19 @@ use alumina_interface_client::diagnostics::{
 };
 use alumina_interface_client::health::RuntimeHealthModel;
 use alumina_interface_client::http::{AuthenticatedHttpSession, DeviceIdentity};
+use alumina_interface_client::network::{
+    NetworkClientPhase, NetworkProvisioningMachine, NetworkUpdate,
+};
 use alumina_interface_client::visual::{VisualAssetDownloadMachine, VisualAssetDownloadPhase};
 use alumina_interface_client::wasm::{
     BrowserCapabilityError, BrowserClockError, BrowserConfigurationError, BrowserFetchError,
-    BrowserHealthError, BrowserTelemetryError, BrowserVisualAssetError, BrowserWaveformError,
-    DeviceOrigin, drive_capability_step_in_worker, drive_clock_probe_in_worker,
-    drive_configuration_status_in_worker, drive_runtime_health_in_worker,
-    drive_telemetry_step_in_worker, drive_visual_asset_step_in_worker,
-    drive_waveform_step_in_worker, fetch_device_identity_in_worker,
-    fetch_pending_request_in_worker, open_authenticated_session_in_worker, worker_origin,
+    BrowserHealthError, BrowserNetworkError, BrowserTelemetryError, BrowserVisualAssetError,
+    BrowserWaveformError, DeviceOrigin, browser_counter_seed, drive_capability_step_in_worker,
+    drive_clock_probe_in_worker, drive_configuration_status_in_worker,
+    drive_network_step_in_worker, drive_runtime_health_in_worker, drive_telemetry_step_in_worker,
+    drive_visual_asset_step_in_worker, drive_waveform_step_in_worker,
+    fetch_device_identity_in_worker, fetch_pending_request_in_worker,
+    open_authenticated_session_in_worker, worker_origin,
 };
 use alumina_interface_client::worker::{
     CapabilityDownloadPhaseSnapshot, CapabilityIdentitySnapshot, ClockEstimateSnapshot,
@@ -51,8 +55,10 @@ use alumina_interface_client::worker::{
     MAXIMUM_WORKER_DIAGNOSTIC_BYTES, RuntimeHealthWorkerSnapshot, TelemetryPhaseSnapshot,
     WORKER_SCHEMA_VERSION, WorkerCachedJobPhaseSnapshot, WorkerCachedJobRequest,
     WorkerCachedJobSnapshot, WorkerCapabilityDocument, WorkerCommand, WorkerCommandEnvelope,
-    WorkerEvent, WorkerEventEnvelope, WorkerJobExecutionMode, WorkerTelemetryDocument,
-    WorkerVisualAssetDocument, WorkerWaveformDocument, WorkerWaveformRequest,
+    WorkerEvent, WorkerEventEnvelope, WorkerJobExecutionMode, WorkerNetworkJoinRequest,
+    WorkerNetworkScanSnapshot, WorkerNetworkSnapshot, WorkerNetworkStatusSnapshot,
+    WorkerTelemetryDocument, WorkerVisualAssetDocument, WorkerWaveformDocument,
+    WorkerWaveformRequest,
 };
 use alumina_interface_core::board_explorer::{
     BoardExplorerSnapshot, build_board_explorer_snapshot,
@@ -92,6 +98,8 @@ const JOB_ATTENDED_INITIAL_LEASE_SECONDS: u64 = 3;
 const JOB_ATTENDED_RENEWAL_HORIZON_SECONDS: u64 = 9;
 const JOB_ATTENDED_RENEWAL_THRESHOLD_SECONDS: u64 = 4;
 const JOB_ATTENDED_RETRY_GUARD_SECONDS: u64 = 1;
+const NETWORK_STATUS_INTERVAL_MS: f64 = 5_000.0;
+const NETWORK_RECONCILIATION_RETRY_MS: f64 = 500.0;
 
 struct PassiveTelemetrySelection {
     resources: Vec<ResourceId>,
@@ -127,6 +135,11 @@ struct DeviceState {
     configuration_consecutive_failures: u32,
     configuration_last_error: Option<String>,
     next_configuration_attempt_ms: f64,
+    network: NetworkProvisioningMachine,
+    network_boot_nonce: Option<[u8; 16]>,
+    network_consecutive_failures: u32,
+    network_last_error: Option<String>,
+    next_network_status_attempt_ms: f64,
     capability_consecutive_failures: u32,
     capability_last_error: Option<String>,
     visual_assets_initialized: bool,
@@ -168,6 +181,10 @@ impl DeviceState {
         let clock = DeviceClockModel::new(estimator).map_err(|error| error.to_string())?;
         let capability = CapabilityDownloadMachine::new(BoardCapabilityLimits::interactive())
             .map_err(|error| error.to_string())?;
+        let network = NetworkProvisioningMachine::starting_at(
+            browser_counter_seed().map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         Ok(Self {
             connection_id: request.connection_id,
             label: std::mem::take(&mut request.label),
@@ -195,6 +212,11 @@ impl DeviceState {
             configuration_consecutive_failures: 0,
             configuration_last_error: None,
             next_configuration_attempt_ms: 0.0,
+            network,
+            network_boot_nonce: None,
+            network_consecutive_failures: 0,
+            network_last_error: None,
+            next_network_status_attempt_ms: 0.0,
             capability_consecutive_failures: 0,
             capability_last_error: None,
             visual_assets_initialized: false,
@@ -335,6 +357,24 @@ impl DeviceState {
         (selected, complete, received, total)
     }
 
+    fn network_snapshot(&self) -> WorkerNetworkSnapshot {
+        WorkerNetworkSnapshot {
+            connection_id: self.connection_id,
+            generation: self.generation,
+            client_phase: self.network.phase().into(),
+            status: self
+                .network
+                .latest_status()
+                .map(WorkerNetworkStatusSnapshot::from_status),
+            scan: self
+                .network
+                .latest_scan()
+                .map(WorkerNetworkScanSnapshot::from_scan),
+            consecutive_failures: self.network_consecutive_failures,
+            last_error: self.network_last_error.clone(),
+        }
+    }
+
     fn telemetry_progress_snapshot(&self) -> TelemetryProgressSnapshot {
         self.telemetry
             .as_ref()
@@ -427,6 +467,110 @@ impl DeviceState {
         self.configuration_consecutive_failures = 0;
         self.configuration_last_error = None;
         self.next_configuration_attempt_ms = 0.0;
+    }
+
+    fn bind_network_boot(&mut self, boot_nonce: [u8; 16]) -> Result<(), String> {
+        if self.network_boot_nonce != Some(boot_nonce) {
+            self.network
+                .reset(browser_counter_seed().map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+            self.network_boot_nonce = Some(boot_nonce);
+            self.network_consecutive_failures = 0;
+            self.network_last_error = None;
+            self.next_network_status_attempt_ms = 0.0;
+        }
+        if self.network.phase() == NetworkClientPhase::Idle
+            && self.network.latest_status().is_none()
+        {
+            self.network
+                .request_status()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn request_network_scan(&mut self) -> Result<(), String> {
+        self.require_network_session()?;
+        self.network
+            .request_scan()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn request_network_join(&mut self, request: &WorkerNetworkJoinRequest) -> Result<(), String> {
+        request.validate().map_err(|error| error.to_string())?;
+        self.require_network_session()?;
+        let scan = self
+            .network
+            .latest_scan()
+            .filter(|scan| scan.scan_generation == request.scan_generation)
+            .ok_or_else(|| "selected WLAN scan generation is stale or absent".to_owned())?;
+        let entry = scan
+            .entries()
+            .iter()
+            .copied()
+            .find(|entry| entry.bssid == request.bssid)
+            .ok_or_else(|| "selected BSSID is absent from the retained scan".to_owned())?;
+        self.network
+            .request_join(
+                entry,
+                request.passphrase().map_err(|error| error.to_string())?,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn request_network_leave(&mut self) -> Result<(), String> {
+        self.require_network_session()?;
+        self.network
+            .request_leave()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn request_network_recovery(&mut self) -> Result<(), String> {
+        self.require_network_session()?;
+        self.network
+            .request_recover_ap()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn require_network_session(&self) -> Result<(), String> {
+        if self.session.is_some() && self.network_boot_nonce.is_some() {
+            Ok(())
+        } else {
+            Err("authenticated network session is unavailable".to_owned())
+        }
+    }
+
+    fn network_due(&self, now_ms: f64) -> bool {
+        self.network.phase() != NetworkClientPhase::Idle
+            || self.next_network_status_attempt_ms <= now_ms
+    }
+
+    fn prepare_network_status_poll(&mut self) -> Result<(), String> {
+        if self.network.phase() == NetworkClientPhase::Idle {
+            self.network
+                .request_status()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn record_network_success(&mut self, now_ms: f64) {
+        self.network_consecutive_failures = 0;
+        self.network_last_error = None;
+        self.next_network_status_attempt_ms = now_ms + NETWORK_STATUS_INTERVAL_MS;
+    }
+
+    fn record_network_failure(&mut self, now_ms: f64, error: &str) {
+        self.network_consecutive_failures = self.network_consecutive_failures.saturating_add(1);
+        self.network_last_error = Some(bounded_diagnostic(error));
+        self.next_network_status_attempt_ms = now_ms + NETWORK_RECONCILIATION_RETRY_MS;
+        self.next_attempt_ms = self
+            .next_attempt_ms
+            .min(self.next_network_status_attempt_ms);
     }
 
     fn record_capability_success(&mut self) {
@@ -1135,7 +1279,9 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
         reject_command(runtime, None, "worker command must be a JSON string");
         return;
     };
+    let mut json = json.into_bytes();
     if json.len() > MAXIMUM_COMMAND_JSON_BYTES {
+        json.fill(0);
         reject_command(
             runtime,
             None,
@@ -1143,7 +1289,9 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
         );
         return;
     }
-    let envelope: WorkerCommandEnvelope = if let Ok(envelope) = serde_json::from_str(&json) {
+    let decoded = serde_json::from_slice(&json);
+    json.fill(0);
+    let envelope: WorkerCommandEnvelope = if let Ok(envelope) = decoded {
         envelope
     } else {
         reject_command(runtime, None, "worker command JSON is not canonical");
@@ -1170,6 +1318,25 @@ fn receive_worker_command(runtime: &SharedWorkerRuntime, event: &MessageEvent) {
         WorkerCommand::CaptureWaveform { request } => {
             start_waveform_capture(runtime, &request);
         }
+        WorkerCommand::NetworkScan { connection_id } => {
+            start_network_operation(runtime, connection_id, DeviceState::request_network_scan);
+        }
+        WorkerCommand::NetworkJoin { request } => {
+            let connection_id = request.connection_id;
+            start_network_operation(runtime, connection_id, |state| {
+                state.request_network_join(&request)
+            });
+        }
+        WorkerCommand::NetworkLeave { connection_id } => {
+            start_network_operation(runtime, connection_id, DeviceState::request_network_leave);
+        }
+        WorkerCommand::NetworkRecoverAp { connection_id } => {
+            start_network_operation(
+                runtime,
+                connection_id,
+                DeviceState::request_network_recovery,
+            );
+        }
         WorkerCommand::StageCachedJob { request } => stage_cached_job(runtime, *request),
         WorkerCommand::StartCachedJob { job_id } => start_cached_job(runtime, job_id),
         WorkerCommand::StopCachedJob { job_id } => stop_cached_job(runtime, job_id),
@@ -1182,14 +1349,72 @@ const fn command_connection_id(command: &WorkerCommand) -> Option<u64> {
     match command {
         WorkerCommand::Configure { request } => Some(request.connection_id),
         WorkerCommand::CaptureWaveform { request } => Some(request.connection_id),
-        WorkerCommand::ProbeNow { connection_id } | WorkerCommand::Disconnect { connection_id } => {
-            Some(*connection_id)
-        }
+        WorkerCommand::NetworkJoin { request } => Some(request.connection_id),
+        WorkerCommand::ProbeNow { connection_id }
+        | WorkerCommand::NetworkScan { connection_id }
+        | WorkerCommand::NetworkLeave { connection_id }
+        | WorkerCommand::NetworkRecoverAp { connection_id }
+        | WorkerCommand::Disconnect { connection_id } => Some(*connection_id),
         WorkerCommand::StageCachedJob { .. }
         | WorkerCommand::StartCachedJob { .. }
         | WorkerCommand::StopCachedJob { .. }
         | WorkerCommand::ClearCachedJob { .. } => None,
     }
+}
+
+fn start_network_operation(
+    runtime: &SharedWorkerRuntime,
+    connection_id: u64,
+    select: impl FnOnce(&mut DeviceState) -> Result<(), String>,
+) {
+    if connection_id == 0 {
+        reject_command(
+            runtime,
+            Some(connection_id),
+            "connection identity must be nonzero",
+        );
+        return;
+    }
+    let result = {
+        let mut runtime_ref = runtime.borrow_mut();
+        match runtime_ref.devices.get_mut(&connection_id) {
+            Some(DeviceEntry::Idle(state)) => select(state),
+            Some(DeviceEntry::Busy { .. }) => {
+                Err("connection is busy; retry the network request".to_owned())
+            }
+            None => Err("connection does not exist".to_owned()),
+        }
+    };
+    if let Err(error) = result {
+        reject_command(runtime, Some(connection_id), &error);
+        return;
+    }
+    publish_network_snapshot(runtime, connection_id);
+    launch_network_device_step(runtime, connection_id);
+}
+
+fn launch_network_device_step(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    let Some(mut state) = take_idle_device(runtime, connection_id) else {
+        reject_command(
+            runtime,
+            Some(connection_id),
+            "connection became busy before network dispatch",
+        );
+        return;
+    };
+    let generation = state.generation;
+    let task_runtime = Rc::clone(runtime);
+    spawn_local(async move {
+        let scope = task_runtime.borrow().scope.clone();
+        let now_ms = worker_now_ms(&scope);
+        if state.session.is_some() {
+            let worker_scope: &WorkerGlobalScope = scope.as_ref();
+            drive_state_network(worker_scope, &mut state, now_ms).await;
+        } else {
+            state.record_network_failure(now_ms, "authenticated network session is unavailable");
+        }
+        finish_device_step(&task_runtime, connection_id, generation, state, false);
+    });
 }
 
 fn start_waveform_capture(runtime: &SharedWorkerRuntime, request: &WorkerWaveformRequest) {
@@ -2226,6 +2451,7 @@ async fn connect_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -
     let now_ms = worker_now_ms(&scope);
     match result {
         Ok((session, identity)) => {
+            let network_boot_nonce = session.boot_nonce().as_bytes();
             let identity_changed = state
                 .identity
                 .as_ref()
@@ -2248,6 +2474,11 @@ async fn connect_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -
             }
             state.session = Some(session);
             state.identity = Some(identity);
+            if let Err(error) = state.bind_network_boot(network_boot_nonce) {
+                state.session = None;
+                state.schedule_failure(now_ms, &error);
+                return state;
+            }
             state.reset_runtime_health_evidence();
             state.reset_configuration_for_new_boot();
             state.phase = DeviceSessionPhase::Sampling;
@@ -2281,6 +2512,7 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
             state.schedule_success(now_ms);
             probe_runtime_health(&scope, worker_scope, &mut state, now_ms).await;
             probe_configuration_status(&scope, worker_scope, &mut state, now_ms).await;
+            probe_network_status(worker_scope, &mut state, now_ms).await;
             download_capability(worker_scope, &mut state).await;
             if state.session.is_some()
                 && state.capability.phase() == CapabilityDownloadPhase::Complete
@@ -2327,6 +2559,59 @@ async fn probe_device(runtime: &SharedWorkerRuntime, mut state: DeviceState) -> 
         }
     }
     state
+}
+
+async fn probe_network_status(
+    worker_scope: &WorkerGlobalScope,
+    state: &mut DeviceState,
+    now_ms: f64,
+) {
+    if state.session.is_none() || !state.network_due(now_ms) {
+        return;
+    }
+    if let Err(error) = state.prepare_network_status_poll() {
+        state.record_network_failure(now_ms, &error);
+        return;
+    }
+    drive_state_network(worker_scope, state, now_ms).await;
+}
+
+async fn drive_state_network(
+    worker_scope: &WorkerGlobalScope,
+    state: &mut DeviceState,
+    now_ms: f64,
+) {
+    // One reconciliation poll may prove that an exact retained mutation was
+    // never observed. In that sole case, allow its exact resend immediately.
+    for _ in 0..2 {
+        let result = drive_network_step_in_worker(
+            worker_scope,
+            &state.origin,
+            state
+                .session
+                .as_mut()
+                .expect("caller checked authenticated network session"),
+            &mut state.network,
+            &state.secret,
+        )
+        .await;
+        match result {
+            Ok(Some(NetworkUpdate::RetryRequired)) => {
+                state.record_network_success(now_ms);
+            }
+            Ok(Some(_)) | Ok(None) => {
+                state.record_network_success(now_ms);
+                break;
+            }
+            Err(error) => {
+                if network_session_must_reopen(&error) {
+                    state.session = None;
+                }
+                state.record_network_failure(now_ms, &error.to_string());
+                break;
+            }
+        }
+    }
 }
 
 async fn probe_runtime_health(
@@ -2704,6 +2989,20 @@ const fn configuration_session_must_reopen(error: &BrowserConfigurationError) ->
     )
 }
 
+const fn network_session_must_reopen(error: &BrowserNetworkError) -> bool {
+    matches!(
+        error,
+        BrowserNetworkError::Session(_)
+            | BrowserNetworkError::Fetch(
+                BrowserFetchError::DocumentOrigin
+                    | BrowserFetchError::Session(_)
+                    | BrowserFetchError::HttpStatus(_)
+                    | BrowserFetchError::MissingHeader(_)
+                    | BrowserFetchError::Media(_),
+            )
+    )
+}
+
 const fn waveform_session_must_reopen(error: &BrowserWaveformError) -> bool {
     matches!(
         error,
@@ -2767,6 +3066,7 @@ fn finish_device_step(
     publish_telemetry_document(runtime, connection_id);
     publish_waveform_document(runtime, connection_id);
     publish_snapshot(runtime, connection_id);
+    publish_network_snapshot(runtime, connection_id);
     if probe_immediately {
         launch_device_step(runtime, connection_id, false);
     }
@@ -2968,6 +3268,25 @@ fn publish_snapshot(runtime: &SharedWorkerRuntime, connection_id: u64) {
     }
 }
 
+fn publish_network_snapshot(runtime: &SharedWorkerRuntime, connection_id: u64) {
+    let network = runtime
+        .borrow()
+        .devices
+        .get(&connection_id)
+        .and_then(|entry| match entry {
+            DeviceEntry::Idle(state) => Some(state.network_snapshot()),
+            DeviceEntry::Busy { .. } => None,
+        });
+    if let Some(network) = network {
+        emit_worker_event(
+            runtime,
+            WorkerEvent::NetworkSnapshot {
+                network: Box::new(network),
+            },
+        );
+    }
+}
+
 fn publish_job_snapshot(runtime: &SharedWorkerRuntime) {
     let snapshot = runtime.borrow().job.as_ref().map(JobEntry::snapshot);
     if let Some(snapshot) = snapshot {
@@ -3020,6 +3339,8 @@ pub struct SupervisorView {
     pub lifecycle: SupervisorLifecycle,
     /// Stable connection snapshots sorted by UI-local identity.
     pub devices: Vec<DeviceSessionSnapshot>,
+    /// Credential-free AP/STA and bounded scan state per connection.
+    pub networks: Vec<WorkerNetworkSnapshot>,
     /// Complete replacement state for the worker-owned cached job, if any.
     pub job: Option<WorkerCachedJobSnapshot>,
     /// Canonical connected-board documents decoded once per matching generation.
@@ -3212,6 +3533,7 @@ impl ConnectedCapabilityView {
 struct MutableSupervisorView {
     lifecycle: SupervisorLifecycle,
     devices: BTreeMap<u64, DeviceSessionSnapshot>,
+    networks: BTreeMap<u64, WorkerNetworkSnapshot>,
     job: Option<WorkerCachedJobSnapshot>,
     capabilities: BTreeMap<u64, ConnectedCapabilityView>,
     visuals: BTreeMap<(u64, [u8; 32]), ConnectedVisualAssetView>,
@@ -3225,6 +3547,7 @@ impl Default for MutableSupervisorView {
         Self {
             lifecycle: SupervisorLifecycle::Starting,
             devices: BTreeMap::new(),
+            networks: BTreeMap::new(),
             job: None,
             capabilities: BTreeMap::new(),
             visuals: BTreeMap::new(),
@@ -3525,6 +3848,9 @@ impl MutableSupervisorView {
     }
 
     fn apply_snapshot(&mut self, snapshot: DeviceSessionSnapshot) {
+        self.networks.retain(|connection_id, network| {
+            *connection_id != snapshot.connection_id || network.generation == snapshot.generation
+        });
         if self
             .capabilities
             .get(&snapshot.connection_id)
@@ -3608,6 +3934,20 @@ impl MutableSupervisorView {
                 self.lifecycle = SupervisorLifecycle::Ready { scope_origin };
             }
             WorkerEvent::Snapshot { snapshot } => self.apply_snapshot(*snapshot),
+            WorkerEvent::NetworkSnapshot { network } => {
+                if self
+                    .devices
+                    .get(&network.connection_id)
+                    .is_some_and(|device| device.generation == network.generation)
+                {
+                    self.networks.insert(network.connection_id, *network);
+                } else {
+                    self.push_diagnostic(format!(
+                        "connection {}: stale network generation {} ignored",
+                        network.connection_id, network.generation
+                    ));
+                }
+            }
             WorkerEvent::JobSnapshot { snapshot } => self.job = Some(*snapshot),
             WorkerEvent::CapabilityDocument { capability } => {
                 let connection_id = capability.connection_id;
@@ -3659,6 +3999,7 @@ impl MutableSupervisorView {
             }
             WorkerEvent::Removed { connection_id } => {
                 self.devices.remove(&connection_id);
+                self.networks.remove(&connection_id);
                 self.capabilities.remove(&connection_id);
                 self.visuals
                     .retain(|(visual_connection, _), _| *visual_connection != connection_id);
@@ -3690,6 +4031,7 @@ impl MutableSupervisorView {
         SupervisorView {
             lifecycle: self.lifecycle.clone(),
             devices: self.devices.values().cloned().collect(),
+            networks: self.networks.values().cloned().collect(),
             job: self.job.clone(),
             capabilities: self.capabilities.values().cloned().collect(),
             visuals: self.visuals.values().cloned().collect(),

@@ -413,6 +413,44 @@ impl GraphComponentDocument {
         &self.name
     }
 
+    /// Transactionally replace the stable component name and declared behavior
+    /// version. Authoring may retain or increase the behavior version but may
+    /// never regress it. An identical replacement is an exact no-op.
+    pub fn update_identity_metadata(
+        &mut self,
+        name: impl Into<String>,
+        component_version: u32,
+    ) -> Result<(), GraphComponentError> {
+        if component_version == 0 {
+            return Err(GraphComponentError::ZeroComponentVersion);
+        }
+        if component_version < self.component_version {
+            return Err(GraphComponentError::ComponentVersionRegression {
+                current: self.component_version,
+                proposed: component_version,
+            });
+        }
+        let name = name.into();
+        if name == self.name && component_version == self.component_version {
+            return Ok(());
+        }
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            component_version,
+            name,
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            self.outputs.clone(),
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Return the next public-input identity or exhausted sentinel.
     pub const fn next_input_id(&self) -> u64 {
         self.next_input_id
@@ -531,6 +569,317 @@ impl GraphComponentDocument {
         *self = candidate;
         Ok(())
     }
+
+    /// Transactionally expose one unowned internal input under a fresh
+    /// monotonic public-input identity.
+    pub fn add_input(
+        &mut self,
+        name: impl Into<String>,
+        target: WireEndpoint,
+    ) -> Result<GraphComponentInputId, GraphComponentError> {
+        let value = u32::try_from(self.next_input_id)
+            .map_err(|_| GraphComponentError::IdentifierExhausted("public input"))?;
+        let following = self
+            .next_input_id
+            .checked_add(1)
+            .filter(|next| *next <= EXHAUSTED_U32_CURSOR)
+            .ok_or(GraphComponentError::IdentifierExhausted("public input"))?;
+        let id = GraphComponentInputId::new(value);
+        let mut inputs = self.inputs.clone();
+        inputs.push(GraphComponentInput::new(id, name, target));
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            following,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            inputs,
+            self.outputs.clone(),
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(id)
+    }
+
+    /// Transactionally replace one public input's stable name and exact
+    /// internal target. An identical replacement is an exact no-op.
+    pub fn update_input(
+        &mut self,
+        id: GraphComponentInputId,
+        name: impl Into<String>,
+        target: WireEndpoint,
+    ) -> Result<(), GraphComponentError> {
+        let replacement = GraphComponentInput::new(id, name, target);
+        let index = self
+            .inputs
+            .binary_search_by_key(&id, GraphComponentInput::id)
+            .map_err(|_| GraphComponentError::UnknownComponentInput(id))?;
+        if self.inputs[index] == replacement {
+            return Ok(());
+        }
+        let mut inputs = self.inputs.clone();
+        inputs[index] = replacement;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            inputs,
+            self.outputs.clone(),
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally remove one public input without rewinding its identity
+    /// cursor. A retained panel binding prevents removal.
+    pub fn remove_input(&mut self, id: GraphComponentInputId) -> Result<(), GraphComponentError> {
+        let index = self
+            .inputs
+            .binary_search_by_key(&id, GraphComponentInput::id)
+            .map_err(|_| GraphComponentError::UnknownComponentInput(id))?;
+        if self
+            .panel_items
+            .iter()
+            .any(|item| item.binding == GraphFrontPanelBinding::InputControl(id))
+        {
+            return Err(GraphComponentError::ComponentInputInUse(id));
+        }
+        let mut inputs = self.inputs.clone();
+        inputs.remove(index);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            inputs,
+            self.outputs.clone(),
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally expose one internal output under a fresh monotonic
+    /// public-output identity.
+    pub fn add_output(
+        &mut self,
+        name: impl Into<String>,
+        source: WireEndpoint,
+    ) -> Result<GraphComponentOutputId, GraphComponentError> {
+        let value = u32::try_from(self.next_output_id)
+            .map_err(|_| GraphComponentError::IdentifierExhausted("public output"))?;
+        let following = self
+            .next_output_id
+            .checked_add(1)
+            .filter(|next| *next <= EXHAUSTED_U32_CURSOR)
+            .ok_or(GraphComponentError::IdentifierExhausted("public output"))?;
+        let id = GraphComponentOutputId::new(value);
+        let mut outputs = self.outputs.clone();
+        outputs.push(GraphComponentOutput::new(id, name, source));
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            following,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            outputs,
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(id)
+    }
+
+    /// Transactionally replace one public output's stable name and exact
+    /// internal source. An identical replacement is an exact no-op.
+    pub fn update_output(
+        &mut self,
+        id: GraphComponentOutputId,
+        name: impl Into<String>,
+        source: WireEndpoint,
+    ) -> Result<(), GraphComponentError> {
+        let replacement = GraphComponentOutput::new(id, name, source);
+        let index = self
+            .outputs
+            .binary_search_by_key(&id, GraphComponentOutput::id)
+            .map_err(|_| GraphComponentError::UnknownComponentOutput(id))?;
+        if self.outputs[index] == replacement {
+            return Ok(());
+        }
+        let mut outputs = self.outputs.clone();
+        outputs[index] = replacement;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            outputs,
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally remove one public output without rewinding its identity
+    /// cursor. A retained panel binding prevents removal.
+    pub fn remove_output(&mut self, id: GraphComponentOutputId) -> Result<(), GraphComponentError> {
+        let index = self
+            .outputs
+            .binary_search_by_key(&id, GraphComponentOutput::id)
+            .map_err(|_| GraphComponentError::UnknownComponentOutput(id))?;
+        if self
+            .panel_items
+            .iter()
+            .any(|item| item.binding == GraphFrontPanelBinding::OutputIndicator(id))
+        {
+            return Err(GraphComponentError::ComponentOutputInUse(id));
+        }
+        let mut outputs = self.outputs.clone();
+        outputs.remove(index);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            outputs,
+            self.panel_items.clone(),
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally append one exact front-panel binding with a fresh
+    /// monotonic component-local identity.
+    pub fn add_panel_item(
+        &mut self,
+        name: impl Into<String>,
+        binding: GraphFrontPanelBinding,
+        rect: GraphFrontPanelRect,
+    ) -> Result<GraphFrontPanelItemId, GraphComponentError> {
+        let value = u32::try_from(self.next_panel_item_id)
+            .map_err(|_| GraphComponentError::IdentifierExhausted("front-panel item"))?;
+        let following = self
+            .next_panel_item_id
+            .checked_add(1)
+            .filter(|next| *next <= EXHAUSTED_U32_CURSOR)
+            .ok_or(GraphComponentError::IdentifierExhausted("front-panel item"))?;
+        let id = GraphFrontPanelItemId::new(value);
+        let mut panel_items = self.panel_items.clone();
+        panel_items.push(GraphFrontPanelItem::new(id, name, binding, rect));
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            following,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            self.outputs.clone(),
+            panel_items,
+        )?;
+        *self = candidate;
+        Ok(id)
+    }
+
+    /// Transactionally replace one front-panel item's stable name, exact
+    /// binding, and integer rectangle. An exact replacement is a no-op.
+    pub fn update_panel_item(
+        &mut self,
+        id: GraphFrontPanelItemId,
+        name: impl Into<String>,
+        binding: GraphFrontPanelBinding,
+        rect: GraphFrontPanelRect,
+    ) -> Result<(), GraphComponentError> {
+        let name = name.into();
+        let index = self
+            .panel_items
+            .binary_search_by_key(&id, GraphFrontPanelItem::id)
+            .map_err(|_| GraphComponentError::UnknownPanelItem(id))?;
+        let replacement = GraphFrontPanelItem::new(id, name, binding, rect);
+        if self.panel_items[index] == replacement {
+            return Ok(());
+        }
+        let mut panel_items = self.panel_items.clone();
+        panel_items[index] = replacement;
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            self.outputs.clone(),
+            panel_items,
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Transactionally remove one exact front-panel item without rewinding its
+    /// monotonic identity cursor.
+    pub fn remove_panel_item(
+        &mut self,
+        id: GraphFrontPanelItemId,
+    ) -> Result<(), GraphComponentError> {
+        let index = self
+            .panel_items
+            .binary_search_by_key(&id, GraphFrontPanelItem::id)
+            .map_err(|_| GraphComponentError::UnknownPanelItem(id))?;
+        let mut panel_items = self.panel_items.clone();
+        panel_items.remove(index);
+        let candidate = Self::try_new(
+            self.limits,
+            self.next_revision()?,
+            self.component_version,
+            self.name.clone(),
+            self.next_input_id,
+            self.next_output_id,
+            self.next_panel_item_id,
+            self.workspace.clone(),
+            self.inputs.clone(),
+            self.outputs.clone(),
+            panel_items,
+        )?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn next_revision(&self) -> Result<u64, GraphComponentError> {
+        self.revision
+            .checked_add(1)
+            .ok_or(GraphComponentError::RevisionOverflow)
+    }
 }
 
 /// Canonical component bytes paired with their SHA-256 content identity.
@@ -590,6 +939,13 @@ pub enum GraphComponentError {
     LimitExceeded(&'static str),
     /// Declared reusable behavior version was zero.
     ZeroComponentVersion,
+    /// An authoring edit attempted to decrease the declared behavior version.
+    ComponentVersionRegression {
+        /// Current canonical behavior version.
+        current: u32,
+        /// Rejected proposed behavior version.
+        proposed: u32,
+    },
     /// Input did not begin with [`GRAPH_COMPONENT_MAGIC`].
     InvalidMagic,
     /// Component format version is unsupported.
@@ -616,6 +972,8 @@ pub enum GraphComponentError {
     DuplicateName(&'static str),
     /// A monotonic allocation cursor was invalid.
     InvalidIdentifierCursor(&'static str),
+    /// A monotonic allocation cursor has no representable identity remaining.
+    IdentifierExhausted(&'static str),
     /// Component-document revision could not advance.
     RevisionOverflow,
     /// A public input did not resolve to an internal input.
@@ -630,6 +988,10 @@ pub enum GraphComponentError {
     UnknownComponentInput(GraphComponentInputId),
     /// A panel output indicator referenced no public output.
     UnknownComponentOutput(GraphComponentOutputId),
+    /// A retained front-panel control still binds a requested input removal.
+    ComponentInputInUse(GraphComponentInputId),
+    /// A retained front-panel indicator still binds a requested output removal.
+    ComponentOutputInUse(GraphComponentOutputId),
     /// A panel parameter control referenced no node.
     UnknownNode(GraphNodeId),
     /// A panel parameter control referenced no exact retained parameter.
@@ -639,6 +1001,8 @@ pub enum GraphComponentError {
         /// Node-local parameter identity.
         parameter: u32,
     },
+    /// A requested front-panel item identity was not retained.
+    UnknownPanelItem(GraphFrontPanelItemId),
     /// Multiple panel items attempted to own one exact binding.
     DuplicatePanelBinding,
     /// A panel rectangle was negative, empty, overflowing, or out of bounds.
@@ -665,6 +1029,10 @@ impl fmt::Display for GraphComponentError {
             Self::ZeroComponentVersion => {
                 formatter.write_str("graph component behavior version is zero")
             }
+            Self::ComponentVersionRegression { current, proposed } => write!(
+                formatter,
+                "graph component behavior version regressed from {current} to {proposed}"
+            ),
             Self::InvalidMagic => formatter.write_str("graph component magic is invalid"),
             Self::UnsupportedVersion(version) => {
                 write!(
@@ -701,6 +1069,9 @@ impl fmt::Display for GraphComponentError {
             Self::InvalidIdentifierCursor(kind) => {
                 write!(formatter, "graph component next {kind} identity is invalid")
             }
+            Self::IdentifierExhausted(kind) => {
+                write!(formatter, "graph component {kind} identities are exhausted")
+            }
             Self::RevisionOverflow => formatter.write_str("graph component revision is exhausted"),
             Self::UnknownInput(endpoint) => {
                 write!(formatter, "graph component input {endpoint:?} is unknown")
@@ -727,6 +1098,14 @@ impl fmt::Display for GraphComponentError {
                     "graph component panel output {output:?} is unknown"
                 )
             }
+            Self::ComponentInputInUse(input) => write!(
+                formatter,
+                "graph component public input {input:?} is still bound to the front panel"
+            ),
+            Self::ComponentOutputInUse(output) => write!(
+                formatter,
+                "graph component public output {output:?} is still bound to the front panel"
+            ),
             Self::UnknownNode(node) => {
                 write!(formatter, "graph component panel node {node:?} is unknown")
             }
@@ -734,6 +1113,9 @@ impl fmt::Display for GraphComponentError {
                 formatter,
                 "graph component panel node {node:?} parameter {parameter} is unknown"
             ),
+            Self::UnknownPanelItem(item) => {
+                write!(formatter, "graph component panel item {item:?} is unknown")
+            }
             Self::DuplicatePanelBinding => {
                 formatter.write_str("graph component front-panel binding is duplicated")
             }
@@ -1463,6 +1845,63 @@ mod tests {
     }
 
     #[test]
+    fn identity_metadata_is_monotonic_transactional_and_noop_aware() {
+        let mut component = component();
+        let initial = component.clone();
+        let initial_encoding = encode_graph_component(&component).unwrap();
+
+        component
+            .update_identity_metadata("control.reference_pid", 1)
+            .unwrap();
+        assert_eq!(component, initial);
+        assert_eq!(
+            encode_graph_component(&component).unwrap(),
+            initial_encoding
+        );
+
+        component
+            .update_identity_metadata("control.renamed_pid", 1)
+            .unwrap();
+        assert_eq!(component.revision(), 2);
+        assert_eq!(component.component_version(), 1);
+        assert_eq!(component.name(), "control.renamed_pid");
+        assert_eq!(component.workspace(), initial.workspace());
+        assert_eq!(component.workspace_digest(), initial.workspace_digest());
+        assert_eq!(component.inputs(), initial.inputs());
+        assert_eq!(component.outputs(), initial.outputs());
+        assert_eq!(component.panel_items(), initial.panel_items());
+        assert_eq!(component.next_input_id(), initial.next_input_id());
+        assert_eq!(component.next_output_id(), initial.next_output_id());
+        assert_eq!(component.next_panel_item_id(), initial.next_panel_item_id());
+
+        component
+            .update_identity_metadata("control.renamed_pid", 3)
+            .unwrap();
+        assert_eq!(component.revision(), 3);
+        assert_eq!(component.component_version(), 3);
+        let advanced = component.clone();
+
+        assert_eq!(
+            component.update_identity_metadata("control.regressed_pid", 2),
+            Err(GraphComponentError::ComponentVersionRegression {
+                current: 3,
+                proposed: 2,
+            })
+        );
+        assert_eq!(component, advanced);
+        assert_eq!(
+            component.update_identity_metadata("control.zero_pid", 0),
+            Err(GraphComponentError::ZeroComponentVersion)
+        );
+        assert_eq!(component, advanced);
+        assert_eq!(
+            component.update_identity_metadata("invalid component name", 3),
+            Err(GraphComponentError::InvalidName("component"))
+        );
+        assert_eq!(component, advanced);
+    }
+
+    #[test]
     fn public_input_must_be_unowned_and_directionally_exact() {
         let connected = GraphComponentDocument::try_new(
             GraphComponentLimits::interactive(),
@@ -1557,6 +1996,229 @@ mod tests {
             Err(GraphComponentError::UnknownOutput(endpoint(18, 3)))
         );
         assert_eq!(component, retained);
+    }
+
+    #[test]
+    fn panel_item_authoring_is_transactional_monotonic_and_canonical() {
+        let mut component = component();
+        let original_revision = component.revision();
+        let original_workspace = component.workspace().clone();
+        let binding = GraphFrontPanelBinding::ParameterControl {
+            node: GraphNodeId::new(11),
+            parameter: 1,
+        };
+
+        let added = component
+            .add_panel_item(
+                "integral_gain",
+                binding,
+                GraphFrontPanelRect::new(20, 80, 180, 48),
+            )
+            .unwrap();
+        assert_eq!(added, GraphFrontPanelItemId::new(3));
+        assert_eq!(component.revision(), original_revision + 1);
+        assert_eq!(component.next_panel_item_id(), 4);
+        assert_eq!(component.workspace(), &original_workspace);
+        assert_eq!(
+            component.panel_item_value_type(added),
+            Some(GraphTypeId::new(3))
+        );
+
+        component
+            .update_panel_item(
+                added,
+                "integral_gain_editor",
+                binding,
+                GraphFrontPanelRect::new(35, 95, 210, 54),
+            )
+            .unwrap();
+        assert_eq!(component.revision(), original_revision + 2);
+        assert_eq!(
+            component.panel_item(added).unwrap().rect(),
+            GraphFrontPanelRect::new(35, 95, 210, 54)
+        );
+        let updated = component.clone();
+        component
+            .update_panel_item(
+                added,
+                "integral_gain_editor",
+                binding,
+                GraphFrontPanelRect::new(35, 95, 210, 54),
+            )
+            .unwrap();
+        assert_eq!(component, updated, "exact panel update advanced state");
+
+        assert_eq!(
+            component.update_panel_item(
+                added,
+                "ambiguous_gain",
+                parameter_item().binding(),
+                GraphFrontPanelRect::new(35, 95, 210, 54),
+            ),
+            Err(GraphComponentError::DuplicatePanelBinding)
+        );
+        assert_eq!(component, updated);
+        assert_eq!(
+            component.update_panel_item(
+                added,
+                "integral_gain_editor",
+                binding,
+                GraphFrontPanelRect::new(-1, 95, 210, 54),
+            ),
+            Err(GraphComponentError::InvalidPanelRect(added))
+        );
+        assert_eq!(component, updated);
+
+        component.remove_panel_item(added).unwrap();
+        assert_eq!(component.revision(), original_revision + 3);
+        assert_eq!(component.next_panel_item_id(), 4);
+        assert!(component.panel_item(added).is_none());
+        let removed = component.clone();
+        assert_eq!(
+            component.remove_panel_item(added),
+            Err(GraphComponentError::UnknownPanelItem(added))
+        );
+        assert_eq!(component, removed);
+
+        let replacement = component
+            .add_panel_item(
+                "integral_gain_readded",
+                binding,
+                GraphFrontPanelRect::new(40, 100, 180, 48),
+            )
+            .unwrap();
+        assert_eq!(replacement, GraphFrontPanelItemId::new(4));
+        assert_eq!(component.next_panel_item_id(), 5);
+        let encoding = encode_graph_component(&component).unwrap();
+        assert_eq!(
+            replay_graph_component(
+                encoding.bytes(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &component
+        );
+    }
+
+    #[test]
+    fn connector_authoring_is_transactional_monotonic_and_binding_safe() {
+        let mut component = component();
+        let initial_workspace = component.workspace().clone();
+        let added_output = component
+            .add_output(
+                "error_signal",
+                RepresentativeControlSignal::Error.endpoint(),
+            )
+            .unwrap();
+        assert_eq!(added_output, GraphComponentOutputId::new(2));
+        assert_eq!(component.next_output_id(), 3);
+        assert_eq!(component.workspace(), &initial_workspace);
+
+        component
+            .update_output(
+                added_output,
+                "integral_signal",
+                RepresentativeControlSignal::IntegralPrior.endpoint(),
+            )
+            .unwrap();
+        let updated_output = component.clone();
+        component
+            .update_output(
+                added_output,
+                "integral_signal",
+                RepresentativeControlSignal::IntegralPrior.endpoint(),
+            )
+            .unwrap();
+        assert_eq!(
+            component, updated_output,
+            "exact output update advanced state"
+        );
+        assert_eq!(
+            component.update_output(
+                added_output,
+                "duplicate_output",
+                RepresentativeControlSignal::PermittedOutput.endpoint(),
+            ),
+            Err(GraphComponentError::DuplicateEndpoint("public output"))
+        );
+        assert_eq!(component, updated_output);
+
+        component.remove_output(added_output).unwrap();
+        assert_eq!(component.next_output_id(), 3);
+        let replacement_output = component
+            .add_output(
+                "integral_readded",
+                RepresentativeControlSignal::IntegralPrior.endpoint(),
+            )
+            .unwrap();
+        assert_eq!(replacement_output, GraphComponentOutputId::new(3));
+        assert_eq!(component.next_output_id(), 4);
+        let retained = component.clone();
+        assert_eq!(
+            component.remove_output(GraphComponentOutputId::new(1)),
+            Err(GraphComponentError::ComponentOutputInUse(
+                GraphComponentOutputId::new(1)
+            ))
+        );
+        assert_eq!(component, retained, "bound output removal was not atomic");
+
+        let mut disconnected = component.workspace().clone();
+        disconnected.disconnect(GraphWireId::new(1)).unwrap();
+        component.replace_workspace(disconnected).unwrap();
+        let input = component
+            .add_input("external_samples", endpoint(4, 1))
+            .unwrap();
+        assert_eq!(input, GraphComponentInputId::new(1));
+        assert_eq!(component.next_input_id(), 2);
+        component
+            .update_input(input, "command_samples", endpoint(4, 1))
+            .unwrap();
+        let input_updated = component.clone();
+        component
+            .update_input(input, "command_samples", endpoint(4, 1))
+            .unwrap();
+        assert_eq!(
+            component, input_updated,
+            "exact input update advanced state"
+        );
+
+        let input_panel = component
+            .add_panel_item(
+                "command_samples_control",
+                GraphFrontPanelBinding::InputControl(input),
+                GraphFrontPanelRect::new(20, 90, 180, 48),
+            )
+            .unwrap();
+        let input_bound = component.clone();
+        assert_eq!(
+            component.remove_input(input),
+            Err(GraphComponentError::ComponentInputInUse(input))
+        );
+        assert_eq!(component, input_bound, "bound input removal was not atomic");
+        component.remove_panel_item(input_panel).unwrap();
+        component.remove_input(input).unwrap();
+        assert_eq!(component.next_input_id(), 2);
+        let replacement_input = component
+            .add_input("command_samples_readded", endpoint(4, 1))
+            .unwrap();
+        assert_eq!(replacement_input, GraphComponentInputId::new(2));
+        assert_eq!(component.next_input_id(), 3);
+
+        let encoding = encode_graph_component(&component).unwrap();
+        assert_eq!(
+            replay_graph_component(
+                encoding.bytes(),
+                GraphComponentLimits::interactive(),
+                GraphWorkspaceLimits::interactive(),
+                GraphLimits::interactive(),
+            )
+            .unwrap()
+            .document(),
+            &component
+        );
     }
 
     #[test]

@@ -67,6 +67,25 @@ impl ExecutionDomainSet {
         self.0 & bit != 0
     }
 
+    /// Return whether exact host placement belongs to the set.
+    pub const fn allows_host_exact(self) -> bool {
+        self.0 & Self::HOST_BIT != 0
+    }
+
+    /// Return whether service-core placement belongs to the set.
+    ///
+    /// A concrete nonzero device identity remains independently required.
+    pub const fn allows_service(self) -> bool {
+        self.0 & Self::SERVICE_BIT != 0
+    }
+
+    /// Return whether real-time-core placement belongs to the set.
+    ///
+    /// A concrete nonzero device identity remains independently required.
+    pub const fn allows_realtime(self) -> bool {
+        self.0 & Self::REALTIME_BIT != 0
+    }
+
     /// Return the canonical Host/Service/Realtime membership bitset.
     pub const fn bits(self) -> u8 {
         self.0
@@ -1468,6 +1487,30 @@ pub fn analyze_graph(
 ) -> Result<GraphAnalysis, GraphAnalysisError> {
     analyze_graph_with_required_input_policy(document, registry, RequiredInputPolicy::Reject)
         .map(|(analysis, _)| analysis)
+}
+
+/// Complete host analysis when a stronger caller has explicitly supplied a
+/// bounded set of otherwise unconnected inputs.
+///
+/// This is intentionally crate-private: an endpoint alone is not authority.
+/// The front-panel runtime derives the set from a canonical hierarchy, and the
+/// simulator separately validates that every supplied endpoint exists, is
+/// unowned, and carries a Stream with exact sample types. Ordinary analysis
+/// continues to reject every unconnected required input.
+pub(crate) fn analyze_graph_with_supplied_inputs(
+    document: &GraphDocument,
+    registry: &GraphNodeRegistry,
+    supplied_inputs: &BTreeSet<WireEndpoint>,
+) -> Result<GraphAnalysis, GraphAnalysisError> {
+    let (analysis, required_unconnected_inputs) =
+        analyze_graph_with_required_input_policy(document, registry, RequiredInputPolicy::Retain)?;
+    if let Some(missing) = required_unconnected_inputs
+        .into_iter()
+        .find(|input| !supplied_inputs.contains(input))
+    {
+        return Err(GraphAnalysisError::RequiredInputUnconnected(missing));
+    }
+    Ok(analysis)
 }
 
 /// Analyze an editor draft while retaining missing required inputs as visible

@@ -5,6 +5,7 @@
 //! projection into egui coordinates.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use alumina_board::{OwnerDomain, ResourceId, SafeValue};
 use alumina_capability::{
@@ -14,38 +15,69 @@ use alumina_diagnostics::{
     CaptureQualityFlags, DiagnosticLimits, DigitalCaptureFlags, DigitalLevel, OverviewFlags,
     ResourceValue, SampleProvenance, SampleQuality,
 };
+use alumina_graph_ir::{GraphIrOpcode, decode_graph_resource_pair_parameter};
 use alumina_interface_core::graph::{
-    CanonicalGraphComponentEncoding, CanonicalGraphHierarchyEncoding, CanonicalGraphProbeEncoding,
-    CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding, ClockDefinition, ClockKind,
-    ExecutionDomain, ExecutionDomainSet, GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits,
+    CanonicalGraphAuthoringSessionEncoding, CanonicalGraphComponentEncoding,
+    CanonicalGraphDeploymentReplayEvidence1, CanonicalGraphFrontPanelRunEncoding,
+    CanonicalGraphHierarchyEncoding, CanonicalGraphHierarchySourceMapEncoding,
+    CanonicalGraphProbeEncoding, CanonicalGraphWorkspaceEncoding, CanonicalTypedGraphValueEncoding,
+    ChannelFullPolicy, ClockDefinition, ClockKind, ExecutionDomain, ExecutionDomainSet,
+    ExternalStreamSample, GRAPH_COMPONENT_INSTANCE_KIND, GRAPH_COMPONENT_INSTANCE_VERSION,
+    GRAPH_PROBE_NAME_BYTES, GraphAnalysisLimits, GraphAuthoringHierarchyInput,
+    GraphAuthoringSessionDocument, GraphAuthoringSessionHistory, GraphAuthoringSessionLimits,
+    GraphAuthoringSessionReplayLimits, GraphCachedJobCatalog, GraphCachedJobCatalogLimits,
     GraphCapabilityCatalogLimits, GraphCapabilityNodeCatalog, GraphClockId, GraphComponentDocument,
-    GraphComponentInstance, GraphComponentLimits, GraphComponentOutput, GraphComponentOutputId,
-    GraphDeploymentImplementation, GraphDeploymentNodeKind, GraphDeploymentRegistry,
-    GraphDeploymentTarget, GraphDocument, GraphFrontPanelBinding, GraphFrontPanelItem,
-    GraphFrontPanelItemId, GraphFrontPanelRect, GraphHierarchyDocument, GraphHierarchyFlattening,
-    GraphHierarchyLimits, GraphLimits, GraphNodeId, GraphNodePlacement, GraphNodePrototype,
-    GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition, GraphProbeDocument,
-    GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
+    GraphComponentInput, GraphComponentInputId, GraphComponentInstance, GraphComponentLimits,
+    GraphComponentOutput, GraphComponentOutputId, GraphComponentPackageLimits,
+    GraphDeploymentImplementation, GraphDeploymentLimits, GraphDeploymentNodeKind,
+    GraphDeploymentRegistry, GraphDeploymentReplayInput, GraphDeploymentReplayLimits,
+    GraphDeploymentReplayReleaseOutcome, GraphDeploymentReport, GraphDeploymentResourceSample,
+    GraphDeploymentTarget, GraphDocument, GraphFlattenedNodeProvenance,
+    GraphFlattenedWireProvenance, GraphFrontPanelBinding, GraphFrontPanelChange,
+    GraphFrontPanelControlKey, GraphFrontPanelExecution, GraphFrontPanelInputAuthority,
+    GraphFrontPanelInputDisposition, GraphFrontPanelItem, GraphFrontPanelItemId,
+    GraphFrontPanelOutputKey, GraphFrontPanelRect, GraphFrontPanelRunDocument,
+    GraphFrontPanelRuntimeLimits, GraphFrontPanelSchedule, GraphHierarchyDependency,
+    GraphHierarchyDocument, GraphHierarchyFlattening, GraphHierarchyLimits,
+    GraphHierarchyNodeOrigin, GraphHierarchySourceMapLimits, GraphHierarchyWireOrigin,
+    GraphInstanceScope, GraphLimits, GraphLiteralTextLimits, GraphNodeId, GraphNodePlacement,
+    GraphNodePrototype, GraphNodeRegistry, GraphPortId, GraphProbeCapture, GraphProbeDefinition,
+    GraphProbeDocument, GraphProbeEdge, GraphProbeId, GraphProbeLimits, GraphProbeProjection,
     GraphProbeProjectionLimits, GraphProbeTrigger, GraphProbeTriggerResolution, GraphSchema,
-    GraphSimulationRegistry, GraphTraceEntry, GraphTypeId, GraphValue, GraphWireId,
-    GraphWorkspaceDocument, GraphWorkspaceLimits, GraphWorkspaceProbeHistory, NodeDefinition,
-    NodeOutputDependency, NodeParameter, NodeParameterContract, NodeSchema, PortDefinition,
-    RepresentativeControlSignal, RepresentativeExactControlGraph, ResourceClassId, TypeDefinition,
-    TypeKind, TypedGraphValue, WireEndpoint, analyze_graph_draft,
-    compile_representative_exact_control_graph, derive_graph_capability_node_catalog,
-    encode_graph_component, encode_graph_hierarchy, encode_graph_probes, encode_graph_workspace,
-    encode_typed_graph_value, flatten_graph_hierarchy, graph_component_instance_prototype,
-    graph_resource_label, project_graph_probe_replay, replay_graph_probes, replay_graph_workspace,
+    GraphSimulationLimits, GraphSimulationRegistry, GraphTraceEntry, GraphTraceEntryKind,
+    GraphTypeId, GraphValue, GraphValuePathSegment, GraphWireId, GraphWorkspaceDocument,
+    GraphWorkspaceLimits, InputConnectionRequirement, MAX_GRAPH_AUTHORING_SESSION_BYTES,
+    MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES, MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
+    NodeDefinition, NodeInputChannelContract, NodeInputChannelKind, NodeKind, NodeOutputDependency,
+    NodeParameter, NodeParameterContract, NodeSchema, PortDefinition, RecordField, RecordFieldId,
+    RecordValueField, RepresentativeControlSignal, RepresentativeExactControlGraph,
+    ResourceClassId, ResourceGraphHandle, TypeDefinition, TypeKind, TypedGraphValue,
+    WireDefinition, WireEndpoint, analyze_graph_draft, compile_representative_exact_control_graph,
+    derive_graph_capability_node_catalog, encode_graph_authoring_session, encode_graph_component,
+    encode_graph_component_package, encode_graph_front_panel_run, encode_graph_hierarchy,
+    encode_graph_hierarchy_source_map, encode_graph_probes, encode_graph_workspace,
+    encode_typed_graph_value, execute_graph_front_panel_run, flatten_graph_hierarchy,
+    format_graph_literal_text, graph_component_instance_input_port,
+    graph_component_instance_output_port, graph_component_instance_prototype, graph_resource_label,
+    lower_graph_deployment, parse_graph_literal_text, project_graph_probe_replay,
+    replay_graph_authoring_session, replay_graph_component, replay_graph_component_package,
+    replay_graph_hierarchy_source_map, replay_graph_probes, replay_graph_workspace,
+    replay_realtime_graph_deployment, resolve_graph_front_panel_inputs,
+    sample_graph_front_panel_output_at_or_before, select_graph_cached_job_handle,
+    select_graph_capability_node_resource, verify_graph_deployment_evidence_bytes,
 };
 use alumina_interface_core::{
-    BoardExplorerSnapshot, DiagnosticExplorerSnapshot, build_board_explorer_snapshot,
-    build_diagnostic_explorer_snapshot,
+    BoardExplorerSnapshot, CanonicalGlobalJob2, DiagnosticExplorerSnapshot,
+    build_board_explorer_snapshot, build_diagnostic_explorer_snapshot,
 };
-use alumina_protocol::{DeviceId, Digest};
+use alumina_protocol::{DeviceCycle, DeviceId, Digest};
+use alumina_runtime::graph::GraphExecutionFault;
 use alumina_sim::diagnostics::tinybee_diagnostic_fixture;
 use eframe::egui;
 use hyperreal::Rational;
 
+use crate::cache_delivery::derive_graph_cached_job_catalog_from_ready;
+use crate::m7_simulation::simulate_cache_delivery;
 use crate::workspace_file::{BoundedFileBridge, BoundedFileEvent, BoundedFileSpec};
 
 const MAXIMUM_VISIBLE_NODES: usize = 256;
@@ -68,11 +100,17 @@ const NEW_NODE_X_GAP: i32 = 300;
 const NEW_NODE_ORIGIN: i32 = 28;
 const EMPTY_CANVAS_WIDTH: f32 = 720.0;
 const EMPTY_CANVAS_HEIGHT: f32 = 280.0;
-const PERSISTED_WORKSPACE_PAIR_PREFIX: &str = "algwp1:";
-const MAXIMUM_PERSISTED_WORKSPACE_BYTES: usize = 2 * 1024 * 1024;
-const MAXIMUM_PERSISTED_PROBE_BYTES: usize = 2 * 1024 * 1024;
+const PERSISTED_AUTHORING_SESSION_PREFIX: &str = "algs1:";
 const ALGW_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGW file", "algw");
 const ALGP_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGP file", "algp");
+const ALGC_FILE: BoundedFileSpec = BoundedFileSpec::new("selected ALGC dependency", "algc");
+const ALCP_FILE: BoundedFileSpec = BoundedFileSpec::new("selected ALCP component closure", "alcp");
+const ALGM_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGM source map", "algm");
+const ALGS_FILE: BoundedFileSpec = BoundedFileSpec::new("ALGS authoring session", "algs");
+const ALGR_SUCCESS_REPLAY_FILE: BoundedFileSpec =
+    BoundedFileSpec::new("success ALGRREP1 evidence", "algrrep");
+const ALGR_FAULT_REPLAY_FILE: BoundedFileSpec =
+    BoundedFileSpec::new("fault ALGRREP1 evidence", "algrrep");
 const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(96, 169, 232),
     egui::Color32::from_rgb(241, 178, 84),
@@ -81,8 +119,9 @@ const DIAGNOSTIC_CHANNEL_COLORS: [egui::Color32; 6] = [
     egui::Color32::from_rgb(238, 126, 161),
     egui::Color32::from_rgb(101, 205, 196),
 ];
+
 #[cfg(target_arch = "wasm32")]
-pub(crate) const WORKSPACE_PAIR_STORAGE_KEY: &str = "alumina.graph-workspace-pair.algwp.v1";
+pub(crate) const AUTHORING_SESSION_STORAGE_KEY: &str = "alumina.graph-authoring-session.algs.v1";
 const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::Error,
     RepresentativeControlSignal::IntegralPrior,
@@ -92,6 +131,80 @@ const SIGNALS: [RepresentativeControlSignal; 7] = [
     RepresentativeControlSignal::CombinedPermit,
     RepresentativeControlSignal::ExternalPermit,
 ];
+const CACHED_JOB_HANDLE_TYPE: GraphTypeId = GraphTypeId::new(1);
+const CACHED_JOB_OPTION_TYPE: GraphTypeId = GraphTypeId::new(2);
+const CACHED_JOB_ARRAY_TYPE: GraphTypeId = GraphTypeId::new(3);
+const CACHED_JOB_REFERENCE_SET_TYPE: GraphTypeId = GraphTypeId::new(4);
+const CACHED_JOB_PARAMETER: u32 = 1;
+const CACHED_JOB_KIND_NAME: &str = "alumina.job.cached-reference-set";
+const CACHED_JOB_PRIMARY_FIELD: RecordFieldId = RecordFieldId::new(1);
+const CACHED_JOB_FALLBACK_FIELD: RecordFieldId = RecordFieldId::new(2);
+const CACHED_JOB_MIRRORS_FIELD: RecordFieldId = RecordFieldId::new(3);
+const CACHED_JOB_PRIMARY_PATH: [GraphValuePathSegment; 1] =
+    [GraphValuePathSegment::RecordField(CACHED_JOB_PRIMARY_FIELD)];
+const CACHED_JOB_FALLBACK_PATH: [GraphValuePathSegment; 2] = [
+    GraphValuePathSegment::RecordField(CACHED_JOB_FALLBACK_FIELD),
+    GraphValuePathSegment::OptionSome,
+];
+const CACHED_JOB_MIRROR_PATH: [GraphValuePathSegment; 2] = [
+    GraphValuePathSegment::RecordField(CACHED_JOB_MIRRORS_FIELD),
+    GraphValuePathSegment::ArrayIndex(0),
+];
+const CACHED_JOB_REFERENCE_SLOTS: [CachedJobReferenceSlot; 3] = [
+    CachedJobReferenceSlot {
+        label: "primary",
+        path: &CACHED_JOB_PRIMARY_PATH,
+    },
+    CachedJobReferenceSlot {
+        label: "fallback.some",
+        path: &CACHED_JOB_FALLBACK_PATH,
+    },
+    CachedJobReferenceSlot {
+        label: "mirrors[0]",
+        path: &CACHED_JOB_MIRROR_PATH,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CachedJobReferenceSlot {
+    label: &'static str,
+    path: &'static [GraphValuePathSegment],
+}
+
+const TARGET_RESOURCE_BOOL_TYPE: GraphTypeId = GraphTypeId::new(1);
+const TARGET_RESOURCE_STREAM_TYPE: GraphTypeId = GraphTypeId::new(2);
+const TARGET_RESOURCE_HANDLE_TYPE: GraphTypeId = GraphTypeId::new(3);
+const TARGET_RESOURCE_PAIR_TYPE: GraphTypeId = GraphTypeId::new(4);
+const TARGET_RESOURCE_PARAMETER: u32 = 1;
+const TARGET_RESOURCE_SCALAR_KIND_NAME: &str = "alumina.io.stable-boolean-input";
+const TARGET_RESOURCE_PAIR_KIND_NAME: &str = "alumina.io.stable-boolean-pair-all";
+const TARGET_RESOURCE_SINK_KIND_NAME: &str = "alumina.io.boolean-stream-sink";
+const TARGET_RESOURCE_FIRST_FIELD: RecordFieldId = RecordFieldId::new(1);
+const TARGET_RESOURCE_SECOND_FIELD: RecordFieldId = RecordFieldId::new(2);
+const TARGET_RESOURCE_FIRST_PATH: [GraphValuePathSegment; 1] =
+    [GraphValuePathSegment::RecordField(
+        TARGET_RESOURCE_FIRST_FIELD,
+    )];
+const TARGET_RESOURCE_SECOND_PATH: [GraphValuePathSegment; 1] =
+    [GraphValuePathSegment::RecordField(
+        TARGET_RESOURCE_SECOND_FIELD,
+    )];
+const TARGET_RESOURCE_REFERENCE_SLOTS: [TargetResourceReferenceSlot; 2] = [
+    TargetResourceReferenceSlot {
+        label: "permit",
+        path: &TARGET_RESOURCE_FIRST_PATH,
+    },
+    TargetResourceReferenceSlot {
+        label: "interlock",
+        path: &TARGET_RESOURCE_SECOND_PATH,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TargetResourceReferenceSlot {
+    label: &'static str,
+    path: &'static [GraphValuePathSegment],
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WirePresentation {
@@ -111,10 +224,173 @@ struct GraphPresentation {
     size: egui::Vec2,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct NodeDrag {
     node: GraphNodeId,
     origin: GraphNodePlacement,
+    delta: egui::Vec2,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentDefinitionEditor {
+    scope: Option<Digest>,
+    palette_index: usize,
+    child_component: Option<Digest>,
+    selected_node: Option<GraphNodeId>,
+    pending_source: Option<WireEndpoint>,
+    drag: Option<NodeDrag>,
+    parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
+    node_label_drafts: BTreeMap<GraphNodeId, String>,
+    status: String,
+}
+
+impl Default for ComponentDefinitionEditor {
+    fn default() -> Self {
+        Self {
+            scope: None,
+            palette_index: 0,
+            child_component: None,
+            selected_node: None,
+            pending_source: None,
+            drag: None,
+            parameter_drafts: BTreeMap::new(),
+            node_label_drafts: BTreeMap::new(),
+            status:
+                "select a non-authoritative ALGH library dependency to edit its exact definition"
+                    .to_owned(),
+        }
+    }
+}
+
+impl ComponentDefinitionEditor {
+    fn reset_scope(&mut self, scope: Option<Digest>, status: String) {
+        self.scope = scope;
+        self.child_component = None;
+        self.selected_node = None;
+        self.pending_source = None;
+        self.drag = None;
+        self.parameter_drafts.clear();
+        self.node_label_drafts.clear();
+        self.status = status;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComponentIdentityDraft {
+    name: String,
+    component_version: String,
+}
+
+impl ComponentIdentityDraft {
+    fn from_document(document: &GraphComponentDocument) -> Self {
+        Self {
+            name: document.name().to_owned(),
+            component_version: document.component_version().to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HierarchySourceSelection {
+    Node {
+        flattened: GraphNodeId,
+        origin: GraphHierarchyNodeOrigin,
+    },
+    Wire {
+        flattened: GraphWireId,
+        origin: GraphHierarchyWireOrigin,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HierarchySourceDestination {
+    Root,
+    Component(Digest),
+}
+
+impl HierarchySourceSelection {
+    fn destination(&self) -> HierarchySourceDestination {
+        match self {
+            Self::Node {
+                origin: GraphHierarchyNodeOrigin::Root(_),
+                ..
+            }
+            | Self::Wire {
+                origin: GraphHierarchyWireOrigin::Root(_),
+                ..
+            } => HierarchySourceDestination::Root,
+            Self::Node {
+                origin: GraphHierarchyNodeOrigin::Component { component, .. },
+                ..
+            }
+            | Self::Wire {
+                origin: GraphHierarchyWireOrigin::Component { component, .. },
+                ..
+            } => HierarchySourceDestination::Component(*component),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HierarchySourceBrowser {
+    selected_node: Option<GraphNodeId>,
+    selected_wire: Option<GraphWireId>,
+    last_opened: Option<HierarchySourceSelection>,
+    scroll_pending: bool,
+    status: String,
+}
+
+impl Default for HierarchySourceBrowser {
+    fn default() -> Self {
+        Self {
+            selected_node: None,
+            selected_wire: None,
+            last_opened: None,
+            scroll_pending: false,
+            status: "choose one final flattened node or wire to open its exact ALGM source"
+                .to_owned(),
+        }
+    }
+}
+
+impl HierarchySourceBrowser {
+    fn reset(&mut self, status: impl Into<String>) {
+        self.selected_node = None;
+        self.selected_wire = None;
+        self.last_opened = None;
+        self.scroll_pending = false;
+        self.status = status.into();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HierarchyRootCanvasFocus {
+    selected_instance: Option<GraphNodeId>,
+    opened_source_node: Option<GraphNodeId>,
+    opened_source_wire: Option<GraphWireId>,
+}
+
+impl HierarchyRootCanvasFocus {
+    fn selects_node(self, node: GraphNodeId) -> bool {
+        self.selected_instance == Some(node) || self.opened_source_node == Some(node)
+    }
+
+    fn selects_wire(self, wire: &WireDefinition) -> bool {
+        self.opened_source_wire == Some(wire.id())
+            || self
+                .selected_instance
+                .is_some_and(|node| node == wire.source().node || node == wire.target().node)
+            || self
+                .opened_source_node
+                .is_some_and(|node| node == wire.source().node || node == wire.target().node)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PanelItemDrag {
+    item: GraphFrontPanelItemId,
+    origin: GraphFrontPanelRect,
+    delta: egui::Vec2,
 }
 
 #[derive(Clone, Debug)]
@@ -373,16 +649,250 @@ struct ComponentPackage {
 }
 
 #[derive(Clone, Debug)]
+struct FrontPanelRuntimePackage {
+    document: GraphFrontPanelRunDocument,
+    encoding: CanonicalGraphFrontPanelRunEncoding,
+    execution: GraphFrontPanelExecution,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrontPanelChangeDraft {
+    tick: String,
+    value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrontPanelScheduleDraft {
+    changes: Vec<FrontPanelChangeDraft>,
+}
+
+impl FrontPanelScheduleDraft {
+    fn constant(value: impl Into<String>) -> Self {
+        Self {
+            changes: vec![FrontPanelChangeDraft {
+                tick: "0".to_owned(),
+                value: value.into(),
+            }],
+        }
+    }
+
+    fn append_change(&mut self) {
+        let next_tick = self
+            .changes
+            .last()
+            .and_then(|change| parse_front_panel_clock_tick(&change.tick).ok())
+            .and_then(|tick| tick.checked_add(1))
+            .map_or_else(String::new, |tick| tick.to_string());
+        let value = self
+            .changes
+            .last()
+            .map_or_else(String::new, |change| change.value.clone());
+        self.changes.push(FrontPanelChangeDraft {
+            tick: next_tick,
+            value,
+        });
+    }
+}
+
+impl Default for FrontPanelScheduleDraft {
+    fn default() -> Self {
+        Self::constant(String::new())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FrontPanelTimelineUiAction {
+    Add(GraphFrontPanelControlKey),
+    Remove(GraphFrontPanelControlKey, usize),
+    Reset(GraphFrontPanelControlKey),
+    Run,
+}
+
+#[derive(Clone, Debug)]
 struct HierarchyPackage {
     document: GraphHierarchyDocument,
     encoding: CanonicalGraphHierarchyEncoding,
     flattening: GraphHierarchyFlattening,
+    source_map: CanonicalGraphHierarchySourceMapEncoding,
+}
+
+fn hierarchy_depth(flattening: &GraphHierarchyFlattening) -> usize {
+    flattening
+        .instances()
+        .iter()
+        .map(|instance| instance.source_path().len())
+        .max()
+        .unwrap_or(0)
+}
+
+fn front_panel_external_samples(
+    fixture: &RepresentativeExactControlGraph,
+    flattening: &GraphHierarchyFlattening,
+) -> Vec<ExternalStreamSample> {
+    let external = fixture
+        .simulation()
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind() == GraphTraceEntryKind::ExternalSource)
+        .collect::<Vec<_>>();
+    let mut samples = Vec::new();
+    for mapping in flattening.node_provenance() {
+        let source_node = match mapping.origin() {
+            GraphHierarchyNodeOrigin::Root(node)
+            | GraphHierarchyNodeOrigin::Component { node, .. } => *node,
+        };
+        let Some(source_definition) = fixture.document().node(source_node) else {
+            continue;
+        };
+        let Some(flattened_definition) = flattening
+            .workspace()
+            .graph()
+            .node(mapping.flattened_node())
+        else {
+            continue;
+        };
+        if flattened_definition.kind() != source_definition.kind() {
+            continue;
+        }
+        for entry in external
+            .iter()
+            .copied()
+            .filter(|entry| entry.endpoint().node == source_node)
+        {
+            if !flattened_definition
+                .outputs()
+                .iter()
+                .any(|port| port.id() == entry.endpoint().port)
+            {
+                continue;
+            }
+            samples.push(ExternalStreamSample::new(
+                WireEndpoint {
+                    node: mapping.flattened_node(),
+                    port: entry.endpoint().port,
+                },
+                entry.clock_tick(),
+                entry.sequence(),
+                entry.value().clone(),
+            ));
+        }
+    }
+    samples
+}
+
+fn hierarchy_source_path_label(path: &[GraphNodeId]) -> String {
+    let mut label = String::from("[");
+    for (index, node) in path.iter().enumerate() {
+        if index != 0 {
+            label.push('/');
+        }
+        label.push_str(&node.get().to_string());
+    }
+    label.push(']');
+    label
+}
+
+fn hierarchy_node_origin_label(origin: &GraphHierarchyNodeOrigin) -> String {
+    match origin {
+        GraphHierarchyNodeOrigin::Root(node) => format!("root ALGW node {}", node.get()),
+        GraphHierarchyNodeOrigin::Component {
+            source_path,
+            component,
+            node,
+        } => format!(
+            "{} · ALGC {}… node {}",
+            hierarchy_source_path_label(source_path),
+            digest_prefix(component.0),
+            node.get()
+        ),
+    }
+}
+
+fn hierarchy_wire_origin_label(origin: &GraphHierarchyWireOrigin) -> String {
+    match origin {
+        GraphHierarchyWireOrigin::Root(wire) => format!("root ALGW wire {}", wire.get()),
+        GraphHierarchyWireOrigin::Component {
+            source_path,
+            component,
+            wire,
+        } => format!(
+            "{} · ALGC {}… wire {}",
+            hierarchy_source_path_label(source_path),
+            digest_prefix(component.0),
+            wire.get()
+        ),
+    }
+}
+
+fn hierarchy_origin_correlation(
+    component: &ComponentPackage,
+    node: GraphNodeId,
+    port: Option<GraphPortId>,
+) -> Option<String> {
+    const MAXIMUM_VISIBLE_OCCURRENCES: usize = 4;
+
+    let mut total = 0_usize;
+    let mut visible = Vec::new();
+    for mapping in component.hierarchy.flattening.node_provenance() {
+        let GraphHierarchyNodeOrigin::Component {
+            source_path,
+            component: origin_component,
+            node: origin_node,
+        } = mapping.origin()
+        else {
+            continue;
+        };
+        if *origin_component != component.encoding.digest() || *origin_node != node {
+            continue;
+        }
+        total += 1;
+        if visible.len() < MAXIMUM_VISIBLE_OCCURRENCES {
+            let endpoint_suffix = port.map_or_else(String::new, |port| format!(".p{}", port.get()));
+            visible.push(format!(
+                "{}:n{}{} → flat n{}{}",
+                hierarchy_source_path_label(source_path),
+                node.get(),
+                endpoint_suffix,
+                mapping.flattened_node().get(),
+                endpoint_suffix,
+            ));
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    let mut label = visible.join(" · ");
+    if total > visible.len() {
+        let _ = write!(label, " · +{} occurrences", total - visible.len());
+    }
+    Some(label)
+}
+
+fn hierarchy_node_correlation(component: &ComponentPackage, node: GraphNodeId) -> Option<String> {
+    hierarchy_origin_correlation(component, node, None)
+}
+
+fn hierarchy_endpoint_correlation(
+    component: &ComponentPackage,
+    endpoint: WireEndpoint,
+) -> Option<String> {
+    hierarchy_origin_correlation(component, endpoint.node, Some(endpoint.port))
 }
 
 #[derive(Clone, Debug)]
 struct ProbePackage {
     document: GraphProbeDocument,
     encoding: CanonicalGraphProbeEncoding,
+}
+
+struct PreparedAuthoringSession {
+    workspace: GraphWorkspaceDocument,
+    workspace_encoding: CanonicalGraphWorkspaceEncoding,
+    presentation: GraphPresentation,
+    component: Option<ComponentPackage>,
+    probes: ProbePackage,
+    cached_job_workspace: GraphWorkspaceDocument,
+    cached_job_encoding: CanonicalGraphWorkspaceEncoding,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -410,14 +920,134 @@ enum ProbeUiAction {
     ResetMetadata(GraphProbeId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HierarchyUiAction {
+    CreateComponent,
+    AddRoot(Digest),
+    RemoveRoot(GraphNodeId),
+    RemoveComponent(Digest),
+    MoveRoot {
+        node: GraphNodeId,
+        x: i32,
+        y: i32,
+    },
+    ConnectRoot {
+        source: WireEndpoint,
+        target: WireEndpoint,
+    },
+    DisconnectRoot(GraphWireId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PanelItemDraft {
+    name: String,
+    binding: GraphFrontPanelBinding,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl PanelItemDraft {
+    fn from_item(item: &GraphFrontPanelItem) -> Self {
+        let rect = item.rect();
+        Self {
+            name: item.name().to_owned(),
+            binding: item.binding(),
+            x: rect.x(),
+            y: rect.y(),
+            width: rect.width(),
+            height: rect.height(),
+        }
+    }
+
+    const fn rect(&self) -> GraphFrontPanelRect {
+        GraphFrontPanelRect::new(self.x, self.y, self.width, self.height)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PanelUiAction {
+    Add {
+        name: String,
+        binding: GraphFrontPanelBinding,
+        rect: GraphFrontPanelRect,
+    },
+    Update {
+        item: GraphFrontPanelItemId,
+        draft: PanelItemDraft,
+    },
+    Remove(GraphFrontPanelItemId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ComponentConnectorSelection {
+    Input(GraphComponentInputId),
+    Output(GraphComponentOutputId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComponentConnectorDraft {
+    name: String,
+    endpoint: WireEndpoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ComponentConnectorUiAction {
+    AddInput {
+        name: String,
+        target: WireEndpoint,
+    },
+    UpdateInput {
+        input: GraphComponentInputId,
+        draft: ComponentConnectorDraft,
+    },
+    RemoveInput(GraphComponentInputId),
+    AddOutput {
+        name: String,
+        source: WireEndpoint,
+    },
+    UpdateOutput {
+        output: GraphComponentOutputId,
+        draft: ComponentConnectorDraft,
+    },
+    RemoveOutput(GraphComponentOutputId),
+}
+
 #[derive(Clone, Debug)]
 struct TargetResourceProof {
     catalog: GraphCapabilityNodeCatalog,
     registry: GraphDeploymentRegistry,
     workspace: GraphWorkspaceDocument,
     encoding: CanonicalGraphWorkspaceEncoding,
+    deployment: TargetResourceDeployment,
     catalog_index: usize,
+    pair_node: GraphNodeId,
+    reference_slot: usize,
     status: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TargetResourceDeployment {
+    report: GraphDeploymentReport,
+    package_digest: Digest,
+    implementation_digest: Digest,
+    package_bytes: usize,
+    first: ResourceId,
+    second: ResourceId,
+    realtime_period_cycles: u64,
+    realtime_wcet_cycles: u64,
+    actor_replay: TargetResourceActorReplay,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TargetResourceActorReplay {
+    success_evidence: CanonicalGraphDeploymentReplayEvidence1,
+    fault_evidence: CanonicalGraphDeploymentReplayEvidence1,
+    truth_table: [bool; 4],
+    ordered_reads: [ResourceId; 2],
+    fault_reads: [ResourceId; 2],
+    terminal_fault: GraphExecutionFault,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -476,11 +1106,14 @@ struct BoardExplorerPanel {
 
 #[derive(Clone, Debug)]
 struct ComponentPanelItem {
+    id: GraphFrontPanelItemId,
     name: String,
     binding: GraphFrontPanelBinding,
     rect: GraphFrontPanelRect,
     value_type: GraphTypeId,
     output_text: Option<String>,
+    output_current: bool,
+    input_authority: Option<GraphFrontPanelInputAuthority>,
 }
 
 impl BoardExplorerPanel {
@@ -1376,6 +2009,559 @@ const fn digital_level_text(level: DigitalLevel) -> &'static str {
     }
 }
 
+/// Offline authoring proof that joins canonical CAM output to simulated,
+/// reconciled cache observations before exposing any graph job identity.
+struct CachedJobGraphProof {
+    catalog: GraphCachedJobCatalog,
+    registry: GraphNodeRegistry,
+    workspace: GraphWorkspaceDocument,
+    encoding: CanonicalGraphWorkspaceEncoding,
+    selected_entry: usize,
+    selected_slot: usize,
+    selected_node: Option<GraphNodeId>,
+    status: String,
+}
+
+impl CachedJobGraphProof {
+    fn try_new(job: &CanonicalGlobalJob2) -> Result<Self, String> {
+        let ready = simulate_cache_delivery(job).map_err(|error| error.to_string())?;
+        let catalog = derive_graph_cached_job_catalog_from_ready(
+            job,
+            &ready,
+            GraphCachedJobCatalogLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        let registry = cached_job_registry()?;
+        let graph = GraphDocument::try_new(
+            0,
+            registry.context_schema().clone(),
+            registry.context_clocks().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut workspace = GraphWorkspaceDocument::try_new(
+            GraphWorkspaceLimits::interactive(),
+            0,
+            1,
+            1,
+            graph,
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let prototype = cached_job_prototype(&catalog, &registry, 0, "Cached participant 1")?;
+        let selected_node = workspace
+            .create_node(prototype, 28, 28)
+            .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&catalog, &registry, &workspace)?;
+        let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+        Ok(Self {
+            catalog,
+            registry,
+            workspace,
+            encoding,
+            selected_entry: 0,
+            selected_slot: 0,
+            selected_node: Some(selected_node),
+            status:
+                "derived from complete simulated partition + global-manifest cache reconciliation"
+                    .to_owned(),
+        })
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui) -> Option<CachedJobGraphAction> {
+        ui.heading("Cached job composite references");
+        ui.label(
+            "Offline proof only: one exact record retains primary, optional fallback, and bounded-array mirror references. Choices come from canonically replayed CAM artifacts observed in each simulated MCU cache. Every leaf is inert data and does not prepare, arm, or start a job.",
+        );
+        ui.label(format!(
+            "{} participants · ALGW {} bytes · revision {} · unified ALGS history",
+            self.catalog.entries().len(),
+            self.encoding.bytes().len(),
+            self.workspace.revision(),
+        ));
+        ui.monospace(format!(
+            "global job {}… · participant set {}… · graph {}…",
+            digest_prefix(self.catalog.global_job_digest().0),
+            digest_prefix(self.catalog.participant_set_digest().0),
+            digest_prefix(self.encoding.digest().0),
+        ));
+
+        self.show_selection(ui);
+
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("add inert reference").clicked() {
+                action = Some(CachedJobGraphAction::Add);
+            }
+            if ui
+                .add_enabled(
+                    self.selected_node.is_some(),
+                    egui::Button::new("rebind selected"),
+                )
+                .clicked()
+            {
+                action = Some(CachedJobGraphAction::Rebind);
+            }
+        });
+        ui.label(&self.status);
+        ui.weak(
+            "The value path uses stable record-field IDs, explicit active branches, and bounded array indices. No digest, device-ID, partition-ID, file path, or command text is accepted; deployment and deterministic start remain separate authorities.",
+        );
+        action
+    }
+
+    fn show_selection(&mut self, ui: &mut egui::Ui) {
+        let selected_entry_label = self.catalog.entries().get(self.selected_entry).map_or_else(
+            || "unavailable participant".to_owned(),
+            cached_job_entry_label,
+        );
+        egui::ComboBox::from_id_salt("cached_job_catalog_entry")
+            .selected_text(selected_entry_label)
+            .show_ui(ui, |ui| {
+                for (index, entry) in self.catalog.entries().iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.selected_entry,
+                        index,
+                        cached_job_entry_label(entry),
+                    );
+                }
+            });
+
+        let selected_slot = self.show_reference_slot_selection(ui);
+
+        let node_choices: Vec<_> = self
+            .workspace
+            .graph()
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                cached_job_handle_at_path(node, self.registry.context_schema(), selected_slot.path)
+                    .and_then(|handle| {
+                        self.catalog
+                            .entry_index_for_handle(handle)
+                            .map(|entry| (node.id(), entry, node.label().to_owned()))
+                    })
+            })
+            .collect();
+        if self
+            .selected_node
+            .is_none_or(|selected| !node_choices.iter().any(|choice| choice.0 == selected))
+        {
+            self.selected_node = node_choices.first().map(|choice| choice.0);
+        }
+        let selected_node_label = self
+            .selected_node
+            .and_then(|selected| {
+                node_choices
+                    .iter()
+                    .find(|choice| choice.0 == selected)
+                    .map(|choice| {
+                        format!(
+                            "#{} {} · {} participant {}",
+                            selected.get(),
+                            choice.2,
+                            selected_slot.label,
+                            choice.1 + 1
+                        )
+                    })
+            })
+            .unwrap_or_else(|| "no managed job-reference node".to_owned());
+        egui::ComboBox::from_id_salt("cached_job_graph_node")
+            .selected_text(selected_node_label)
+            .show_ui(ui, |ui| {
+                for (node, entry, label) in &node_choices {
+                    ui.selectable_value(
+                        &mut self.selected_node,
+                        Some(*node),
+                        format!(
+                            "#{} {label} · {} participant {}",
+                            node.get(),
+                            selected_slot.label,
+                            entry + 1
+                        ),
+                    );
+                }
+            });
+        ui.monospace(format!(
+            "selected value path: references.{} · {} segment(s)",
+            selected_slot.label,
+            selected_slot.path.len()
+        ));
+
+        if let Some(entry) = self.catalog.entries().get(self.selected_entry) {
+            let participant = entry.participant();
+            ui.label(format!(
+                "Selected cache fact: {} partition bytes · {} blocks · {} Hz local timer",
+                participant.partition_byte_len, participant.block_count, participant.local_timer_hz,
+            ));
+            ui.monospace(format!(
+                "capability {}… · config {}… · partition {}…",
+                digest_prefix(participant.capability_digest.0),
+                digest_prefix(participant.config_digest.0),
+                digest_prefix(participant.partition_digest.0),
+            ));
+        }
+    }
+
+    fn show_reference_slot_selection(&mut self, ui: &mut egui::Ui) -> CachedJobReferenceSlot {
+        if self.selected_slot >= CACHED_JOB_REFERENCE_SLOTS.len() {
+            self.selected_slot = 0;
+        }
+        egui::ComboBox::from_id_salt("cached_job_reference_slot")
+            .selected_text(format!(
+                "composite leaf · {}",
+                CACHED_JOB_REFERENCE_SLOTS[self.selected_slot].label
+            ))
+            .show_ui(ui, |ui| {
+                for (index, slot) in CACHED_JOB_REFERENCE_SLOTS.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.selected_slot,
+                        index,
+                        format!("composite leaf · {}", slot.label),
+                    );
+                }
+            });
+        CACHED_JOB_REFERENCE_SLOTS[self.selected_slot]
+    }
+
+    fn prepare_add_selected_reference(&self) -> Result<CachedJobGraphUpdate, String> {
+        let index = self.workspace.graph().nodes().len();
+        let ordinal = index
+            .checked_add(1)
+            .ok_or_else(|| "cached job node count overflow".to_owned())?;
+        let x = i32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(260))
+            .and_then(|offset| offset.checked_add(28))
+            .ok_or_else(|| "cached job canvas coordinate overflow".to_owned())?;
+        let prototype = cached_job_prototype(
+            &self.catalog,
+            &self.registry,
+            self.selected_entry,
+            &format!("Cached participant {ordinal}"),
+        )?;
+        let mut candidate = self.workspace.clone();
+        let node = candidate
+            .create_node(prototype, x, 28)
+            .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
+        let encoding = encode_graph_workspace(&candidate).map_err(|error| error.to_string())?;
+        Ok(CachedJobGraphUpdate {
+            workspace: candidate,
+            encoding,
+            selected_node: Some(node),
+            status: format!(
+                "added inert cached-job reference #{} from audited catalog entry {}",
+                node.get(),
+                self.selected_entry + 1
+            ),
+        })
+    }
+
+    fn prepare_rebind_selected_reference(&self) -> Result<CachedJobGraphUpdate, String> {
+        let node = self
+            .selected_node
+            .ok_or_else(|| "select a catalog-managed job node first".to_owned())?;
+        let slot = CACHED_JOB_REFERENCE_SLOTS
+            .get(self.selected_slot)
+            .copied()
+            .ok_or_else(|| "select a bounded cached-job composite leaf first".to_owned())?;
+        let current_entry = self
+            .workspace
+            .graph()
+            .node(node)
+            .and_then(|node| {
+                cached_job_handle_at_path(node, self.registry.context_schema(), slot.path)
+            })
+            .and_then(|handle| self.catalog.entry_index_for_handle(handle));
+        if current_entry == Some(self.selected_entry) {
+            return Ok(CachedJobGraphUpdate {
+                workspace: self.workspace.clone(),
+                encoding: self.encoding.clone(),
+                selected_node: self.selected_node,
+                status: format!(
+                    "retained inert reference #{} at references.{} on audited catalog entry {}",
+                    node.get(),
+                    slot.label,
+                    self.selected_entry + 1
+                ),
+            });
+        }
+        let mut candidate = self.workspace.clone();
+        let encoding = select_graph_cached_job_handle(
+            &self.catalog,
+            &self.registry,
+            &mut candidate,
+            node,
+            CACHED_JOB_PARAMETER,
+            slot.path,
+            self.selected_entry,
+        )
+        .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, &candidate)?;
+        Ok(CachedJobGraphUpdate {
+            workspace: candidate,
+            encoding,
+            selected_node: self.selected_node,
+            status: format!(
+                "rebound inert reference #{} at references.{} to audited catalog entry {}",
+                node.get(),
+                slot.label,
+                self.selected_entry + 1
+            ),
+        })
+    }
+
+    fn prepare_action(&self, action: CachedJobGraphAction) -> Result<CachedJobGraphUpdate, String> {
+        match action {
+            CachedJobGraphAction::Add => self.prepare_add_selected_reference(),
+            CachedJobGraphAction::Rebind => self.prepare_rebind_selected_reference(),
+        }
+    }
+
+    fn commit_update(&mut self, update: CachedJobGraphUpdate) {
+        self.workspace = update.workspace;
+        self.encoding = update.encoding;
+        self.selected_node = update.selected_node;
+        self.status = update.status;
+    }
+
+    fn replay_persisted_workspace(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(GraphWorkspaceDocument, CanonicalGraphWorkspaceEncoding), String> {
+        let replay = replay_graph_workspace(
+            bytes,
+            self.workspace.limits(),
+            self.workspace.graph().schema().limits(),
+        )
+        .map_err(|error| error.to_string())?;
+        validate_cached_job_workspace(&self.catalog, &self.registry, replay.document())?;
+        Ok((replay.document().clone(), replay.encoding().clone()))
+    }
+
+    fn restore_persisted_workspace(
+        &mut self,
+        workspace: GraphWorkspaceDocument,
+        encoding: CanonicalGraphWorkspaceEncoding,
+    ) {
+        self.workspace = workspace;
+        self.encoding = encoding;
+        self.selected_node = self
+            .workspace
+            .graph()
+            .nodes()
+            .first()
+            .map(NodeDefinition::id);
+        if self.selected_slot >= CACHED_JOB_REFERENCE_SLOTS.len() {
+            self.selected_slot = 0;
+        }
+        let slot = CACHED_JOB_REFERENCE_SLOTS[self.selected_slot];
+        self.selected_entry = self
+            .selected_node
+            .and_then(|node| self.workspace.graph().node(node))
+            .and_then(|node| {
+                cached_job_handle_at_path(node, self.registry.context_schema(), slot.path)
+            })
+            .and_then(|handle| self.catalog.entry_index_for_handle(handle))
+            .unwrap_or(0);
+        "restored catalog-bound cached-job ALGW from application storage"
+            .clone_into(&mut self.status);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CachedJobGraphAction {
+    Add,
+    Rebind,
+}
+
+struct CachedJobGraphUpdate {
+    workspace: GraphWorkspaceDocument,
+    encoding: CanonicalGraphWorkspaceEncoding,
+    selected_node: Option<GraphNodeId>,
+    status: String,
+}
+
+fn cached_job_registry() -> Result<GraphNodeRegistry, String> {
+    let schema = GraphSchema::try_new(
+        GraphLimits::interactive(),
+        Vec::new(),
+        vec![
+            TypeDefinition::new(
+                CACHED_JOB_HANDLE_TYPE,
+                "job.cached.participant",
+                TypeKind::JobHandle,
+            ),
+            TypeDefinition::new(
+                CACHED_JOB_OPTION_TYPE,
+                "job.cached.optional-participant",
+                TypeKind::Option {
+                    value: CACHED_JOB_HANDLE_TYPE,
+                },
+            ),
+            TypeDefinition::new(
+                CACHED_JOB_ARRAY_TYPE,
+                "job.cached.participant-array",
+                TypeKind::Array {
+                    element: CACHED_JOB_HANDLE_TYPE,
+                    maximum_items: 4,
+                },
+            ),
+            TypeDefinition::new(
+                CACHED_JOB_REFERENCE_SET_TYPE,
+                "job.cached.reference-set",
+                TypeKind::Record {
+                    fields: vec![
+                        RecordField::new(
+                            CACHED_JOB_PRIMARY_FIELD,
+                            "primary",
+                            CACHED_JOB_HANDLE_TYPE,
+                        ),
+                        RecordField::new(
+                            CACHED_JOB_FALLBACK_FIELD,
+                            "fallback",
+                            CACHED_JOB_OPTION_TYPE,
+                        ),
+                        RecordField::new(
+                            CACHED_JOB_MIRRORS_FIELD,
+                            "mirrors",
+                            CACHED_JOB_ARRAY_TYPE,
+                        ),
+                    ],
+                },
+            ),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let context = GraphDocument::try_new(0, schema, Vec::new(), Vec::new(), Vec::new())
+        .map_err(|error| error.to_string())?;
+    GraphNodeRegistry::try_new(
+        GraphAnalysisLimits::interactive(),
+        &context,
+        vec![NodeSchema::new(
+            NodeKind::new(CACHED_JOB_KIND_NAME, 1),
+            ExecutionDomainSet::HOST_EXACT,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![NodeParameterContract::new(
+                CACHED_JOB_PARAMETER,
+                "references",
+                CACHED_JOB_REFERENCE_SET_TYPE,
+            )],
+            Vec::new(),
+            Vec::new(),
+            None,
+        )],
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn cached_job_prototype(
+    catalog: &GraphCachedJobCatalog,
+    registry: &GraphNodeRegistry,
+    entry: usize,
+    label: &str,
+) -> Result<GraphNodePrototype, String> {
+    let entry = catalog
+        .entries()
+        .get(entry)
+        .copied()
+        .ok_or_else(|| "cached job catalog entry is unavailable".to_owned())?;
+    let handle = entry.handle();
+    let value = TypedGraphValue::try_new(
+        registry.context_schema(),
+        CACHED_JOB_REFERENCE_SET_TYPE,
+        GraphValue::Record(vec![
+            RecordValueField {
+                field: CACHED_JOB_PRIMARY_FIELD,
+                value: GraphValue::JobHandle(handle),
+            },
+            RecordValueField {
+                field: CACHED_JOB_FALLBACK_FIELD,
+                value: GraphValue::OptionSome(Box::new(GraphValue::JobHandle(handle))),
+            },
+            RecordValueField {
+                field: CACHED_JOB_MIRRORS_FIELD,
+                value: GraphValue::Array(vec![GraphValue::JobHandle(handle)]),
+            },
+        ]),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(GraphNodePrototype::new(
+        NodeKind::new(CACHED_JOB_KIND_NAME, 1),
+        label,
+        ExecutionDomain::HostExact,
+        Vec::new(),
+        Vec::new(),
+        vec![NodeParameter::new(
+            CACHED_JOB_PARAMETER,
+            "references",
+            value,
+        )],
+    ))
+}
+
+fn cached_job_handle_at_path(
+    node: &NodeDefinition,
+    schema: &GraphSchema,
+    path: &[GraphValuePathSegment],
+) -> Option<alumina_interface_core::JobGraphHandle> {
+    let parameter = node
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.id() == CACHED_JOB_PARAMETER)?;
+    let (value_type, value) = parameter.value().value_at_path(schema, path).ok()?;
+    if !matches!(schema.value_type(value_type)?.kind(), TypeKind::JobHandle) {
+        return None;
+    }
+    match value {
+        GraphValue::JobHandle(handle) => Some(*handle),
+        _ => None,
+    }
+}
+
+fn validate_cached_job_workspace(
+    catalog: &GraphCachedJobCatalog,
+    registry: &GraphNodeRegistry,
+    workspace: &GraphWorkspaceDocument,
+) -> Result<(), String> {
+    analyze_graph_draft(workspace.graph(), registry).map_err(|error| error.to_string())?;
+    for node in workspace.graph().nodes() {
+        for slot in CACHED_JOB_REFERENCE_SLOTS {
+            let handle = cached_job_handle_at_path(node, registry.context_schema(), slot.path)
+                .ok_or_else(|| {
+                    format!(
+                        "cached job node #{} has no typed references.{} job leaf",
+                        node.id().get(),
+                        slot.label
+                    )
+                })?;
+            if catalog.entry_index_for_handle(handle).is_none() {
+                return Err(format!(
+                    "cached job node #{} references.{} carries a raw, stale, or foreign identity",
+                    node.id().get(),
+                    slot.label
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cached_job_entry_label(
+    entry: &alumina_interface_core::graph::GraphCachedJobCatalogEntry,
+) -> String {
+    let participant = entry.participant();
+    format!(
+        "MCU {}… · partition {}…",
+        digest_prefix16(participant.device_id.0),
+        digest_prefix(participant.partition_digest.0),
+    )
+}
+
 /// Browser/native inspector for one shared exact control graph and trace.
 pub(crate) struct ExactControlWorkspace {
     fixture: RepresentativeExactControlGraph,
@@ -1387,22 +2573,56 @@ pub(crate) struct ExactControlWorkspace {
     probe_status: String,
     board_explorer: BoardExplorerPanel,
     target_resources: TargetResourceProof,
-    history: GraphWorkspaceProbeHistory,
+    cached_jobs: CachedJobGraphProof,
+    history: GraphAuthoringSessionHistory,
     presentation: GraphPresentation,
     traces: Vec<TraceSeries>,
     palette: Vec<NodePaletteEntry>,
     palette_index: usize,
     parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
+    node_label_drafts: BTreeMap<GraphNodeId, String>,
     probe_drafts: BTreeMap<GraphProbeId, ProbeEditDraft>,
+    panel_item_drafts: BTreeMap<GraphFrontPanelItemId, PanelItemDraft>,
+    front_panel_schedule_drafts: BTreeMap<GraphFrontPanelControlKey, FrontPanelScheduleDraft>,
+    front_panel_runtime: Option<FrontPanelRuntimePackage>,
+    front_panel_runtime_status: String,
+    front_panel_cursor_draft: String,
+    front_panel_cursor_status: String,
+    component_identity_drafts: BTreeMap<Digest, ComponentIdentityDraft>,
+    component_connector_drafts: BTreeMap<ComponentConnectorSelection, ComponentConnectorDraft>,
+    component_connector_scope: Option<Digest>,
+    component_definition: ComponentDefinitionEditor,
     selected_node: Option<GraphNodeId>,
+    selected_panel_item: Option<GraphFrontPanelItemId>,
+    selected_component_connector: Option<ComponentConnectorSelection>,
+    new_component_input_name: String,
+    new_component_input_target: Option<WireEndpoint>,
+    new_component_output_name: String,
+    new_component_output_source: Option<WireEndpoint>,
+    new_panel_item_name: String,
+    new_panel_binding: Option<GraphFrontPanelBinding>,
+    panel_drag: Option<PanelItemDrag>,
+    selected_hierarchy_component: Option<Digest>,
+    selected_hierarchy_instance: Option<GraphNodeId>,
+    hierarchy_parameter_drafts: BTreeMap<(GraphNodeId, u32), String>,
+    new_library_component_name: String,
+    hierarchy_source_browser: HierarchySourceBrowser,
+    pending_hierarchy_source: Option<WireEndpoint>,
+    hierarchy_drag: Option<NodeDrag>,
     pending_source: Option<WireEndpoint>,
     drag: Option<NodeDrag>,
     edit_status: String,
     persistence_dirty: bool,
     persistence_attempted: bool,
     file_status: String,
+    authoring_session_file_bridge: BoundedFileBridge,
     workspace_file_bridge: BoundedFileBridge,
     probe_file_bridge: BoundedFileBridge,
+    component_file_bridge: BoundedFileBridge,
+    component_package_file_bridge: BoundedFileBridge,
+    hierarchy_source_file_bridge: BoundedFileBridge,
+    target_success_replay_file_bridge: BoundedFileBridge,
+    target_fault_replay_file_bridge: BoundedFileBridge,
     trigger_pre_samples: u32,
     trigger_post_samples: u32,
     cursor_root_tick: Rational,
@@ -1414,14 +2634,56 @@ impl ExactControlWorkspace {
         Self::try_new_with_persisted(None)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_new_with_persisted(persisted: Option<&str>) -> Result<Self, String> {
+        let program = alumina_interface_core::compile_representative_program()
+            .map_err(|error| error.to_string())?;
+        let job = alumina_interface_core::compile_representative_global_job(&program)
+            .map_err(|error| error.to_string())?;
+        Self::try_new_with_persisted_job(persisted, &job)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the complete initial ALGS fixture and all editor-local draft state are constructed together"
+    )]
+    pub(crate) fn try_new_with_persisted_job(
+        persisted: Option<&str>,
+        job: &CanonicalGlobalJob2,
+    ) -> Result<Self, String> {
         let fixture =
             compile_representative_exact_control_graph().map_err(|error| error.to_string())?;
         let (workspace, workspace_encoding, presentation) = initial_workspace(&fixture)?;
         let component = representative_component(&workspace, &fixture)?;
+        let selected_hierarchy_component = Some(component.encoding.digest());
+        let selected_hierarchy_instance = component
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .find(|instance| instance.scope() == GraphInstanceScope::Root)
+            .map(|instance| instance.node());
+        let selected_panel_item = component
+            .document
+            .panel_items()
+            .first()
+            .map(GraphFrontPanelItem::id);
+        let selected_component_connector = component
+            .document
+            .inputs()
+            .first()
+            .map(|input| ComponentConnectorSelection::Input(input.id()))
+            .or_else(|| {
+                component
+                    .document
+                    .outputs()
+                    .first()
+                    .map(|output| ComponentConnectorSelection::Output(output.id()))
+            });
         let probes = representative_probes(&workspace)?;
         let board_explorer = tinybee_board_explorer()?;
         let target_resources = tinybee_resource_proof()?;
+        let cached_jobs = CachedJobGraphProof::try_new(job)?;
         let traces = trace_series(&fixture, &workspace, &probes.document)?;
         let palette = control_palette(&fixture)?;
         let trigger = probes
@@ -1432,6 +2694,7 @@ impl ExactControlWorkspace {
         let cursor_root_tick = initial_projection
             .trigger_root_window()
             .map_or_else(|| Rational::from(0), |(_, trigger, _)| trigger.clone());
+        let front_panel_cursor_draft = front_panel_root_cursor_text(&cursor_root_tick);
         let mut result = Self {
             fixture,
             workspace,
@@ -1442,44 +2705,76 @@ impl ExactControlWorkspace {
             probe_status: "canonical ALGP diagnostic probes attached".to_owned(),
             board_explorer,
             target_resources,
-            history: GraphWorkspaceProbeHistory::default(),
+            cached_jobs,
+            history: GraphAuthoringSessionHistory::default(),
             presentation,
             traces,
             palette,
             palette_index: 0,
             parameter_drafts: BTreeMap::new(),
+            node_label_drafts: BTreeMap::new(),
             probe_drafts: BTreeMap::new(),
+            panel_item_drafts: BTreeMap::new(),
+            front_panel_schedule_drafts: BTreeMap::new(),
+            front_panel_runtime: None,
+            front_panel_runtime_status:
+                "author an InputControl, enter exact values, then run the canonical host panel"
+                    .to_owned(),
+            front_panel_cursor_draft,
+            front_panel_cursor_status:
+                "shared exact root cursor follows the trace until edited here".to_owned(),
+            component_identity_drafts: BTreeMap::new(),
+            component_connector_drafts: BTreeMap::new(),
+            component_connector_scope: selected_hierarchy_component,
+            component_definition: ComponentDefinitionEditor::default(),
             selected_node: None,
+            selected_panel_item,
+            selected_component_connector,
+            new_component_input_name: String::new(),
+            new_component_input_target: None,
+            new_component_output_name: String::new(),
+            new_component_output_source: None,
+            new_panel_item_name: String::new(),
+            new_panel_binding: None,
+            panel_drag: None,
+            selected_hierarchy_component,
+            selected_hierarchy_instance,
+            hierarchy_parameter_drafts: BTreeMap::new(),
+            new_library_component_name: "user.new_component".to_owned(),
+            hierarchy_source_browser: HierarchySourceBrowser::default(),
+            pending_hierarchy_source: None,
+            hierarchy_drag: None,
             pending_source: None,
             drag: None,
             edit_status: "canonical workspace ready; no structural edits".to_owned(),
             persistence_dirty: persisted.is_none(),
             persistence_attempted: false,
             file_status: "canonical workspace has not been exported this session".to_owned(),
+            authoring_session_file_bridge: BoundedFileBridge::default(),
             workspace_file_bridge: BoundedFileBridge::default(),
             probe_file_bridge: BoundedFileBridge::default(),
+            component_file_bridge: BoundedFileBridge::default(),
+            component_package_file_bridge: BoundedFileBridge::default(),
+            hierarchy_source_file_bridge: BoundedFileBridge::default(),
+            target_success_replay_file_bridge: BoundedFileBridge::default(),
+            target_fault_replay_file_bridge: BoundedFileBridge::default(),
             trigger_pre_samples: trigger.pretrigger_samples(),
             trigger_post_samples: trigger.posttrigger_samples(),
             cursor_root_tick,
         };
         result.reset_probe_drafts();
         if let Some(persisted) = persisted {
-            match decode_persisted_workspace_pair(
-                persisted,
-                result.workspace.limits(),
-                GraphProbeLimits::interactive(),
-            )
-            .and_then(|(workspace, probes)| {
-                result.restore_workspace_pair_bytes(&workspace, &probes)
-            }) {
+            match decode_persisted_authoring_session(persisted)
+                .and_then(|bytes| result.restore_authoring_session_bytes(&bytes))
+            {
                 Ok(()) => {
-                    "restored exact canonical ALGW/ALGP pair from application storage"
+                    "restored one exact canonical ALGS authoring session from application storage"
                         .clone_into(&mut result.edit_status);
                 }
                 Err(error) => {
                     result.persistence_dirty = true;
                     result.edit_status = format!(
-                        "persisted ALGW/ALGP pair rejected atomically; canonical reference loaded instead: {error}"
+                        "persisted ALGS authoring session rejected atomically; canonical reference loaded instead: {error}"
                     );
                 }
             }
@@ -1493,12 +2788,9 @@ impl ExactControlWorkspace {
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) fn persisted_workspace_pair(&self) -> Result<String, String> {
-        let probes = self
-            .probes
-            .as_ref()
-            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
-        encode_persisted_workspace_pair(&self.workspace_encoding, &probes.encoding)
+    pub(crate) fn persisted_authoring_session(&self) -> Result<String, String> {
+        let encoding = self.authoring_session_encoding()?;
+        encode_persisted_authoring_session(&encoding)
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
@@ -1531,9 +2823,10 @@ impl ExactControlWorkspace {
         ));
         if let Some(component) = &self.component {
             ui.label(format!(
-                "Component: {} v{} · {} outputs / {} panel items · {} bytes",
+                "Component: {} v{} · {} inputs / {} outputs / {} panel items · {} bytes",
                 component.document.name(),
                 component.document.component_version(),
+                component.document.inputs().len(),
                 component.document.outputs().len(),
                 component.document.panel_items().len(),
                 component.encoding.bytes().len()
@@ -1543,8 +2836,9 @@ impl ExactControlWorkspace {
                 digest_prefix(component.encoding.digest().0)
             ));
             ui.label(format!(
-                "Hierarchy: {} instance → {} nodes / {} wires · {} bytes",
-                component.hierarchy.document.instances().len(),
+                "Hierarchy: {} expanded / depth {} → {} nodes / {} wires · {} bytes",
+                component.hierarchy.document.flattened_instance_count(),
+                hierarchy_depth(&component.hierarchy.flattening),
                 component.hierarchy.document.flattened_node_count(),
                 component.hierarchy.document.flattened_wire_count(),
                 component.hierarchy.encoding.bytes().len()
@@ -1554,10 +2848,15 @@ impl ExactControlWorkspace {
                 digest_prefix(component.hierarchy.encoding.digest().0),
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
             ));
+            ui.monospace(format!(
+                "source map {}… · {} bytes",
+                digest_prefix(component.hierarchy.source_map.digest().0),
+                component.hierarchy.source_map.bytes().len()
+            ));
         }
         self.show_probe_sidebar(ui);
         ui.label(format!(
-            "Pair history: {} undo / {} redo · {} bytes",
+            "Authoring-session history: {} undo / {} redo · {} ALGS bytes",
             self.history.undo_len(),
             self.history.redo_len(),
             self.history.retained_bytes()
@@ -1568,7 +2867,7 @@ impl ExactControlWorkspace {
         } else if self.persistence_dirty {
             "Browser persistence: pending"
         } else {
-            "Browser persistence: exact ALGW/ALGP pair saved"
+            "Browser persistence: exact ALGS authoring session saved"
         });
         ui.label(format!(
             "Reference trace: {} entries / {} bytes",
@@ -1586,6 +2885,11 @@ impl ExactControlWorkspace {
         ui.monospace(format!(
             "trace {}…",
             digest_prefix(self.fixture.trace().digest().0)
+        ));
+        ui.label(format!(
+            "Cached-job proof: {} exact participants · {} canonical bytes",
+            self.cached_jobs.catalog.entries().len(),
+            self.cached_jobs.encoding.bytes().len()
         ));
         ui.colored_label(
             egui::Color32::YELLOW,
@@ -1650,7 +2954,7 @@ impl ExactControlWorkspace {
             }
         });
         ui.label(
-            "Add audited node kinds, drag headers onto the integer canvas, edit exact parameters, and connect typed ports in the in-memory ALGW draft. Secondary-click an input to disconnect. Editing never arms or commands firmware.",
+            "Add audited node kinds, drag headers onto the integer canvas, edit schema-directed exact scalar/composite parameters, and connect typed ports in the in-memory ALGW draft. Resource/job identities require selectors. Secondary-click an input to disconnect. Editing never arms or commands firmware.",
         );
         self.show_workspace_controls(ui);
         self.show_palette(ui);
@@ -1676,6 +2980,17 @@ impl ExactControlWorkspace {
         ui.separator();
 
         self.show_target_resources(ui);
+        ui.separator();
+
+        if let Some(action) = self.cached_jobs.show(ui) {
+            self.apply_cached_job_action(action);
+        }
+        ui.separator();
+
+        self.show_hierarchy_authoring(ui);
+        ui.separator();
+
+        self.show_selected_component_definition(ui);
         ui.separator();
 
         self.show_front_panel(ui);
@@ -1732,7 +3047,7 @@ impl ExactControlWorkspace {
                 navigate = Some(true);
             }
             ui.weak(format!(
-                "{} back / {} forward · {} retained pair bytes",
+                "{} back / {} forward · {} retained ALGS bytes",
                 self.history.undo_len(),
                 self.history.redo_len(),
                 self.history.retained_bytes()
@@ -1741,6 +3056,8 @@ impl ExactControlWorkspace {
         if let Some(redo) = navigate {
             self.navigate_history(redo);
         }
+
+        self.show_authoring_session_file_controls(ui);
 
         let download_name = format!(
             "alumina-{}.algw",
@@ -1781,6 +3098,61 @@ impl ExactControlWorkspace {
 
         self.show_probe_file_controls(ui);
         ui.weak(&self.file_status);
+    }
+
+    fn show_authoring_session_file_controls(&mut self, ui: &mut egui::Ui) {
+        let encoding = match self.authoring_session_encoding() {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("ALGS file exchange unavailable: {error}"),
+                );
+                return;
+            }
+        };
+        let download_name = format!(
+            "alumina-session-{}.algs",
+            digest_prefix(encoding.digest().0)
+        );
+        let events = self.authoring_session_file_bridge.show(
+            ui,
+            encoding.bytes(),
+            MAX_GRAPH_AUTHORING_SESSION_BYTES,
+            &download_name,
+            ALGS_FILE,
+        );
+        for event in events {
+            match event {
+                BoundedFileEvent::Import(Ok(bytes)) => {
+                    match self.restore_authoring_session_bytes(&bytes) {
+                        Ok(()) => {
+                            self.persistence_dirty = true;
+                            self.persistence_attempted = false;
+                            self.file_status = format!(
+                                "imported {} exact ALGS bytes after atomic complete-session replay",
+                                bytes.len()
+                            );
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "ALGS import rejected without authoring-state mutation: {error}"
+                            );
+                        }
+                    }
+                }
+                BoundedFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("ALGS file read rejected: {error}");
+                }
+                BoundedFileEvent::Export(Ok(bytes)) => {
+                    self.file_status =
+                        format!("exported {bytes} exact canonical ALGS authoring-session bytes");
+                }
+                BoundedFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("ALGS export failed: {error}");
+                }
+            }
+        }
     }
 
     fn show_probe_file_controls(&mut self, ui: &mut egui::Ui) {
@@ -1838,64 +3210,28 @@ impl ExactControlWorkspace {
     }
 
     fn navigate_history(&mut self, redo: bool) {
-        let admission = GraphWorkspaceLimits::interactive();
-        let graph_admission = GraphLimits::interactive();
-        let probe_admission = GraphProbeLimits::interactive();
-        let preview = if redo {
-            self.history
-                .preview_redo(admission, graph_admission, probe_admission)
-        } else {
-            self.history
-                .preview_undo(admission, graph_admission, probe_admission)
-        };
-        let Some(preview) = (match preview {
-            Ok(preview) => preview,
+        let current = match self.authoring_session_encoding() {
+            Ok(current) => current,
             Err(error) => {
-                self.edit_status = format!("history replay rejected without mutation: {error}");
-                return;
-            }
-        }) else {
-            self.edit_status = if redo {
-                "no later canonical workspace/probe pair is retained".to_owned()
-            } else {
-                "no prior canonical workspace/probe pair is retained".to_owned()
-            };
-            return;
-        };
-        let candidate = preview.workspace().clone();
-        let (encoding, presentation, semantic) = match self.prepare_candidate(&candidate) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.edit_status = format!("history target rejected without mutation: {error}");
+                self.edit_status =
+                    format!("history current session rejected without mutation: {error}");
                 return;
             }
         };
-        let Some(current_probes) = self.probes.as_ref() else {
-            "history navigation rejected without mutation: no canonical ALGP sidecar is attached"
-                .clone_into(&mut self.edit_status);
-            return;
-        };
+        let mut history = self.history.clone();
         let navigation = if redo {
-            self.history.redo(
-                &self.workspace,
-                &current_probes.document,
-                admission,
-                graph_admission,
-                probe_admission,
-            )
+            history.redo(current, GraphAuthoringSessionReplayLimits::interactive())
         } else {
-            self.history.undo(
-                &self.workspace,
-                &current_probes.document,
-                admission,
-                graph_admission,
-                probe_admission,
-            )
+            history.undo(current, GraphAuthoringSessionReplayLimits::interactive())
         };
         let replay = match navigation {
             Ok(Some(replay)) => replay,
             Ok(None) => {
-                "history target disappeared without mutation".clone_into(&mut self.edit_status);
+                self.edit_status = if redo {
+                    "no later complete canonical ALGS session is retained".to_owned()
+                } else {
+                    "no prior complete canonical ALGS session is retained".to_owned()
+                };
                 return;
             }
             Err(error) => {
@@ -1903,32 +3239,25 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let (workspace_replay, probe_replay) = replay.into_parts();
-        debug_assert_eq!(workspace_replay.encoding(), &encoding);
-        debug_assert_eq!(probe_replay.encoding(), preview.probe_encoding());
-        let probe_encoding = probe_replay.encoding().clone();
-        self.workspace = workspace_replay.into_document();
-        self.workspace_encoding = encoding;
-        self.presentation = presentation;
-        self.pending_source = None;
-        self.drag = None;
-        self.parameter_drafts.clear();
-        self.probe_drafts.clear();
-        self.selected_node = self
-            .selected_node
-            .filter(|node| self.workspace.graph().node(*node).is_some());
+        let target_digest = replay.encoding().digest();
+        let prepared = match self.prepare_authoring_session_bytes(replay.encoding().bytes()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.edit_status =
+                    format!("history target failed UI/catalog admission without mutation: {error}");
+                return;
+            }
+        };
+        self.commit_prepared_authoring_session(prepared);
+        self.history = history;
         self.persistence_dirty = true;
         self.persistence_attempted = false;
-        self.refresh_component();
-        self.replace_probe_package(ProbePackage {
-            document: probe_replay.into_document(),
-            encoding: probe_encoding,
-        });
-        "restored exact ALGW/ALGP pair from bounded history".clone_into(&mut self.probe_status);
-        self.reset_cursor_to_trigger();
+        "restored exact ALGS-bound probe sidecar from unified history"
+            .clone_into(&mut self.probe_status);
         self.edit_status = format!(
-            "{} canonical workspace/probe pair; {semantic}",
-            if redo { "redid" } else { "undid to" }
+            "{} complete canonical ALGS session {}…",
+            if redo { "redid" } else { "undid to" },
+            digest_prefix(target_digest.0),
         );
     }
 
@@ -1956,20 +3285,14 @@ impl ExactControlWorkspace {
     }
 
     fn show_target_resources(&mut self, ui: &mut egui::Ui) {
-        let proof = &mut self.target_resources;
-        let selected = proof.catalog.entries().get(proof.catalog_index).map_or(
-            "resource unavailable".to_owned(),
-            |entry| {
-                format!(
-                    "{} · {} v{}",
-                    graph_resource_label(entry.resource().resource),
-                    short_kind(entry.kind().name()),
-                    entry.kind().version()
-                )
-            },
-        );
+        let Self {
+            target_resources: proof,
+            target_success_replay_file_bridge: success_bridge,
+            target_fault_replay_file_bridge: fault_bridge,
+            ..
+        } = self;
         ui.horizontal_wrapped(|ui| {
-            ui.heading("TinyBee target-I/O draft");
+            ui.heading("TinyBee executable target-I/O draft");
             ui.monospace(format!(
                 "capability {}… · {} advertised / {} reviewed entries",
                 digest_prefix(proof.catalog.capability_identity().digest.0),
@@ -1977,9 +3300,16 @@ impl ExactControlWorkspace {
                 proof.catalog.entries().len()
             ));
             ui.monospace(format!(
-                "ALGW {}… · {} concrete nodes",
+                "ALGW {}… · {} nodes / {} wire",
                 digest_prefix(proof.encoding.digest().0),
-                proof.workspace.graph().nodes().len()
+                proof.workspace.graph().nodes().len(),
+                proof.workspace.graph().wires().len()
+            ));
+            ui.monospace(format!(
+                "ALGR {}… · {} bytes · implementation {}…",
+                digest_prefix(proof.deployment.package_digest.0),
+                proof.deployment.package_bytes,
+                digest_prefix(proof.deployment.implementation_digest.0)
             ));
             ui.monospace(format!(
                 "offline device {}… / config {}…",
@@ -1988,48 +3318,3870 @@ impl ExactControlWorkspace {
             ));
         });
         ui.label(
-            "This separate Realtime draft is derived from the exact MKS TinyBee V1 8 MiB board package and a reviewed stable-input implementation. Its device/configuration identities are explicit offline reference values, so it cannot be deployed to the connected board.",
+            "This separate Realtime draft is derived from the exact MKS TinyBee V1 8 MiB board package. One paired-input node reads both selected stable Boolean resources every release, emits their conjunction, and feeds a required sink. Each edit is admitted through the exact capability document and lowered offline into the fixed 4 KiB firmware graph package.",
         );
+        proof.show_catalog_selector(ui);
+        proof.show_reference_selector(ui);
+        ui.monospace(format!(
+            "lowered opcode {:?} · first {} · second {} · period {} cycles · WCET {} cycles",
+            GraphIrOpcode::StableBooleanPairAll,
+            graph_resource_label(proof.deployment.first),
+            graph_resource_label(proof.deployment.second),
+            proof.deployment.realtime_period_cycles,
+            proof.deployment.realtime_wcet_cycles,
+        ));
+        let actor_replay = &proof.deployment.actor_replay;
         ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("tinybee_resource_catalog")
-                .selected_text(selected)
+            ui.strong("Portable firmware-actor replay");
+            ui.monospace(format!(
+                "00→{} · 01→{} · 10→{} · 11→{}",
+                u8::from(actor_replay.truth_table[0]),
+                u8::from(actor_replay.truth_table[1]),
+                u8::from(actor_replay.truth_table[2]),
+                u8::from(actor_replay.truth_table[3]),
+            ));
+        });
+        ui.monospace(format!(
+            "actual provider order {} → {} · success evidence {}…",
+            graph_resource_label(actor_replay.ordered_reads[0]),
+            graph_resource_label(actor_replay.ordered_reads[1]),
+            digest_prefix(actor_replay.success_evidence.digest().0),
+        ));
+        ui.monospace(format!(
+            "unavailable first input → {:?} · retained reads {} → {} · no completed sink report · fault evidence {}…",
+            actor_replay.terminal_fault,
+            graph_resource_label(actor_replay.fault_reads[0]),
+            graph_resource_label(actor_replay.fault_reads[1]),
+            digest_prefix(actor_replay.fault_evidence.digest().0),
+        ));
+        proof.show_replay_evidence_files(ui, success_bridge, fault_bridge);
+        ui.label(&proof.status);
+        ui.label(
+            "Both resource identities are selectable only from the digest-verified scalar catalog. Stable record-field IDs determine ordered lowering and provider calls. Candidate edits commit ALGW, ALGR, and replay evidence together only after the actual fixed-memory firmware actors reproduce the four-case conjunction and the ordered unavailable-resource fault. Duplicate physical identities and capability-unadvertised resources fail without changing that transaction.",
+        );
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Offline native/WASM actor replay only: there is no MCU session, upload, install, start, GPIO configuration, or physical read authority. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
+        );
+    }
+
+    fn scroll_to_open_hierarchy_source(
+        &mut self,
+        ui: &egui::Ui,
+        destination: HierarchySourceDestination,
+    ) {
+        if self.hierarchy_source_browser.scroll_pending
+            && self
+                .hierarchy_source_browser
+                .last_opened
+                .as_ref()
+                .is_some_and(|selection| selection.destination() == destination)
+        {
+            ui.scroll_to_cursor(Some(egui::Align::Center));
+            self.hierarchy_source_browser.scroll_pending = false;
+        }
+    }
+
+    fn opened_component_wire(&self, component: Digest) -> Option<GraphWireId> {
+        match self.hierarchy_source_browser.last_opened.as_ref() {
+            Some(HierarchySourceSelection::Wire {
+                origin:
+                    GraphHierarchyWireOrigin::Component {
+                        component: source_component,
+                        wire,
+                        ..
+                    },
+                ..
+            }) if *source_component == component => Some(*wire),
+            _ => None,
+        }
+    }
+
+    fn show_front_panel_output_cursor(&mut self, ui: &mut egui::Ui, component: &ComponentPackage) {
+        if !component
+            .document
+            .panel_items()
+            .iter()
+            .any(|item| matches!(item.binding(), GraphFrontPanelBinding::OutputIndicator(_)))
+        {
+            return;
+        }
+        let runtime_current = self.front_panel_runtime_is_current(component);
+        let horizon = self
+            .front_panel_runtime
+            .as_ref()
+            .filter(|_| runtime_current)
+            .map_or_else(
+                || self.fixture.simulation().horizon(),
+                |runtime| runtime.document.horizon(),
+            );
+        let mut apply = false;
+        let mut requested = None;
+        let mut restore_accepted = false;
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Exact output cursor");
+            ui.monospace(format!("root c{} tick", horizon.root_clock().get()));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.front_panel_cursor_draft)
+                    .char_limit(96)
+                    .desired_width(130.0)
+                    .hint_text("canonical rational"),
+            );
+            apply = ui.button("apply cursor").clicked()
+                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            if ui.small_button("start").clicked() {
+                requested = Some((Rational::from(0), "selected run start"));
+            }
+            if ui.small_button("end").clicked() {
+                requested = Some((
+                    Rational::from(horizon.inclusive_root_tick()),
+                    "selected inclusive run horizon",
+                ));
+            }
+            if ui.small_button("restore accepted").clicked() {
+                restore_accepted = true;
+            }
+            ui.monospace(format!("0…{}", horizon.inclusive_root_tick()));
+        });
+        if restore_accepted {
+            self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+            "restored the last accepted shared exact cursor"
+                .clone_into(&mut self.front_panel_cursor_status);
+        } else if apply {
+            self.commit_front_panel_cursor_draft(horizon.inclusive_root_tick(), runtime_current);
+        }
+        if let Some((cursor, reason)) = requested {
+            self.cursor_root_tick = cursor;
+            self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+            self.front_panel_cursor_status = format!(
+                "{reason} at exact root tick {} · {}",
+                self.cursor_root_tick,
+                if runtime_current {
+                    "ALFR/ALGT output projection"
+                } else {
+                    "reference ALGT output projection"
+                },
+            );
+        }
+        ui.weak(&self.front_panel_cursor_status);
+    }
+
+    fn commit_front_panel_cursor_draft(
+        &mut self,
+        maximum_root_tick: u64,
+        runtime_current: bool,
+    ) -> bool {
+        match parse_front_panel_root_cursor(&self.front_panel_cursor_draft, maximum_root_tick) {
+            Ok(cursor) => {
+                self.cursor_root_tick = cursor;
+                self.front_panel_cursor_draft =
+                    front_panel_root_cursor_text(&self.cursor_root_tick);
+                self.front_panel_cursor_status = format!(
+                    "accepted canonical rational cursor at exact root tick {} · {}",
+                    self.cursor_root_tick,
+                    if runtime_current {
+                        "ALFR/ALGT output projection"
+                    } else {
+                        "reference ALGT output projection"
+                    },
+                );
+                true
+            }
+            Err(error) => {
+                self.front_panel_cursor_status =
+                    format!("output cursor rejected without changing inspection: {error}");
+                false
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the two selectors share one immutable canonical hierarchy snapshot and defer their single action until all display borrows end"
+    )]
+    fn show_hierarchy_authoring(&mut self, ui: &mut egui::Ui) {
+        self.scroll_to_open_hierarchy_source(ui, HierarchySourceDestination::Root);
+        ui.heading("Component library / root instances");
+        ui.label(
+            "Choose one exact embedded ALGC dependency, instantiate it in the hierarchy root, or remove a selected root occurrence. These authoring-only placeholders flatten through ALGH/ALGM and never deploy by themselves.",
+        );
+        self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_identity_drafts();
+        let Some(component) = self.component.as_ref() else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_status);
+            return;
+        };
+        let dependencies = component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .map(|dependency| {
+                (
+                    dependency.digest(),
+                    format!(
+                        "{} · {}…",
+                        dependency.document().name(),
+                        digest_prefix(dependency.digest().0)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root_instances = component
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .filter(|instance| instance.scope() == GraphInstanceScope::Root)
+            .map(|instance| {
+                let node = instance.node();
+                let node_label = component
+                    .hierarchy
+                    .document
+                    .root()
+                    .graph()
+                    .node(node)
+                    .map_or("missing placeholder", NodeDefinition::label);
+                let component_name = component
+                    .hierarchy
+                    .document
+                    .dependency(instance.component())
+                    .map_or("missing component", |dependency| {
+                        dependency.document().name()
+                    });
+                (
+                    node,
+                    format!(
+                        "#{} {} → {} · {}…",
+                        node.get(),
+                        node_label,
+                        component_name,
+                        digest_prefix(instance.component().0)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_dependency_label = dependencies
+            .iter()
+            .find(|(digest, _)| Some(*digest) == self.selected_hierarchy_component)
+            .map_or("no component dependency", |(_, label)| label.as_str());
+        let selected_instance_label = root_instances
+            .iter()
+            .find(|(node, _)| Some(*node) == self.selected_hierarchy_instance)
+            .map_or("no root instance", |(_, label)| label.as_str());
+        let mut action = None;
+        let mut identity_action = None;
+        let mut root_parameter_request = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Library component");
+            egui::ComboBox::from_id_salt("hierarchy_library_component")
+                .selected_text(selected_dependency_label)
                 .show_ui(ui, |ui| {
-                    for (index, entry) in proof.catalog.entries().iter().enumerate() {
+                    for (digest, label) in &dependencies {
                         ui.selectable_value(
-                            &mut proof.catalog_index,
+                            &mut self.selected_hierarchy_component,
+                            Some(*digest),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    self.selected_hierarchy_component.is_some(),
+                    egui::Button::new("add root instance"),
+                )
+                .clicked()
+                && let Some(digest) = self.selected_hierarchy_component
+            {
+                action = Some(HierarchyUiAction::AddRoot(digest));
+            }
+        });
+        let selected_dependency = self.selected_hierarchy_component;
+        let selected_dependency_in_use = selected_dependency.is_some_and(|digest| {
+            component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.component() == digest
+                        || instance.scope() == GraphInstanceScope::Component(digest)
+                })
+        });
+        let selected_dependency_is_authoritative =
+            selected_dependency == Some(component.encoding.digest());
+        ui.horizontal_wrapped(|ui| {
+            let removable = selected_dependency.is_some()
+                && !selected_dependency_in_use
+                && !selected_dependency_is_authoritative;
+            if ui
+                .add_enabled(removable, egui::Button::new("remove library component"))
+                .clicked()
+                && let Some(digest) = selected_dependency
+            {
+                action = Some(HierarchyUiAction::RemoveComponent(digest));
+            }
+            ui.weak(if selected_dependency_is_authoritative {
+                "the selected ALGC is the complete-session control authority"
+            } else if selected_dependency_in_use {
+                "remove every root/nested reference before removing this dependency"
+            } else {
+                "only exact unreferenced non-authoritative dependencies are removable"
+            });
+        });
+        if let Some(scope) = selected_dependency
+            && let Some(dependency) = component.hierarchy.document.dependency(scope)
+        {
+            let document = dependency.document().clone();
+            let mut draft = self
+                .component_identity_drafts
+                .get(&scope)
+                .cloned()
+                .unwrap_or_else(|| ComponentIdentityDraft::from_document(&document));
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Selected component identity");
+                ui.label("stable name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .char_limit(64)
+                        .desired_width(230.0),
+                );
+                ui.label("behavior version");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.component_version)
+                        .char_limit(10)
+                        .desired_width(72.0),
+                );
+                if ui.button("apply identity metadata").clicked() {
+                    identity_action = Some((scope, draft.clone()));
+                }
+                if ui.button("reset identity draft").clicked() {
+                    draft = ComponentIdentityDraft::from_document(&document);
+                }
+                ui.weak(format!(
+                    "canonical revision {} · version may stay {} or increase",
+                    document.revision(),
+                    document.component_version()
+                ));
+            });
+            self.component_identity_drafts.insert(scope, draft);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("New library component");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_library_component_name)
+                    .desired_width(260.0)
+                    .hint_text("user.component_name"),
+            );
+            if ui
+                .add_enabled(
+                    !self.new_library_component_name.is_empty(),
+                    egui::Button::new("create empty component"),
+                )
+                .clicked()
+            {
+                action = Some(HierarchyUiAction::CreateComponent);
+            }
+            ui.weak("version 1 · shared exact schema/clocks · empty ALGW · no authority");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Root occurrence");
+            egui::ComboBox::from_id_salt("hierarchy_root_instance")
+                .selected_text(selected_instance_label)
+                .show_ui(ui, |ui| {
+                    for (node, label) in &root_instances {
+                        ui.selectable_value(
+                            &mut self.selected_hierarchy_instance,
+                            Some(*node),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    self.selected_hierarchy_instance.is_some(),
+                    egui::Button::new("delete root instance"),
+                )
+                .clicked()
+                && let Some(node) = self.selected_hierarchy_instance
+            {
+                action = Some(HierarchyUiAction::RemoveRoot(node));
+            }
+        });
+        if let Some(node_id) = self.selected_hierarchy_instance
+            && let Some(node) = component.hierarchy.document.root().graph().node(node_id)
+        {
+            let defaults = component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .find(|instance| {
+                    instance.scope() == GraphInstanceScope::Root && instance.node() == node_id
+                })
+                .and_then(|instance| {
+                    component
+                        .hierarchy
+                        .document
+                        .dependency(instance.component())
+                })
+                .and_then(|dependency| {
+                    graph_component_instance_prototype(dependency.document(), node.label()).ok()
+                });
+            let overrides = defaults.as_ref().map_or(0, |prototype| {
+                node.parameters()
+                    .iter()
+                    .zip(prototype.parameters())
+                    .filter(|(actual, default)| actual.value() != default.value())
+                    .count()
+            });
+            ui.strong("Selected root-occurrence parameters");
+            ui.weak(format!(
+                "{} promoted exact parameter(s) · {overrides} occurrence-local override(s). Stable front-panel item IDs survive recursive promotion; accepted values are applied only while flattening this source path.",
+                node.parameters().len(),
+            ));
+            root_parameter_request = show_node_parameter_editors(
+                ui,
+                component.hierarchy.document.root().graph(),
+                node,
+                &mut self.hierarchy_parameter_drafts,
+            );
+        }
+        let component_file_events = selected_dependency
+            .and_then(|digest| component.hierarchy.document.dependency(digest))
+            .map_or_else(Vec::new, |dependency| {
+                let download_name = format!(
+                    "alumina-component-{}.algc",
+                    digest_prefix(dependency.digest().0)
+                );
+                self.component_file_bridge.show(
+                    ui,
+                    dependency.encoding().bytes(),
+                    GraphComponentLimits::interactive().maximum_component_bytes,
+                    &download_name,
+                    ALGC_FILE,
+                )
+            });
+        ui.weak(
+            "ALGC import accepts a bounded canonical leaf component only after exact replay, audited graph admission, and current hierarchy-context validation.",
+        );
+        let component_package_export = selected_dependency
+            .map(|digest| {
+                let package = component
+                    .hierarchy
+                    .document
+                    .export_component_package(digest, GraphComponentPackageLimits::interactive())
+                    .map_err(|error| error.to_string())?;
+                let encoding =
+                    encode_graph_component_package(&package).map_err(|error| error.to_string())?;
+                Ok::<_, String>((digest, package, encoding))
+            })
+            .transpose();
+        let component_package_file_events = match component_package_export {
+            Ok(Some((digest, package, encoding))) => {
+                let download_name =
+                    format!("alumina-component-closure-{}.alcp", digest_prefix(digest.0));
+                let events = self.component_package_file_bridge.show(
+                    ui,
+                    encoding.bytes(),
+                    GraphComponentPackageLimits::interactive().maximum_package_bytes,
+                    &download_name,
+                    ALCP_FILE,
+                );
+                ui.weak(format!(
+                    "ALCP closure: {} exact components · {} scoped bindings · {} expanded occurrences · no execution authority",
+                    package.dependencies().len(),
+                    package.instances().len(),
+                    package.expanded_instance_count(),
+                ));
+                events
+            }
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    format!("selected component closure is not exportable: {error}"),
+                );
+                Vec::new()
+            }
+        };
+        ui.weak(
+            "ALCP imports one exact root component with its complete transitive ALGC/scoped-binding closure. Existing identities and bindings are never replaced; exact duplicate packages are selection-only no-ops.",
+        );
+        ui.monospace(format!(
+            "{} exact dependencies · {} root bindings · next root node {}",
+            dependencies.len(),
+            root_instances.len(),
+            component.hierarchy.document.root().next_node_id(),
+        ));
+        ui.label(&self.component_status);
+        let root = component.hierarchy.document.root().clone();
+        let root_instance_nodes = root_instances
+            .iter()
+            .map(|(node, _)| *node)
+            .collect::<BTreeSet<_>>();
+        if action.is_none() {
+            action = self.show_hierarchy_root_canvas(ui, &root, &root_instance_nodes);
+        }
+        if let Some(action) = action {
+            self.apply_hierarchy_action(action);
+        } else if let Some((scope, draft)) = identity_action {
+            self.apply_component_identity_draft(scope, &draft);
+        } else if let Some((parameter, text)) = root_parameter_request
+            && let Some(node) = self.selected_hierarchy_instance
+        {
+            self.commit_root_instance_parameter_text(node, parameter, &text);
+        }
+        for event in component_file_events {
+            self.handle_component_file_event(event);
+        }
+        for event in component_package_file_events {
+            self.handle_component_package_file_event(event);
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the structural root canvas keeps layered node/port interaction and one deferred canonical hierarchy action in one egui frame"
+    )]
+    fn show_hierarchy_root_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &GraphWorkspaceDocument,
+        root_instance_nodes: &BTreeSet<GraphNodeId>,
+    ) -> Option<HierarchyUiAction> {
+        ui.strong("Canonical hierarchy root canvas");
+        ui.weak(
+            "Drag a component header to an exact integer placement. Select an output, then a typed input, to connect; secondary-click an owned input to disconnect. Every accepted edit freshly flattens and commits one complete ALGS session.",
+        );
+        let presentation = match structural_workspace_presentation(root) {
+            Ok(presentation) => presentation,
+            Err(error) => {
+                self.component_status =
+                    format!("hierarchy root canvas rejected without mutation: {error}");
+                return None;
+            }
+        };
+        let nodes = root.graph().nodes().to_vec();
+        let wires = root.graph().wires().to_vec();
+        let (opened_root_node, opened_root_wire) =
+            match self.hierarchy_source_browser.last_opened.as_ref() {
+                Some(HierarchySourceSelection::Node {
+                    origin: GraphHierarchyNodeOrigin::Root(node),
+                    ..
+                }) => (Some(*node), None),
+                Some(HierarchySourceSelection::Wire {
+                    origin: GraphHierarchyWireOrigin::Root(wire),
+                    ..
+                }) => (None, Some(*wire)),
+                _ => (None, None),
+            };
+        let focus = HierarchyRootCanvasFocus {
+            selected_instance: self.selected_hierarchy_instance,
+            opened_source_node: opened_root_node,
+            opened_source_wire: opened_root_wire,
+        };
+        let mut action = None;
+        let mut clicked_instance = None;
+        egui::ScrollArea::both()
+            .id_salt("hierarchy_root_canvas")
+            .auto_shrink([false, false])
+            .min_scrolled_height(260.0)
+            .max_height(340.0)
+            .show(ui, |ui| {
+                let canvas_size = egui::vec2(
+                    presentation.size.x.max(ui.available_width()),
+                    presentation.size.y.max(260.0),
+                );
+                let (canvas, painter) = ui.allocate_painter(canvas_size, egui::Sense::click());
+                painter.rect_filled(canvas.rect, 0.0, egui::Color32::from_rgb(17, 21, 29));
+                paint_grid(&painter, canvas.rect);
+                let origin = canvas.rect.min.to_vec2();
+                for wire in &wires {
+                    paint_hierarchy_root_wire(
+                        &painter,
+                        origin,
+                        root.graph(),
+                        &presentation,
+                        focus,
+                        wire,
+                    );
+                }
+                for node in &nodes {
+                    let Some(node_presentation) = presentation.nodes.get(&node.id()) else {
+                        continue;
+                    };
+                    let rect = node_presentation.rect.translate(origin);
+                    let header = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
+                    );
+                    let bound_instance = root_instance_nodes.contains(&node.id());
+                    let response = ui.interact(
+                        header,
+                        egui::Id::new(("hierarchy_root_node", node.id().get())),
+                        if bound_instance {
+                            egui::Sense::click_and_drag()
+                        } else {
+                            egui::Sense::click()
+                        },
+                    );
+                    if response.drag_started()
+                        && bound_instance
+                        && let Some(placement) = root.placement(node.id())
+                    {
+                        self.hierarchy_drag = Some(NodeDrag {
+                            node: node.id(),
+                            origin: placement,
+                            delta: egui::Vec2::ZERO,
+                        });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.hierarchy_drag.as_mut()
+                        && drag.node == node.id()
+                    {
+                        drag.delta += response.drag_delta();
+                    }
+                    let dragging = self
+                        .hierarchy_drag
+                        .filter(|drag| drag.node == node.id())
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let painted_rect = dragging.map_or(rect, |drag| rect.translate(drag.delta));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        match (
+                            quantized_canvas_coordinate(drag.origin.x(), drag.delta.x),
+                            quantized_canvas_coordinate(drag.origin.y(), drag.delta.y),
+                        ) {
+                            (Ok(x), Ok(y)) => {
+                                action = Some(HierarchyUiAction::MoveRoot {
+                                    node: drag.node,
+                                    x,
+                                    y,
+                                });
+                            }
+                            (Err(error), _) | (_, Err(error)) => {
+                                self.component_status = format!(
+                                    "hierarchy root move rejected without mutation: {error}"
+                                );
+                            }
+                        }
+                        self.hierarchy_drag = None;
+                    }
+                    if response.clicked() && bound_instance {
+                        clicked_instance = Some(node.id());
+                    }
+                    for (index, port) in node.inputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, false);
+                        let port_response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "hierarchy_root_input",
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        let target = WireEndpoint {
+                            node: node.id(),
+                            port: port.id(),
+                        };
+                        if port_response.secondary_clicked() {
+                            if let Some(wire) = wires
+                                .iter()
+                                .find(|wire| wire.target() == target)
+                                .map(|wire| wire.id())
+                            {
+                                action = Some(HierarchyUiAction::DisconnectRoot(wire));
+                            } else {
+                                self.component_status = format!(
+                                    "hierarchy root input #{}.{} is already disconnected",
+                                    target.node.get(),
+                                    target.port.get()
+                                );
+                            }
+                        } else if port_response.clicked() {
+                            if let Some(source) = self.pending_hierarchy_source {
+                                action = Some(HierarchyUiAction::ConnectRoot { source, target });
+                            } else {
+                                self.component_status = format!(
+                                    "hierarchy root input #{}.{} selected; choose an output first",
+                                    target.node.get(),
+                                    target.port.get()
+                                );
+                            }
+                        }
+                    }
+                    for (index, port) in node.outputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, true);
+                        let port_response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "hierarchy_root_output",
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        if port_response.clicked() {
+                            let source = WireEndpoint {
+                                node: node.id(),
+                                port: port.id(),
+                            };
+                            if self.pending_hierarchy_source == Some(source) {
+                                self.pending_hierarchy_source = None;
+                                "pending hierarchy root wire cancelled"
+                                    .clone_into(&mut self.component_status);
+                            } else {
+                                self.pending_hierarchy_source = Some(source);
+                                self.component_status = format!(
+                                    "selected hierarchy root output #{}.{}; choose one typed input",
+                                    source.node.get(),
+                                    source.port.get()
+                                );
+                            }
+                        }
+                    }
+                    paint_hierarchy_root_node(
+                        &painter,
+                        painted_rect,
+                        node,
+                        focus.selects_node(node.id()),
+                        bound_instance,
+                        root.placement(node.id()),
+                    );
+                }
+                if let Some(source) = self.pending_hierarchy_source
+                    && let Some(source_anchor) =
+                        port_anchor(root.graph(), &presentation, source, true)
+                    && let Some(pointer) = ui.ctx().pointer_hover_pos()
+                {
+                    painter.line_segment(
+                        [source_anchor + origin, pointer],
+                        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    );
+                }
+            });
+        if let Some(node) = clicked_instance {
+            self.selected_hierarchy_instance = Some(node);
+        }
+        action
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "node and wire provenance selectors share one immutable ALGM snapshot and defer one transient navigation action until display borrows end"
+    )]
+    fn show_hierarchy_source_browser(&mut self, ui: &mut egui::Ui, component: &ComponentPackage) {
+        self.reconcile_hierarchy_source_browser();
+        let flattened = &component.hierarchy.flattening;
+        let workspace = flattened.workspace();
+        let node_choices = flattened.node_provenance();
+        let wire_choices = flattened.wire_provenance();
+        let node_choice_label = |mapping: &GraphFlattenedNodeProvenance| {
+            let flattened = mapping.flattened_node();
+            let node_label = workspace
+                .graph()
+                .node(flattened)
+                .map_or("missing final node", NodeDefinition::label);
+            format!(
+                "final n{} {node_label} · {}",
+                flattened.get(),
+                hierarchy_node_origin_label(mapping.origin())
+            )
+        };
+        let wire_choice_label = |mapping: &GraphFlattenedWireProvenance| {
+            let flattened = mapping.flattened_wire();
+            let endpoints = workspace
+                .graph()
+                .wires()
+                .iter()
+                .find(|wire| wire.id() == flattened)
+                .map_or_else(
+                    || "missing final wire".to_owned(),
+                    |wire| {
+                        format!(
+                            "n{}.p{} → n{}.p{}",
+                            wire.source().node.get(),
+                            wire.source().port.get(),
+                            wire.target().node.get(),
+                            wire.target().port.get()
+                        )
+                    },
+                );
+            format!(
+                "final w{} {endpoints} · {}",
+                flattened.get(),
+                hierarchy_wire_origin_label(mapping.origin())
+            )
+        };
+        let selected_node_label = node_choices
+            .iter()
+            .find(|mapping| {
+                Some(mapping.flattened_node()) == self.hierarchy_source_browser.selected_node
+            })
+            .map_or_else(|| "no final node".to_owned(), node_choice_label);
+        let selected_wire_label = wire_choices
+            .iter()
+            .find(|mapping| {
+                Some(mapping.flattened_wire()) == self.hierarchy_source_browser.selected_wire
+            })
+            .map_or_else(|| "no final wire".to_owned(), wire_choice_label);
+        let mut action = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.heading("Flattened hierarchy source browser");
+                ui.weak("read-only ALGM navigation");
+            });
+            ui.label(
+                "Choose one final flattened item. Opening its exact source follows the stable occurrence path into the root or component definition and changes only transient UI selection.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Final node");
+                egui::ComboBox::from_id_salt("hierarchy_source_final_node")
+                    .width(640.0)
+                    .selected_text(selected_node_label)
+                    .show_ui(ui, |ui| {
+                        for mapping in node_choices {
+                            ui.selectable_value(
+                                &mut self.hierarchy_source_browser.selected_node,
+                                Some(mapping.flattened_node()),
+                                node_choice_label(mapping),
+                            );
+                        }
+                    });
+                if ui
+                    .add_enabled(
+                        self.hierarchy_source_browser.selected_node.is_some(),
+                        egui::Button::new("open exact node source"),
+                    )
+                    .clicked()
+                    && let Some(selected) = self.hierarchy_source_browser.selected_node
+                    && let Some(mapping) = node_choices
+                        .iter()
+                        .find(|mapping| mapping.flattened_node() == selected)
+                {
+                    action = Some(HierarchySourceSelection::Node {
+                        flattened: selected,
+                        origin: mapping.origin().clone(),
+                    });
+                }
+            });
+            if let Some(selected) = self.hierarchy_source_browser.selected_node
+                && let Some(mapping) = node_choices
+                    .iter()
+                    .find(|mapping| mapping.flattened_node() == selected)
+            {
+                ui.monospace(format!(
+                    "exact node origin: {}",
+                    hierarchy_node_origin_label(mapping.origin())
+                ));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Final wire");
+                egui::ComboBox::from_id_salt("hierarchy_source_final_wire")
+                    .width(640.0)
+                    .selected_text(selected_wire_label)
+                    .show_ui(ui, |ui| {
+                        for mapping in wire_choices {
+                            ui.selectable_value(
+                                &mut self.hierarchy_source_browser.selected_wire,
+                                Some(mapping.flattened_wire()),
+                                wire_choice_label(mapping),
+                            );
+                        }
+                    });
+                if ui
+                    .add_enabled(
+                        self.hierarchy_source_browser.selected_wire.is_some(),
+                        egui::Button::new("open exact wire source"),
+                    )
+                    .clicked()
+                    && let Some(selected) = self.hierarchy_source_browser.selected_wire
+                    && let Some(mapping) = wire_choices
+                        .iter()
+                        .find(|mapping| mapping.flattened_wire() == selected)
+                {
+                    action = Some(HierarchySourceSelection::Wire {
+                        flattened: selected,
+                        origin: mapping.origin().clone(),
+                    });
+                }
+            });
+            if let Some(selected) = self.hierarchy_source_browser.selected_wire
+                && let Some(mapping) = wire_choices
+                    .iter()
+                    .find(|mapping| mapping.flattened_wire() == selected)
+            {
+                ui.monospace(format!(
+                    "exact wire origin: {}",
+                    hierarchy_wire_origin_label(mapping.origin())
+                ));
+            }
+            ui.label(&self.hierarchy_source_browser.status);
+        });
+        if let Some(action) = action {
+            self.open_hierarchy_source(action);
+        }
+    }
+
+    fn open_hierarchy_source(&mut self, selection: HierarchySourceSelection) {
+        match self.try_open_hierarchy_source(&selection) {
+            Ok(status) => {
+                self.hierarchy_source_browser.last_opened = Some(selection);
+                self.hierarchy_source_browser.scroll_pending = true;
+                self.hierarchy_source_browser.status = status;
+            }
+            Err(error) => {
+                self.hierarchy_source_browser.status =
+                    format!("ALGM source navigation rejected without authoring mutation: {error}");
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the four exact ALGM node/wire and root/component origin variants remain visibly exhaustive at one fail-closed navigation boundary"
+    )]
+    fn try_open_hierarchy_source(
+        &mut self,
+        selection: &HierarchySourceSelection,
+    ) -> Result<String, String> {
+        let package = self
+            .component
+            .clone()
+            .ok_or_else(|| "no complete ALGH/ALGM source authority is attached".to_owned())?;
+        match selection {
+            HierarchySourceSelection::Node { flattened, origin } => {
+                if package.hierarchy.flattening.node_origin(*flattened) != Some(origin) {
+                    return Err(
+                        "the selected final node no longer has that exact origin".to_owned()
+                    );
+                }
+                match origin {
+                    GraphHierarchyNodeOrigin::Root(node) => {
+                        if package
+                            .hierarchy
+                            .document
+                            .root()
+                            .graph()
+                            .node(*node)
+                            .is_none()
+                        {
+                            return Err("the exact root source node is unavailable".to_owned());
+                        }
+                        self.pending_hierarchy_source = None;
+                        self.hierarchy_drag = None;
+                        Ok(format!(
+                            "opened final node {} as root ALGW node {}; canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            node.get()
+                        ))
+                    }
+                    GraphHierarchyNodeOrigin::Component {
+                        source_path,
+                        component,
+                        node,
+                    } => {
+                        Self::validate_component_source(
+                            &package,
+                            source_path,
+                            *component,
+                            Some(*node),
+                            None,
+                        )?;
+                        self.select_component_source(&package, source_path, *component, *node);
+                        Ok(format!(
+                            "opened final node {} at exact occurrence {} as ALGC {}… node {}; canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            hierarchy_source_path_label(source_path),
+                            digest_prefix(component.0),
+                            node.get()
+                        ))
+                    }
+                }
+            }
+            HierarchySourceSelection::Wire { flattened, origin } => {
+                if package.hierarchy.flattening.wire_origin(*flattened) != Some(origin) {
+                    return Err(
+                        "the selected final wire no longer has that exact origin".to_owned()
+                    );
+                }
+                match origin {
+                    GraphHierarchyWireOrigin::Root(wire) => {
+                        let source = package
+                            .hierarchy
+                            .document
+                            .root()
+                            .graph()
+                            .wires()
+                            .iter()
+                            .find(|candidate| candidate.id() == *wire)
+                            .ok_or_else(|| {
+                                "the exact root source wire is unavailable".to_owned()
+                            })?;
+                        self.pending_hierarchy_source = None;
+                        self.hierarchy_drag = None;
+                        Ok(format!(
+                            "opened final wire {} as root ALGW wire {} (n{}.p{} → n{}.p{}); canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            wire.get(),
+                            source.source().node.get(),
+                            source.source().port.get(),
+                            source.target().node.get(),
+                            source.target().port.get()
+                        ))
+                    }
+                    GraphHierarchyWireOrigin::Component {
+                        source_path,
+                        component,
+                        wire,
+                    } => {
+                        let source = Self::validate_component_source(
+                            &package,
+                            source_path,
+                            *component,
+                            None,
+                            Some(*wire),
+                        )?
+                        .ok_or_else(|| {
+                            "the exact component source wire is unavailable".to_owned()
+                        })?;
+                        self.select_component_source(
+                            &package,
+                            source_path,
+                            *component,
+                            source.target().node,
+                        );
+                        Ok(format!(
+                            "opened final wire {} at exact occurrence {} as selected and highlighted ALGC {}… wire {} (n{}.p{} → n{}.p{}); canonical ALGS, history, and persistence are unchanged",
+                            flattened.get(),
+                            hierarchy_source_path_label(source_path),
+                            digest_prefix(component.0),
+                            wire.get(),
+                            source.source().node.get(),
+                            source.source().port.get(),
+                            source.target().node.get(),
+                            source.target().port.get()
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_component_source(
+        package: &ComponentPackage,
+        source_path: &[GraphNodeId],
+        source_component: Digest,
+        node: Option<GraphNodeId>,
+        wire: Option<GraphWireId>,
+    ) -> Result<Option<WireDefinition>, String> {
+        if package
+            .hierarchy
+            .document
+            .component_at_instance_path(source_path)
+            != Some(source_component)
+        {
+            return Err(
+                "the selected ALGM occurrence path no longer resolves to its exact component"
+                    .to_owned(),
+            );
+        }
+        let dependency = package
+            .hierarchy
+            .document
+            .dependency(source_component)
+            .ok_or_else(|| "the selected ALGM source component is unavailable".to_owned())?;
+        if let Some(wire) = wire {
+            return dependency
+                .document()
+                .workspace()
+                .graph()
+                .wires()
+                .iter()
+                .find(|candidate| candidate.id() == wire)
+                .copied()
+                .map(Some)
+                .ok_or_else(|| "the selected ALGM source wire is unavailable".to_owned());
+        }
+        let node = node.ok_or_else(|| "the selected ALGM source has no node".to_owned())?;
+        if dependency
+            .document()
+            .workspace()
+            .graph()
+            .node(node)
+            .is_none()
+        {
+            return Err("the selected ALGM source node is unavailable".to_owned());
+        }
+        Ok(None)
+    }
+
+    fn select_component_source(
+        &mut self,
+        package: &ComponentPackage,
+        source_path: &[GraphNodeId],
+        source_component: Digest,
+        node: GraphNodeId,
+    ) {
+        self.selected_hierarchy_component = Some(source_component);
+        self.selected_hierarchy_instance = source_path.first().copied();
+        self.pending_hierarchy_source = None;
+        self.hierarchy_drag = None;
+        self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_definition_editor();
+        if source_component == package.encoding.digest() {
+            self.selected_node = Some(node);
+            self.pending_source = None;
+            self.drag = None;
+        } else {
+            self.component_definition.selected_node = Some(node);
+            self.component_definition.pending_source = None;
+            self.component_definition.drag = None;
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "selected dependency identity, palette, exact canvas interaction, and node inspector form one scoped definition editor"
+    )]
+    fn show_selected_component_definition(&mut self, ui: &mut egui::Ui) {
+        self.reconcile_component_definition_editor();
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Selected component definition");
+            ui.weak("ALGC workspace canvas · authoring only");
+        });
+        ui.label(
+            "Edit the internal ALGW of the selected non-authoritative library dependency. Every accepted node, parameter, placement, or typed-wire edit replaces that exact ALGC, recursively refreshes ALGH/ALGM, and commits one complete ALGS history state.",
+        );
+        let Some(component) = self.component.clone() else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_definition.status);
+            return;
+        };
+        let Some(scope) = self.component_definition.scope else {
+            ui.colored_label(egui::Color32::YELLOW, &self.component_definition.status);
+            return;
+        };
+        let Some(dependency) = component.hierarchy.document.dependency(scope) else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "the selected exact component definition is no longer available",
+            );
+            return;
+        };
+        let document = dependency.document().clone();
+        let workspace = document.workspace().clone();
+        let authoritative = scope == component.encoding.digest();
+        ui.monospace(format!(
+            "{} · {}… · ALGW {}… · revision {} · {} nodes / {} wires{}",
+            document.name(),
+            digest_prefix(scope.0),
+            digest_prefix(workspace.graph_digest().0),
+            document.revision(),
+            workspace.graph().nodes().len(),
+            workspace.graph().wires().len(),
+            if authoritative {
+                " · control authority"
+            } else {
+                " · editable library definition"
+            },
+        ));
+        if authoritative {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "This ALGC supplies the complete-session control ALGW. Edit it on the main exact-control canvas below so probes, panel bindings, and control authority move together.",
+            );
+            ui.label(&self.component_definition.status);
+            return;
+        }
+        self.scroll_to_open_hierarchy_source(ui, HierarchySourceDestination::Component(scope));
+        let opened_source_wire = self.opened_component_wire(scope).and_then(|wire| {
+            workspace
+                .graph()
+                .wires()
+                .iter()
+                .find(|candidate| candidate.id() == wire)
+                .copied()
+        });
+        if let Some(wire) = opened_source_wire {
+            ui.colored_label(
+                egui::Color32::LIGHT_GREEN,
+                format!(
+                    "Exact ALGM source wire w{} selected below · n{}.p{} → n{}.p{} · target node #{} remains available in the inspector",
+                    wire.id().get(),
+                    wire.source().node.get(),
+                    wire.source().port.get(),
+                    wire.target().node.get(),
+                    wire.target().port.get(),
+                    wire.target().node.get(),
+                ),
+            );
+        }
+        let presentation = match structural_workspace_presentation(&workspace) {
+            Ok(presentation) => presentation,
+            Err(error) => {
+                self.component_definition.status =
+                    format!("component definition canvas rejected without mutation: {error}");
+                ui.colored_label(egui::Color32::YELLOW, &self.component_definition.status);
+                return;
+            }
+        };
+
+        if self.component_definition.palette_index >= self.palette.len() {
+            self.component_definition.palette_index = 0;
+        }
+        let palette_label = self
+            .palette
+            .get(self.component_definition.palette_index)
+            .map_or("audited palette unavailable", |entry| {
+                entry.display_name.as_str()
+            });
+        let mut add_requested = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Definition palette");
+            egui::ComboBox::from_id_salt("component_definition_palette")
+                .selected_text(palette_label)
+                .show_ui(ui, |ui| {
+                    for (index, entry) in self.palette.iter().enumerate() {
+                        ui.selectable_value(
+                            &mut self.component_definition.palette_index,
                             index,
+                            &entry.display_name,
+                        );
+                    }
+                });
+            add_requested = ui.button("add node to definition").clicked();
+            if let Some(source) = self.component_definition.pending_source {
+                ui.colored_label(
+                    egui::Color32::WHITE,
+                    format!("wiring #{}.{}", source.node.get(), source.port.get()),
+                );
+                if ui.small_button("cancel definition wire").clicked() {
+                    self.component_definition.pending_source = None;
+                    "pending component-definition wire cancelled"
+                        .clone_into(&mut self.component_definition.status);
+                }
+            }
+        });
+        if add_requested {
+            self.add_component_definition_node(scope);
+            ui.label(&self.component_definition.status);
+            return;
+        }
+
+        let selected_child_label = self
+            .component_definition
+            .child_component
+            .and_then(|child| component.hierarchy.document.dependency(child))
+            .map_or_else(
+                || "no other library dependency".to_owned(),
+                |dependency| {
+                    format!(
+                        "{} · {}…",
+                        dependency.document().name(),
+                        digest_prefix(dependency.digest().0)
+                    )
+                },
+            );
+        let mut add_child_requested = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Child component");
+            egui::ComboBox::from_id_salt(("component_definition_child", scope.0))
+                .selected_text(selected_child_label)
+                .show_ui(ui, |ui| {
+                    for dependency in component
+                        .hierarchy
+                        .document
+                        .dependencies()
+                        .iter()
+                        .filter(|dependency| dependency.digest() != scope)
+                    {
+                        let digest = dependency.digest();
+                        ui.selectable_value(
+                            &mut self.component_definition.child_component,
+                            Some(digest),
                             format!(
-                                "{} · {:?}",
-                                graph_resource_label(entry.resource().resource),
-                                entry.resource().support
+                                "{} · {}…",
+                                dependency.document().name(),
+                                digest_prefix(digest.0)
                             ),
                         );
                     }
                 });
-            let already_present = proof.selected_is_present();
+            add_child_requested = ui
+                .add_enabled(
+                    self.component_definition.child_component.is_some(),
+                    egui::Button::new("add child occurrence"),
+                )
+                .clicked();
+            ui.weak("one ALGW placeholder + one scoped ALGH binding");
+        });
+        if add_child_requested && let Some(child) = self.component_definition.child_component {
+            self.add_component_definition_child(scope, child);
+            ui.label(&self.component_definition.status);
+            return;
+        }
+
+        if self.show_component_definition_canvas(
+            ui,
+            scope,
+            &workspace,
+            &presentation,
+            opened_source_wire.map(WireDefinition::id),
+        ) {
+            ui.label(&self.component_definition.status);
+            return;
+        }
+        self.show_component_definition_selected_node(ui, scope, &workspace);
+        ui.label(&self.component_definition.status);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the scoped definition canvas keeps node, port, wire, and drag interactions together before one deferred transaction"
+    )]
+    fn show_component_definition_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Digest,
+        workspace: &GraphWorkspaceDocument,
+        presentation: &GraphPresentation,
+        opened_source_wire: Option<GraphWireId>,
+    ) -> bool {
+        ui.strong("Canonical selected-definition canvas");
+        ui.weak(
+            "Drag node headers on the exact integer canvas. Select an output then a typed input to connect; secondary-click an owned input to disconnect. Component-instance placeholders may be wired or relabeled; their dedicated inspector action removes the placeholder and scoped ALGH occurrence atomically.",
+        );
+        let nodes = workspace.graph().nodes().to_vec();
+        let wires = workspace.graph().wires().to_vec();
+        let mut clicked_node = None;
+        let mut canvas_clicked = false;
+        let mut move_request = None;
+        let mut port_edit = None;
+        egui::ScrollArea::both()
+            .id_salt(("selected_component_definition_canvas", scope.0))
+            .auto_shrink([false, false])
+            .min_scrolled_height(260.0)
+            .max_height(360.0)
+            .show(ui, |ui| {
+                let canvas_size = egui::vec2(
+                    presentation.size.x.max(ui.available_width()),
+                    presentation.size.y.max(260.0),
+                );
+                let (canvas, painter) = ui.allocate_painter(canvas_size, egui::Sense::click());
+                canvas_clicked = canvas.clicked();
+                painter.rect_filled(canvas.rect, 0.0, egui::Color32::from_rgb(17, 21, 29));
+                paint_grid(&painter, canvas.rect);
+                let origin = canvas.rect.min.to_vec2();
+                for wire in &wires {
+                    Self::paint_wire(
+                        &painter,
+                        origin,
+                        workspace.graph(),
+                        presentation,
+                        self.component_definition.selected_node,
+                        opened_source_wire,
+                        wire,
+                    );
+                }
+                for node in &nodes {
+                    let Some(node_presentation) = presentation.nodes.get(&node.id()) else {
+                        continue;
+                    };
+                    let rect = node_presentation.rect.translate(origin);
+                    let header_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
+                    );
+                    let response = ui.interact(
+                        header_rect,
+                        egui::Id::new((
+                            "selected_component_definition_node",
+                            scope.0,
+                            node.id().get(),
+                        )),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if response.drag_started()
+                        && let Some(placement) = workspace.placement(node.id())
+                    {
+                        self.component_definition.drag = Some(NodeDrag {
+                            node: node.id(),
+                            origin: placement,
+                            delta: egui::Vec2::ZERO,
+                        });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.component_definition.drag.as_mut()
+                        && drag.node == node.id()
+                    {
+                        drag.delta += response.drag_delta();
+                    }
+                    let dragging = self
+                        .component_definition
+                        .drag
+                        .filter(|drag| drag.node == node.id())
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let painted_rect = dragging.map_or(rect, |drag| rect.translate(drag.delta));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        move_request = Some((drag, drag.delta));
+                        self.component_definition.drag = None;
+                    }
+                    if response.clicked() {
+                        clicked_node = Some(node.id());
+                    }
+                    for (index, port) in node.inputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, false);
+                        let response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "selected_component_definition_input",
+                                scope.0,
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        let endpoint = WireEndpoint {
+                            node: node.id(),
+                            port: port.id(),
+                        };
+                        if response.secondary_clicked() {
+                            port_edit = Some(PortEdit::DisconnectInput(endpoint));
+                            clicked_node = Some(node.id());
+                        } else if response.clicked() {
+                            port_edit = Some(PortEdit::ConnectInput(endpoint));
+                            clicked_node = Some(node.id());
+                        }
+                    }
+                    for (index, port) in node.outputs().iter().enumerate() {
+                        let anchor = port_anchor_for_rect(painted_rect, index, true);
+                        let response = ui.interact(
+                            egui::Rect::from_center_size(anchor, egui::vec2(18.0, 18.0)),
+                            egui::Id::new((
+                                "selected_component_definition_output",
+                                scope.0,
+                                node.id().get(),
+                                port.id().get(),
+                            )),
+                            egui::Sense::click(),
+                        );
+                        if response.clicked() {
+                            port_edit = Some(PortEdit::SelectOutput(WireEndpoint {
+                                node: node.id(),
+                                port: port.id(),
+                            }));
+                            clicked_node = Some(node.id());
+                        }
+                    }
+                    self.paint_node(
+                        &painter,
+                        painted_rect,
+                        node,
+                        node_presentation.rank,
+                        self.component_definition.selected_node,
+                    );
+                }
+                if let Some(source) = self.component_definition.pending_source
+                    && let Some(anchor) = port_anchor(workspace.graph(), presentation, source, true)
+                    && let Some(pointer) = ui.ctx().pointer_hover_pos()
+                {
+                    painter.line_segment(
+                        [anchor + origin, pointer],
+                        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    );
+                }
+            });
+        let interaction_consumed =
+            clicked_node.is_some() || move_request.is_some() || port_edit.is_some();
+        if let Some((drag, delta)) = move_request {
+            return self.commit_component_definition_node_drag(scope, drag, delta);
+        }
+        if let Some(edit) = port_edit
+            && self.handle_component_definition_port_edit(scope, edit)
+        {
+            return true;
+        }
+        if let Some(node) = clicked_node {
+            self.component_definition.selected_node = Some(node);
+        } else if canvas_clicked && !interaction_consumed {
+            self.component_definition.selected_node = None;
+        }
+        false
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the definition inspector presents one exact node and defers each possible canonical mutation until the display borrow ends"
+    )]
+    fn show_component_definition_selected_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        scope: Digest,
+        workspace: &GraphWorkspaceDocument,
+    ) {
+        let Some(id) = self.component_definition.selected_node else {
+            ui.weak("Select a definition node to inspect exact ports and edit its metadata.");
+            return;
+        };
+        let Some(node) = workspace.graph().node(id).cloned() else {
+            return;
+        };
+        let graph = workspace.graph().clone();
+        let placement = workspace.placement(id);
+        let schema = self
+            .fixture
+            .registry()
+            .semantic_registry()
+            .schema(node.kind());
+        let state = schema.and_then(alumina_interface_core::graph::NodeSchema::state);
+        let domain_choices = schema.map_or_else(Vec::new, |schema| {
+            audited_domain_choices(&graph, schema.allowed_domains())
+        });
+        let maximum_label_bytes = graph.schema().limits().maximum_label_bytes;
+        let mut label_text = self
+            .component_definition
+            .node_label_drafts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| node.label().to_owned());
+        let placeholder = node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
+            && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION;
+        let bound_child = placeholder.then(|| {
+            self.component.as_ref().and_then(|component| {
+                component
+                    .hierarchy
+                    .document
+                    .instances()
+                    .iter()
+                    .find(|instance| {
+                        instance.scope() == GraphInstanceScope::Component(scope)
+                            && instance.node() == id
+                    })
+                    .map(|instance| instance.component())
+            })
+        });
+        let bound_child = bound_child.flatten();
+        let bound_child_label = bound_child.and_then(|child| {
+            self.component.as_ref().and_then(|component| {
+                component
+                    .hierarchy
+                    .document
+                    .dependency(child)
+                    .map(|dependency| {
+                        format!(
+                            "{} · {}…",
+                            dependency.document().name(),
+                            digest_prefix(child.0)
+                        )
+                    })
+            })
+        });
+        let rebind_target = self.component_definition.child_component;
+        let mut delete_requested = false;
+        let mut rebind_requested = false;
+        let mut label_request = None;
+        let mut domain_request = None;
+        let mut parameter_request = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(format!("definition #{} {}", id.get(), node.label()));
+                ui.monospace(format!("{} v{}", node.kind().name(), node.kind().version()));
+                if ui.small_button("clear").clicked() {
+                    self.component_definition.selected_node = None;
+                }
+                delete_requested = if placeholder {
+                    ui.button("delete child occurrence + wires")
+                        .on_hover_text(
+                            "Atomically removes this parent-local ALGW placeholder and its scoped ALGH binding. Public connector or panel bindings must be rebound first.",
+                        )
+                        .clicked()
+                } else {
+                    ui.button("delete node + wires").clicked()
+                };
+                if placeholder {
+                    rebind_requested = ui
+                        .add_enabled(
+                            rebind_target.is_some(),
+                            egui::Button::new("rebind child to selected component"),
+                        )
+                        .on_hover_text(
+                            "Uses the Child component selector above. The node, placement, and compatible live stable-ID endpoints remain exact.",
+                        )
+                        .clicked();
+                }
+            });
+            (label_request, domain_request) = show_node_identity_editors(
+                ui,
+                &node,
+                &domain_choices,
+                maximum_label_bytes,
+                &mut label_text,
+            );
+            if let Some(placement) = placement {
+                ui.monospace(format!(
+                    "ALGC {}… · canvas = ({}, {}) logical px",
+                    digest_prefix(scope.0),
+                    placement.x(),
+                    placement.y()
+                ));
+            }
+            ui.horizontal_wrapped(|ui| {
+                for port in node.inputs() {
+                    ui.monospace(port_description(&graph, "in", port));
+                }
+                for port in node.outputs() {
+                    ui.monospace(port_description(&graph, "out", port));
+                }
+            });
+            parameter_request = show_node_parameter_editors(
+                ui,
+                &graph,
+                &node,
+                &mut self.component_definition.parameter_drafts,
+            );
+            if placeholder {
+                ui.weak(format!(
+                    "Collapsed nested ALGC occurrence · bound child {} · this placeholder and its scoped ALGH binding have one lifecycle",
+                    bound_child_label.as_deref().unwrap_or("unavailable")
+                ));
+            } else if let Some(state) = state {
+                ui.label(format!(
+                    "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
+                    state.clock().get(),
+                    state.value_type().get(),
+                    state.declared_storage_bytes()
+                ));
+            }
+        });
+        self.component_definition
+            .node_label_drafts
+            .insert(id, label_text);
+        if delete_requested {
+            if placeholder {
+                self.remove_component_definition_child(scope, id);
+            } else {
+                self.delete_component_definition_node(scope, id);
+            }
+        } else if rebind_requested && let Some(child) = rebind_target {
+            self.rebind_component_definition_child(scope, id, child);
+        } else if let Some(label) = label_request {
+            self.commit_component_definition_node_label(scope, id, &label);
+        } else if let Some(domain) = domain_request {
+            self.commit_component_definition_node_domain(scope, id, domain);
+        } else if let Some((parameter, text)) = parameter_request {
+            self.commit_component_definition_parameter_text(scope, id, parameter, &text);
+        }
+    }
+
+    fn editable_component_definition(
+        &self,
+        scope: Digest,
+    ) -> Result<(ComponentPackage, GraphComponentDocument), String> {
+        let current = self
+            .component
+            .clone()
+            .ok_or_else(|| "no selected component hierarchy is attached".to_owned())?;
+        if self.component_definition.scope != Some(scope)
+            || self.selected_hierarchy_component != Some(scope)
+        {
+            return Err("the selected component-definition scope changed".to_owned());
+        }
+        if current.encoding.digest() == scope {
+            return Err(
+                "the complete-session control ALGC must be edited on the main canvas".to_owned(),
+            );
+        }
+        let document = current
+            .hierarchy
+            .document
+            .dependency(scope)
+            .ok_or_else(|| "the selected component definition is unavailable".to_owned())?
+            .document()
+            .clone();
+        Ok((current, document))
+    }
+
+    fn reject_component_definition_edit(&mut self, context: &str, error: impl std::fmt::Display) {
+        self.component_definition.status =
+            format!("component definition {context} rejected without mutation: {error}");
+        self.component_status
+            .clone_from(&self.component_definition.status);
+        self.edit_status
+            .clone_from(&self.component_definition.status);
+    }
+
+    fn commit_component_definition_workspace(
+        &mut self,
+        scope: Digest,
+        candidate: GraphWorkspaceDocument,
+        success: &str,
+    ) -> bool {
+        let (current, mut document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("edit", error);
+                return false;
+            }
+        };
+        if &candidate == document.workspace() {
+            self.component_definition.status =
+                format!("{success}; canonical component definition already matched");
+            self.component_status
+                .clone_from(&self.component_definition.status);
+            self.edit_status
+                .clone_from(&self.component_definition.status);
+            return true;
+        }
+        if let Err(error) = structural_workspace_presentation(&candidate) {
+            self.reject_component_definition_edit("presentation", error);
+            return false;
+        }
+        if let Err(error) = document.replace_workspace(candidate) {
+            self.reject_component_definition_edit("workspace replacement", error);
+            return false;
+        }
+        match self.commit_component_dependency_document(
+            &current,
+            scope,
+            document,
+            success,
+            self.selected_panel_item,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = self.selected_hierarchy_component;
+                self.reconcile_component_definition_editor();
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+                true
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("transaction", error);
+                false
+            }
+        }
+    }
+
+    fn add_component_definition_node(&mut self, scope: Digest) {
+        let Some(entry) = self
+            .palette
+            .get(self.component_definition.palette_index)
+            .cloned()
+        else {
+            self.reject_component_definition_edit(
+                "node creation",
+                "palette selection is unavailable",
+            );
+            return;
+        };
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node creation", error);
+                return;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        let (x, y) = match new_node_position(&candidate) {
+            Ok(position) => position,
+            Err(error) => {
+                self.reject_component_definition_edit("node creation", error);
+                return;
+            }
+        };
+        let id = match candidate.create_node(entry.prototype, x, y) {
+            Ok(id) => id,
+            Err(error) => {
+                self.reject_component_definition_edit("node creation", error);
+                return;
+            }
+        };
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "created {} as selected-definition node {} at canonical canvas ({x}, {y})",
+                entry.display_name,
+                id.get()
+            ),
+        ) {
+            self.component_definition.selected_node = Some(id);
+            self.component_definition.pending_source = None;
+        }
+    }
+
+    fn add_component_definition_child(&mut self, scope: Digest, child: Digest) {
+        let (current, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence creation", error);
+                return;
+            }
+        };
+        let Some(child_dependency) = current.hierarchy.document.dependency(child) else {
+            self.reject_component_definition_edit(
+                "child occurrence creation",
+                format!("child component {} is unavailable", digest_prefix(child.0)),
+            );
+            return;
+        };
+        let child_name = child_dependency.document().name().to_owned();
+        let (x, y) = match new_node_position(document.workspace()) {
+            Ok(position) => position,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence creation", error);
+                return;
+            }
+        };
+        let label = format!(
+            "{child_name} occurrence {}",
+            document.workspace().next_node_id()
+        );
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let (node, report) = match hierarchy_document.add_nested_instance(scope, child, label, x, y)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence creation", error);
+                return;
+            }
+        };
+        let authoritative = current.encoding.digest();
+        if report.resolve(authoritative) != authoritative {
+            self.reject_component_definition_edit(
+                "child occurrence creation",
+                "the nested occurrence would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available",
+            );
+            return;
+        }
+        let replacement = report.resolve(scope);
+        let retained_child = report.resolve(child);
+        let remaps = report.remaps().len();
+        let selected_instance = self.selected_hierarchy_instance;
+        let status = format!(
+            "added selected-definition child occurrence node {} of {child_name} {}… at canonical canvas ({x}, {y}) with one scoped ALGH binding across {remaps} recursive identity remap(s)",
+            node.get(),
+            digest_prefix(retained_child.0)
+        );
+        match self.commit_hierarchy_document(
+            current,
+            hierarchy_document,
+            &status,
+            Some(replacement),
+            selected_instance,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = Some(replacement);
+                self.component_definition.child_component = Some(retained_child);
+                self.component_definition.selected_node = Some(node);
+                self.component_definition.pending_source = None;
+                self.component_definition.drag = None;
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence transaction", error);
+            }
+        }
+    }
+
+    fn rebind_component_definition_child(
+        &mut self,
+        scope: Digest,
+        node: GraphNodeId,
+        child: Digest,
+    ) {
+        let (current, _) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence rebinding", error);
+                return;
+            }
+        };
+        let instance_scope = GraphInstanceScope::Component(scope);
+        let Some(instance) = current
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .copied()
+            .find(|instance| instance.scope() == instance_scope && instance.node() == node)
+        else {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                format!("node {} has no scoped ALGH binding", node.get()),
+            );
+            return;
+        };
+        let original_child = instance.component();
+        let Some(original_dependency) = current.hierarchy.document.dependency(original_child)
+        else {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                format!(
+                    "bound child component {} is unavailable",
+                    digest_prefix(original_child.0)
+                ),
+            );
+            return;
+        };
+        let original_name = original_dependency.document().name().to_owned();
+        let Some(child_dependency) = current.hierarchy.document.dependency(child) else {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                format!(
+                    "replacement child component {} is unavailable",
+                    digest_prefix(child.0)
+                ),
+            );
+            return;
+        };
+        let child_name = child_dependency.document().name().to_owned();
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let report = match hierarchy_document.rebind_nested_instance(scope, node, child) {
+            Ok(report) => report,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence rebinding", error);
+                return;
+            }
+        };
+        let authoritative = current.encoding.digest();
+        if report.resolve(authoritative) != authoritative {
+            self.reject_component_definition_edit(
+                "child occurrence rebinding",
+                "the replacement would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available",
+            );
+            return;
+        }
+        let replacement = report.resolve(scope);
+        let retained_child = report.resolve(child);
+        let remaps = report.remaps().len();
+        let selected_instance = self.selected_hierarchy_instance;
+        let status = format!(
+            "rebound selected-definition child occurrence node {} from {original_name} {}… to {child_name} {}… while retaining its node, placement, and compatible stable-ID endpoints across {remaps} recursive identity remap(s)",
+            node.get(),
+            digest_prefix(original_child.0),
+            digest_prefix(retained_child.0)
+        );
+        match self.commit_hierarchy_document(
+            current,
+            hierarchy_document,
+            &status,
+            Some(replacement),
+            selected_instance,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = Some(replacement);
+                self.component_definition.child_component = Some(retained_child);
+                self.component_definition.selected_node = Some(node);
+                self.reconcile_component_definition_editor();
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence transaction", error);
+            }
+        }
+    }
+
+    fn remove_component_definition_child(&mut self, scope: Digest, node: GraphNodeId) {
+        let (current, _) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence deletion", error);
+                return;
+            }
+        };
+        let instance_scope = GraphInstanceScope::Component(scope);
+        let Some(instance) = current
+            .hierarchy
+            .document
+            .instances()
+            .iter()
+            .copied()
+            .find(|instance| instance.scope() == instance_scope && instance.node() == node)
+        else {
+            self.reject_component_definition_edit(
+                "child occurrence deletion",
+                format!("node {} has no scoped ALGH binding", node.get()),
+            );
+            return;
+        };
+        let child = instance.component();
+        let child_name = current
+            .hierarchy
+            .document
+            .dependency(child)
+            .map_or("unknown child", |dependency| dependency.document().name())
+            .to_owned();
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let (removed_wires, report) = match hierarchy_document.remove_nested_instance(scope, node) {
+            Ok(result) => result,
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence deletion", error);
+                return;
+            }
+        };
+        let authoritative = current.encoding.digest();
+        if report.resolve(authoritative) != authoritative {
+            self.reject_component_definition_edit(
+                "child occurrence deletion",
+                "the nested occurrence removal would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available",
+            );
+            return;
+        }
+        let replacement = report.resolve(scope);
+        let retained_child = report.resolve(child);
+        let remaps = report.remaps().len();
+        let selected_instance = self.selected_hierarchy_instance;
+        let status = format!(
+            "removed selected-definition child occurrence node {} of {child_name} {}…, {removed_wires} incident wire(s), and its scoped ALGH binding across {remaps} recursive identity remap(s)",
+            node.get(),
+            digest_prefix(retained_child.0)
+        );
+        match self.commit_hierarchy_document(
+            current,
+            hierarchy_document,
+            &status,
+            Some(replacement),
+            selected_instance,
+        ) {
+            Ok(_) => {
+                self.component_definition.scope = Some(replacement);
+                self.component_definition.child_component = Some(retained_child);
+                self.component_definition.selected_node = None;
+                self.component_definition.pending_source = self
+                    .component_definition
+                    .pending_source
+                    .filter(|source| source.node != node);
+                self.component_definition.drag = self
+                    .component_definition
+                    .drag
+                    .filter(|drag| drag.node != node);
+                self.component_definition
+                    .parameter_drafts
+                    .retain(|(draft_node, _), _| *draft_node != node);
+                self.component_definition.node_label_drafts.remove(&node);
+                self.component_definition
+                    .status
+                    .clone_from(&self.component_status);
+            }
+            Err(error) => {
+                self.reject_component_definition_edit("child occurrence transaction", error);
+            }
+        }
+    }
+
+    fn delete_component_definition_node(&mut self, scope: Digest, id: GraphNodeId) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node deletion", error);
+                return;
+            }
+        };
+        let Some(node) = document.workspace().graph().node(id) else {
+            self.reject_component_definition_edit(
+                "node deletion",
+                format!("node {} is unavailable", id.get()),
+            );
+            return;
+        };
+        if node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
+            && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION
+        {
+            self.reject_component_definition_edit(
+                "node deletion",
+                "ALGH owns component-instance placeholders",
+            );
+            return;
+        }
+        let mut candidate = document.workspace().clone();
+        let removed_wires = match candidate.delete_node(id) {
+            Ok(count) => count,
+            Err(error) => {
+                self.reject_component_definition_edit("node deletion", error);
+                return;
+            }
+        };
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "deleted selected-definition node {} and {removed_wires} incident wire(s) without reusing identities",
+                id.get()
+            ),
+        ) {
+            self.component_definition.selected_node = None;
+            self.component_definition.pending_source = self
+                .component_definition
+                .pending_source
+                .filter(|source| source.node != id);
+            self.component_definition
+                .parameter_drafts
+                .retain(|(node, _), _| *node != id);
+            self.component_definition.node_label_drafts.remove(&id);
+        }
+    }
+
+    fn commit_component_definition_node_label(
+        &mut self,
+        scope: Digest,
+        id: GraphNodeId,
+        label: &str,
+    ) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node label", error);
+                return;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        if let Err(error) = candidate.set_node_label(id, label) {
+            self.reject_component_definition_edit("node label", error);
+            return;
+        }
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "set selected-definition node {} label to exact UTF-8 {label:?}",
+                id.get()
+            ),
+        ) {
+            self.component_definition
+                .node_label_drafts
+                .insert(id, label.to_owned());
+        }
+    }
+
+    fn commit_component_definition_node_domain(
+        &mut self,
+        scope: Digest,
+        id: GraphNodeId,
+        domain: ExecutionDomain,
+    ) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node domain", error);
+                return;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        if let Err(error) = candidate.set_node_domain(id, domain) {
+            self.reject_component_definition_edit("node domain", error);
+            return;
+        }
+        self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "set selected-definition node {} execution placement to {}",
+                id.get(),
+                domain_choice_label(domain)
+            ),
+        );
+    }
+
+    fn commit_component_definition_parameter_text(
+        &mut self,
+        scope: Digest,
+        id: GraphNodeId,
+        parameter_id: u32,
+        text: &str,
+    ) {
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("parameter", error);
+                return;
+            }
+        };
+        let workspace = document.workspace();
+        let Some(parameter) = workspace
+            .graph()
+            .node(id)
+            .and_then(|node| {
+                node.parameters()
+                    .iter()
+                    .find(|value| value.id() == parameter_id)
+            })
+            .cloned()
+        else {
+            self.reject_component_definition_edit(
+                "parameter",
+                format!("node {} parameter {parameter_id} is unavailable", id.get()),
+            );
+            return;
+        };
+        let value =
+            match parse_parameter_text(workspace.graph(), parameter.value().value_type(), text) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.reject_component_definition_edit("parameter", error);
+                    return;
+                }
+            };
+        let canonical =
+            parameter_edit_text(workspace.graph(), &value).unwrap_or_else(|| text.to_owned());
+        let mut candidate = workspace.clone();
+        if let Err(error) = candidate.set_parameter(id, parameter_id, value) {
+            self.reject_component_definition_edit("parameter", error);
+            return;
+        }
+        if self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "set selected-definition node {} parameter {} to exact canonical {canonical}",
+                id.get(),
+                parameter.name()
+            ),
+        ) {
+            self.component_definition
+                .parameter_drafts
+                .insert((id, parameter_id), canonical);
+        }
+    }
+
+    fn commit_component_definition_node_drag(
+        &mut self,
+        scope: Digest,
+        drag: NodeDrag,
+        delta: egui::Vec2,
+    ) -> bool {
+        let (x, y) = match (
+            quantized_canvas_coordinate(drag.origin.x(), delta.x),
+            quantized_canvas_coordinate(drag.origin.y(), delta.y),
+        ) {
+            (Ok(x), Ok(y)) => (x, y),
+            (Err(error), _) | (_, Err(error)) => {
+                self.reject_component_definition_edit("node move", error);
+                return false;
+            }
+        };
+        if x == drag.origin.x() && y == drag.origin.y() {
+            self.component_definition.status = format!(
+                "selected-definition node {} already matched canonical canvas ({x}, {y})",
+                drag.node.get()
+            );
+            self.component_status
+                .clone_from(&self.component_definition.status);
+            self.edit_status
+                .clone_from(&self.component_definition.status);
+            return true;
+        }
+        let (_, document) = match self.editable_component_definition(scope) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.reject_component_definition_edit("node move", error);
+                return false;
+            }
+        };
+        let mut candidate = document.workspace().clone();
+        if let Err(error) = candidate.move_node(drag.node, x, y) {
+            self.reject_component_definition_edit("node move", error);
+            return false;
+        }
+        self.commit_component_definition_workspace(
+            scope,
+            candidate,
+            &format!(
+                "moved selected-definition node {} to canonical canvas ({x}, {y})",
+                drag.node.get()
+            ),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "typed output selection plus transactional connect/disconnect share one scoped pending-wire state"
+    )]
+    fn handle_component_definition_port_edit(&mut self, scope: Digest, edit: PortEdit) -> bool {
+        match edit {
+            PortEdit::SelectOutput(source) => {
+                if self.component_definition.pending_source == Some(source) {
+                    self.component_definition.pending_source = None;
+                    "pending component-definition wire cancelled"
+                        .clone_into(&mut self.component_definition.status);
+                } else {
+                    self.component_definition.pending_source = Some(source);
+                    self.component_definition.status = format!(
+                        "selected definition output #{}.{}; choose one typed input",
+                        source.node.get(),
+                        source.port.get()
+                    );
+                }
+                false
+            }
+            PortEdit::ConnectInput(target) => {
+                let Some(source) = self.component_definition.pending_source else {
+                    self.component_definition.status = format!(
+                        "definition input #{}.{} selected; choose an output first",
+                        target.node.get(),
+                        target.port.get()
+                    );
+                    return false;
+                };
+                let (_, document) = match self.editable_component_definition(scope) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.reject_component_definition_edit("wire", error);
+                        return false;
+                    }
+                };
+                let mut candidate = document.workspace().clone();
+                let id = match candidate.connect(source, target) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        self.reject_component_definition_edit("wire", error);
+                        return false;
+                    }
+                };
+                let changed = self.commit_component_definition_workspace(
+                    scope,
+                    candidate,
+                    &format!(
+                        "connected selected-definition wire {} from #{}.{} to #{}.{}",
+                        id.get(),
+                        source.node.get(),
+                        source.port.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                );
+                if changed {
+                    self.component_definition.pending_source = None;
+                }
+                changed
+            }
+            PortEdit::DisconnectInput(target) => {
+                let (_, document) = match self.editable_component_definition(scope) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        self.reject_component_definition_edit("wire removal", error);
+                        return false;
+                    }
+                };
+                let Some(id) = document
+                    .workspace()
+                    .graph()
+                    .wires()
+                    .iter()
+                    .find(|wire| wire.target() == target)
+                    .map(|wire| wire.id())
+                else {
+                    self.component_definition.status = format!(
+                        "definition input #{}.{} is already disconnected",
+                        target.node.get(),
+                        target.port.get()
+                    );
+                    return false;
+                };
+                let mut candidate = document.workspace().clone();
+                if let Err(error) = candidate.disconnect(id) {
+                    self.reject_component_definition_edit("wire removal", error);
+                    return false;
+                }
+                let changed = self.commit_component_definition_workspace(
+                    scope,
+                    candidate,
+                    &format!(
+                        "disconnected selected-definition wire {} from input #{}.{}",
+                        id.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                );
+                if changed {
+                    self.component_definition.pending_source = None;
+                }
+                changed
+            }
+        }
+    }
+
+    fn commit_root_instance_parameter_text(
+        &mut self,
+        node: GraphNodeId,
+        parameter_id: u32,
+        text: &str,
+    ) {
+        let Some(current) = self.component.clone() else {
+            "root-occurrence parameter edit rejected without mutation: no hierarchy is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(parameter) = current
+            .hierarchy
+            .document
+            .root()
+            .graph()
+            .node(node)
+            .and_then(|node| {
+                node.parameters()
+                    .iter()
+                    .find(|parameter| parameter.id() == parameter_id)
+            })
+            .cloned()
+        else {
+            self.component_status = format!(
+                "root-occurrence parameter edit rejected without mutation: instance #{} parameter {parameter_id} is unavailable",
+                node.get()
+            );
+            return;
+        };
+        let value = match parse_parameter_text(
+            current.hierarchy.document.root().graph(),
+            parameter.value().value_type(),
+            text,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.component_status =
+                    format!("root-occurrence parameter edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        let canonical = parameter_edit_text(current.hierarchy.document.root().graph(), &value)
+            .unwrap_or_else(|| text.to_owned());
+        let mut document = current.hierarchy.document.clone();
+        if let Err(error) = document.set_root_instance_parameter(
+            node,
+            GraphFrontPanelItemId::new(parameter_id),
+            value,
+        ) {
+            self.component_status =
+                format!("root-occurrence parameter edit rejected without mutation: {error}");
+            return;
+        }
+        let status = format!(
+            "set root occurrence [{}] promoted parameter #{} {} to exact canonical {canonical}",
+            node.get(),
+            parameter_id,
+            parameter.name(),
+        );
+        match self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            self.selected_hierarchy_component,
+            Some(node),
+        ) {
+            Ok(_) => {
+                self.hierarchy_parameter_drafts
+                    .insert((node, parameter_id), canonical);
+            }
+            Err(error) => {
+                self.component_status =
+                    format!("root-occurrence parameter edit rejected without mutation: {error}");
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "candidate hierarchy mutation, ALGH/ALGM regeneration, complete-session admission, history recording, and commit remain one auditable transaction"
+    )]
+    fn apply_hierarchy_action(&mut self, action: HierarchyUiAction) {
+        let Some(current) = self.component.clone() else {
+            "hierarchy edit rejected without mutation: no selected component hierarchy is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = current.hierarchy.document.clone();
+        let clears_pending_source = matches!(
+            action,
+            HierarchyUiAction::ConnectRoot { .. } | HierarchyUiAction::DisconnectRoot(_)
+        );
+        let clears_new_component_name = action == HierarchyUiAction::CreateComponent;
+        let (status, selected_component, selected_instance) = match action {
+            HierarchyUiAction::CreateComponent => {
+                let name = self.new_library_component_name.clone();
+                let component = match empty_library_component(&name, &self.workspace) {
+                    Ok(component) => component,
+                    Err(error) => {
+                        self.component_status =
+                            format!("empty library component rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                let encoding = match encode_graph_component(&component) {
+                    Ok(encoding) => encoding,
+                    Err(error) => {
+                        self.component_status =
+                            format!("empty library component rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                let digest = encoding.digest();
+                if let Some(existing) = document.dependencies().iter().find(|dependency| {
+                    dependency.document().name() == name && dependency.digest() != digest
+                }) {
+                    self.component_status = format!(
+                        "empty library component rejected without mutation: stable name {name} already belongs to ALGC {}…",
+                        digest_prefix(existing.digest().0)
+                    );
+                    return;
+                }
+                let already_present = document.dependency(digest).is_some();
+                if let Err(error) = document.add_component(component) {
+                    self.component_status =
+                        format!("empty library component rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!(
+                        "{} deterministic empty library component {name} ALGC {}… with shared exact schema/clocks and no execution authority",
+                        if already_present {
+                            "selected existing"
+                        } else {
+                            "created"
+                        },
+                        digest_prefix(digest.0)
+                    ),
+                    Some(digest),
+                    self.selected_hierarchy_instance,
+                )
+            }
+            HierarchyUiAction::AddRoot(component) => {
+                let maximum_x = document
+                    .root()
+                    .placements()
+                    .iter()
+                    .map(|placement| placement.x())
+                    .max();
+                let x = maximum_x.map_or(Ok(NEW_NODE_ORIGIN), |maximum_x| {
+                    maximum_x
+                        .checked_add(NEW_NODE_X_GAP)
+                        .ok_or_else(|| "root instance x coordinate overflowed".to_owned())
+                });
+                let x = match x {
+                    Ok(x) => x,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                let label = format!("Component instance {}", document.root().next_node_id());
+                let node = match document.add_root_instance(component, label, x, NEW_NODE_ORIGIN) {
+                    Ok(node) => node,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added root instance #{} of exact ALGC {}…",
+                        node.get(),
+                        digest_prefix(component.0)
+                    ),
+                    Some(component),
+                    Some(node),
+                )
+            }
+            HierarchyUiAction::RemoveRoot(node) => {
+                let removed_wires = match document.remove_root_instance(node) {
+                    Ok(removed_wires) => removed_wires,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "removed root instance #{} and {removed_wires} incident root wire(s)",
+                        node.get()
+                    ),
+                    self.selected_hierarchy_component,
+                    None,
+                )
+            }
+            HierarchyUiAction::RemoveComponent(component) => {
+                if component == current.encoding.digest() {
+                    "hierarchy edit rejected without mutation: the selected ALGC is complete-session control authority"
+                        .clone_into(&mut self.component_status);
+                    return;
+                }
+                if let Err(error) = document.remove_component(component) {
+                    self.component_status =
+                        format!("hierarchy edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!(
+                        "removed unreferenced library ALGC {}…",
+                        digest_prefix(component.0)
+                    ),
+                    None,
+                    self.selected_hierarchy_instance,
+                )
+            }
+            HierarchyUiAction::MoveRoot { node, x, y } => {
+                if let Err(error) = document.move_root_instance(node, x, y) {
+                    self.component_status =
+                        format!("hierarchy edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!(
+                        "moved root instance #{} to canonical canvas ({x}, {y})",
+                        node.get()
+                    ),
+                    self.selected_hierarchy_component,
+                    Some(node),
+                )
+            }
+            HierarchyUiAction::ConnectRoot { source, target } => {
+                let wire = match document.connect_root_wire(source, target) {
+                    Ok(wire) => wire,
+                    Err(error) => {
+                        self.component_status =
+                            format!("hierarchy edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "connected root wire {} from #{}.{} to #{}.{}",
+                        wire.get(),
+                        source.node.get(),
+                        source.port.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                    self.selected_hierarchy_component,
+                    Some(target.node),
+                )
+            }
+            HierarchyUiAction::DisconnectRoot(wire) => {
+                if let Err(error) = document.disconnect_root_wire(wire) {
+                    self.component_status =
+                        format!("hierarchy edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("disconnected root wire {}", wire.get()),
+                    self.selected_hierarchy_component,
+                    self.selected_hierarchy_instance,
+                )
+            }
+        };
+        match self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            selected_component,
+            selected_instance,
+        ) {
+            Ok(_) => {
+                if clears_pending_source {
+                    self.pending_hierarchy_source = None;
+                }
+                if clears_new_component_name {
+                    self.new_library_component_name.clear();
+                }
+            }
+            Err(error) => {
+                self.component_status =
+                    format!("hierarchy edit rejected without mutation: {error}");
+            }
+        }
+    }
+
+    fn commit_hierarchy_document(
+        &mut self,
+        current: ComponentPackage,
+        document: GraphHierarchyDocument,
+        status: &str,
+        selected_component: Option<Digest>,
+        selected_instance: Option<GraphNodeId>,
+    ) -> Result<bool, String> {
+        if document == current.hierarchy.document {
+            self.selected_hierarchy_component = selected_component;
+            self.selected_hierarchy_instance = selected_instance;
+            self.reconcile_hierarchy_selection(None);
+            self.reconcile_component_identity_drafts();
+            self.component_status = format!("{status}; canonical hierarchy already matched");
+            self.edit_status.clone_from(&self.component_status);
+            return Ok(false);
+        }
+        let hierarchy = hierarchy_package(document, &self.fixture)?;
+        let candidate = ComponentPackage {
+            document: current.document,
+            encoding: current.encoding,
+            hierarchy,
+        };
+        let Some(probes) = self.probes.as_ref() else {
+            return Err("canonical ALGP sidecar is unavailable".to_owned());
+        };
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            Some(&candidate),
+        )
+        .map_err(|error| format!("complete-session candidate rejected: {error}"))?;
+        let history = self.history_with_current_recorded()?;
+        self.component = Some(candidate);
+        self.front_panel_runtime = None;
+        "front-panel runtime invalidated by exact hierarchy replacement"
+            .clone_into(&mut self.front_panel_runtime_status);
+        self.history = history;
+        self.hierarchy_parameter_drafts.clear();
+        self.selected_hierarchy_component = selected_component;
+        self.selected_hierarchy_instance = selected_instance;
+        self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_identity_drafts();
+        self.reconcile_component_definition_editor();
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
+        self.component_status = format!("{status}; complete ALGS history recorded");
+        self.edit_status.clone_from(&self.component_status);
+        Ok(true)
+    }
+
+    fn apply_component_identity_draft(&mut self, original: Digest, draft: &ComponentIdentityDraft) {
+        let Some(current) = self.component.clone() else {
+            "component identity edit rejected without mutation: no selected component is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(dependency) = current.hierarchy.document.dependency(original) else {
+            "component identity edit rejected without mutation: selected hierarchy library component is unavailable"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let component_version = match parse_component_behavior_version(&draft.component_version) {
+            Ok(version) => version,
+            Err(error) => {
+                self.component_status =
+                    format!("component identity edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        if let Some(conflict) = current
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|candidate| {
+                candidate.digest() != original && candidate.document().name() == draft.name
+            })
+        {
+            self.component_status = format!(
+                "component identity edit rejected without mutation: stable name {} already belongs to ALGC {}…",
+                draft.name,
+                digest_prefix(conflict.digest().0)
+            );
+            return;
+        }
+        let original_name = dependency.document().name().to_owned();
+        let original_version = dependency.document().component_version();
+        let mut document = dependency.document().clone();
+        if let Err(error) = document.update_identity_metadata(draft.name.clone(), component_version)
+        {
+            self.component_status =
+                format!("component identity edit rejected without mutation: {error}");
+            return;
+        }
+        let status = format!(
+            "updated exact component identity {original_name} v{original_version} → {} v{component_version}",
+            draft.name
+        );
+        match self.commit_component_dependency_document(
+            &current,
+            original,
+            document,
+            &status,
+            self.selected_panel_item,
+        ) {
+            Ok(_) => self.reconcile_component_identity_drafts(),
+            Err(error) => {
+                self.component_status =
+                    format!("component identity edit rejected without mutation: {error}");
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "six connector CRUD variants converge on one atomic ALGC/ALGH/ALGM/ALGS commit boundary"
+    )]
+    fn apply_component_connector_action(&mut self, action: ComponentConnectorUiAction) {
+        let Some(current) = self.component.clone() else {
+            "connector-pane edit rejected without mutation: no selected component is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(original) = self.component_connector_scope else {
+            "connector-pane edit rejected without mutation: no hierarchy library component is selected"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let Some(dependency) = current.hierarchy.document.dependency(original) else {
+            "connector-pane edit rejected without mutation: selected hierarchy library component is unavailable"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = dependency.document().clone();
+        let (status, preferred, clears_input, clears_output) = match action {
+            ComponentConnectorUiAction::AddInput { name, target } => {
+                let input = match document.add_input(name, target) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        self.component_status =
+                            format!("connector-pane edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added stable public input #{} at internal endpoint #{}.{}",
+                        input.get(),
+                        target.node.get(),
+                        target.port.get()
+                    ),
+                    Some(ComponentConnectorSelection::Input(input)),
+                    true,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::UpdateInput { input, draft } => {
+                if let Err(error) = document.update_input(input, draft.name, draft.endpoint) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("updated stable public input #{}", input.get()),
+                    Some(ComponentConnectorSelection::Input(input)),
+                    false,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::RemoveInput(input) => {
+                if let Err(error) = document.remove_input(input) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("removed stable public input #{}", input.get()),
+                    None,
+                    false,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::AddOutput { name, source } => {
+                let output = match document.add_output(name, source) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.component_status =
+                            format!("connector-pane edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added stable public output #{} at internal endpoint #{}.{}",
+                        output.get(),
+                        source.node.get(),
+                        source.port.get()
+                    ),
+                    Some(ComponentConnectorSelection::Output(output)),
+                    false,
+                    true,
+                )
+            }
+            ComponentConnectorUiAction::UpdateOutput { output, draft } => {
+                if let Err(error) = document.update_output(output, draft.name, draft.endpoint) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("updated stable public output #{}", output.get()),
+                    Some(ComponentConnectorSelection::Output(output)),
+                    false,
+                    false,
+                )
+            }
+            ComponentConnectorUiAction::RemoveOutput(output) => {
+                if let Err(error) = document.remove_output(output) {
+                    self.component_status =
+                        format!("connector-pane edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("removed stable public output #{}", output.get()),
+                    None,
+                    false,
+                    false,
+                )
+            }
+        };
+        match self.commit_component_dependency_document(
+            &current,
+            original,
+            document,
+            &status,
+            self.selected_panel_item,
+        ) {
+            Ok(_) => {
+                if clears_input {
+                    self.new_component_input_name.clear();
+                    self.new_component_input_target = None;
+                }
+                if clears_output {
+                    self.new_component_output_name.clear();
+                    self.new_component_output_source = None;
+                }
+                self.reconcile_component_connector_selection(preferred);
+            }
+            Err(error) => {
+                self.component_status =
+                    format!("connector-pane edit rejected without mutation: {error}");
+            }
+        }
+    }
+
+    fn apply_panel_action(&mut self, action: PanelUiAction) {
+        let Some(current) = self.component.clone() else {
+            "front-panel edit rejected without mutation: no selected component is attached"
+                .clone_into(&mut self.component_status);
+            return;
+        };
+        let mut document = current.document.clone();
+        let (status, selected, clears_new_item) = match action {
+            PanelUiAction::Add {
+                name,
+                binding,
+                rect,
+            } => {
+                let item = match document.add_panel_item(name, binding, rect) {
+                    Ok(item) => item,
+                    Err(error) => {
+                        self.component_status =
+                            format!("front-panel edit rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                (
+                    format!(
+                        "added front-panel item #{} bound to {}",
+                        item.get(),
+                        panel_binding_label(&document, binding)
+                    ),
+                    Some(item),
+                    true,
+                )
+            }
+            PanelUiAction::Update { item, draft } => {
+                let rect = draft.rect();
+                if let Err(error) =
+                    document.update_panel_item(item, draft.name, draft.binding, rect)
+                {
+                    self.component_status =
+                        format!("front-panel edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("updated exact front-panel item #{}", item.get()),
+                    Some(item),
+                    false,
+                )
+            }
+            PanelUiAction::Remove(item) => {
+                if let Err(error) = document.remove_panel_item(item) {
+                    self.component_status =
+                        format!("front-panel edit rejected without mutation: {error}");
+                    return;
+                }
+                (
+                    format!("removed front-panel item #{}", item.get()),
+                    None,
+                    false,
+                )
+            }
+        };
+        match self.commit_component_document(&current, document, &status, selected) {
+            Ok(_) if clears_new_item => {
+                self.new_panel_item_name.clear();
+                self.new_panel_binding = None;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.component_status =
+                    format!("front-panel edit rejected without mutation: {error}");
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ALGC replacement, recursive hierarchy remap, flattening, complete-session admission, history, and UI reconciliation are one transaction"
+    )]
+    fn commit_component_document(
+        &mut self,
+        current: &ComponentPackage,
+        document: GraphComponentDocument,
+        status: &str,
+        selected_panel_item: Option<GraphFrontPanelItemId>,
+    ) -> Result<bool, String> {
+        self.commit_component_dependency_document(
+            current,
+            current.encoding.digest(),
+            document,
+            status,
+            selected_panel_item,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "arbitrary ALGC replacement, recursive hierarchy remap, control-authority preservation, flattening, complete-session admission, history, and UI reconciliation are one transaction"
+    )]
+    fn commit_component_dependency_document(
+        &mut self,
+        current: &ComponentPackage,
+        original: Digest,
+        document: GraphComponentDocument,
+        status: &str,
+        selected_panel_item: Option<GraphFrontPanelItemId>,
+    ) -> Result<bool, String> {
+        let dependency = current
+            .hierarchy
+            .document
+            .dependency(original)
+            .ok_or_else(|| "selected hierarchy library component is unavailable".to_owned())?;
+        if &document == dependency.document() {
+            self.reconcile_hierarchy_selection(None);
+            self.reconcile_component_identity_drafts();
+            self.reconcile_component_connector_selection(self.selected_component_connector);
+            self.reconcile_panel_selection(selected_panel_item);
+            self.component_status =
+                format!("{status}; canonical hierarchy library component already matched");
+            self.edit_status.clone_from(&self.component_status);
+            return Ok(false);
+        }
+        let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
+        let replacement = encoding.digest();
+        let mut hierarchy_document = current.hierarchy.document.clone();
+        let report = hierarchy_document
+            .replace_component_with_report(original, document.clone())
+            .map_err(|error| error.to_string())?;
+        if report.requested_replacement() != replacement {
+            return Err("hierarchy replacement returned a foreign ALGC identity".to_owned());
+        }
+        let authoritative_original = current.encoding.digest();
+        let authoritative_replacement = report.resolve(authoritative_original);
+        if original != authoritative_original && authoritative_replacement != authoritative_original
+        {
+            return Err(
+                "library edit would recursively rewrite the complete-session control ALGC; coordinated control-workspace replacement is not available"
+                    .to_owned(),
+            );
+        }
+        let hierarchy = hierarchy_package(hierarchy_document, &self.fixture)?;
+        let (selected_document, selected_encoding) = if original == authoritative_original {
+            (document, encoding)
+        } else {
+            (current.document.clone(), current.encoding.clone())
+        };
+        let candidate = ComponentPackage {
+            document: selected_document,
+            encoding: selected_encoding,
+            hierarchy,
+        };
+        let Some(probes) = self.probes.as_ref() else {
+            return Err("canonical ALGP sidecar is unavailable".to_owned());
+        };
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            Some(&candidate),
+        )
+        .map_err(|error| format!("complete-session candidate rejected: {error}"))?;
+        let history = self.history_with_current_recorded()?;
+        self.component = Some(candidate);
+        self.history = history;
+        self.panel_item_drafts.clear();
+        self.component_connector_drafts.clear();
+        self.component_definition.scope = self
+            .component_definition
+            .scope
+            .map(|scope| report.resolve(scope));
+        self.selected_hierarchy_component = self
+            .selected_hierarchy_component
+            .map(|selected| report.resolve(selected));
+        self.reconcile_hierarchy_selection(None);
+        self.reconcile_component_identity_drafts();
+        self.reconcile_component_definition_editor();
+        self.reconcile_component_connector_selection(None);
+        self.reconcile_panel_selection(selected_panel_item);
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
+        self.component_status = format!(
+            "{status}; exact selected library ALGC {}… and complete ALGS history recorded across {} recursive identity remap(s)",
+            digest_prefix(replacement.0),
+            report.remaps().len()
+        );
+        self.edit_status.clone_from(&self.component_status);
+        Ok(true)
+    }
+
+    fn handle_component_file_event(&mut self, event: BoundedFileEvent) {
+        match event {
+            BoundedFileEvent::Import(Ok(bytes)) => match self.import_component_dependency(&bytes) {
+                Ok(_) => self.file_status.clone_from(&self.component_status),
+                Err(error) => {
+                    self.file_status =
+                        format!("ALGC import rejected without authoring mutation: {error}");
+                    self.component_status.clone_from(&self.file_status);
+                }
+            },
+            BoundedFileEvent::Import(Err(error)) => {
+                self.file_status = format!("ALGC file read rejected: {error}");
+            }
+            BoundedFileEvent::Export(Ok(bytes)) => {
+                self.file_status = format!("exported {bytes} exact selected ALGC dependency bytes");
+            }
+            BoundedFileEvent::Export(Err(error)) => {
+                self.file_status = format!("ALGC export failed: {error}");
+            }
+        }
+    }
+
+    fn import_component_dependency(&mut self, bytes: &[u8]) -> Result<bool, String> {
+        let replay = replay_graph_component(
+            bytes,
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        analyze_graph_draft(
+            replay.document().workspace().graph(),
+            self.fixture.registry().semantic_registry(),
+        )
+        .map_err(|error| format!("imported ALGC graph semantics rejected: {error}"))?;
+        let digest = replay.encoding().digest();
+        let Some(current) = self.component.clone() else {
+            return Err("no selected component hierarchy is attached".to_owned());
+        };
+        let mut document = current.hierarchy.document.clone();
+        let admitted = document
+            .add_component(replay.into_document())
+            .map_err(|error| error.to_string())?;
+        if admitted != digest {
+            return Err("component-library admission returned a foreign ALGC identity".to_owned());
+        }
+        let status = format!(
+            "imported {} canonical ALGC bytes as library dependency {}…",
+            bytes.len(),
+            digest_prefix(digest.0)
+        );
+        self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            Some(digest),
+            self.selected_hierarchy_instance,
+        )
+    }
+
+    fn handle_component_package_file_event(&mut self, event: BoundedFileEvent) {
+        match event {
+            BoundedFileEvent::Import(Ok(bytes)) => {
+                match self.import_component_package_dependency(&bytes) {
+                    Ok(_) => self.file_status.clone_from(&self.component_status),
+                    Err(error) => {
+                        self.file_status =
+                            format!("ALCP import rejected without authoring mutation: {error}");
+                        self.component_status.clone_from(&self.file_status);
+                    }
+                }
+            }
+            BoundedFileEvent::Import(Err(error)) => {
+                self.file_status = format!("ALCP file read rejected: {error}");
+            }
+            BoundedFileEvent::Export(Ok(bytes)) => {
+                self.file_status = format!("exported {bytes} exact selected ALCP closure bytes");
+            }
+            BoundedFileEvent::Export(Err(error)) => {
+                self.file_status = format!("ALCP export failed: {error}");
+            }
+        }
+    }
+
+    fn import_component_package_dependency(&mut self, bytes: &[u8]) -> Result<bool, String> {
+        let replay = replay_graph_component_package(
+            bytes,
+            GraphComponentPackageLimits::interactive(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .map_err(|error| error.to_string())?;
+        let root = replay.document().root();
+        let package_identity = replay.encoding().digest();
+        let package_component_count = replay.document().dependencies().len();
+        let package_binding_count = replay.document().instances().len();
+        let Some(current) = self.component.clone() else {
+            return Err("no selected component hierarchy is attached".to_owned());
+        };
+        let mut document = current.hierarchy.document.clone();
+        let report = document
+            .import_component_package(replay.document())
+            .map_err(|error| error.to_string())?;
+        if report.root() != root {
+            return Err("component-package admission returned a foreign root identity".to_owned());
+        }
+        let status = if report.changed() {
+            format!(
+                "imported {}-byte ALCP {}… rooted at {}…: {} of {} components and {} of {} scoped bindings added",
+                bytes.len(),
+                digest_prefix(package_identity.0),
+                digest_prefix(root.0),
+                report.added_components().len(),
+                package_component_count,
+                report.added_instance_bindings(),
+                package_binding_count,
+            )
+        } else {
+            format!(
+                "selected exact duplicate {}-byte ALCP {}… root {}…",
+                bytes.len(),
+                digest_prefix(package_identity.0),
+                digest_prefix(root.0),
+            )
+        };
+        self.commit_hierarchy_document(
+            current,
+            document,
+            &status,
+            Some(root),
+            self.selected_hierarchy_instance,
+        )
+    }
+
+    fn reconcile_hierarchy_selection(&mut self, component_remap: Option<(Digest, Digest)>) {
+        let Some(component) = self.component.as_ref() else {
+            self.selected_hierarchy_component = None;
+            self.selected_hierarchy_instance = None;
+            self.hierarchy_parameter_drafts.clear();
+            self.pending_hierarchy_source = None;
+            self.hierarchy_drag = None;
+            self.hierarchy_source_browser
+                .reset("no complete ALGH/ALGM source authority is attached");
+            return;
+        };
+        let mut selected_component = self.selected_hierarchy_component;
+        if let Some((original, replacement)) = component_remap
+            && selected_component == Some(original)
+        {
+            selected_component = Some(replacement);
+        }
+        if selected_component
+            .is_none_or(|digest| component.hierarchy.document.dependency(digest).is_none())
+        {
+            selected_component = component
+                .hierarchy
+                .document
+                .dependency(component.encoding.digest())
+                .map(GraphHierarchyDependency::digest)
+                .or_else(|| {
+                    component
+                        .hierarchy
+                        .document
+                        .dependencies()
+                        .first()
+                        .map(GraphHierarchyDependency::digest)
+                });
+        }
+        let mut selected_instance = self.selected_hierarchy_instance;
+        if selected_instance.is_none_or(|node| {
+            !component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root && instance.node() == node
+                })
+        }) {
+            selected_instance = component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .find(|instance| instance.scope() == GraphInstanceScope::Root)
+                .map(|instance| instance.node());
+        }
+        self.selected_hierarchy_component = selected_component;
+        self.selected_hierarchy_instance = selected_instance;
+        self.hierarchy_parameter_drafts
+            .retain(|(node, parameter), _| {
+                component
+                    .hierarchy
+                    .document
+                    .root()
+                    .graph()
+                    .node(*node)
+                    .is_some_and(|node| {
+                        node.parameters()
+                            .iter()
+                            .any(|candidate| candidate.id() == *parameter)
+                    })
+            });
+        if self.pending_hierarchy_source.is_some_and(|source| {
+            component
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .node(source.node)
+                .is_none_or(|node| node.outputs().iter().all(|port| port.id() != source.port))
+        }) {
+            self.pending_hierarchy_source = None;
+        }
+        if self.hierarchy_drag.is_some_and(|drag| {
+            !component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root && instance.node() == drag.node
+                })
+        }) {
+            self.hierarchy_drag = None;
+        }
+        self.reconcile_hierarchy_source_browser();
+    }
+
+    fn reconcile_component_identity_drafts(&mut self) {
+        let retained = self
+            .component
+            .as_ref()
+            .map(|component| {
+                component
+                    .hierarchy
+                    .document
+                    .dependencies()
+                    .iter()
+                    .map(GraphHierarchyDependency::digest)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        self.component_identity_drafts
+            .retain(|component, _| retained.contains(component));
+    }
+
+    fn reconcile_hierarchy_source_browser(&mut self) {
+        let Some(component) = self.component.as_ref() else {
+            self.hierarchy_source_browser
+                .reset("no complete ALGH/ALGM source authority is attached");
+            return;
+        };
+        let nodes = component
+            .hierarchy
+            .flattening
+            .node_provenance()
+            .iter()
+            .map(|mapping| (mapping.flattened_node(), mapping.origin().clone()))
+            .collect::<Vec<_>>();
+        let wires = component
+            .hierarchy
+            .flattening
+            .wire_provenance()
+            .iter()
+            .map(|mapping| (mapping.flattened_wire(), mapping.origin().clone()))
+            .collect::<Vec<_>>();
+        self.hierarchy_source_browser.selected_node = self
+            .hierarchy_source_browser
+            .selected_node
+            .filter(|selected| nodes.iter().any(|(node, _)| node == selected))
+            .or_else(|| nodes.first().map(|(node, _)| *node));
+        self.hierarchy_source_browser.selected_wire = self
+            .hierarchy_source_browser
+            .selected_wire
+            .filter(|selected| wires.iter().any(|(wire, _)| wire == selected))
+            .or_else(|| wires.first().map(|(wire, _)| *wire));
+        let had_opened = self.hierarchy_source_browser.last_opened.is_some();
+        let retained = self
+            .hierarchy_source_browser
+            .last_opened
+            .take()
+            .filter(|selection| match selection {
+                HierarchySourceSelection::Node { flattened, origin } => nodes
+                    .iter()
+                    .any(|(node, retained)| node == flattened && retained == origin),
+                HierarchySourceSelection::Wire { flattened, origin } => wires
+                    .iter()
+                    .any(|(wire, retained)| wire == flattened && retained == origin),
+            });
+        if retained.is_none() && had_opened {
+            "the previously opened ALGM source is absent from the current exact hierarchy"
+                .clone_into(&mut self.hierarchy_source_browser.status);
+            self.hierarchy_source_browser.scroll_pending = false;
+        }
+        self.hierarchy_source_browser.last_opened = retained;
+    }
+
+    fn reconcile_component_definition_editor(&mut self) {
+        let snapshot = self.component.as_ref().and_then(|component| {
+            let scope = self.selected_hierarchy_component?;
+            let dependency = component.hierarchy.document.dependency(scope)?;
+            Some((
+                scope,
+                scope == component.encoding.digest(),
+                dependency.document().name().to_owned(),
+                dependency.document().workspace().clone(),
+                component
+                    .hierarchy
+                    .document
+                    .dependencies()
+                    .iter()
+                    .map(GraphHierarchyDependency::digest)
+                    .filter(|digest| *digest != scope)
+                    .collect::<Vec<_>>(),
+            ))
+        });
+        let Some((scope, authoritative, name, workspace, child_components)) = snapshot else {
+            if self.component_definition.scope.is_some() {
+                self.component_definition.reset_scope(
+                    None,
+                    "no exact ALGH library dependency is selected for definition authoring"
+                        .to_owned(),
+                );
+            }
+            return;
+        };
+        if self.component_definition.scope != Some(scope) {
+            let status = if authoritative {
+                format!(
+                    "{name} is the complete-session control authority; edit it on the main exact-control canvas"
+                )
+            } else {
+                format!(
+                    "selected exact {name} definition {}…; no definition edit has been proposed",
+                    digest_prefix(scope.0)
+                )
+            };
+            self.component_definition.reset_scope(Some(scope), status);
+        }
+        self.component_definition.child_component = self
+            .component_definition
+            .child_component
+            .filter(|selected| child_components.contains(selected))
+            .or_else(|| child_components.first().copied());
+        let graph = workspace.graph();
+        self.component_definition.selected_node = self
+            .component_definition
+            .selected_node
+            .filter(|node| graph.node(*node).is_some());
+        self.component_definition.pending_source =
+            self.component_definition.pending_source.filter(|source| {
+                graph
+                    .node(source.node)
+                    .is_some_and(|node| node.outputs().iter().any(|port| port.id() == source.port))
+            });
+        if self
+            .component_definition
+            .drag
+            .is_some_and(|drag| graph.node(drag.node).is_none())
+        {
+            self.component_definition.drag = None;
+        }
+        self.component_definition
+            .parameter_drafts
+            .retain(|(node, _), _| graph.node(*node).is_some());
+        self.component_definition
+            .node_label_drafts
+            .retain(|node, _| graph.node(*node).is_some());
+    }
+
+    fn reconcile_panel_selection(&mut self, preferred: Option<GraphFrontPanelItemId>) {
+        let Some(component) = self.component.as_ref() else {
+            self.selected_panel_item = None;
+            self.panel_item_drafts.clear();
+            self.panel_drag = None;
+            self.new_panel_binding = None;
+            return;
+        };
+        let items = component.document.panel_items();
+        self.panel_item_drafts.retain(|item, _| {
+            items
+                .binary_search_by_key(item, GraphFrontPanelItem::id)
+                .is_ok()
+        });
+        let preferred = preferred.filter(|item| {
+            items
+                .binary_search_by_key(item, GraphFrontPanelItem::id)
+                .is_ok()
+        });
+        self.selected_panel_item = preferred
+            .or_else(|| {
+                self.selected_panel_item.filter(|item| {
+                    items
+                        .binary_search_by_key(item, GraphFrontPanelItem::id)
+                        .is_ok()
+                })
+            })
+            .or_else(|| items.first().map(GraphFrontPanelItem::id));
+        if self.panel_drag.is_some_and(|drag| {
+            items
+                .binary_search_by_key(&drag.item, GraphFrontPanelItem::id)
+                .is_err()
+        }) {
+            self.panel_drag = None;
+        }
+    }
+
+    fn reconcile_component_connector_selection(
+        &mut self,
+        preferred: Option<ComponentConnectorSelection>,
+    ) {
+        let Some((scope, document)) = self.component.as_ref().and_then(|component| {
+            let scope = self
+                .selected_hierarchy_component
+                .filter(|digest| component.hierarchy.document.dependency(*digest).is_some())
+                .unwrap_or_else(|| component.encoding.digest());
+            component
+                .hierarchy
+                .document
+                .dependency(scope)
+                .map(|dependency| (scope, dependency.document().clone()))
+        }) else {
+            self.component_connector_scope = None;
+            self.selected_component_connector = None;
+            self.component_connector_drafts.clear();
+            self.new_component_input_target = None;
+            self.new_component_output_source = None;
+            return;
+        };
+        if self.component_connector_scope != Some(scope) {
+            self.component_connector_scope = Some(scope);
+            self.selected_component_connector = None;
+            self.component_connector_drafts.clear();
+            self.new_component_input_name.clear();
+            self.new_component_input_target = None;
+            self.new_component_output_name.clear();
+            self.new_component_output_source = None;
+        }
+        let connectors = document
+            .inputs()
+            .iter()
+            .map(|input| ComponentConnectorSelection::Input(input.id()))
+            .chain(
+                document
+                    .outputs()
+                    .iter()
+                    .map(|output| ComponentConnectorSelection::Output(output.id())),
+            )
+            .collect::<BTreeSet<_>>();
+        self.component_connector_drafts
+            .retain(|connector, _| connectors.contains(connector));
+        self.selected_component_connector = preferred
+            .filter(|connector| connectors.contains(connector))
+            .or_else(|| {
+                self.selected_component_connector
+                    .filter(|connector| connectors.contains(connector))
+            })
+            .or_else(|| connectors.first().copied());
+
+        let input_choices = component_input_endpoint_choices(&document, None);
+        if self.new_component_input_target.is_none_or(|target| {
+            input_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != target)
+        }) {
+            self.new_component_input_target = input_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+        let output_choices = component_output_endpoint_choices(&document, None);
+        if self.new_component_output_source.is_none_or(|source| {
+            output_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != source)
+        }) {
+            self.new_component_output_source =
+                output_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "input/output creation, stable selection, endpoint drafts, and one deferred canonical action form one connector-pane editor"
+    )]
+    fn show_component_connector_authoring(
+        &mut self,
+        ui: &mut egui::Ui,
+        component: &ComponentPackage,
+    ) -> Option<ComponentConnectorUiAction> {
+        let scope = self.component_connector_scope?;
+        let dependency = component.hierarchy.document.dependency(scope)?;
+        let document = dependency.document().clone();
+        ui.separator();
+        ui.strong("Canonical public connector authoring");
+        ui.weak(
+            "Edit the selected ALGH library dependency. Expose an unowned internal input or any unexposed internal output under a fresh monotonic identity. Stable connector IDs, never positional ports, govern recursive ALGC placeholder and wire remapping through ALGH, ALGM, and complete ALGS history.",
+        );
+        ui.monospace(format!(
+            "{} · {}… · {} inputs / {} outputs · next IDs {} / {}{}",
+            document.name(),
+            digest_prefix(scope.0),
+            document.inputs().len(),
+            document.outputs().len(),
+            document.next_input_id(),
+            document.next_output_id(),
+            if scope == component.encoding.digest() {
+                " · control authority"
+            } else {
+                " · library dependency"
+            },
+        ));
+
+        let input_choices = component_input_endpoint_choices(&document, None);
+        if self.new_component_input_target.is_none_or(|target| {
+            input_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != target)
+        }) {
+            self.new_component_input_target = input_choices.first().map(|(endpoint, _)| *endpoint);
+        }
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("new public input name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_component_input_name)
+                    .char_limit(64)
+                    .desired_width(180.0),
+            );
+            let selected = endpoint_choice_selected_label(
+                self.new_component_input_target,
+                &input_choices,
+                "no unowned internal input",
+            );
+            egui::ComboBox::from_id_salt("new_component_input_target")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (endpoint, label) in &input_choices {
+                        ui.selectable_value(
+                            &mut self.new_component_input_target,
+                            Some(*endpoint),
+                            label,
+                        );
+                    }
+                });
             if ui
                 .add_enabled(
-                    !already_present,
-                    egui::Button::new("add concrete input node"),
+                    !self.new_component_input_name.is_empty()
+                        && self.new_component_input_target.is_some(),
+                    egui::Button::new("add public input"),
                 )
                 .clicked()
+                && let Some(target) = self.new_component_input_target
             {
-                proof.add_selected();
-            }
-            if ui.small_button("reset target draft").clicked() {
-                proof.reset();
+                action = Some(ComponentConnectorUiAction::AddInput {
+                    name: self.new_component_input_name.clone(),
+                    target,
+                });
             }
         });
+
+        let output_choices = component_output_endpoint_choices(&document, None);
+        if self.new_component_output_source.is_none_or(|source| {
+            output_choices
+                .iter()
+                .all(|(candidate, _)| *candidate != source)
+        }) {
+            self.new_component_output_source =
+                output_choices.first().map(|(endpoint, _)| *endpoint);
+        }
         ui.horizontal_wrapped(|ui| {
-            for node in proof.workspace.graph().nodes() {
-                ui.monospace(format!("#{} {}", node.id().get(), node.label()));
+            ui.label("new public output name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_component_output_name)
+                    .char_limit(64)
+                    .desired_width(180.0),
+            );
+            let selected = endpoint_choice_selected_label(
+                self.new_component_output_source,
+                &output_choices,
+                "no unexposed internal output",
+            );
+            egui::ComboBox::from_id_salt("new_component_output_source")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (endpoint, label) in &output_choices {
+                        ui.selectable_value(
+                            &mut self.new_component_output_source,
+                            Some(*endpoint),
+                            label,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    !self.new_component_output_name.is_empty()
+                        && self.new_component_output_source.is_some(),
+                    egui::Button::new("add public output"),
+                )
+                .clicked()
+                && let Some(source) = self.new_component_output_source
+            {
+                action = Some(ComponentConnectorUiAction::AddOutput {
+                    name: self.new_component_output_name.clone(),
+                    source,
+                });
             }
         });
-        ui.label(&proof.status);
-        ui.colored_label(
-            egui::Color32::YELLOW,
-            "Only GPIO22/32/33/35 stable Boolean reads are creatable. ADC, UART, timers, shifted outputs, and raw GPIO remain closed until matching firmware opcodes/access descriptors are published.",
+
+        let mut selected = self.selected_component_connector;
+        let selected_label = selected.map_or_else(
+            || "no public connector".to_owned(),
+            |connector| component_connector_label(&document, connector),
         );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("selected public connector");
+            egui::ComboBox::from_id_salt("selected_component_connector")
+                .selected_text(selected_label)
+                .show_ui(ui, |ui| {
+                    for input in document.inputs() {
+                        let connector = ComponentConnectorSelection::Input(input.id());
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(connector),
+                            component_connector_label(&document, connector),
+                        );
+                    }
+                    for output in document.outputs() {
+                        let connector = ComponentConnectorSelection::Output(output.id());
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(connector),
+                            component_connector_label(&document, connector),
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    selected.is_some(),
+                    egui::Button::new("remove public connector"),
+                )
+                .clicked()
+                && let Some(connector) = selected
+            {
+                action = Some(match connector {
+                    ComponentConnectorSelection::Input(input) => {
+                        ComponentConnectorUiAction::RemoveInput(input)
+                    }
+                    ComponentConnectorSelection::Output(output) => {
+                        ComponentConnectorUiAction::RemoveOutput(output)
+                    }
+                });
+            }
+        });
+        self.selected_component_connector = selected;
+
+        if let Some(connector) = selected {
+            let (canonical_name, canonical_endpoint, choices) = match connector {
+                ComponentConnectorSelection::Input(input) => {
+                    let input = document.input(input)?;
+                    (
+                        input.name(),
+                        input.target(),
+                        component_input_endpoint_choices(&document, Some(input.id())),
+                    )
+                }
+                ComponentConnectorSelection::Output(output) => {
+                    let output = document.output(output)?;
+                    (
+                        output.name(),
+                        output.source(),
+                        component_output_endpoint_choices(&document, Some(output.id())),
+                    )
+                }
+            };
+            let mut draft = self
+                .component_connector_drafts
+                .get(&connector)
+                .cloned()
+                .unwrap_or_else(|| ComponentConnectorDraft {
+                    name: canonical_name.to_owned(),
+                    endpoint: canonical_endpoint,
+                });
+            if choices
+                .iter()
+                .all(|(endpoint, _)| *endpoint != draft.endpoint)
+            {
+                draft = ComponentConnectorDraft {
+                    name: canonical_name.to_owned(),
+                    endpoint: canonical_endpoint,
+                };
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("stable name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .char_limit(64)
+                        .desired_width(180.0),
+                );
+                let selected_endpoint = endpoint_choice_selected_label(
+                    Some(draft.endpoint),
+                    &choices,
+                    "missing canonical endpoint",
+                );
+                egui::ComboBox::from_id_salt("selected_component_connector_endpoint")
+                    .selected_text(selected_endpoint)
+                    .show_ui(ui, |ui| {
+                        for (endpoint, label) in &choices {
+                            ui.selectable_value(&mut draft.endpoint, *endpoint, label);
+                        }
+                    });
+                if ui.button("apply connector metadata").clicked() {
+                    action = Some(match connector {
+                        ComponentConnectorSelection::Input(input) => {
+                            ComponentConnectorUiAction::UpdateInput {
+                                input,
+                                draft: draft.clone(),
+                            }
+                        }
+                        ComponentConnectorSelection::Output(output) => {
+                            ComponentConnectorUiAction::UpdateOutput {
+                                output,
+                                draft: draft.clone(),
+                            }
+                        }
+                    });
+                }
+                if ui.button("reset connector draft").clicked() {
+                    draft = ComponentConnectorDraft {
+                        name: canonical_name.to_owned(),
+                        endpoint: canonical_endpoint,
+                    };
+                }
+            });
+            self.component_connector_drafts.insert(connector, draft);
+        }
+        action
     }
 
     #[allow(
@@ -2050,21 +7202,287 @@ impl ExactControlWorkspace {
         ui.label(
             "This first canonical component wraps the autonomous reference controller: exact parameter controls write ALGW through the normal transactional boundary, and output indicators read only the attached exact replay.",
         );
-        let Some(component) = &self.component else {
+        let Some(component) = self.component.clone() else {
             ui.colored_label(egui::Color32::YELLOW, &self.component_status);
             return;
         };
+        let hierarchy_depth = hierarchy_depth(&component.hierarchy.flattening);
         ui.horizontal_wrapped(|ui| {
             ui.strong("Reusable instance proof");
             ui.monospace(format!(
-                "ALGH {}… · {} collapsed instance → {} ordinary ALGR nodes / {} wires · flattened ALGW {}…",
+                "ALGH {}… · {} collapsed instances / depth {} → {} ordinary ALGR nodes / {} wires · flattened ALGW {}…",
                 digest_prefix(component.hierarchy.encoding.digest().0),
-                component.hierarchy.document.instances().len(),
+                component.hierarchy.document.flattened_instance_count(),
+                hierarchy_depth,
                 component.hierarchy.document.flattened_node_count(),
                 component.hierarchy.document.flattened_wire_count(),
                 digest_prefix(component.hierarchy.flattening.encoding().digest().0)
             ));
         });
+        ui.monospace(format!(
+            "ALGM {}… · {} total node origins / {} total wire origins",
+            digest_prefix(component.hierarchy.source_map.digest().0),
+            component.hierarchy.flattening.node_provenance().len(),
+            component.hierarchy.flattening.wire_provenance().len(),
+        ));
+        let source_map_name = format!(
+            "alumina-{}.algm",
+            digest_prefix(component.hierarchy.source_map.digest().0)
+        );
+        let source_map_events = self.hierarchy_source_file_bridge.show(
+            ui,
+            component.hierarchy.source_map.bytes(),
+            MAX_GRAPH_HIERARCHY_SOURCE_MAP_BYTES,
+            &source_map_name,
+            ALGM_FILE,
+        );
+        for event in source_map_events {
+            match event {
+                BoundedFileEvent::Import(Ok(bytes)) => {
+                    match replay_graph_hierarchy_source_map(
+                        &bytes,
+                        &component.hierarchy.document,
+                        GraphHierarchySourceMapLimits::interactive(),
+                    ) {
+                        Ok(replay) if replay.encoding() == &component.hierarchy.source_map => {
+                            self.file_status = format!(
+                                "verified {} exact ALGM bytes by fresh hierarchy flattening",
+                                bytes.len()
+                            );
+                        }
+                        Ok(_) => {
+                            "ALGM import regenerated a different embedded-policy map without mutation"
+                                .clone_into(&mut self.file_status);
+                        }
+                        Err(error) => {
+                            self.file_status = format!(
+                                "ALGM import rejected without graph or hierarchy mutation: {error}"
+                            );
+                        }
+                    }
+                }
+                BoundedFileEvent::Import(Err(error)) => {
+                    self.file_status = format!("ALGM file read rejected: {error}");
+                }
+                BoundedFileEvent::Export(Ok(bytes)) => {
+                    self.file_status = format!(
+                        "exported {bytes} exact ALGM bytes bound to the current ALGH and ALGW"
+                    );
+                }
+                BoundedFileEvent::Export(Err(error)) => {
+                    self.file_status = format!("ALGM export failed: {error}");
+                }
+            }
+        }
+        ui.separator();
+        self.show_hierarchy_source_browser(ui, &component);
+        ui.separator();
+        self.reconcile_component_connector_selection(None);
+        if let Some(action) = self.show_component_connector_authoring(ui, &component) {
+            self.apply_component_connector_action(action);
+            ui.label(&self.component_status);
+            return;
+        }
+        self.reconcile_panel_selection(None);
+        let binding_choices = panel_binding_choices(&component.document);
+        let used_bindings = component
+            .document
+            .panel_items()
+            .iter()
+            .map(GraphFrontPanelItem::binding)
+            .collect::<BTreeSet<_>>();
+        let available_bindings = binding_choices
+            .iter()
+            .filter(|(binding, _)| !used_bindings.contains(binding))
+            .cloned()
+            .collect::<Vec<_>>();
+        if self
+            .new_panel_binding
+            .is_none_or(|binding| used_bindings.contains(&binding))
+        {
+            self.new_panel_binding = available_bindings.first().map(|(binding, _)| *binding);
+        }
+        let mut panel_action = None;
+        ui.separator();
+        ui.strong("Canonical front-panel authoring");
+        ui.weak(
+            "Choose one unbound exact input, parameter, or output; add it with a fresh monotonic identity. Select an item to edit its stable metadata, or drag its header to an integer position. All changes replace the selected ALGC through complete ALGH/ALGM/ALGS admission.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("new stable name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_panel_item_name)
+                    .char_limit(64)
+                    .desired_width(180.0),
+            );
+            let selected_binding_label = self.new_panel_binding.map_or_else(
+                || "no unbound exact binding".to_owned(),
+                |binding| panel_binding_label(&component.document, binding),
+            );
+            egui::ComboBox::from_id_salt("new_component_panel_binding")
+                .selected_text(selected_binding_label)
+                .show_ui(ui, |ui| {
+                    for (binding, label) in &available_bindings {
+                        ui.selectable_value(&mut self.new_panel_binding, Some(*binding), label);
+                    }
+                });
+            if ui
+                .add_enabled(
+                    !self.new_panel_item_name.is_empty() && self.new_panel_binding.is_some(),
+                    egui::Button::new("add bound item"),
+                )
+                .clicked()
+                && let Some(binding) = self.new_panel_binding
+            {
+                match next_panel_item_rect(&component.document) {
+                    Ok(rect) => {
+                        panel_action = Some(PanelUiAction::Add {
+                            name: self.new_panel_item_name.clone(),
+                            binding,
+                            rect,
+                        });
+                    }
+                    Err(error) => {
+                        self.component_status =
+                            format!("front-panel edit rejected without mutation: {error}");
+                    }
+                }
+            }
+        });
+
+        let mut selected_panel_item = self.selected_panel_item;
+        let selected_panel_label = selected_panel_item
+            .and_then(|id| component.document.panel_item(id))
+            .map_or_else(
+                || "no panel item".to_owned(),
+                |item| format!("#{} {}", item.id().get(), item.name()),
+            );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("selected item");
+            egui::ComboBox::from_id_salt("selected_component_panel_item")
+                .selected_text(selected_panel_label)
+                .show_ui(ui, |ui| {
+                    for item in component.document.panel_items() {
+                        ui.selectable_value(
+                            &mut selected_panel_item,
+                            Some(item.id()),
+                            format!("#{} {}", item.id().get(), item.name()),
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(
+                    selected_panel_item.is_some(),
+                    egui::Button::new("remove selected item"),
+                )
+                .clicked()
+                && let Some(item) = selected_panel_item
+            {
+                panel_action = Some(PanelUiAction::Remove(item));
+            }
+        });
+        self.selected_panel_item = selected_panel_item;
+
+        if let Some(item_id) = selected_panel_item
+            && let Some(item) = component.document.panel_item(item_id)
+        {
+            let mut draft = self
+                .panel_item_drafts
+                .get(&item_id)
+                .cloned()
+                .unwrap_or_else(|| PanelItemDraft::from_item(item));
+            let selectable_bindings = binding_choices
+                .iter()
+                .filter(|(binding, _)| {
+                    *binding == draft.binding
+                        || !component.document.panel_items().iter().any(|candidate| {
+                            candidate.id() != item_id && candidate.binding() == *binding
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .char_limit(64)
+                        .desired_width(170.0),
+                );
+                egui::ComboBox::from_id_salt("selected_component_panel_binding")
+                    .selected_text(panel_binding_label(&component.document, draft.binding))
+                    .show_ui(ui, |ui| {
+                        for (binding, label) in &selectable_bindings {
+                            ui.selectable_value(&mut draft.binding, *binding, label);
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                let maximum = i32::try_from(component.document.limits().maximum_panel_coordinate)
+                    .unwrap_or(i32::MAX);
+                ui.label("x");
+                ui.add(egui::DragValue::new(&mut draft.x).range(0..=maximum));
+                ui.label("y");
+                ui.add(egui::DragValue::new(&mut draft.y).range(0..=maximum));
+                ui.label("width");
+                ui.add(
+                    egui::DragValue::new(&mut draft.width)
+                        .range(1..=component.document.limits().maximum_panel_coordinate),
+                );
+                ui.label("height");
+                ui.add(
+                    egui::DragValue::new(&mut draft.height)
+                        .range(1..=component.document.limits().maximum_panel_coordinate),
+                );
+                if ui.button("apply exact metadata").clicked() {
+                    panel_action = Some(PanelUiAction::Update {
+                        item: item_id,
+                        draft: draft.clone(),
+                    });
+                }
+                if ui.button("reset draft").clicked() {
+                    draft = PanelItemDraft::from_item(item);
+                }
+            });
+            self.panel_item_drafts.insert(item_id, draft);
+        }
+        let resolved_input_authorities = match resolve_graph_front_panel_inputs(
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            GraphFrontPanelRuntimeLimits::interactive(),
+        ) {
+            Ok(authorities) => authorities,
+            Err(error) => {
+                self.front_panel_runtime_status =
+                    format!("front-panel input authority rejected: {error}");
+                Vec::new()
+            }
+        };
+        let active_keys = resolved_input_authorities
+            .iter()
+            .filter(|authority| authority.is_active())
+            .map(|authority| authority.key().clone())
+            .collect::<BTreeSet<_>>();
+        self.front_panel_schedule_drafts
+            .retain(|key, _| active_keys.contains(key));
+        for key in &active_keys {
+            self.front_panel_schedule_drafts
+                .entry(key.clone())
+                .or_default();
+        }
+        let selected_occurrence = self.selected_component_occurrence_path(&component);
+        let input_authorities = resolved_input_authorities
+            .into_iter()
+            .filter(|authority| authority.component() == component.encoding.digest())
+            .filter(|authority| {
+                selected_occurrence
+                    .as_deref()
+                    .is_none_or(|path| authority.key().source_path() == path)
+            })
+            .map(|authority| (authority.key().item(), authority))
+            .collect::<BTreeMap<_, _>>();
+        self.show_front_panel_output_cursor(ui, &component);
+        let output_current =
+            self.front_panel_runtime_is_current(&component) || self.reference_trace_is_current();
         let items = component
             .document
             .panel_items()
@@ -2073,17 +7491,20 @@ impl ExactControlWorkspace {
                 let value_type = component.document.panel_item_value_type(item.id())?;
                 let output_text = match item.binding() {
                     GraphFrontPanelBinding::OutputIndicator(output) => {
-                        Some(self.component_output_text(&component.document, output))
+                        Some(self.component_output_text(&component, output))
                     }
                     GraphFrontPanelBinding::InputControl(_)
                     | GraphFrontPanelBinding::ParameterControl { .. } => None,
                 };
                 Some(ComponentPanelItem {
+                    id: item.id(),
                     name: item.name().to_owned(),
                     binding: item.binding(),
                     rect: item.rect(),
                     value_type,
                     output_text,
+                    output_current,
+                    input_authority: input_authorities.get(&item.id()).cloned(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2108,6 +7529,7 @@ impl ExactControlWorkspace {
             display_panel_coordinate(maximum_bottom.saturating_add(20)).max(120.0),
         );
         let mut parameter_request = None;
+        let mut clicked_panel_item = None;
         egui::ScrollArea::both()
             .id_salt("exact_control_component_front_panel")
             .auto_shrink([false, false])
@@ -2117,7 +7539,7 @@ impl ExactControlWorkspace {
                 painter.rect_filled(surface.rect, 5.0, egui::Color32::from_rgb(21, 25, 34));
                 paint_grid(&painter, surface.rect);
                 for item in &items {
-                    let rect = egui::Rect::from_min_size(
+                    let canonical_rect = egui::Rect::from_min_size(
                         surface.rect.min
                             + egui::vec2(
                                 display_coordinate(item.rect.x()),
@@ -2128,11 +7550,80 @@ impl ExactControlWorkspace {
                             display_panel_coordinate(item.rect.height()),
                         ),
                     );
+                    let header = egui::Rect::from_min_max(
+                        canonical_rect.min,
+                        egui::pos2(canonical_rect.right(), canonical_rect.top() + 22.0),
+                    );
+                    let response = ui.interact(
+                        header,
+                        egui::Id::new(("component_panel_item", item.id.get())),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if response.drag_started() {
+                        self.panel_drag = Some(PanelItemDrag {
+                            item: item.id,
+                            origin: item.rect,
+                            delta: egui::Vec2::ZERO,
+                        });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.panel_drag.as_mut()
+                        && drag.item == item.id
+                    {
+                        drag.delta += response.drag_delta();
+                    }
+                    let dragging = self
+                        .panel_drag
+                        .filter(|drag| drag.item == item.id)
+                        .filter(|_| response.dragged() || response.drag_stopped());
+                    let rect = dragging
+                        .map_or(canonical_rect, |drag| canonical_rect.translate(drag.delta));
+                    if response.drag_stopped()
+                        && let Some(drag) = dragging
+                    {
+                        match (
+                            quantized_canvas_coordinate(drag.origin.x(), drag.delta.x),
+                            quantized_canvas_coordinate(drag.origin.y(), drag.delta.y),
+                        ) {
+                            (Ok(x), Ok(y)) => {
+                                panel_action = Some(PanelUiAction::Update {
+                                    item: item.id,
+                                    draft: PanelItemDraft {
+                                        name: item.name.clone(),
+                                        binding: item.binding,
+                                        x,
+                                        y,
+                                        width: item.rect.width(),
+                                        height: item.rect.height(),
+                                    },
+                                });
+                            }
+                            (Err(error), _) | (_, Err(error)) => {
+                                self.component_status =
+                                    format!("front-panel move rejected without mutation: {error}");
+                            }
+                        }
+                        self.panel_drag = None;
+                    }
+                    if response.clicked() {
+                        clicked_panel_item = Some(item.id);
+                    }
                     painter.rect_filled(rect, 5.0, egui::Color32::from_rgb(35, 44, 57));
                     painter.rect_stroke(
                         rect,
                         5.0,
-                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 119, 151)),
+                        egui::Stroke::new(
+                            if self.selected_panel_item == Some(item.id) {
+                                2.0_f32
+                            } else {
+                                1.0_f32
+                            },
+                            if self.selected_panel_item == Some(item.id) {
+                                egui::Color32::from_rgb(122, 211, 185)
+                            } else {
+                                egui::Color32::from_rgb(90, 119, 151)
+                            },
+                        ),
                     );
                     painter.text(
                         rect.left_top() + egui::vec2(8.0, 6.0),
@@ -2156,13 +7647,14 @@ impl ExactControlWorkspace {
                             else {
                                 continue;
                             };
-                            let Some(initial) =
-                                parameter_edit_text(parameter_definition.value().value())
-                            else {
+                            let Some(initial) = parameter_edit_text(
+                                self.workspace.graph(),
+                                parameter_definition.value(),
+                            ) else {
                                 painter.text(
                                     rect.center_bottom() - egui::vec2(0.0, 7.0),
                                     egui::Align2::CENTER_BOTTOM,
-                                    "exact composite control is not rendered yet",
+                                    "selector-bound or oversized literal is read-only",
                                     egui::FontId::monospace(9.5),
                                     egui::Color32::YELLOW,
                                 );
@@ -2201,7 +7693,7 @@ impl ExactControlWorkspace {
                                 egui::Align2::LEFT_BOTTOM,
                                 item.output_text.as_deref().unwrap_or("no exact sample"),
                                 egui::FontId::monospace(11.0),
-                                if self.reference_trace_is_current() {
+                                if item.output_current {
                                     egui::Color32::from_rgb(122, 211, 185)
                                 } else {
                                     egui::Color32::YELLOW
@@ -2209,32 +7701,526 @@ impl ExactControlWorkspace {
                             );
                         }
                         GraphFrontPanelBinding::InputControl(_) => {
-                            painter.text(
-                                rect.left_bottom() + egui::vec2(8.0, -8.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                format!("runtime input · t{}", item.value_type.get()),
-                                egui::FontId::monospace(10.0),
-                                egui::Color32::GRAY,
-                            );
+                            let Some(authority) = item.input_authority.as_ref() else {
+                                painter.text(
+                                    rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                    egui::Align2::LEFT_BOTTOM,
+                                    format!(
+                                        "unresolved occurrence · stream t{}",
+                                        item.value_type.get()
+                                    ),
+                                    egui::FontId::monospace(9.5),
+                                    egui::Color32::YELLOW,
+                                );
+                                continue;
+                            };
+                            match authority.disposition() {
+                                GraphFrontPanelInputDisposition::Active => {
+                                    let change_count = self
+                                        .front_panel_schedule_drafts
+                                        .get(authority.key())
+                                        .map_or(0, |draft| draft.changes.len());
+                                    let summary_rect = egui::Rect::from_min_max(
+                                        rect.left_top() + egui::vec2(8.0, 25.0),
+                                        rect.right_bottom() - egui::vec2(69.0, 7.0),
+                                    );
+                                    let button_rect = egui::Rect::from_min_max(
+                                        egui::pos2(summary_rect.right() + 5.0, summary_rect.top()),
+                                        rect.right_bottom() - egui::vec2(7.0, 7.0),
+                                    );
+                                    painter.text(
+                                        summary_rect.left_center(),
+                                        egui::Align2::LEFT_CENTER,
+                                        format!(
+                                            "{change_count} change(s) · c{} · t{}",
+                                            authority.clock().get(),
+                                            authority.sample_type().get(),
+                                        ),
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::from_rgb(122, 211, 185),
+                                    );
+                                    if ui.put(button_rect, egui::Button::new("timeline")).clicked()
+                                    {
+                                        clicked_panel_item = Some(item.id);
+                                    }
+                                }
+                                GraphFrontPanelInputDisposition::Connected(wire) => {
+                                    painter.text(
+                                        rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                        egui::Align2::LEFT_BOTTOM,
+                                        format!(
+                                            "inactive · structural wire #{} owns input",
+                                            wire.get()
+                                        ),
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::YELLOW,
+                                    );
+                                }
+                                GraphFrontPanelInputDisposition::Superseded(parent) => {
+                                    painter.text(
+                                        rect.left_bottom() + egui::vec2(8.0, -8.0),
+                                        egui::Align2::LEFT_BOTTOM,
+                                        format!(
+                                            "inactive · outer {}:p{} owns input",
+                                            hierarchy_source_path_label(parent.source_path()),
+                                            parent.item().get()
+                                        ),
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::YELLOW,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
             });
-        ui.weak(&self.component_status);
-        if let Some((node, parameter, text)) = parameter_request {
-            self.commit_parameter_text(node, parameter, &text);
+        if let Some(item) = clicked_panel_item {
+            self.selected_panel_item = Some(item);
         }
+        let timeline_action = self.show_front_panel_timeline_editor(ui, &component, &items);
+        ui.weak(&self.component_status);
+        ui.monospace(&self.front_panel_runtime_status);
+        if let Some(action) = panel_action {
+            self.apply_panel_action(action);
+        } else if let Some((node, parameter, text)) = parameter_request {
+            self.commit_parameter_text(node, parameter, &text);
+        } else if let Some(action) = timeline_action {
+            self.apply_front_panel_timeline_action(action);
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the bounded timeline grid, authority explanation, and exact transient actions remain one auditable egui operation"
+    )]
+    fn show_front_panel_timeline_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        component: &ComponentPackage,
+        items: &[ComponentPanelItem],
+    ) -> Option<FrontPanelTimelineUiAction> {
+        let selected = self
+            .selected_panel_item
+            .and_then(|selected| items.iter().find(|item| item.id == selected))?;
+        let GraphFrontPanelBinding::InputControl(_) = selected.binding else {
+            return None;
+        };
+        ui.separator();
+        ui.strong(format!("Exact InputControl timeline · {}", selected.name));
+        let Some(authority) = selected.input_authority.as_ref() else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "This panel item has no hierarchy-resolved occurrence authority.",
+            );
+            return None;
+        };
+        match authority.disposition() {
+            GraphFrontPanelInputDisposition::Connected(wire) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Structural wire #{} owns this input; its timeline is inactive.",
+                        wire.get()
+                    ),
+                );
+                return None;
+            }
+            GraphFrontPanelInputDisposition::Superseded(parent) => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Outer occurrence {} panel item p{} owns this input.",
+                        hierarchy_source_path_label(parent.source_path()),
+                        parent.item().get(),
+                    ),
+                );
+                return None;
+            }
+            GraphFrontPanelInputDisposition::Active => {}
+        }
+
+        let limits = GraphFrontPanelRuntimeLimits::interactive();
+        let key = authority.key().clone();
+        let timeline_id = (
+            key.item().get(),
+            hierarchy_source_path_label(key.source_path()),
+        );
+        ui.weak(format!(
+            "Occurrence {} · local clock c{} · exact sample t{}. Tick 0 is mandatory; later ticks must be canonical unsigned decimals in strictly increasing order. Values are held exactly until the next change.",
+            hierarchy_source_path_label(key.source_path()),
+            authority.clock().get(),
+            authority.sample_type().get(),
+        ));
+        let value_limit = parameter_text_limit(
+            component.hierarchy.flattening.workspace().graph(),
+            authority.sample_type(),
+        );
+        let mut action = None;
+        let mut draft_changed = false;
+        {
+            let draft = self
+                .front_panel_schedule_drafts
+                .entry(key.clone())
+                .or_default();
+            if draft.changes.is_empty() {
+                draft.changes.push(FrontPanelChangeDraft {
+                    tick: "0".to_owned(),
+                    value: String::new(),
+                });
+                draft_changed = true;
+            }
+            egui::ScrollArea::vertical()
+                .id_salt(("front_panel_timeline", timeline_id.clone()))
+                .max_height(180.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    egui::Grid::new(("front_panel_timeline_grid", timeline_id))
+                        .num_columns(4)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("change");
+                            ui.strong("local tick");
+                            ui.strong("exact value");
+                            ui.end_row();
+                            for (index, change) in draft.changes.iter_mut().enumerate() {
+                                ui.monospace(format!("#{}", index + 1));
+                                if index == 0 {
+                                    ui.monospace("0 (initial)");
+                                } else if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut change.tick)
+                                            .char_limit(20)
+                                            .desired_width(92.0),
+                                    )
+                                    .changed()
+                                {
+                                    draft_changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut change.value)
+                                            .char_limit(value_limit)
+                                            .desired_width(300.0)
+                                            .hint_text(format!(
+                                                "exact t{}",
+                                                authority.sample_type().get()
+                                            )),
+                                    )
+                                    .changed()
+                                {
+                                    draft_changed = true;
+                                }
+                                if index == 0 {
+                                    ui.weak("required");
+                                } else if ui.small_button("remove").clicked() {
+                                    action = Some(FrontPanelTimelineUiAction::Remove(
+                                        key.clone(),
+                                        index,
+                                    ));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        draft.changes.len() < limits.maximum_changes_per_control,
+                        egui::Button::new("add change"),
+                    )
+                    .clicked()
+                {
+                    action = Some(FrontPanelTimelineUiAction::Add(key.clone()));
+                }
+                if ui.button("reset to constant").clicked() {
+                    action = Some(FrontPanelTimelineUiAction::Reset(key.clone()));
+                }
+                if ui.button("run exact timeline").clicked() {
+                    action = Some(FrontPanelTimelineUiAction::Run);
+                }
+                ui.monospace(format!(
+                    "{} / {} retained changes",
+                    draft.changes.len(),
+                    limits.maximum_changes_per_control,
+                ));
+            });
+        }
+        if draft_changed {
+            self.front_panel_runtime = None;
+            "front-panel timeline changed; prior ALFR/ALGT evidence invalidated until run"
+                .clone_into(&mut self.front_panel_runtime_status);
+        }
+        action
+    }
+
+    fn apply_front_panel_timeline_action(&mut self, action: FrontPanelTimelineUiAction) {
+        let limits = GraphFrontPanelRuntimeLimits::interactive();
+        match action {
+            FrontPanelTimelineUiAction::Add(key) => {
+                let draft = self.front_panel_schedule_drafts.entry(key).or_default();
+                if draft.changes.len() >= limits.maximum_changes_per_control {
+                    self.front_panel_runtime_status = format!(
+                        "front-panel timeline rejected: at most {} changes are admitted per control",
+                        limits.maximum_changes_per_control,
+                    );
+                    return;
+                }
+                draft.append_change();
+                self.front_panel_runtime = None;
+                "front-panel change added; prior ALFR/ALGT evidence invalidated until run"
+                    .clone_into(&mut self.front_panel_runtime_status);
+            }
+            FrontPanelTimelineUiAction::Remove(key, index) => {
+                let Some(draft) = self.front_panel_schedule_drafts.get_mut(&key) else {
+                    "front-panel timeline removal rejected: control draft is absent"
+                        .clone_into(&mut self.front_panel_runtime_status);
+                    return;
+                };
+                if index == 0 || index >= draft.changes.len() {
+                    "front-panel timeline removal rejected: the initial change is mandatory"
+                        .clone_into(&mut self.front_panel_runtime_status);
+                    return;
+                }
+                draft.changes.remove(index);
+                self.front_panel_runtime = None;
+                "front-panel change removed; prior ALFR/ALGT evidence invalidated until run"
+                    .clone_into(&mut self.front_panel_runtime_status);
+            }
+            FrontPanelTimelineUiAction::Reset(key) => {
+                self.front_panel_schedule_drafts
+                    .insert(key, FrontPanelScheduleDraft::default());
+                self.front_panel_runtime = None;
+                "front-panel timeline reset; enter an exact initial value before run"
+                    .clone_into(&mut self.front_panel_runtime_status);
+            }
+            FrontPanelTimelineUiAction::Run => self.rebuild_front_panel_runtime(),
+        }
+    }
+
+    fn selected_component_occurrence_path(
+        &self,
+        package: &ComponentPackage,
+    ) -> Option<Vec<GraphNodeId>> {
+        let component = package.encoding.digest();
+        let selected_root = self.selected_hierarchy_instance;
+        package
+            .hierarchy
+            .flattening
+            .instances()
+            .iter()
+            .filter(|occurrence| occurrence.component() == component)
+            .find(|occurrence| {
+                selected_root.is_some_and(|root| occurrence.source_path().first() == Some(&root))
+            })
+            .or_else(|| {
+                package
+                    .hierarchy
+                    .flattening
+                    .instances()
+                    .iter()
+                    .find(|occurrence| occurrence.component() == component)
+            })
+            .map(|occurrence| occurrence.source_path().to_vec())
+    }
+
+    fn front_panel_runtime_is_current(&self, package: &ComponentPackage) -> bool {
+        self.front_panel_runtime.as_ref().is_some_and(|runtime| {
+            runtime.document.hierarchy_digest() == package.hierarchy.encoding.digest()
+                && runtime.document.workspace_digest()
+                    == package.hierarchy.flattening.encoding().digest()
+                && runtime.document.registry_digest() == self.fixture.registry().digest()
+        })
+    }
+
+    fn front_panel_runtime_output_text(
+        &self,
+        package: &ComponentPackage,
+        output: GraphComponentOutputId,
+    ) -> Option<String> {
+        let runtime = self
+            .front_panel_runtime
+            .as_ref()
+            .filter(|_| self.front_panel_runtime_is_current(package))?;
+        let Some(path) = self.selected_component_occurrence_path(package) else {
+            return Some("selected component occurrence has no exact output path".to_owned());
+        };
+        let selected = match sample_graph_front_panel_output_at_or_before(
+            &runtime.document,
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            self.fixture.registry(),
+            &runtime.execution,
+            GraphFrontPanelOutputKey::new(path, output),
+            &self.cursor_root_tick,
+        ) {
+            Ok(Some(selected)) => selected,
+            Ok(None) => {
+                return Some(format!(
+                    "no exact sample at or before root cursor {}",
+                    self.cursor_root_tick
+                ));
+            }
+            Err(error) => return Some(format!("exact output projection rejected: {error}")),
+        };
+        let entry = selected.entry();
+        let exact = format_graph_literal_text(
+            package.hierarchy.flattening.workspace().graph().schema(),
+            entry.value(),
+            GraphLiteralTextLimits::interactive(),
+        )
+        .unwrap_or_else(|_| format!("t{} exact value", entry.value().value_type().get()));
+        Some(format!(
+            "{exact} · c{}:t{}:s{} · root {} ≤ cursor {} · ALFR {}…",
+            entry.clock().get(),
+            entry.clock_tick(),
+            entry.sequence(),
+            selected.root_tick(),
+            self.cursor_root_tick,
+            digest_prefix(runtime.encoding.digest().0),
+        ))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact draft parsing, ALFR construction, external-source remapping, execution, and trace identity form one fail-closed UI transaction"
+    )]
+    fn rebuild_front_panel_runtime(&mut self) {
+        let Some(package) = self.component.clone() else {
+            self.front_panel_runtime = None;
+            "front-panel run rejected: no component hierarchy is attached"
+                .clone_into(&mut self.front_panel_runtime_status);
+            return;
+        };
+        let limits = GraphFrontPanelRuntimeLimits::interactive();
+        let authorities = match resolve_graph_front_panel_inputs(
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            limits,
+        ) {
+            Ok(authorities) => authorities,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel authority rejected without execution: {error}");
+                return;
+            }
+        };
+        let active = authorities
+            .iter()
+            .filter(|authority| authority.is_active())
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            self.front_panel_runtime = None;
+            "front-panel run has no active InputControl authority"
+                .clone_into(&mut self.front_panel_runtime_status);
+            return;
+        }
+        let graph = package.hierarchy.flattening.workspace().graph();
+        let mut schedules = Vec::with_capacity(active.len());
+        for authority in active {
+            let Some(draft) = self.front_panel_schedule_drafts.get(authority.key()) else {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status = format!(
+                    "front-panel run awaits an exact timeline for occurrence {} item p{}",
+                    hierarchy_source_path_label(authority.key().source_path()),
+                    authority.key().item().get(),
+                );
+                return;
+            };
+            let schedule = match parse_front_panel_schedule_draft(graph, authority, draft, limits) {
+                Ok(schedule) => schedule,
+                Err(error) => {
+                    self.front_panel_runtime = None;
+                    self.front_panel_runtime_status = format!(
+                        "front-panel occurrence {} item p{} rejected exact timeline: {error}",
+                        hierarchy_source_path_label(authority.key().source_path()),
+                        authority.key().item().get(),
+                    );
+                    return;
+                }
+            };
+            schedules.push(schedule);
+        }
+        let run = match GraphFrontPanelRunDocument::try_new(
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            self.fixture.registry(),
+            self.fixture.simulation().horizon(),
+            schedules,
+            limits,
+        ) {
+            Ok(run) => run,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel run rejected before execution: {error}");
+                return;
+            }
+        };
+        let change_count = run
+            .schedules()
+            .iter()
+            .map(|schedule| schedule.changes().len())
+            .sum::<usize>();
+        let encoding = match encode_graph_front_panel_run(&run, &package.hierarchy.flattening) {
+            Ok(encoding) => encoding,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel ALFR encoding rejected: {error}");
+                return;
+            }
+        };
+        let external = front_panel_external_samples(&self.fixture, &package.hierarchy.flattening);
+        let execution = match execute_graph_front_panel_run(
+            &run,
+            &package.hierarchy.document,
+            &package.hierarchy.flattening,
+            self.fixture.registry(),
+            &external,
+            GraphSimulationLimits::interactive(),
+        ) {
+            Ok(execution) => execution,
+            Err(error) => {
+                self.front_panel_runtime = None;
+                self.front_panel_runtime_status =
+                    format!("front-panel host execution rejected: {error}");
+                return;
+            }
+        };
+        self.front_panel_runtime_status = format!(
+            "executed {change_count} exact changes as {} injected samples · ALFR {} bytes {}… · ALGT {} bytes {}…",
+            execution.injected_sample_count(),
+            encoding.bytes().len(),
+            digest_prefix(encoding.digest().0),
+            execution.trace().bytes().len(),
+            digest_prefix(execution.trace().digest().0),
+        );
+        self.front_panel_runtime = Some(FrontPanelRuntimePackage {
+            document: run,
+            encoding,
+            execution,
+        });
     }
 
     fn component_output_text(
         &self,
-        component: &GraphComponentDocument,
+        package: &ComponentPackage,
         output: GraphComponentOutputId,
     ) -> String {
+        if self.front_panel_runtime_is_current(package) {
+            return self
+                .front_panel_runtime_output_text(package, output)
+                .unwrap_or_else(|| "current ALFR output projection is unavailable".to_owned());
+        }
         if !self.reference_trace_is_current() {
             return "exact replay detached after draft edit".to_owned();
         }
-        let Some(endpoint) = component.output(output).map(GraphComponentOutput::source) else {
+        let Some(endpoint) = package
+            .document
+            .output(output)
+            .map(GraphComponentOutput::source)
+        else {
             return "unresolved output binding".to_owned();
         };
         let Some(signal) = SIGNALS
@@ -2294,6 +8280,40 @@ impl ExactControlWorkspace {
         reason = "canvas allocation, layered node/port interaction, preview, and deferred transactional edits remain one egui frame operation"
     )]
     fn show_graph(&mut self, ui: &mut egui::Ui, maximum_height: f32) {
+        let authoritative = self
+            .component
+            .as_ref()
+            .map(|component| component.encoding.digest());
+        if let Some(authoritative) = authoritative {
+            self.scroll_to_open_hierarchy_source(
+                ui,
+                HierarchySourceDestination::Component(authoritative),
+            );
+        }
+        let opened_source_wire = authoritative
+            .and_then(|component| self.opened_component_wire(component))
+            .and_then(|wire| {
+                self.workspace
+                    .graph()
+                    .wires()
+                    .iter()
+                    .find(|candidate| candidate.id() == wire)
+                    .copied()
+            });
+        if let Some(wire) = opened_source_wire {
+            ui.colored_label(
+                egui::Color32::LIGHT_GREEN,
+                format!(
+                    "Exact ALGM source wire w{} selected below · n{}.p{} → n{}.p{} · target node #{} remains available in the inspector",
+                    wire.id().get(),
+                    wire.source().node.get(),
+                    wire.source().port.get(),
+                    wire.target().node.get(),
+                    wire.target().port.get(),
+                    wire.target().node.get(),
+                ),
+            );
+        }
         let nodes = self.workspace.graph().nodes().to_vec();
         let wires = self.workspace.graph().wires().to_vec();
         let mut clicked_node = None;
@@ -2313,7 +8333,15 @@ impl ExactControlWorkspace {
                 let origin = canvas.rect.min.to_vec2();
 
                 for wire in &wires {
-                    self.paint_wire(&painter, origin, wire.id(), wire.source(), wire.target());
+                    Self::paint_wire(
+                        &painter,
+                        origin,
+                        self.workspace.graph(),
+                        &self.presentation,
+                        self.selected_node,
+                        opened_source_wire.map(WireDefinition::id),
+                        wire,
+                    );
                 }
                 for node in &nodes {
                     let Some(presentation) = self.presentation.nodes.get(&node.id()) else {
@@ -2335,18 +8363,24 @@ impl ExactControlWorkspace {
                         self.drag = Some(NodeDrag {
                             node: node.id(),
                             origin: placement,
+                            delta: egui::Vec2::ZERO,
                         });
+                    }
+                    if response.dragged()
+                        && let Some(drag) = self.drag.as_mut()
+                        && drag.node == node.id()
+                    {
+                        drag.delta += response.drag_delta();
                     }
                     let dragging = self
                         .drag
                         .filter(|drag| drag.node == node.id())
                         .filter(|_| response.dragged() || response.drag_stopped());
-                    let painted_rect =
-                        dragging.map_or(rect, |_| rect.translate(response.drag_delta()));
+                    let painted_rect = dragging.map_or(rect, |drag| rect.translate(drag.delta));
                     if response.drag_stopped()
                         && let Some(drag) = dragging
                     {
-                        move_request = Some((drag, response.drag_delta()));
+                        move_request = Some((drag, drag.delta));
                         self.drag = None;
                     }
                     if response.clicked() {
@@ -2394,7 +8428,13 @@ impl ExactControlWorkspace {
                             clicked_node = Some(node.id());
                         }
                     }
-                    self.paint_node(&painter, painted_rect, node, presentation.rank);
+                    self.paint_node(
+                        &painter,
+                        painted_rect,
+                        node,
+                        presentation.rank,
+                        self.selected_node,
+                    );
                 }
                 if let Some(source) = self.pending_source
                     && let Some(source_anchor) =
@@ -2423,37 +8463,30 @@ impl ExactControlWorkspace {
     }
 
     fn paint_wire(
-        &self,
         painter: &egui::Painter,
         origin: egui::Vec2,
-        id: GraphWireId,
-        source: WireEndpoint,
-        target: WireEndpoint,
+        document: &GraphDocument,
+        presentation: &GraphPresentation,
+        selected_node: Option<GraphNodeId>,
+        opened_source_wire: Option<GraphWireId>,
+        wire: &WireDefinition,
     ) {
         let (Some(source_anchor), Some(target_anchor)) = (
-            port_anchor(self.workspace.graph(), &self.presentation, source, true),
-            port_anchor(self.workspace.graph(), &self.presentation, target, false),
+            port_anchor(document, presentation, wire.source(), true),
+            port_anchor(document, presentation, wire.target(), false),
         ) else {
             return;
         };
         let source_anchor = source_anchor + origin;
         let target_anchor = target_anchor + origin;
-        let selected = self
-            .selected_node
-            .is_some_and(|node| node == source.node || node == target.node);
-        let color = if selected {
-            egui::Color32::WHITE
-        } else {
-            wire_color(self.workspace.graph(), source)
-        };
-        let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
-        let feedback_lane = self
-            .presentation
+        let stroke = graph_wire_stroke(document, selected_node, opened_source_wire, wire);
+        let color = stroke.color;
+        let feedback_lane = presentation
             .wires
-            .get(&id)
+            .get(&wire.id())
             .and_then(|wire| wire.feedback_lane);
         let points = if let Some(lane) = feedback_lane {
-            let route_y = origin.y + self.presentation.size.y - 18.0 - display_index(lane) * 13.0;
+            let route_y = origin.y + presentation.size.y - 18.0 - display_index(lane) * 13.0;
             vec![
                 source_anchor,
                 egui::pos2(source_anchor.x + 22.0, source_anchor.y),
@@ -2489,8 +8522,9 @@ impl ExactControlWorkspace {
         rect: egui::Rect,
         node: &NodeDefinition,
         rank: usize,
+        selected_node: Option<GraphNodeId>,
     ) {
-        let selected = self.selected_node == Some(node.id());
+        let selected = selected_node == Some(node.id());
         let stateful = self
             .fixture
             .registry()
@@ -2594,6 +8628,7 @@ impl ExactControlWorkspace {
                     self.pending_source = None;
                     self.drag = None;
                     self.parameter_drafts.clear();
+                    self.node_label_drafts.clear();
                 }
             }
             Err(error) => {
@@ -2655,7 +8690,52 @@ impl ExactControlWorkspace {
             self.selected_node = None;
             self.pending_source = self.pending_source.filter(|source| source.node != id);
             self.parameter_drafts.retain(|(node, _), _| *node != id);
+            self.node_label_drafts.remove(&id);
         }
+    }
+
+    fn commit_node_label(&mut self, node_id: GraphNodeId, label: &str) {
+        if self.workspace.graph().node(node_id).is_none() {
+            self.edit_status = format!(
+                "node label edit rejected without mutation: node {} is unavailable",
+                node_id.get()
+            );
+            return;
+        }
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.set_node_label(node_id, label) {
+            self.edit_status = format!("node label edit rejected without mutation: {error}");
+            return;
+        }
+        if self.commit_candidate(
+            candidate,
+            &format!("set node {} label to exact UTF-8 {label:?}", node_id.get()),
+        ) {
+            self.node_label_drafts.insert(node_id, label.to_owned());
+        }
+    }
+
+    fn commit_node_domain(&mut self, node_id: GraphNodeId, domain: ExecutionDomain) {
+        if self.workspace.graph().node(node_id).is_none() {
+            self.edit_status = format!(
+                "node domain edit rejected without mutation: node {} is unavailable",
+                node_id.get()
+            );
+            return;
+        }
+        let mut candidate = self.workspace.clone();
+        if let Err(error) = candidate.set_node_domain(node_id, domain) {
+            self.edit_status = format!("node domain edit rejected without mutation: {error}");
+            return;
+        }
+        self.commit_candidate(
+            candidate,
+            &format!(
+                "set node {} execution placement to {}",
+                node_id.get(),
+                domain_choice_label(domain)
+            ),
+        );
     }
 
     fn commit_parameter_text(&mut self, node_id: GraphNodeId, parameter_id: u32, text: &str) {
@@ -2687,7 +8767,8 @@ impl ExactControlWorkspace {
                 return;
             }
         };
-        let canonical = parameter_edit_text(value.value()).unwrap_or_else(|| text.to_owned());
+        let canonical =
+            parameter_edit_text(self.workspace.graph(), &value).unwrap_or_else(|| text.to_owned());
         let mut candidate = self.workspace.clone();
         if let Err(error) = candidate.set_parameter(node_id, parameter_id, value) {
             self.edit_status = format!("parameter edit rejected without mutation: {error}");
@@ -2825,18 +8906,54 @@ impl ExactControlWorkspace {
                 return false;
             }
         };
-        let Some(probes) = self.probes.as_ref() else {
-            "edit history rejected without mutation: no canonical ALGP sidecar is attached"
-                .clone_into(&mut self.edit_status);
-            return false;
+        let (component, component_status) = self.prepare_component_for_workspace(&candidate);
+        let (probes, probe_status) = match self.prepare_probes_for_workspace(&candidate) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.edit_status = format!(
+                    "edit rejected without mutation because no exact ALGP sidecar could be prepared: {error}"
+                );
+                return false;
+            }
         };
-        if let Err(error) = self.history.record(&self.workspace, &probes.document) {
-            self.edit_status = format!("edit history rejected without mutation: {error}");
+        if let Err(error) = Self::authoring_session_document_from_parts(
+            &candidate,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            component.as_ref(),
+        ) {
+            self.edit_status =
+                format!("complete-session candidate rejected without mutation: {error}");
             return false;
         }
+        let history = match self.history_with_current_recorded() {
+            Ok(history) => history,
+            Err(error) => {
+                self.edit_status = format!("edit history rejected without mutation: {error}");
+                return false;
+            }
+        };
+        let prior_component_digest = self
+            .component
+            .as_ref()
+            .map(|component| component.encoding.digest());
+        let replacement_component_digest = component
+            .as_ref()
+            .map(|component| component.encoding.digest());
         self.workspace = candidate;
         self.workspace_encoding = encoding;
         self.presentation = presentation;
+        self.component = component;
+        self.component_status = component_status;
+        self.reconcile_hierarchy_selection(
+            prior_component_digest.zip(replacement_component_digest),
+        );
+        self.reconcile_component_definition_editor();
+        self.reconcile_component_connector_selection(self.selected_component_connector);
+        self.reconcile_panel_selection(self.selected_panel_item);
+        self.replace_probe_package(probes);
+        self.probe_status = probe_status;
+        self.history = history;
         self.selected_node = self
             .selected_node
             .filter(|node| self.workspace.graph().node(*node).is_some());
@@ -2845,12 +8962,21 @@ impl ExactControlWorkspace {
             .filter(|source| self.workspace.graph().node(source.node).is_some());
         self.parameter_drafts
             .retain(|(node, _), _| self.workspace.graph().node(*node).is_some());
+        self.node_label_drafts
+            .retain(|node, _| self.workspace.graph().node(*node).is_some());
         self.persistence_dirty = true;
         self.persistence_attempted = false;
-        self.refresh_component();
-        self.refresh_probes();
         self.edit_status = format!("{success}; {semantic}");
         true
+    }
+
+    fn history_with_current_recorded(&self) -> Result<GraphAuthoringSessionHistory, String> {
+        let current = self.authoring_session_encoding()?;
+        let mut history = self.history.clone();
+        history
+            .record(current)
+            .map_err(|error| format!("complete ALGS history rejected: {error}"))?;
+        Ok(history)
     }
 
     fn prepare_candidate(
@@ -2879,49 +9005,241 @@ impl ExactControlWorkspace {
         Ok((encoding, presentation, semantic))
     }
 
-    fn restore_workspace_pair_bytes(
-        &mut self,
-        workspace_bytes: &[u8],
-        probe_bytes: &[u8],
-    ) -> Result<(), String> {
-        let workspace_replay = replay_graph_workspace(
-            workspace_bytes,
-            GraphWorkspaceLimits::interactive(),
-            GraphLimits::interactive(),
+    fn authoring_session_document_from_parts(
+        workspace: &GraphWorkspaceDocument,
+        probes: &GraphProbeDocument,
+        cached_job_workspace: &GraphWorkspaceDocument,
+        component: Option<&ComponentPackage>,
+    ) -> Result<GraphAuthoringSessionDocument, String> {
+        let hierarchy = component.map(|component| {
+            GraphAuthoringHierarchyInput::new(
+                component.encoding.digest(),
+                component.hierarchy.document.clone(),
+                component.hierarchy.source_map.clone(),
+            )
+        });
+        GraphAuthoringSessionDocument::try_new(
+            GraphAuthoringSessionLimits::interactive(),
+            GraphHierarchySourceMapLimits::interactive(),
+            workspace.clone(),
+            probes.clone(),
+            cached_job_workspace.clone(),
+            hierarchy,
         )
-        .map_err(|error| error.to_string())?;
-        let candidate = workspace_replay.document().clone();
-        let (encoding, presentation, _) = self.prepare_candidate(&candidate)?;
-        if workspace_replay.encoding() != &encoding {
-            return Err("replayed ALGW identity changed during UI admission".to_owned());
-        }
-        let probe_replay =
-            replay_graph_probes(probe_bytes, &candidate, GraphProbeLimits::interactive())
-                .map_err(|error| format!("bound ALGP replay failed: {error}"))?;
-        let probes = ProbePackage {
-            document: probe_replay.document().clone(),
-            encoding: probe_replay.encoding().clone(),
-        };
+        .map_err(|error| error.to_string())
+    }
 
-        // Commit only after both artifacts have replayed canonically and the
-        // sidecar has proven its binding to the candidate workspace.
-        self.workspace = candidate;
-        self.workspace_encoding = encoding;
-        self.presentation = presentation;
-        self.history.clear();
+    fn authoring_session_document(&self) -> Result<GraphAuthoringSessionDocument, String> {
+        let probes = self
+            .probes
+            .as_ref()
+            .ok_or_else(|| "canonical ALGP sidecar is unavailable".to_owned())?;
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            self.component.as_ref(),
+        )
+    }
+
+    fn authoring_session_encoding(&self) -> Result<CanonicalGraphAuthoringSessionEncoding, String> {
+        let document = self.authoring_session_document()?;
+        encode_graph_authoring_session(&document).map_err(|error| error.to_string())
+    }
+
+    fn prepare_authoring_session_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PreparedAuthoringSession, String> {
+        let replay =
+            replay_graph_authoring_session(bytes, GraphAuthoringSessionReplayLimits::interactive())
+                .map_err(|error| error.to_string())?;
+        let session = replay.document();
+        let candidate = session.control_workspace().clone();
+        let (encoding, presentation, _) = self.prepare_candidate(&candidate)?;
+        if session.control_encoding() != &encoding {
+            return Err("ALGS control ALGW identity changed during UI admission".to_owned());
+        }
+        let probes = ProbePackage {
+            document: session.probes().clone(),
+            encoding: session.probe_encoding().clone(),
+        };
+        let (cached_job_workspace, cached_job_encoding) = self
+            .cached_jobs
+            .replay_persisted_workspace(session.cached_job_encoding().bytes())?;
+        if &cached_job_encoding != session.cached_job_encoding() {
+            return Err(
+                "ALGS cached-job ALGW identity changed during catalog admission".to_owned(),
+            );
+        }
+        let component = session
+            .hierarchy()
+            .map(|hierarchy| {
+                analyze_component_library_drafts(hierarchy.document(), &self.fixture)?;
+                analyze_graph_draft(
+                    hierarchy.flattening().workspace().graph(),
+                    self.fixture.registry().semantic_registry(),
+                )
+                .map_err(|error| {
+                    format!("ALGS flattened component draft semantics rejected: {error}")
+                })?;
+                if hierarchy.selected_component_encoding().digest()
+                    != hierarchy.selected_component()
+                {
+                    return Err(
+                        "ALGS selected component identity changed during UI admission".to_owned(),
+                    );
+                }
+                Ok(ComponentPackage {
+                    document: hierarchy.selected_component_document().clone(),
+                    encoding: hierarchy.selected_component_encoding().clone(),
+                    hierarchy: HierarchyPackage {
+                        document: hierarchy.document().clone(),
+                        encoding: hierarchy.encoding().clone(),
+                        flattening: hierarchy.flattening().clone(),
+                        source_map: hierarchy.source_map().clone(),
+                    },
+                })
+            })
+            .transpose()?;
+
+        Ok(PreparedAuthoringSession {
+            workspace: candidate,
+            workspace_encoding: encoding,
+            presentation,
+            component,
+            probes,
+            cached_job_workspace,
+            cached_job_encoding,
+        })
+    }
+
+    fn commit_prepared_authoring_session(&mut self, prepared: PreparedAuthoringSession) {
+        self.workspace = prepared.workspace;
+        self.workspace_encoding = prepared.workspace_encoding;
+        self.presentation = prepared.presentation;
+        self.component = prepared.component;
+        self.component_status = if self.component.is_some() {
+            "restored exact selected ALGC and complete ALGH/ALGM from ALGS".to_owned()
+        } else {
+            "ALGS contains no selected component hierarchy".to_owned()
+        };
+        self.selected_hierarchy_component = self
+            .component
+            .as_ref()
+            .map(|component| component.encoding.digest());
+        self.selected_hierarchy_instance = None;
+        self.hierarchy_parameter_drafts.clear();
+        self.reconcile_hierarchy_selection(None);
         self.selected_node = None;
+        self.pending_hierarchy_source = None;
+        self.hierarchy_drag = None;
         self.pending_source = None;
         self.drag = None;
         self.parameter_drafts.clear();
+        self.node_label_drafts.clear();
         self.probe_drafts.clear();
-        self.refresh_component();
-        self.replace_probe_package(probes);
+        self.panel_item_drafts.clear();
+        self.component_identity_drafts.clear();
+        self.component_connector_drafts.clear();
+        self.component_definition.reset_scope(
+            self.selected_hierarchy_component,
+            "restored selected component-definition navigation from canonical ALGS authority"
+                .to_owned(),
+        );
+        self.component_connector_scope = self.selected_hierarchy_component;
+        self.selected_component_connector = self.component.as_ref().and_then(|component| {
+            component
+                .document
+                .inputs()
+                .first()
+                .map(|input| ComponentConnectorSelection::Input(input.id()))
+                .or_else(|| {
+                    component
+                        .document
+                        .outputs()
+                        .first()
+                        .map(|output| ComponentConnectorSelection::Output(output.id()))
+                })
+        });
+        self.new_component_input_name.clear();
+        self.new_component_input_target = None;
+        self.new_component_output_name.clear();
+        self.new_component_output_source = None;
+        self.reconcile_component_connector_selection(self.selected_component_connector);
+        self.selected_panel_item = self
+            .component
+            .as_ref()
+            .and_then(|component| component.document.panel_items().first())
+            .map(GraphFrontPanelItem::id);
+        self.new_panel_item_name.clear();
+        self.new_panel_binding = None;
+        self.panel_drag = None;
+        self.replace_probe_package(prepared.probes);
+        self.cached_jobs.restore_persisted_workspace(
+            prepared.cached_job_workspace,
+            prepared.cached_job_encoding,
+        );
         self.reset_cursor_to_trigger();
+        "restored canonical ALGP sidecar with exact ALGS/ALGW binding"
+            .clone_into(&mut self.probe_status);
+    }
+
+    fn restore_authoring_session_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let prepared = self.prepare_authoring_session_bytes(bytes)?;
+        // Commit only after all nested artifacts, exact hierarchy provenance,
+        // UI semantics, and every catalog-bound cached-job leaf have passed.
+        self.commit_prepared_authoring_session(prepared);
+        self.history.clear();
         self.persistence_dirty = false;
         self.persistence_attempted = false;
-        "restored canonical ALGP sidecar with exact ALGW binding"
-            .clone_into(&mut self.probe_status);
         Ok(())
+    }
+
+    fn apply_cached_job_action(&mut self, action: CachedJobGraphAction) {
+        let update = match self.cached_jobs.prepare_action(action) {
+            Ok(update) => update,
+            Err(error) => {
+                self.cached_jobs.status =
+                    format!("cached-job edit rejected without mutation: {error}");
+                return;
+            }
+        };
+        if update.encoding == self.cached_jobs.encoding {
+            self.cached_jobs.status = format!(
+                "{}; canonical cached-job workspace already matched",
+                update.status
+            );
+            return;
+        }
+        let Some(probes) = self.probes.as_ref() else {
+            "cached-job edit rejected without mutation: canonical ALGP sidecar is unavailable"
+                .clone_into(&mut self.cached_jobs.status);
+            return;
+        };
+        if let Err(error) = Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &update.workspace,
+            self.component.as_ref(),
+        ) {
+            self.cached_jobs.status =
+                format!("cached-job complete-session candidate rejected without mutation: {error}");
+            return;
+        }
+        let history = match self.history_with_current_recorded() {
+            Ok(history) => history,
+            Err(error) => {
+                self.cached_jobs.status = format!(
+                    "cached-job authoring-session history rejected without mutation: {error}"
+                );
+                return;
+            }
+        };
+        self.cached_jobs.commit_update(update);
+        self.history = history;
+        self.persistence_dirty = true;
+        self.persistence_attempted = false;
     }
 
     fn reset_cursor_to_trigger(&mut self) {
@@ -2937,57 +9255,106 @@ impl ExactControlWorkspace {
                     .map(|(_, trigger, _)| trigger.clone())
             })
             .unwrap_or_else(|| Rational::from(0));
+        self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+        self.front_panel_cursor_status = format!(
+            "shared exact cursor reset to probe trigger root tick {}",
+            self.cursor_root_tick
+        );
     }
 
-    fn refresh_component(&mut self) {
-        match representative_component(&self.workspace, &self.fixture) {
+    fn prepare_component_for_workspace(
+        &self,
+        workspace: &GraphWorkspaceDocument,
+    ) -> (Option<ComponentPackage>, String) {
+        let prepared = if let Some(current) = &self.component {
+            let mut document = current.document.clone();
+            document
+                .replace_workspace(workspace.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    let encoding =
+                        encode_graph_component(&document).map_err(|error| error.to_string())?;
+                    let mut hierarchy = current.hierarchy.document.clone();
+                    let remapped = hierarchy
+                        .replace_component(current.encoding.digest(), document.clone())
+                        .map_err(|error| error.to_string())?;
+                    if remapped != encoding.digest() {
+                        return Err(
+                            "hierarchy dependency replacement returned a foreign ALGC identity"
+                                .to_owned(),
+                        );
+                    }
+                    let hierarchy = hierarchy_package(hierarchy, &self.fixture)?;
+                    Ok(ComponentPackage {
+                        document,
+                        encoding,
+                        hierarchy,
+                    })
+                })
+        } else {
+            representative_component_document(workspace).and_then(|(document, encoding)| {
+                let hierarchy =
+                    representative_hierarchy(&document, encoding.digest(), &self.fixture)?;
+                Ok(ComponentPackage {
+                    document,
+                    encoding,
+                    hierarchy,
+                })
+            })
+        };
+        match prepared {
             Ok(component) => {
-                self.component = Some(component);
-                "canonical ALGC connector pane and front panel attached"
-                    .clone_into(&mut self.component_status);
+                let status = if self.component.is_some() {
+                    "canonical ALGC updated while authored ALGH root instances and stable library dependencies were preserved exactly"
+                } else {
+                    "canonical ALGC connector pane and fresh representative ALGH attached"
+                };
+                (Some(component), status.to_owned())
             }
-            Err(error) => {
-                self.component = None;
-                self.component_status = format!(
+            Err(error) => (
+                None,
+                format!(
                     "ALGC front panel detached from this draft without affecting ALGW: {error}"
-                );
-            }
+                ),
+            ),
         }
     }
 
-    fn refresh_probes(&mut self) {
+    fn prepare_probes_for_workspace(
+        &self,
+        workspace: &GraphWorkspaceDocument,
+    ) -> Result<(ProbePackage, String), String> {
         let result = if let Some(current) = &self.probes {
             let mut document = current.document.clone();
             document
-                .replace_workspace(&self.workspace)
+                .replace_workspace(workspace)
                 .and_then(|()| {
                     let encoding = encode_graph_probes(&document)?;
                     Ok(ProbePackage { document, encoding })
                 })
                 .map_err(|error| error.to_string())
         } else {
-            representative_probes(&self.workspace)
+            representative_probes(workspace)
         };
         match result {
-            Ok(probes) => {
-                self.replace_probe_package(probes);
-                "canonical ALGP diagnostic probes attached".clone_into(&mut self.probe_status);
-            }
-            Err(error) => match empty_probes(&self.workspace) {
-                Ok(probes) => {
-                    self.replace_probe_package(probes);
-                    self.probe_status = format!(
-                        "ALGP bindings incompatible with revised ALGW were atomically replaced by an empty canonical sidecar: {error}"
-                    );
-                }
-                Err(empty_error) => {
-                    self.probes = None;
-                    self.probe_drafts.clear();
-                    self.probe_status = format!(
-                        "ALGP probes detached from this draft without affecting ALGW: {error}; empty sidecar failed: {empty_error}"
-                    );
-                }
-            },
+            Ok(probes) => Ok((
+                probes,
+                "canonical ALGP diagnostic probes attached".to_owned(),
+            )),
+            Err(error) => empty_probes(workspace)
+                .map(|probes| {
+                    (
+                        probes,
+                        format!(
+                            "ALGP bindings incompatible with revised ALGW were atomically replaced by an empty canonical sidecar: {error}"
+                        ),
+                    )
+                })
+                .map_err(|empty_error| {
+                    format!(
+                        "ALGP probe rebinding failed: {error}; empty sidecar failed: {empty_error}"
+                    )
+                }),
         }
     }
 
@@ -3060,14 +9427,17 @@ impl ExactControlWorkspace {
         {
             return Ok(false);
         }
-        let current = self
-            .probes
-            .as_ref()
-            .ok_or_else(|| "no canonical ALGP sidecar is attached".to_owned())?;
-        self.history
-            .record(&self.workspace, &current.document)
-            .map_err(|error| format!("pair history rejected: {error}"))?;
-        Ok(self.replace_probe_package(probes))
+        Self::authoring_session_document_from_parts(
+            &self.workspace,
+            &probes.document,
+            &self.cached_jobs.workspace,
+            self.component.as_ref(),
+        )
+        .map_err(|error| format!("probe complete-session candidate rejected: {error}"))?;
+        let history = self.history_with_current_recorded()?;
+        let changed = self.replace_probe_package(probes);
+        self.history = history;
+        Ok(changed)
     }
 
     fn import_workspace_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -3085,6 +9455,7 @@ impl ExactControlWorkspace {
             self.pending_source = None;
             self.drag = None;
             self.parameter_drafts.clear();
+            self.node_label_drafts.clear();
             self.reset_probe_drafts();
             Ok(())
         } else {
@@ -3120,13 +9491,32 @@ impl ExactControlWorkspace {
         };
         let document = self.workspace.graph().clone();
         let placement = self.workspace.placement(id);
-        let state = self
+        let schema = self
             .fixture
             .registry()
             .semantic_registry()
-            .schema(node.kind())
-            .and_then(alumina_interface_core::graph::NodeSchema::state);
+            .schema(node.kind());
+        let state = schema.and_then(alumina_interface_core::graph::NodeSchema::state);
+        let hierarchy_correlation = self.component.as_ref().and_then(|component| {
+            hierarchy_node_correlation(component, id).map(|correlation| {
+                (
+                    digest_prefix(component.hierarchy.source_map.digest().0),
+                    correlation,
+                )
+            })
+        });
+        let domain_choices = schema.map_or_else(Vec::new, |schema| {
+            audited_domain_choices(&document, schema.allowed_domains())
+        });
+        let maximum_label_bytes = document.schema().limits().maximum_label_bytes;
+        let mut label_text = self
+            .node_label_drafts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| node.label().to_owned());
         let mut delete_requested = false;
+        let mut label_request = None;
+        let mut domain_request = None;
         let mut parameter_request = None;
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3137,12 +9527,23 @@ impl ExactControlWorkspace {
                 }
                 delete_requested = ui.small_button("delete node + wires").clicked();
             });
-            ui.label(format!("Execution domain: {}", domain_label(node.domain())));
+            (label_request, domain_request) = show_node_identity_editors(
+                ui,
+                &node,
+                &domain_choices,
+                maximum_label_bytes,
+                &mut label_text,
+            );
             if let Some(placement) = placement {
                 ui.monospace(format!(
                     "canvas = ({}, {}) logical px · presentation only",
                     placement.x(),
                     placement.y()
+                ));
+            }
+            if let Some((source_map, correlation)) = &hierarchy_correlation {
+                ui.monospace(format!(
+                    "ALGM {source_map}… · hierarchy origin {correlation}"
                 ));
             }
             ui.horizontal_wrapped(|ui| {
@@ -3153,36 +9554,8 @@ impl ExactControlWorkspace {
                     ui.monospace(port_description(&document, "out", port));
                 }
             });
-            for parameter in node.parameters() {
-                let Some(initial) = parameter_edit_text(parameter.value().value()) else {
-                    ui.monospace(format!(
-                        "{} = {} · read-only literal shape",
-                        parameter.name(),
-                        typed_value_text(&document, parameter.value())
-                    ));
-                    continue;
-                };
-                let maximum = parameter_text_limit(&document, parameter.value().value_type());
-                let draft = self
-                    .parameter_drafts
-                    .entry((id, parameter.id()))
-                    .or_insert(initial);
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(format!("{}:", parameter.name()));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(draft)
-                            .desired_width(180.0)
-                            .char_limit(maximum),
-                    );
-                    let apply = ui.small_button("apply exact").clicked()
-                        || (response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-                    ui.weak(typed_value_text(&document, parameter.value()));
-                    if apply {
-                        parameter_request = Some((parameter.id(), draft.clone()));
-                    }
-                });
-            }
+            parameter_request =
+                show_node_parameter_editors(ui, &document, &node, &mut self.parameter_drafts);
             if let Some(state) = state {
                 ui.label(format!(
                     "Explicit state: clock {}, t{}, read-before-write, ≤{} canonical bytes",
@@ -3192,8 +9565,13 @@ impl ExactControlWorkspace {
                 ));
             }
         });
+        self.node_label_drafts.insert(id, label_text);
         if delete_requested {
             self.delete_selected_node(id);
+        } else if let Some(label) = label_request {
+            self.commit_node_label(id, &label);
+        } else if let Some(domain) = domain_request {
+            self.commit_node_domain(id, domain);
         } else if let Some((parameter, text)) = parameter_request {
             self.commit_parameter_text(id, parameter, &text);
         }
@@ -3881,6 +10259,11 @@ impl ExactControlWorkspace {
             && let Some(tick) = time_axis.nearest_tick(time_plot, pointer.x)
         {
             self.cursor_root_tick = tick;
+            self.front_panel_cursor_draft = front_panel_root_cursor_text(&self.cursor_root_tick);
+            self.front_panel_cursor_status = format!(
+                "shared exact cursor selected from trace at root tick {}",
+                self.cursor_root_tick
+            );
         }
         if let Some(trigger_x) = trigger_root_tick
             .as_ref()
@@ -3919,6 +10302,7 @@ impl ExactControlWorkspace {
             egui::Color32::GRAY,
         );
 
+        let hierarchy_component = self.component.as_ref();
         ui.horizontal_wrapped(|ui| {
             ui.strong(format!("root tick {}", self.cursor_root_tick));
             for series in analog_groups
@@ -3928,10 +10312,13 @@ impl ExactControlWorkspace {
                 .chain(state.iter().copied())
             {
                 if let Some(point) = trace_point_at_or_before(series, &self.cursor_root_tick) {
-                    ui.colored_label(
-                        trace_signal_color(&series.signal),
-                        trace_cursor_label(&series.signal, point),
-                    );
+                    let value = trace_cursor_label(&series.signal, point);
+                    let label = hierarchy_component
+                        .and_then(|component| {
+                            hierarchy_endpoint_correlation(component, series.signal.source)
+                        })
+                        .map_or(value.clone(), |origin| format!("{origin} · {value}"));
+                    ui.colored_label(trace_signal_color(&series.signal), label);
                 }
             }
         });
@@ -3939,85 +10326,254 @@ impl ExactControlWorkspace {
 }
 
 impl TargetResourceProof {
-    fn selected_is_present(&self) -> bool {
-        let Some(entry) = self.catalog.entries().get(self.catalog_index) else {
-            return false;
-        };
-        let Some(expected) = entry.prototype().parameters().first() else {
-            return false;
-        };
-        self.workspace.graph().nodes().iter().any(|node| {
-            node.kind() == entry.kind()
-                && node.parameters().iter().any(|parameter| {
-                    parameter.id() == expected.id() && parameter.value() == expected.value()
-                })
-        })
+    fn catalog_selection_choices(&self) -> Vec<(String, String)> {
+        self.catalog
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    format!(
+                        "{} · {} v{}",
+                        graph_resource_label(entry.resource().resource),
+                        short_kind(entry.kind().name()),
+                        entry.kind().version()
+                    ),
+                    format!(
+                        "{} · {:?}",
+                        graph_resource_label(entry.resource().resource),
+                        entry.resource().support
+                    ),
+                )
+            })
+            .collect()
     }
 
-    fn add_selected(&mut self) {
-        let Some(entry) = self.catalog.entries().get(self.catalog_index) else {
-            "target resource creation rejected without mutation: selection is unavailable"
-                .clone_into(&mut self.status);
-            return;
-        };
-        if self.selected_is_present() {
-            "target resource already has one concrete node in this draft"
-                .clone_into(&mut self.status);
-            return;
-        }
-        let Ok(count) = i32::try_from(self.workspace.graph().nodes().len()) else {
-            "target resource creation rejected: node count exceeds canvas integer policy"
-                .clone_into(&mut self.status);
-            return;
-        };
-        let Some(x) = count
-            .checked_mul(260)
-            .and_then(|offset| offset.checked_add(28))
-        else {
-            "target resource creation rejected: canvas position overflowed"
-                .clone_into(&mut self.status);
-            return;
-        };
-        let mut candidate = self.workspace.clone();
-        let node = match candidate.create_node(entry.instantiate(), x, 28) {
-            Ok(node) => node,
-            Err(error) => {
-                self.status =
-                    format!("target resource creation rejected without mutation: {error}");
-                return;
+    fn show_catalog_selector(&mut self, ui: &mut egui::Ui) {
+        let choices = self.catalog_selection_choices();
+        let selected = choices
+            .get(self.catalog_index)
+            .map_or("resource unavailable", |choice| choice.0.as_str());
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("tinybee_resource_catalog")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (index, (_, choice)) in choices.iter().enumerate() {
+                        ui.selectable_value(&mut self.catalog_index, index, choice);
+                    }
+                });
+            if ui.small_button("reset target draft").clicked() {
+                self.reset();
             }
-        };
-        if let Err(error) =
-            analyze_graph_draft(candidate.graph(), self.registry.semantic_registry())
-        {
-            self.status = format!("target resource semantics rejected without mutation: {error}");
-            return;
+        });
+    }
+
+    fn selected_is_present(&self) -> bool {
+        self.workspace
+            .graph()
+            .nodes()
+            .iter()
+            .flat_map(NodeDefinition::parameters)
+            .any(|parameter| {
+                graph_value_contains_catalog_resource(
+                    &self.catalog,
+                    parameter.value().value(),
+                    self.catalog_index,
+                )
+            })
+    }
+
+    fn selected_reference_entry(&self) -> Option<usize> {
+        let slot = TARGET_RESOURCE_REFERENCE_SLOTS.get(self.reference_slot)?;
+        self.workspace
+            .graph()
+            .node(self.pair_node)
+            .and_then(|node| {
+                target_resource_handle_at_path(
+                    node,
+                    self.registry.semantic_registry().context_schema(),
+                    slot.path,
+                )
+            })
+            .and_then(|handle| self.catalog.entry_index_for_handle(handle))
+    }
+
+    fn show_reference_selector(&mut self, ui: &mut egui::Ui) {
+        if self.reference_slot >= TARGET_RESOURCE_REFERENCE_SLOTS.len() {
+            self.reference_slot = 0;
         }
-        let encoding = match encode_graph_workspace(&candidate) {
-            Ok(encoding) => encoding,
-            Err(error) => {
-                self.status =
-                    format!("target resource encoding rejected without mutation: {error}");
-                return;
-            }
-        };
-        self.workspace = candidate;
-        self.encoding = encoding;
-        self.status = format!(
-            "created target-bound node {} from authenticated capability facts; deployment remains disabled",
-            node.get()
+        egui::ComboBox::from_id_salt("tinybee_resource_reference_slot")
+            .selected_text(format!(
+                "composite leaf · {}",
+                TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot].label
+            ))
+            .show_ui(ui, |ui| {
+                for (index, slot) in TARGET_RESOURCE_REFERENCE_SLOTS.iter().enumerate() {
+                    ui.selectable_value(
+                        &mut self.reference_slot,
+                        index,
+                        format!("composite leaf · {}", slot.label),
+                    );
+                }
+            });
+        let slot = TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot];
+        let current_entry = self.selected_reference_entry();
+        let current = current_entry
+            .and_then(|entry| self.catalog.entries().get(entry))
+            .map_or_else(
+                || "unresolved catalog identity".to_owned(),
+                |entry| graph_resource_label(entry.resource().resource),
+            );
+        ui.monospace(format!(
+            "#{} capability references · {} = {} · {} segment(s)",
+            self.pair_node.get(),
+            slot.label,
+            current,
+            slot.path.len()
+        ));
+        let target_is_current = current_entry == Some(self.catalog_index);
+        let target_is_present = self.selected_is_present();
+        let can_rebind = current_entry.is_some() && !target_is_current && !target_is_present;
+        let mut rebind = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Executable paired stable inputs");
+            rebind = ui
+                .add_enabled(can_rebind, egui::Button::new("rebind composite leaf"))
+                .on_disabled_hover_text(if current_entry.is_none() {
+                    "the reviewed paired-input field is unavailable"
+                } else if target_is_current {
+                    "the leaf already carries this exact catalog entry"
+                } else {
+                    "the other paired-input field already carries this resource identity"
+                })
+                .clicked();
+            ui.monospace(format!("stable value path: resources.{}", slot.label));
+        });
+        if rebind {
+            self.rebind_reference();
+        }
+    }
+
+    fn show_replay_evidence_files(
+        &mut self,
+        ui: &mut egui::Ui,
+        success_bridge: &mut BoundedFileBridge,
+        fault_bridge: &mut BoundedFileBridge,
+    ) {
+        let actor = &self.deployment.actor_replay;
+        let success_name = format!(
+            "alumina-{}-success.algrrep",
+            digest_prefix(actor.success_evidence.digest().0)
         );
+        let success_events = success_bridge.show(
+            ui,
+            actor.success_evidence.encoded(),
+            MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+            &success_name,
+            ALGR_SUCCESS_REPLAY_FILE,
+        );
+        let fault_name = format!(
+            "alumina-{}-fault.algrrep",
+            digest_prefix(actor.fault_evidence.digest().0)
+        );
+        let fault_events = fault_bridge.show(
+            ui,
+            actor.fault_evidence.encoded(),
+            MAX_GRAPH_DEPLOYMENT_REPLAY_EVIDENCE_BYTES,
+            &fault_name,
+            ALGR_FAULT_REPLAY_FILE,
+        );
+
+        let mut file_status = None;
+        for event in success_events {
+            file_status = Some(target_replay_file_event_status(
+                event,
+                "success",
+                &actor.success_evidence,
+                &self.deployment.report,
+                self.catalog.target(),
+            ));
+        }
+        for event in fault_events {
+            file_status = Some(target_replay_file_event_status(
+                event,
+                "fault",
+                &actor.fault_evidence,
+                &self.deployment.report,
+                self.catalog.target(),
+            ));
+        }
+        if let Some(status) = file_status {
+            self.status = status;
+        }
+        ui.weak(format!(
+            "canonical actor transcripts · success {} bytes · fault {} bytes · imports rerun fresh actors and mutate no draft",
+            actor.success_evidence.encoded().len(),
+            actor.fault_evidence.encoded().len(),
+        ));
+    }
+
+    fn rebind_reference(&mut self) {
+        let slot = TARGET_RESOURCE_REFERENCE_SLOTS[self.reference_slot];
+        let previous = self
+            .selected_reference_entry()
+            .and_then(|index| self.catalog.entries().get(index))
+            .map_or_else(
+                || "unresolved resource".to_owned(),
+                |entry| graph_resource_label(entry.resource().resource),
+            );
+        let selected = self.catalog.entries().get(self.catalog_index).map_or_else(
+            || "unavailable resource".to_owned(),
+            |entry| graph_resource_label(entry.resource().resource),
+        );
+        let mut candidate = self.workspace.clone();
+        match select_graph_capability_node_resource(
+            &self.catalog,
+            &self.registry,
+            &mut candidate,
+            self.pair_node,
+            TARGET_RESOURCE_PARAMETER,
+            slot.path,
+            self.catalog_index,
+        ) {
+            Ok(encoding) => {
+                let deployment = match validate_target_resource_workspace(
+                    &self.catalog,
+                    &self.registry,
+                    &candidate,
+                ) {
+                    Ok(deployment) => deployment,
+                    Err(error) => {
+                        self.status =
+                            format!("paired resource selection rejected without mutation: {error}");
+                        return;
+                    }
+                };
+                self.workspace = candidate;
+                self.encoding = encoding;
+                self.deployment = deployment;
+                self.status = format!(
+                    "rebound executable pair #{} at resources.{} from {previous} to {selected}; offline ALGR changed and firmware session authority remains closed",
+                    self.pair_node.get(),
+                    slot.label,
+                );
+            }
+            Err(error) => {
+                self.status =
+                    format!("paired resource selection rejected without mutation: {error}");
+            }
+        }
     }
 
     fn reset(&mut self) {
-        match empty_target_workspace(&self.registry).and_then(|workspace| {
-            let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
-            Ok((workspace, encoding))
-        }) {
-            Ok((workspace, encoding)) => {
+        match initial_target_resource_workspace(&self.catalog, &self.registry) {
+            Ok((workspace, encoding, pair_node, deployment)) => {
                 self.workspace = workspace;
                 self.encoding = encoding;
-                "reset separate target-I/O draft; no identities were sent to firmware"
+                self.deployment = deployment;
+                self.pair_node = pair_node;
+                self.reference_slot = 0;
+                self.catalog_index = 3;
+                "reset executable target-I/O draft and offline ALGR; nothing was sent to firmware"
                     .clone_into(&mut self.status);
             }
             Err(error) => {
@@ -4027,15 +10583,52 @@ impl TargetResourceProof {
     }
 }
 
+fn target_replay_file_event_status(
+    event: BoundedFileEvent,
+    kind: &str,
+    expected: &CanonicalGraphDeploymentReplayEvidence1,
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+) -> String {
+    match event {
+        BoundedFileEvent::Import(Ok(bytes)) => {
+            match verify_graph_deployment_evidence_bytes(
+                &bytes,
+                expected.digest(),
+                report,
+                target,
+                board_mks_tinybee::PACKAGE.graph.opcodes,
+                board_mks_tinybee::PACKAGE.graph.resources,
+                GraphDeploymentReplayLimits::interactive(),
+            ) {
+                Ok(replay) if replay.evidence() == expected => format!(
+                    "imported {} canonical {kind} ALGRREP1 bytes after fresh fixed-memory firmware-actor replay; no draft or session changed",
+                    bytes.len()
+                ),
+                Ok(_) => format!(
+                    "{kind} ALGRREP1 import rejected without mutation: fresh replay did not reproduce the current artifact"
+                ),
+                Err(error) => format!("{kind} ALGRREP1 import rejected without mutation: {error}"),
+            }
+        }
+        BoundedFileEvent::Import(Err(error)) => {
+            format!("{kind} ALGRREP1 file read rejected: {error}")
+        }
+        BoundedFileEvent::Export(Ok(bytes)) => {
+            format!("exported {bytes} exact canonical {kind} ALGRREP1 bytes")
+        }
+        BoundedFileEvent::Export(Err(error)) => {
+            format!("{kind} ALGRREP1 export failed: {error}")
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "the offline proof keeps its exact target schema, clocks, reviewed implementation, capability derivation, and empty draft visibly co-located"
+    reason = "the offline proof keeps its exact target schema, clocks, three reviewed implementations, capability derivation, and initial executable pair visibly co-located"
 )]
 fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
     const DEVICE: DeviceId = DeviceId([0x54; 16]);
-    const BOOL: GraphTypeId = GraphTypeId::new(1);
-    const STREAM: GraphTypeId = GraphTypeId::new(2);
-    const RESOURCE: GraphTypeId = GraphTypeId::new(3);
     const ROOT: GraphClockId = GraphClockId::new(1);
     const INPUT_CLOCK: GraphClockId = GraphClockId::new(2);
 
@@ -4045,21 +10638,39 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
         GraphLimits::interactive(),
         Vec::new(),
         vec![
-            TypeDefinition::new(BOOL, "core.bool", TypeKind::Boolean),
+            TypeDefinition::new(TARGET_RESOURCE_BOOL_TYPE, "core.bool", TypeKind::Boolean),
             TypeDefinition::new(
-                STREAM,
+                TARGET_RESOURCE_STREAM_TYPE,
                 "tinybee.stream.stable-bool",
                 TypeKind::Stream {
-                    sample: BOOL,
+                    sample: TARGET_RESOURCE_BOOL_TYPE,
                     clock: INPUT_CLOCK,
                     capacity: 1,
                 },
             ),
             TypeDefinition::new(
-                RESOURCE,
+                TARGET_RESOURCE_HANDLE_TYPE,
                 "tinybee.resource.stable-bool",
                 TypeKind::ResourceHandle {
                     class: resource_class,
+                },
+            ),
+            TypeDefinition::new(
+                TARGET_RESOURCE_PAIR_TYPE,
+                "tinybee.resource.stable-bool-pair",
+                TypeKind::Record {
+                    fields: vec![
+                        RecordField::new(
+                            TARGET_RESOURCE_FIRST_FIELD,
+                            "permit",
+                            TARGET_RESOURCE_HANDLE_TYPE,
+                        ),
+                        RecordField::new(
+                            TARGET_RESOURCE_SECOND_FIELD,
+                            "interlock",
+                            TARGET_RESOURCE_HANDLE_TYPE,
+                        ),
+                    ],
                 },
             ),
         ],
@@ -4086,35 +10697,101 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
     ];
     let context = GraphDocument::try_new(0, schema, clocks, Vec::new(), Vec::new())
         .map_err(|error| error.to_string())?;
-    let kind = alumina_interface_core::graph::NodeKind::new("alumina.io.stable-boolean-input", 1);
-    let output = PortDefinition::new(GraphPortId::new(1), "samples", STREAM);
+    let scalar_kind = NodeKind::new(TARGET_RESOURCE_SCALAR_KIND_NAME, 1);
+    let pair_kind = NodeKind::new(TARGET_RESOURCE_PAIR_KIND_NAME, 1);
+    let sink_kind = NodeKind::new(TARGET_RESOURCE_SINK_KIND_NAME, 1);
+    let output = PortDefinition::new(GraphPortId::new(1), "samples", TARGET_RESOURCE_STREAM_TYPE);
     let semantic = GraphNodeRegistry::try_new(
         GraphAnalysisLimits::interactive(),
         &context,
-        vec![NodeSchema::new(
-            kind.clone(),
-            ExecutionDomainSet::REALTIME,
-            Vec::new(),
-            Vec::new(),
-            vec![output],
-            vec![NodeParameterContract::new(1, "resource", RESOURCE)],
-            vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
-            Vec::new(),
-            None,
-        )],
+        vec![
+            NodeSchema::new(
+                scalar_kind.clone(),
+                ExecutionDomainSet::REALTIME,
+                Vec::new(),
+                Vec::new(),
+                vec![output.clone()],
+                vec![NodeParameterContract::new(
+                    TARGET_RESOURCE_PARAMETER,
+                    "resource",
+                    TARGET_RESOURCE_HANDLE_TYPE,
+                )],
+                vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
+                Vec::new(),
+                None,
+            ),
+            NodeSchema::new(
+                pair_kind.clone(),
+                ExecutionDomainSet::REALTIME,
+                Vec::new(),
+                Vec::new(),
+                vec![output.clone()],
+                vec![NodeParameterContract::new(
+                    TARGET_RESOURCE_PARAMETER,
+                    "resources",
+                    TARGET_RESOURCE_PAIR_TYPE,
+                )],
+                vec![NodeOutputDependency::new(GraphPortId::new(1), Vec::new())],
+                Vec::new(),
+                None,
+            ),
+            NodeSchema::new(
+                sink_kind.clone(),
+                ExecutionDomainSet::REALTIME,
+                vec![PortDefinition::new(
+                    GraphPortId::new(1),
+                    "samples",
+                    TARGET_RESOURCE_STREAM_TYPE,
+                )],
+                vec![NodeInputChannelContract::new(
+                    GraphPortId::new(1),
+                    InputConnectionRequirement::Required,
+                    NodeInputChannelKind::StreamQueue {
+                        capacity: 1,
+                        full_policy: ChannelFullPolicy::Fault,
+                    },
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            ),
+        ],
     )
     .map_err(|error| error.to_string())?;
     let registry = GraphDeploymentRegistry::try_new(
         semantic,
-        vec![GraphDeploymentImplementation::new(
-            kind,
-            GraphDeploymentNodeKind::StableBooleanInput {
-                output: GraphPortId::new(1),
-                resource_parameter: 1,
-            },
-            INPUT_CLOCK,
-            100,
-        )],
+        vec![
+            GraphDeploymentImplementation::new(
+                scalar_kind,
+                GraphDeploymentNodeKind::StableBooleanInput {
+                    output: GraphPortId::new(1),
+                    resource_parameter: TARGET_RESOURCE_PARAMETER,
+                },
+                INPUT_CLOCK,
+                100,
+            ),
+            GraphDeploymentImplementation::new(
+                pair_kind,
+                GraphDeploymentNodeKind::StableBooleanPairAll {
+                    output: GraphPortId::new(1),
+                    resource_parameter: TARGET_RESOURCE_PARAMETER,
+                    first_field: TARGET_RESOURCE_FIRST_FIELD,
+                    second_field: TARGET_RESOURCE_SECOND_FIELD,
+                },
+                INPUT_CLOCK,
+                120,
+            ),
+            GraphDeploymentImplementation::new(
+                sink_kind,
+                GraphDeploymentNodeKind::BooleanStreamSink {
+                    input: GraphPortId::new(1),
+                },
+                INPUT_CLOCK,
+                40,
+            ),
+        ],
     )
     .map_err(|error| error.to_string())?;
     let capability_document = tinybee_capability_document()?;
@@ -4136,15 +10813,19 @@ fn tinybee_resource_proof() -> Result<TargetResourceProof, String> {
             catalog.entries().len()
         ));
     }
-    let workspace = empty_target_workspace(&registry)?;
-    let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+    let (workspace, encoding, pair_node, deployment) =
+        initial_target_resource_workspace(&catalog, &registry)?;
     Ok(TargetResourceProof {
         catalog,
         registry,
         workspace,
         encoding,
-        catalog_index: 0,
-        status: "digest-verified offline reference catalog ready; target draft is empty".to_owned(),
+        deployment,
+        catalog_index: 3,
+        pair_node,
+        reference_slot: 0,
+        status: "digest-verified offline catalog lowered an executable GPIO22/GPIO32 pair; no firmware session exists"
+            .to_owned(),
     })
 }
 
@@ -4174,6 +10855,530 @@ fn tinybee_capability_document() -> Result<Vec<u8>, String> {
             .ok_or_else(|| "TinyBee capability offset overflowed".to_owned())?;
     }
     Ok(document)
+}
+
+fn target_catalog_resource_handle(
+    catalog: &GraphCapabilityNodeCatalog,
+    entry: usize,
+) -> Result<ResourceGraphHandle, String> {
+    let parameter = catalog
+        .entries()
+        .get(entry)
+        .and_then(|entry| entry.resource_parameter())
+        .ok_or_else(|| format!("TinyBee resource catalog entry {entry} is unavailable"))?;
+    match parameter.value().value() {
+        GraphValue::ResourceHandle(handle) => Ok(*handle),
+        _ => Err(format!(
+            "TinyBee resource catalog entry {entry} is not a resource handle"
+        )),
+    }
+}
+
+fn target_resource_pair_prototype(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+) -> Result<GraphNodePrototype, String> {
+    let value = TypedGraphValue::try_new(
+        registry.semantic_registry().context_schema(),
+        TARGET_RESOURCE_PAIR_TYPE,
+        GraphValue::Record(vec![
+            RecordValueField {
+                field: TARGET_RESOURCE_FIRST_FIELD,
+                value: GraphValue::ResourceHandle(target_catalog_resource_handle(catalog, 0)?),
+            },
+            RecordValueField {
+                field: TARGET_RESOURCE_SECOND_FIELD,
+                value: GraphValue::ResourceHandle(target_catalog_resource_handle(catalog, 1)?),
+            },
+        ]),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(GraphNodePrototype::new(
+        NodeKind::new(TARGET_RESOURCE_PAIR_KIND_NAME, 1),
+        "Paired stable safety inputs",
+        ExecutionDomain::Realtime {
+            device_id: catalog.target().device_id,
+        },
+        Vec::new(),
+        vec![PortDefinition::new(
+            GraphPortId::new(1),
+            "samples",
+            TARGET_RESOURCE_STREAM_TYPE,
+        )],
+        vec![NodeParameter::new(
+            TARGET_RESOURCE_PARAMETER,
+            "resources",
+            value,
+        )],
+    ))
+}
+
+fn target_resource_sink_prototype(catalog: &GraphCapabilityNodeCatalog) -> GraphNodePrototype {
+    GraphNodePrototype::new(
+        NodeKind::new(TARGET_RESOURCE_SINK_KIND_NAME, 1),
+        "Paired-input proof sink",
+        ExecutionDomain::Realtime {
+            device_id: catalog.target().device_id,
+        },
+        vec![PortDefinition::new(
+            GraphPortId::new(1),
+            "samples",
+            TARGET_RESOURCE_STREAM_TYPE,
+        )],
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+fn initial_target_resource_workspace(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+) -> Result<
+    (
+        GraphWorkspaceDocument,
+        CanonicalGraphWorkspaceEncoding,
+        GraphNodeId,
+        TargetResourceDeployment,
+    ),
+    String,
+> {
+    let mut workspace = empty_target_workspace(registry)?;
+    let pair_node = workspace
+        .create_node(target_resource_pair_prototype(catalog, registry)?, 28, 28)
+        .map_err(|error| error.to_string())?;
+    let sink_node = workspace
+        .create_node(target_resource_sink_prototype(catalog), 328, 28)
+        .map_err(|error| error.to_string())?;
+    workspace
+        .connect(
+            WireEndpoint {
+                node: pair_node,
+                port: GraphPortId::new(1),
+            },
+            WireEndpoint {
+                node: sink_node,
+                port: GraphPortId::new(1),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let deployment = validate_target_resource_workspace(catalog, registry, &workspace)?;
+    let encoding = encode_graph_workspace(&workspace).map_err(|error| error.to_string())?;
+    Ok((workspace, encoding, pair_node, deployment))
+}
+
+fn target_resource_handle_at_path(
+    node: &NodeDefinition,
+    schema: &GraphSchema,
+    path: &[GraphValuePathSegment],
+) -> Option<ResourceGraphHandle> {
+    let parameter = node
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.id() == TARGET_RESOURCE_PARAMETER)?;
+    let (value_type, value) = parameter.value().value_at_path(schema, path).ok()?;
+    if !matches!(
+        schema.value_type(value_type)?.kind(),
+        TypeKind::ResourceHandle { .. }
+    ) {
+        return None;
+    }
+    match value {
+        GraphValue::ResourceHandle(handle) => Some(*handle),
+        _ => None,
+    }
+}
+
+fn collect_resource_handles(value: &GraphValue, handles: &mut Vec<ResourceGraphHandle>) {
+    match value {
+        GraphValue::Array(values) => {
+            for value in values {
+                collect_resource_handles(value, handles);
+            }
+        }
+        GraphValue::Record(fields) => {
+            for field in fields {
+                collect_resource_handles(&field.value, handles);
+            }
+        }
+        GraphValue::OptionSome(value)
+        | GraphValue::ResultOk(value)
+        | GraphValue::ResultError(value) => collect_resource_handles(value, handles),
+        GraphValue::ResourceHandle(handle) => handles.push(*handle),
+        GraphValue::Boolean(_)
+        | GraphValue::ExactRational(_)
+        | GraphValue::MeasurementInterval { .. }
+        | GraphValue::CanonicalI64(_)
+        | GraphValue::CanonicalU64(_)
+        | GraphValue::Text(_)
+        | GraphValue::Bytes(_)
+        | GraphValue::OptionNone
+        | GraphValue::JobHandle(_) => {}
+    }
+}
+
+fn graph_value_contains_catalog_resource(
+    catalog: &GraphCapabilityNodeCatalog,
+    value: &GraphValue,
+    entry: usize,
+) -> bool {
+    let Ok(selected) = target_catalog_resource_handle(catalog, entry) else {
+        return false;
+    };
+    let mut handles = Vec::new();
+    collect_resource_handles(value, &mut handles);
+    handles.contains(&selected)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-closed transaction validates graph shape, catalog provenance, uniqueness, and the independently decoded lowering result"
+)]
+fn validate_target_resource_workspace(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+    workspace: &GraphWorkspaceDocument,
+) -> Result<TargetResourceDeployment, String> {
+    analyze_graph_draft(workspace.graph(), registry.semantic_registry())
+        .map_err(|error| error.to_string())?;
+    let pair_nodes = workspace
+        .graph()
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind().name() == TARGET_RESOURCE_PAIR_KIND_NAME && node.kind().version() == 1
+        })
+        .collect::<Vec<_>>();
+    let sink_nodes = workspace
+        .graph()
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind().name() == TARGET_RESOURCE_SINK_KIND_NAME && node.kind().version() == 1
+        })
+        .collect::<Vec<_>>();
+    if workspace.graph().nodes().len() != 2 || pair_nodes.len() != 1 || sink_nodes.len() != 1 {
+        return Err(format!(
+            "target resource draft must contain exactly one paired input and one sink, found {} node(s), {} pair(s), and {} sink(s)",
+            workspace.graph().nodes().len(),
+            pair_nodes.len(),
+            sink_nodes.len(),
+        ));
+    }
+    let [wire] = workspace.graph().wires() else {
+        return Err(format!(
+            "target resource draft has {} wires instead of one",
+            workspace.graph().wires().len()
+        ));
+    };
+    if wire.source()
+        != (WireEndpoint {
+            node: pair_nodes[0].id(),
+            port: GraphPortId::new(1),
+        })
+        || wire.target()
+            != (WireEndpoint {
+                node: sink_nodes[0].id(),
+                port: GraphPortId::new(1),
+            })
+    {
+        return Err(
+            "target resource draft wire does not connect pair output to proof sink".to_owned(),
+        );
+    }
+
+    let mut selected_resources = Vec::with_capacity(TARGET_RESOURCE_REFERENCE_SLOTS.len());
+    for slot in TARGET_RESOURCE_REFERENCE_SLOTS {
+        let handle = target_resource_handle_at_path(
+            pair_nodes[0],
+            registry.semantic_registry().context_schema(),
+            slot.path,
+        )
+        .ok_or_else(|| {
+            format!(
+                "target resource pair has no typed resources.{} field",
+                slot.label
+            )
+        })?;
+        let resource = catalog
+            .entry_index_for_handle(handle)
+            .and_then(|index| catalog.entries().get(index))
+            .map(|entry| entry.resource().resource)
+            .ok_or_else(|| {
+                format!(
+                    "target resource resources.{} carries a raw or foreign identity",
+                    slot.label
+                )
+            })?;
+        selected_resources.push(resource);
+    }
+
+    let mut retained = Vec::new();
+    for node in workspace.graph().nodes() {
+        for parameter in node.parameters() {
+            let mut handles = Vec::new();
+            collect_resource_handles(parameter.value().value(), &mut handles);
+            for handle in handles {
+                if catalog.entry_index_for_handle(handle).is_none() {
+                    return Err(format!(
+                        "target resource node #{} parameter {} carries a raw or foreign identity",
+                        node.id().get(),
+                        parameter.id()
+                    ));
+                }
+                if retained.contains(&handle) {
+                    return Err(format!(
+                        "target resource node #{} parameter {} duplicates a physical identity",
+                        node.id().get(),
+                        parameter.id()
+                    ));
+                }
+                retained.push(handle);
+            }
+        }
+    }
+
+    let [first, second] = selected_resources.as_slice() else {
+        return Err(
+            "target resource pair did not retain exactly two selected resources".to_owned(),
+        );
+    };
+    lower_target_resource_workspace(catalog, registry, workspace, (*first, *second))
+}
+
+fn lower_target_resource_workspace(
+    catalog: &GraphCapabilityNodeCatalog,
+    registry: &GraphDeploymentRegistry,
+    workspace: &GraphWorkspaceDocument,
+    expected_pair: (ResourceId, ResourceId),
+) -> Result<TargetResourceDeployment, String> {
+    let capability_document = tinybee_capability_document()?;
+    let limits =
+        GraphDeploymentLimits::from_capability_document(&capability_document, 1_000_000, 100)
+            .map_err(|error| error.to_string())?;
+    if limits.capability_identity() != catalog.capability_identity() {
+        return Err(
+            "target lowering limits do not retain the catalog capability identity".to_owned(),
+        );
+    }
+    let report = lower_graph_deployment(workspace.graph(), registry, catalog.target(), &limits)
+        .map_err(|error| error.to_string())?;
+    let package = report.package();
+    let lowered_nodes = package.nodes().collect::<Vec<_>>();
+    if lowered_nodes.len() != 2
+        || lowered_nodes[0].opcode != GraphIrOpcode::StableBooleanPairAll
+        || lowered_nodes[1].opcode != GraphIrOpcode::BooleanStreamSink
+    {
+        return Err(
+            "target resource draft did not lower to the exact pair-then-sink opcode sequence"
+                .to_owned(),
+        );
+    }
+    let lowered_pair = decode_graph_resource_pair_parameter(lowered_nodes[0].parameter)
+        .map_err(|error| format!("lowered target resource pair is not canonical: {error:?}"))?;
+    if lowered_pair != expected_pair {
+        return Err(format!(
+            "lowered target resource pair {lowered_pair:?} does not preserve stable field order {expected_pair:?}"
+        ));
+    }
+    let realtime = package.header().realtime_schedule;
+    let actor_replay = replay_target_resource_deployment(
+        &report,
+        catalog.target(),
+        lowered_pair,
+        realtime.period_cycles,
+    )?;
+    Ok(TargetResourceDeployment {
+        package_digest: package.digest(),
+        implementation_digest: report.implementation_digest(),
+        package_bytes: package.bytes().len(),
+        first: lowered_pair.0,
+        second: lowered_pair.1,
+        realtime_period_cycles: realtime.period_cycles,
+        realtime_wcet_cycles: realtime.total_wcet_cycles,
+        actor_replay,
+        report,
+    })
+}
+
+fn replay_target_resource_deployment(
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+    pair: (ResourceId, ResourceId),
+    period_cycles: u64,
+) -> Result<TargetResourceActorReplay, String> {
+    if period_cycles == 0 {
+        return Err("target resource package has a zero Realtime period".to_owned());
+    }
+    let start = DeviceCycle(period_cycles);
+    let (success_evidence, truth_table, ordered_reads) =
+        replay_target_resource_success(report, target, pair, period_cycles, start)?;
+    let (fault_evidence, fault_reads, terminal_fault) =
+        replay_target_resource_fault(report, target, pair, start)?;
+    Ok(TargetResourceActorReplay {
+        success_evidence,
+        fault_evidence,
+        truth_table,
+        ordered_reads,
+        fault_reads,
+        terminal_fault,
+    })
+}
+
+fn replay_target_resource_success(
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+    pair: (ResourceId, ResourceId),
+    period_cycles: u64,
+    start: DeviceCycle,
+) -> Result<
+    (
+        CanonicalGraphDeploymentReplayEvidence1,
+        [bool; 4],
+        [ResourceId; 2],
+    ),
+    String,
+> {
+    let truth_inputs = [(false, false), (false, true), (true, false), (true, true)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (first, second))| {
+            let release = u64::try_from(index + 1)
+                .map_err(|_| "target resource replay release index overflowed".to_owned())?;
+            let cycle = period_cycles
+                .checked_mul(release)
+                .map(DeviceCycle)
+                .ok_or_else(|| "target resource replay cycle overflowed".to_owned())?;
+            Ok(GraphDeploymentReplayInput::new(
+                cycle,
+                true,
+                vec![
+                    GraphDeploymentResourceSample::new(pair.1, Some(second)),
+                    GraphDeploymentResourceSample::new(pair.0, Some(first)),
+                ],
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let success = replay_realtime_graph_deployment(
+        report,
+        target,
+        board_mks_tinybee::PACKAGE.graph.opcodes,
+        board_mks_tinybee::PACKAGE.graph.resources,
+        1,
+        1,
+        start,
+        &truth_inputs,
+        GraphDeploymentReplayLimits::interactive(),
+    )
+    .map_err(|error| format!("target resource firmware-actor success replay failed: {error}"))?;
+    if !success.complete()
+        || success.requested_releases() != truth_inputs.len()
+        || success.releases().len() != truth_inputs.len()
+    {
+        return Err(
+            "target resource firmware actors did not complete the four-case replay".to_owned(),
+        );
+    }
+
+    let expected_reads = [pair.0, pair.1];
+    let mut truth_table = [false; 4];
+    for (index, release) in success.releases().iter().enumerate() {
+        if release.reads() != expected_reads {
+            return Err(format!(
+                "target resource firmware actor release {index} read {:?} instead of {:?}",
+                release.reads(),
+                expected_reads,
+            ));
+        }
+        truth_table[index] = match release.outcome() {
+            GraphDeploymentReplayReleaseOutcome::Completed(release) => {
+                release.last_sink_value.ok_or_else(|| {
+                    format!("target resource firmware actor release {index} produced no sink value")
+                })?
+            }
+            GraphDeploymentReplayReleaseOutcome::Faulted(error) => {
+                return Err(format!(
+                    "target resource firmware actor release {index} faulted unexpectedly: {error:?}"
+                ));
+            }
+        };
+    }
+    if truth_table != [false, false, false, true] {
+        return Err(format!(
+            "target resource firmware actor produced an invalid conjunction table {truth_table:?}"
+        ));
+    }
+    Ok((success.evidence().clone(), truth_table, expected_reads))
+}
+
+fn replay_target_resource_fault(
+    report: &GraphDeploymentReport,
+    target: GraphDeploymentTarget,
+    pair: (ResourceId, ResourceId),
+    start: DeviceCycle,
+) -> Result<
+    (
+        CanonicalGraphDeploymentReplayEvidence1,
+        [ResourceId; 2],
+        GraphExecutionFault,
+    ),
+    String,
+> {
+    let expected_reads = [pair.0, pair.1];
+    let fault_input = [GraphDeploymentReplayInput::new(
+        start,
+        true,
+        vec![
+            GraphDeploymentResourceSample::new(pair.1, Some(true)),
+            GraphDeploymentResourceSample::new(pair.0, None),
+        ],
+    )];
+    let fault = replay_realtime_graph_deployment(
+        report,
+        target,
+        board_mks_tinybee::PACKAGE.graph.opcodes,
+        board_mks_tinybee::PACKAGE.graph.resources,
+        2,
+        1,
+        start,
+        &fault_input,
+        GraphDeploymentReplayLimits::interactive(),
+    )
+    .map_err(|error| format!("target resource firmware-actor fault replay failed: {error}"))?;
+    let [fault_release] = fault.releases() else {
+        return Err(format!(
+            "target resource firmware-actor fault replay attempted {} release(s) instead of one",
+            fault.releases().len()
+        ));
+    };
+    let fault_reads: [ResourceId; 2] = fault_release.reads().try_into().map_err(|_| {
+        format!(
+            "target resource firmware-actor fault replay retained {} read(s) instead of two",
+            fault_release.reads().len()
+        )
+    })?;
+    if fault.complete() || fault.requested_releases() != 1 || fault_reads != expected_reads {
+        return Err(
+            "target resource firmware actors did not preserve the ordered fault replay".to_owned(),
+        );
+    }
+    let terminal_fault = match fault_release.outcome() {
+        GraphDeploymentReplayReleaseOutcome::Faulted(error)
+            if error.observation.fault == GraphExecutionFault::ResourceUnavailable =>
+        {
+            error.observation.fault
+        }
+        GraphDeploymentReplayReleaseOutcome::Faulted(error) => {
+            return Err(format!(
+                "target resource firmware actor produced the wrong terminal fault: {error:?}"
+            ));
+        }
+        GraphDeploymentReplayReleaseOutcome::Completed(_) => {
+            return Err(
+                "target resource firmware actor completed the unavailable-input release".to_owned(),
+            );
+        }
+    };
+    Ok((fault.evidence().clone(), fault_reads, terminal_fault))
 }
 
 fn tinybee_board_explorer() -> Result<BoardExplorerPanel, String> {
@@ -4265,18 +11470,24 @@ fn control_palette(
             .document()
             .nodes()
             .iter()
-            .find(|node| node.kind() == schema.kind())
-            .ok_or_else(|| {
-                format!(
-                    "audited palette kind {} v{} has no reviewed default instance",
+            .find(|node| node.kind() == schema.kind());
+        let (domain, parameters) = if let Some(exemplar) = exemplar {
+            if exemplar.inputs() != schema.inputs() || exemplar.outputs() != schema.outputs() {
+                return Err(format!(
+                    "audited palette kind {} v{} exemplar ports disagree with its schema",
                     schema.kind().name(),
                     schema.kind().version()
-                )
-            })?;
-        if exemplar.inputs() != schema.inputs()
-            || exemplar.outputs() != schema.outputs()
-            || !schema.allowed_domains().contains(exemplar.domain())
-            || !parameters_match_schema(exemplar.parameters(), schema.parameters())
+                ));
+            }
+            (exemplar.domain(), exemplar.parameters().to_vec())
+        } else {
+            (
+                ExecutionDomain::HostExact,
+                reviewed_uninstantiated_palette_parameters(fixture.document(), schema)?,
+            )
+        };
+        if !schema.allowed_domains().contains(domain)
+            || !parameters_match_schema(&parameters, schema.parameters())
         {
             return Err(format!(
                 "audited palette kind {} v{} disagrees with its reviewed default instance",
@@ -4290,10 +11501,10 @@ fn control_palette(
             prototype: GraphNodePrototype::new(
                 schema.kind().clone(),
                 format!("New {short}"),
-                exemplar.domain(),
+                domain,
                 schema.inputs().to_vec(),
                 schema.outputs().to_vec(),
-                exemplar.parameters().to_vec(),
+                parameters,
             ),
         });
     }
@@ -4301,6 +11512,60 @@ fn control_palette(
         return Err("audited node palette is empty".to_owned());
     }
     Ok(palette)
+}
+
+fn reviewed_uninstantiated_palette_parameters(
+    document: &GraphDocument,
+    schema: &NodeSchema,
+) -> Result<Vec<NodeParameter>, String> {
+    match (schema.kind().name(), schema.kind().version()) {
+        ("control.bool.case" | "control.exact.case", 1) => Ok(Vec::new()),
+        ("control.bool.constant" | "control.bool.delay", 1) => {
+            let contract = schema.parameters().first().ok_or_else(|| {
+                format!(
+                    "audited palette kind {} v{} has no Boolean default contract",
+                    schema.kind().name(),
+                    schema.kind().version()
+                )
+            })?;
+            let value = TypedGraphValue::try_new(
+                document.schema(),
+                contract.value_type(),
+                GraphValue::Boolean(false),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(vec![NodeParameter::new(
+                contract.id(),
+                contract.name(),
+                value,
+            )])
+        }
+        ("control.exact.constant", 1) => {
+            let contract = schema.parameters().first().ok_or_else(|| {
+                format!(
+                    "audited palette kind {} v{} has no exact default contract",
+                    schema.kind().name(),
+                    schema.kind().version()
+                )
+            })?;
+            let value = TypedGraphValue::try_new(
+                document.schema(),
+                contract.value_type(),
+                GraphValue::ExactRational(Rational::zero()),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(vec![NodeParameter::new(
+                contract.id(),
+                contract.name(),
+                value,
+            )])
+        }
+        _ => Err(format!(
+            "audited palette kind {} v{} has no reviewed default instance",
+            schema.kind().name(),
+            schema.kind().version()
+        )),
+    }
 }
 
 fn parameters_match_schema(
@@ -4342,28 +11607,18 @@ fn new_node_position(workspace: &GraphWorkspaceDocument) -> Result<(i32, i32), S
     Ok((x, y))
 }
 
-fn parameter_edit_text(value: &GraphValue) -> Option<String> {
-    match value {
-        GraphValue::Boolean(value) => Some(value.to_string()),
-        GraphValue::ExactRational(value) => Some(value.to_string()),
-        GraphValue::MeasurementInterval { lower, upper } => Some(format!("{lower}..{upper}")),
-        GraphValue::CanonicalI64(value) => Some(value.to_string()),
-        GraphValue::CanonicalU64(value) => Some(value.to_string()),
-        GraphValue::Text(value) => Some(value.clone()),
-        GraphValue::Bytes(_)
-        | GraphValue::Array(_)
-        | GraphValue::Record(_)
-        | GraphValue::OptionNone
-        | GraphValue::OptionSome(_)
-        | GraphValue::ResultOk(_)
-        | GraphValue::ResultError(_)
-        | GraphValue::ResourceHandle(_)
-        | GraphValue::JobHandle(_) => None,
-    }
+fn parameter_edit_text(document: &GraphDocument, value: &TypedGraphValue) -> Option<String> {
+    format_graph_literal_text(
+        document.schema(),
+        value,
+        GraphLiteralTextLimits::new(parameter_text_limit(document, value.value_type())),
+    )
+    .ok()
 }
 
 fn parameter_text_limit(document: &GraphDocument, value_type: GraphTypeId) -> usize {
     let rational_digits = document.schema().limits().maximum_rational_digits;
+    let interactive = GraphLiteralTextLimits::interactive().maximum_bytes();
     document
         .schema()
         .value_type(value_type)
@@ -4374,17 +11629,22 @@ fn parameter_text_limit(document: &GraphDocument, value_type: GraphTypeId) -> us
                 rational_digits.saturating_mul(4).saturating_add(10)
             }
             TypeKind::CanonicalI64 { .. } | TypeKind::CanonicalU64 { .. } => 20,
-            TypeKind::Text { maximum_bytes } => *maximum_bytes as usize,
-            TypeKind::Bytes { .. }
-            | TypeKind::Array { .. }
+            TypeKind::Text { maximum_bytes } => (*maximum_bytes as usize)
+                .saturating_mul(6)
+                .saturating_add(2),
+            TypeKind::Bytes { maximum_bytes } => (*maximum_bytes as usize)
+                .saturating_mul(2)
+                .saturating_add(6),
+            TypeKind::Array { .. }
             | TypeKind::Record { .. }
             | TypeKind::Option { .. }
-            | TypeKind::Result { .. }
-            | TypeKind::Event { .. }
+            | TypeKind::Result { .. } => interactive,
+            TypeKind::Event { .. }
             | TypeKind::Stream { .. }
             | TypeKind::ResourceHandle { .. }
             | TypeKind::JobHandle => 1,
         })
+        .min(interactive)
 }
 
 fn parse_parameter_text(
@@ -4393,106 +11653,35 @@ fn parse_parameter_text(
     source: &str,
 ) -> Result<TypedGraphValue, String> {
     let maximum = parameter_text_limit(document, value_type);
-    if source.len() > maximum {
-        return Err(format!(
-            "parameter text has {} bytes; this exact type admits at most {maximum}",
-            source.len()
-        ));
-    }
-    let definition = document
-        .schema()
-        .value_type(value_type)
-        .ok_or_else(|| format!("parameter type {} is not registered", value_type.get()))?;
-    let trimmed = source.trim();
-    let value = match definition.kind() {
-        TypeKind::Boolean => match trimmed {
-            "true" => GraphValue::Boolean(true),
-            "false" => GraphValue::Boolean(false),
-            _ => return Err("Boolean parameter must be exactly true or false".to_owned()),
-        },
-        TypeKind::ExactRational { .. } => GraphValue::ExactRational(
-            trimmed
-                .parse::<Rational>()
-                .map_err(|error| format!("exact rational parameter is invalid: {error}"))?,
-        ),
-        TypeKind::MeasurementInterval { .. } => {
-            let (lower, upper) = trimmed
-                .split_once("..")
-                .ok_or_else(|| "measurement interval must use lower..upper".to_owned())?;
-            GraphValue::MeasurementInterval {
-                lower: lower
-                    .trim()
-                    .parse::<Rational>()
-                    .map_err(|error| format!("measurement lower bound is invalid: {error}"))?,
-                upper: upper
-                    .trim()
-                    .parse::<Rational>()
-                    .map_err(|error| format!("measurement upper bound is invalid: {error}"))?,
-            }
-        }
-        TypeKind::CanonicalI64 { .. } => GraphValue::CanonicalI64(
-            trimmed
-                .parse::<i64>()
-                .map_err(|error| format!("canonical signed count is invalid: {error}"))?,
-        ),
-        TypeKind::CanonicalU64 { .. } => GraphValue::CanonicalU64(
-            trimmed
-                .parse::<u64>()
-                .map_err(|error| format!("canonical unsigned count is invalid: {error}"))?,
-        ),
-        TypeKind::Text { .. } => GraphValue::Text(source.to_owned()),
-        TypeKind::Bytes { .. }
-        | TypeKind::Array { .. }
-        | TypeKind::Record { .. }
-        | TypeKind::Option { .. }
-        | TypeKind::Result { .. }
-        | TypeKind::Event { .. }
-        | TypeKind::Stream { .. }
-        | TypeKind::ResourceHandle { .. }
-        | TypeKind::JobHandle => {
-            return Err(format!(
-                "parameter type {} is not editable in this scalar palette slice",
-                definition.name()
-            ));
-        }
-    };
-    TypedGraphValue::try_new(document.schema(), value_type, value)
-        .map_err(|error| format!("exact parameter failed schema validation: {error}"))
+    parse_graph_literal_text(
+        document.schema(),
+        value_type,
+        source,
+        GraphLiteralTextLimits::new(maximum),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn encode_persisted_workspace_pair(
-    workspace: &CanonicalGraphWorkspaceEncoding,
-    probes: &CanonicalGraphProbeEncoding,
+fn encode_persisted_authoring_session(
+    session: &CanonicalGraphAuthoringSessionEncoding,
 ) -> Result<String, String> {
-    let workspace_bytes = workspace.bytes();
-    let probe_bytes = probes.bytes();
-    if workspace_bytes.len() > MAXIMUM_PERSISTED_WORKSPACE_BYTES {
+    let bytes = session.bytes();
+    if bytes.len() > MAX_GRAPH_AUTHORING_SESSION_BYTES {
         return Err(format!(
-            "canonical ALGW has {} bytes; browser persistence admits at most {}",
-            workspace_bytes.len(),
-            MAXIMUM_PERSISTED_WORKSPACE_BYTES
+            "canonical ALGS has {} bytes; browser persistence admits at most {}",
+            bytes.len(),
+            MAX_GRAPH_AUTHORING_SESSION_BYTES
         ));
     }
-    if probe_bytes.len() > MAXIMUM_PERSISTED_PROBE_BYTES {
-        return Err(format!(
-            "canonical ALGP has {} bytes; browser persistence admits at most {}",
-            probe_bytes.len(),
-            MAXIMUM_PERSISTED_PROBE_BYTES
-        ));
-    }
-    let encoded_bytes = workspace_bytes
+    let encoded_bytes = bytes
         .len()
         .checked_mul(2)
-        .and_then(|length| length.checked_add(probe_bytes.len().checked_mul(2)?))
-        .and_then(|length| length.checked_add(PERSISTED_WORKSPACE_PAIR_PREFIX.len()))
-        .and_then(|length| length.checked_add(1))
-        .ok_or_else(|| "persisted ALGW/ALGP text length overflowed".to_owned())?;
+        .and_then(|length| length.checked_add(PERSISTED_AUTHORING_SESSION_PREFIX.len()))
+        .ok_or_else(|| "persisted ALGS text length overflowed".to_owned())?;
     let mut result = String::with_capacity(encoded_bytes);
-    result.push_str(PERSISTED_WORKSPACE_PAIR_PREFIX);
-    append_lower_hex(&mut result, workspace_bytes);
-    result.push(':');
-    append_lower_hex(&mut result, probe_bytes);
+    result.push_str(PERSISTED_AUTHORING_SESSION_PREFIX);
+    append_lower_hex(&mut result, bytes);
     Ok(result)
 }
 
@@ -4505,27 +11694,11 @@ fn append_lower_hex(result: &mut String, bytes: &[u8]) {
     }
 }
 
-fn decode_persisted_workspace_pair(
-    value: &str,
-    workspace_limits: GraphWorkspaceLimits,
-    probe_limits: GraphProbeLimits,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+fn decode_persisted_authoring_session(value: &str) -> Result<Vec<u8>, String> {
     let encoded = value
-        .strip_prefix(PERSISTED_WORKSPACE_PAIR_PREFIX)
-        .ok_or_else(|| "persisted ALGW/ALGP pair prefix/version is unsupported".to_owned())?;
-    let (workspace, probes) = encoded
-        .split_once(':')
-        .ok_or_else(|| "persisted ALGW/ALGP pair separator is missing".to_owned())?;
-    let workspace_maximum = workspace_limits
-        .maximum_workspace_bytes
-        .min(MAXIMUM_PERSISTED_WORKSPACE_BYTES);
-    let probe_maximum = probe_limits
-        .maximum_probe_document_bytes
-        .min(MAXIMUM_PERSISTED_PROBE_BYTES);
-    Ok((
-        decode_persisted_hex(workspace, workspace_maximum, "ALGW")?,
-        decode_persisted_hex(probes, probe_maximum, "ALGP")?,
-    ))
+        .strip_prefix(PERSISTED_AUTHORING_SESSION_PREFIX)
+        .ok_or_else(|| "persisted ALGS prefix/version is unsupported".to_owned())?;
+    decode_persisted_hex(encoded, MAX_GRAPH_AUTHORING_SESSION_BYTES, "ALGS")
 }
 
 fn decode_persisted_hex(
@@ -4703,6 +11876,18 @@ fn representative_component(
     workspace: &GraphWorkspaceDocument,
     fixture: &RepresentativeExactControlGraph,
 ) -> Result<ComponentPackage, String> {
+    let (document, encoding) = representative_component_document(workspace)?;
+    let hierarchy = representative_hierarchy(&document, encoding.digest(), fixture)?;
+    Ok(ComponentPackage {
+        document,
+        encoding,
+        hierarchy,
+    })
+}
+
+fn representative_component_document(
+    workspace: &GraphWorkspaceDocument,
+) -> Result<(GraphComponentDocument, CanonicalGraphComponentEncoding), String> {
     let outputs = SIGNALS
         .iter()
         .copied()
@@ -4782,26 +11967,168 @@ fn representative_component(
     )
     .map_err(|error| error.to_string())?;
     let encoding = encode_graph_component(&document).map_err(|error| error.to_string())?;
-    let hierarchy = representative_hierarchy(&document, encoding.digest(), fixture)?;
-    Ok(ComponentPackage {
-        document,
-        encoding,
-        hierarchy,
-    })
+    Ok((document, encoding))
+}
+
+fn empty_library_component(
+    name: &str,
+    authority: &GraphWorkspaceDocument,
+) -> Result<GraphComponentDocument, String> {
+    let graph = GraphDocument::try_new(
+        1,
+        authority.graph().schema().clone(),
+        authority.graph().clocks().to_vec(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let workspace = GraphWorkspaceDocument::try_new(authority.limits(), 1, 1, 1, graph, Vec::new())
+        .map_err(|error| error.to_string())?;
+    GraphComponentDocument::try_new(
+        GraphComponentLimits::interactive(),
+        1,
+        1,
+        name,
+        1,
+        1,
+        1,
+        workspace,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn promoted_parameter_panel_items(
+    component: &GraphComponentDocument,
+    nested_id: GraphNodeId,
+) -> Vec<GraphFrontPanelItem> {
+    component
+        .panel_items()
+        .iter()
+        .filter_map(|item| match item.binding() {
+            GraphFrontPanelBinding::ParameterControl { .. } => Some(GraphFrontPanelItem::new(
+                item.id(),
+                item.name(),
+                GraphFrontPanelBinding::ParameterControl {
+                    node: nested_id,
+                    parameter: item.id().get(),
+                },
+                item.rect(),
+            )),
+            GraphFrontPanelBinding::InputControl(_)
+            | GraphFrontPanelBinding::OutputIndicator(_) => None,
+        })
+        .collect()
+}
+
+fn representative_wrapper_component(
+    component: &GraphComponentDocument,
+) -> Result<(GraphComponentDocument, Digest), String> {
+    let nested_id = GraphNodeId::new(1);
+    let nested_prototype = graph_component_instance_prototype(component, "Reference PID leaf")
+        .map_err(|error| error.to_string())?;
+    let nested_instance = NodeDefinition::new(
+        nested_id,
+        nested_prototype.kind().clone(),
+        "Reference PID leaf",
+        nested_prototype.domain(),
+        nested_prototype.inputs().to_vec(),
+        nested_prototype.outputs().to_vec(),
+        nested_prototype.parameters().to_vec(),
+    );
+    let wrapper_graph = GraphDocument::try_new(
+        1,
+        component.workspace().graph().schema().clone(),
+        component.workspace().graph().clocks().to_vec(),
+        vec![nested_instance],
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+    let wrapper_workspace = GraphWorkspaceDocument::try_new(
+        GraphWorkspaceLimits::interactive(),
+        1,
+        2,
+        1,
+        wrapper_graph,
+        vec![GraphNodePlacement::new(nested_id, 28, 28)],
+    )
+    .map_err(|error| error.to_string())?;
+    let wrapper_inputs = component
+        .inputs()
+        .iter()
+        .map(|input| {
+            let port =
+                graph_component_instance_input_port(component, input.id()).ok_or_else(|| {
+                    format!("component input {} has no instance port", input.id().get())
+                })?;
+            Ok(GraphComponentInput::new(
+                input.id(),
+                input.name(),
+                WireEndpoint {
+                    node: nested_id,
+                    port,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let wrapper_outputs = component
+        .outputs()
+        .iter()
+        .map(|output| {
+            let port =
+                graph_component_instance_output_port(component, output.id()).ok_or_else(|| {
+                    format!(
+                        "component output {} has no instance port",
+                        output.id().get()
+                    )
+                })?;
+            Ok(GraphComponentOutput::new(
+                output.id(),
+                output.name(),
+                WireEndpoint {
+                    node: nested_id,
+                    port,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let wrapper_panel_items = promoted_parameter_panel_items(component, nested_id);
+    let wrapper = GraphComponentDocument::try_new(
+        GraphComponentLimits::interactive(),
+        component.revision(),
+        1,
+        "control.reference_pid_wrapper",
+        component.next_input_id(),
+        component.next_output_id(),
+        component.next_panel_item_id(),
+        wrapper_workspace,
+        wrapper_inputs,
+        wrapper_outputs,
+        wrapper_panel_items,
+    )
+    .map_err(|error| error.to_string())?;
+    let wrapper_digest = encode_graph_component(&wrapper)
+        .map_err(|error| error.to_string())?
+        .digest();
+    Ok((wrapper, wrapper_digest))
 }
 
 fn representative_hierarchy(
     component: &GraphComponentDocument,
-    component_digest: alumina_protocol::Digest,
+    component_digest: Digest,
     fixture: &RepresentativeExactControlGraph,
 ) -> Result<HierarchyPackage, String> {
-    let prototype = graph_component_instance_prototype(component, "Reference PID component")
+    let nested_id = GraphNodeId::new(1);
+    let (wrapper, wrapper_digest) = representative_wrapper_component(component)?;
+    let prototype = graph_component_instance_prototype(&wrapper, "Reference PID wrapper")
         .map_err(|error| error.to_string())?;
     let instance_id = GraphNodeId::new(1);
     let instance = NodeDefinition::new(
         instance_id,
         prototype.kind().clone(),
-        "Reference PID component",
+        "Reference PID wrapper",
         prototype.domain(),
         prototype.inputs().to_vec(),
         prototype.outputs().to_vec(),
@@ -4828,12 +12155,140 @@ fn representative_hierarchy(
         GraphHierarchyLimits::interactive(),
         component.revision(),
         root,
-        vec![component.clone()],
-        vec![GraphComponentInstance::new(instance_id, component_digest)],
+        vec![component.clone(), wrapper],
+        vec![
+            GraphComponentInstance::root(instance_id, wrapper_digest),
+            GraphComponentInstance::nested(wrapper_digest, nested_id, component_digest),
+        ],
     )
     .map_err(|error| error.to_string())?;
+    hierarchy_package(document, fixture)
+}
+
+fn parse_component_behavior_version(text: &str) -> Result<u32, String> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(
+            "behavior version must be one canonical nonzero unsigned decimal integer".to_owned(),
+        );
+    }
+    let version = text.parse::<u32>().map_err(|_| {
+        "behavior version must fit one canonical nonzero unsigned 32-bit integer".to_owned()
+    })?;
+    if version == 0 || version.to_string() != text {
+        return Err(
+            "behavior version must be one canonical nonzero unsigned decimal integer".to_owned(),
+        );
+    }
+    Ok(version)
+}
+
+fn parse_front_panel_clock_tick(text: &str) -> Result<u64, String> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("local tick must be one canonical unsigned decimal u64".to_owned());
+    }
+    let tick = text
+        .parse::<u64>()
+        .map_err(|_| "local tick must fit one canonical unsigned decimal u64".to_owned())?;
+    if tick.to_string() != text {
+        return Err("local tick must be one canonical unsigned decimal u64".to_owned());
+    }
+    Ok(tick)
+}
+
+fn front_panel_root_cursor_text(cursor: &Rational) -> String {
+    let sign = if cursor < &Rational::from(0) { "-" } else { "" };
+    if cursor.is_integer() {
+        format!("{sign}{}", cursor.numerator())
+    } else {
+        format!("{sign}{}/{}", cursor.numerator(), cursor.denominator())
+    }
+}
+
+fn parse_front_panel_root_cursor(text: &str, maximum_root_tick: u64) -> Result<Rational, String> {
+    if text.is_empty() || text.len() > 96 {
+        return Err("root tick must be one bounded canonical rational".to_owned());
+    }
+    let cursor = text
+        .parse::<Rational>()
+        .map_err(|_| "root tick must be one canonical rational".to_owned())?;
+    let canonical = front_panel_root_cursor_text(&cursor);
+    if canonical != text {
+        return Err(format!(
+            "root tick is not canonical; use exact text {canonical:?}"
+        ));
+    }
+    if cursor < Rational::from(0) || cursor > Rational::from(maximum_root_tick) {
+        return Err(format!(
+            "root tick {cursor} is outside inclusive horizon 0…{maximum_root_tick}"
+        ));
+    }
+    Ok(cursor)
+}
+
+fn parse_front_panel_schedule_draft(
+    graph: &GraphDocument,
+    authority: &GraphFrontPanelInputAuthority,
+    draft: &FrontPanelScheduleDraft,
+    limits: GraphFrontPanelRuntimeLimits,
+) -> Result<GraphFrontPanelSchedule, String> {
+    if draft.changes.is_empty() {
+        return Err("timeline must retain its mandatory tick-zero change".to_owned());
+    }
+    if draft.changes.len() > limits.maximum_changes_per_control {
+        return Err(format!(
+            "timeline has {} changes; policy permits {}",
+            draft.changes.len(),
+            limits.maximum_changes_per_control,
+        ));
+    }
+    let mut changes = Vec::with_capacity(draft.changes.len());
+    let mut previous_tick = None;
+    for (index, change) in draft.changes.iter().enumerate() {
+        let row = index + 1;
+        let tick = parse_front_panel_clock_tick(&change.tick)
+            .map_err(|error| format!("change #{row} {error}"))?;
+        if index == 0 && tick != 0 {
+            return Err("change #1 must begin at local tick 0".to_owned());
+        }
+        if previous_tick.is_some_and(|previous| tick <= previous) {
+            return Err(format!(
+                "change #{row} tick {tick} is not strictly after the preceding change"
+            ));
+        }
+        if change.value.trim().is_empty() {
+            return Err(format!(
+                "change #{row} awaits an exact t{} value",
+                authority.sample_type().get(),
+            ));
+        }
+        let value = parse_graph_literal_text(
+            graph.schema(),
+            authority.sample_type(),
+            &change.value,
+            GraphLiteralTextLimits::new(parameter_text_limit(graph, authority.sample_type())),
+        )
+        .map_err(|error| format!("change #{row} exact value rejected: {error}"))?;
+        changes.push(GraphFrontPanelChange::new(tick, value));
+        previous_tick = Some(tick);
+    }
+    Ok(GraphFrontPanelSchedule::new(
+        authority.key().clone(),
+        changes,
+    ))
+}
+
+fn hierarchy_package(
+    document: GraphHierarchyDocument,
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<HierarchyPackage, String> {
+    analyze_component_library_drafts(&document, fixture)?;
     let encoding = encode_graph_hierarchy(&document).map_err(|error| error.to_string())?;
     let flattening = flatten_graph_hierarchy(&document).map_err(|error| error.to_string())?;
+    let source_map = encode_graph_hierarchy_source_map(
+        &flattening,
+        GraphHierarchySourceMapLimits::interactive(),
+    )
+    .map_err(|error| error.to_string())?;
     analyze_graph_draft(
         flattening.workspace().graph(),
         fixture.registry().semantic_registry(),
@@ -4843,6 +12298,114 @@ fn representative_hierarchy(
         document,
         encoding,
         flattening,
+        source_map,
+    })
+}
+
+fn analyze_component_library_drafts(
+    document: &GraphHierarchyDocument,
+    fixture: &RepresentativeExactControlGraph,
+) -> Result<(), String> {
+    for dependency in document.dependencies() {
+        let mut workspace = dependency.document().workspace().clone();
+        let placeholders = workspace
+            .graph()
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind().name() == GRAPH_COMPONENT_INSTANCE_KIND
+                    && node.kind().version() == GRAPH_COMPONENT_INSTANCE_VERSION
+            })
+            .map(NodeDefinition::id)
+            .collect::<Vec<_>>();
+        for placeholder in placeholders {
+            workspace
+                .delete_node(placeholder)
+                .map_err(|error| error.to_string())?;
+        }
+        analyze_graph_draft(workspace.graph(), fixture.registry().semantic_registry()).map_err(
+            |error| {
+                format!(
+                    "component library ALGC {}… draft semantics rejected: {error}",
+                    digest_prefix(dependency.digest().0)
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn structural_workspace_presentation(
+    workspace: &GraphWorkspaceDocument,
+) -> Result<GraphPresentation, String> {
+    let document = workspace.graph();
+    if document.nodes().is_empty() {
+        return Ok(GraphPresentation {
+            nodes: BTreeMap::new(),
+            wires: BTreeMap::new(),
+            size: egui::vec2(EMPTY_CANVAS_WIDTH, EMPTY_CANVAS_HEIGHT),
+        });
+    }
+    if document.nodes().len() > MAXIMUM_VISIBLE_NODES {
+        return Err("hierarchy root exceeds the visible-node limit".to_owned());
+    }
+    if document.wires().len() > MAXIMUM_VISIBLE_WIRES {
+        return Err("hierarchy root exceeds the visible-wire limit".to_owned());
+    }
+    if workspace.placements().len() != document.nodes().len() {
+        return Err("hierarchy root canvas does not cover every node".to_owned());
+    }
+    let minimum_x = workspace
+        .placements()
+        .iter()
+        .map(|placement| display_coordinate(placement.x()))
+        .fold(f32::INFINITY, f32::min);
+    let minimum_y = workspace
+        .placements()
+        .iter()
+        .map(|placement| display_coordinate(placement.y()))
+        .fold(f32::INFINITY, f32::min);
+    let offset = egui::vec2(
+        (CANVAS_MARGIN - minimum_x).max(0.0),
+        (CANVAS_MARGIN - minimum_y).max(0.0),
+    );
+    let mut nodes = BTreeMap::new();
+    let mut maximum_bottom = 0.0_f32;
+    let mut maximum_right = 0.0_f32;
+    for placement in workspace.placements() {
+        let node = document
+            .node(placement.node())
+            .ok_or_else(|| format!("hierarchy root node {} is missing", placement.node().get()))?;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(
+                display_coordinate(placement.x()) + offset.x,
+                display_coordinate(placement.y()) + offset.y,
+            ),
+            egui::vec2(NODE_WIDTH, node_height(node)),
+        );
+        maximum_bottom = maximum_bottom.max(rect.bottom());
+        maximum_right = maximum_right.max(rect.right());
+        nodes.insert(placement.node(), NodePresentation { rect, rank: 0 });
+    }
+    let wires = document
+        .wires()
+        .iter()
+        .map(|wire| {
+            (
+                wire.id(),
+                WirePresentation {
+                    feedback_lane: None,
+                },
+            )
+        })
+        .collect();
+    Ok(GraphPresentation {
+        nodes,
+        wires,
+        size: egui::vec2(
+            maximum_right + CANVAS_MARGIN,
+            maximum_bottom + CANVAS_MARGIN + 36.0,
+        ),
     })
 }
 
@@ -5450,6 +13013,164 @@ fn wire_color(document: &GraphDocument, source: WireEndpoint) -> egui::Color32 {
     }
 }
 
+fn graph_wire_stroke(
+    document: &GraphDocument,
+    selected_node: Option<GraphNodeId>,
+    opened_source_wire: Option<GraphWireId>,
+    wire: &WireDefinition,
+) -> egui::Stroke {
+    if opened_source_wire == Some(wire.id()) {
+        egui::Stroke::new(3.6_f32, egui::Color32::LIGHT_GREEN)
+    } else if selected_node
+        .is_some_and(|node| node == wire.source().node || node == wire.target().node)
+    {
+        egui::Stroke::new(2.4_f32, egui::Color32::WHITE)
+    } else {
+        egui::Stroke::new(1.5_f32, wire_color(document, wire.source()))
+    }
+}
+
+fn paint_hierarchy_root_wire(
+    painter: &egui::Painter,
+    origin: egui::Vec2,
+    document: &GraphDocument,
+    presentation: &GraphPresentation,
+    focus: HierarchyRootCanvasFocus,
+    wire: &WireDefinition,
+) {
+    let source = wire.source();
+    let target = wire.target();
+    let (Some(source_anchor), Some(target_anchor)) = (
+        port_anchor(document, presentation, source, true),
+        port_anchor(document, presentation, target, false),
+    ) else {
+        return;
+    };
+    let source_anchor = source_anchor + origin;
+    let target_anchor = target_anchor + origin;
+    let selected = focus.selects_wire(wire);
+    let color = if selected {
+        egui::Color32::WHITE
+    } else {
+        wire_color(document, source)
+    };
+    let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
+    let middle_x = (source_anchor.x + target_anchor.x) * 0.5;
+    painter.add(egui::Shape::line(
+        vec![
+            source_anchor,
+            egui::pos2(middle_x, source_anchor.y),
+            egui::pos2(middle_x, target_anchor.y),
+            target_anchor,
+        ],
+        stroke,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            target_anchor,
+            target_anchor + egui::vec2(-7.0, -4.0),
+            target_anchor + egui::vec2(-7.0, 4.0),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+fn paint_hierarchy_root_node(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    node: &NodeDefinition,
+    selected: bool,
+    bound_instance: bool,
+    placement: Option<GraphNodePlacement>,
+) {
+    let fill = if selected {
+        egui::Color32::from_rgb(53, 76, 108)
+    } else if bound_instance {
+        egui::Color32::from_rgb(44, 50, 73)
+    } else {
+        egui::Color32::from_rgb(34, 43, 56)
+    };
+    let border = if selected {
+        egui::Color32::from_rgb(126, 195, 255)
+    } else if bound_instance {
+        egui::Color32::from_rgb(184, 153, 244)
+    } else {
+        egui::Color32::from_rgb(89, 111, 139)
+    };
+    painter.rect_filled(rect, 6.0, fill);
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, border),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.top() + NODE_HEADER_HEIGHT),
+            egui::pos2(rect.right(), rect.top() + NODE_HEADER_HEIGHT),
+        ],
+        egui::Stroke::new(1.0_f32, border.gamma_multiply(0.65)),
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 9.0),
+        egui::Align2::LEFT_TOP,
+        node.label(),
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 28.0),
+        egui::Align2::LEFT_TOP,
+        if bound_instance {
+            "root ALGC instance"
+        } else {
+            "root structural node"
+        },
+        egui::FontId::monospace(10.5),
+        egui::Color32::GRAY,
+    );
+    for (index, port) in node.inputs().iter().enumerate() {
+        let anchor = port_anchor_for_rect(rect, index, false);
+        painter.circle_filled(anchor, 4.0, egui::Color32::from_rgb(136, 171, 211));
+        painter.text(
+            anchor + egui::vec2(9.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            port.name(),
+            egui::FontId::proportional(11.0),
+            egui::Color32::LIGHT_GRAY,
+        );
+    }
+    for (index, port) in node.outputs().iter().enumerate() {
+        let anchor = port_anchor_for_rect(rect, index, true);
+        painter.circle_filled(anchor, 4.0, egui::Color32::from_rgb(122, 211, 185));
+        painter.text(
+            anchor + egui::vec2(-9.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            port.name(),
+            egui::FontId::proportional(11.0),
+            egui::Color32::LIGHT_GRAY,
+        );
+    }
+    let footer = placement.map_or_else(
+        || "placement unavailable".to_owned(),
+        |placement| {
+            format!(
+                "exact ({}, {}) · {} promoted parameter(s)",
+                placement.x(),
+                placement.y(),
+                node.parameters().len()
+            )
+        },
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(10.0, -8.0),
+        egui::Align2::LEFT_BOTTOM,
+        footer,
+        egui::FontId::monospace(9.5),
+        egui::Color32::from_rgb(170, 180, 194),
+    );
+}
+
 fn typed_value_text(
     document: &GraphDocument,
     value: &alumina_interface_core::graph::TypedGraphValue,
@@ -5508,8 +13229,268 @@ fn paint_grid(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
+fn component_input_endpoint_choices(
+    component: &GraphComponentDocument,
+    editing: Option<GraphComponentInputId>,
+) -> Vec<(WireEndpoint, String)> {
+    let connected = component
+        .workspace()
+        .graph()
+        .wires()
+        .iter()
+        .map(|wire| wire.target())
+        .collect::<BTreeSet<_>>();
+    let exposed = component
+        .inputs()
+        .iter()
+        .filter(|input| Some(input.id()) != editing)
+        .map(GraphComponentInput::target)
+        .collect::<BTreeSet<_>>();
+    component
+        .workspace()
+        .graph()
+        .nodes()
+        .iter()
+        .flat_map(|node| {
+            node.inputs().iter().filter_map(|port| {
+                let endpoint = WireEndpoint {
+                    node: node.id(),
+                    port: port.id(),
+                };
+                (!connected.contains(&endpoint) && !exposed.contains(&endpoint)).then(|| {
+                    (
+                        endpoint,
+                        component_endpoint_label(component, endpoint, false),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+fn component_output_endpoint_choices(
+    component: &GraphComponentDocument,
+    editing: Option<GraphComponentOutputId>,
+) -> Vec<(WireEndpoint, String)> {
+    let exposed = component
+        .outputs()
+        .iter()
+        .filter(|output| Some(output.id()) != editing)
+        .map(GraphComponentOutput::source)
+        .collect::<BTreeSet<_>>();
+    component
+        .workspace()
+        .graph()
+        .nodes()
+        .iter()
+        .flat_map(|node| {
+            node.outputs().iter().filter_map(|port| {
+                let endpoint = WireEndpoint {
+                    node: node.id(),
+                    port: port.id(),
+                };
+                (!exposed.contains(&endpoint)).then(|| {
+                    (
+                        endpoint,
+                        component_endpoint_label(component, endpoint, true),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+fn component_endpoint_label(
+    component: &GraphComponentDocument,
+    endpoint: WireEndpoint,
+    output: bool,
+) -> String {
+    let Some(node) = component.workspace().graph().node(endpoint.node) else {
+        return format!("missing #{}.{}", endpoint.node.get(), endpoint.port.get());
+    };
+    let port = if output {
+        node.outputs()
+    } else {
+        node.inputs()
+    }
+    .iter()
+    .find(|port| port.id() == endpoint.port);
+    let Some(port) = port else {
+        return format!("missing #{}.{}", endpoint.node.get(), endpoint.port.get());
+    };
+    let value_type = component
+        .workspace()
+        .graph()
+        .schema()
+        .value_type(port.value_type())
+        .map_or("unknown", TypeDefinition::name);
+    format!(
+        "#{}.{} · {} / {} · {} [t{}]",
+        endpoint.node.get(),
+        endpoint.port.get(),
+        node.label(),
+        port.name(),
+        value_type,
+        port.value_type().get(),
+    )
+}
+
+fn endpoint_choice_selected_label(
+    selected: Option<WireEndpoint>,
+    choices: &[(WireEndpoint, String)],
+    unavailable: &str,
+) -> String {
+    selected
+        .and_then(|selected| {
+            choices
+                .iter()
+                .find(|(endpoint, _)| *endpoint == selected)
+                .map(|(_, label)| label.clone())
+        })
+        .unwrap_or_else(|| unavailable.to_owned())
+}
+
+fn component_connector_label(
+    component: &GraphComponentDocument,
+    connector: ComponentConnectorSelection,
+) -> String {
+    match connector {
+        ComponentConnectorSelection::Input(id) => component.input(id).map_or_else(
+            || format!("missing input #{}", id.get()),
+            |input| {
+                let port = graph_component_instance_input_port(component, id)
+                    .map_or_else(|| "?".to_owned(), |port| port.get().to_string());
+                format!(
+                    "input #{} · instance p{} · {} → #{}.{}",
+                    id.get(),
+                    port,
+                    input.name(),
+                    input.target().node.get(),
+                    input.target().port.get(),
+                )
+            },
+        ),
+        ComponentConnectorSelection::Output(id) => component.output(id).map_or_else(
+            || format!("missing output #{}", id.get()),
+            |output| {
+                let port = graph_component_instance_output_port(component, id)
+                    .map_or_else(|| "?".to_owned(), |port| port.get().to_string());
+                format!(
+                    "output #{} · instance p{} · {} ← #{}.{}",
+                    id.get(),
+                    port,
+                    output.name(),
+                    output.source().node.get(),
+                    output.source().port.get(),
+                )
+            },
+        ),
+    }
+}
+
 fn panel_item_label(name: &str) -> String {
     name.replace('_', " ")
+}
+
+fn panel_binding_label(
+    component: &GraphComponentDocument,
+    binding: GraphFrontPanelBinding,
+) -> String {
+    match binding {
+        GraphFrontPanelBinding::InputControl(input) => component.input(input).map_or_else(
+            || format!("missing input {}", input.get()),
+            |input| format!("input {} · {}", input.id().get(), input.name()),
+        ),
+        GraphFrontPanelBinding::ParameterControl { node, parameter } => component
+            .workspace()
+            .graph()
+            .node(node)
+            .and_then(|definition| {
+                definition
+                    .parameters()
+                    .iter()
+                    .find(|candidate| candidate.id() == parameter)
+                    .map(|parameter_definition| {
+                        format!(
+                            "parameter #{}.{} · {}.{}",
+                            node.get(),
+                            parameter,
+                            definition.label(),
+                            parameter_definition.name()
+                        )
+                    })
+            })
+            .unwrap_or_else(|| format!("missing parameter #{}.{}", node.get(), parameter)),
+        GraphFrontPanelBinding::OutputIndicator(output) => component.output(output).map_or_else(
+            || format!("missing output {}", output.get()),
+            |output| format!("output {} · {}", output.id().get(), output.name()),
+        ),
+    }
+}
+
+fn panel_binding_choices(
+    component: &GraphComponentDocument,
+) -> Vec<(GraphFrontPanelBinding, String)> {
+    let mut choices = Vec::new();
+    choices.extend(component.inputs().iter().map(|input| {
+        let binding = GraphFrontPanelBinding::InputControl(input.id());
+        (binding, panel_binding_label(component, binding))
+    }));
+    for node in component.workspace().graph().nodes() {
+        choices.extend(node.parameters().iter().map(|parameter| {
+            let binding = GraphFrontPanelBinding::ParameterControl {
+                node: node.id(),
+                parameter: parameter.id(),
+            };
+            (binding, panel_binding_label(component, binding))
+        }));
+    }
+    choices.extend(component.outputs().iter().map(|output| {
+        let binding = GraphFrontPanelBinding::OutputIndicator(output.id());
+        (binding, panel_binding_label(component, binding))
+    }));
+    choices
+}
+
+fn next_panel_item_rect(component: &GraphComponentDocument) -> Result<GraphFrontPanelRect, String> {
+    const X: i32 = 20;
+    const GAP: u32 = 20;
+    const WIDTH: u32 = 220;
+    const HEIGHT: u32 = 54;
+    let bottom = component
+        .panel_items()
+        .iter()
+        .map(|item| {
+            u32::try_from(item.rect().y())
+                .ok()
+                .and_then(|y| y.checked_add(item.rect().height()))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "validated panel rectangle could not be projected".to_owned())?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let y = bottom
+        .checked_add(GAP)
+        .ok_or_else(|| "front-panel placement overflowed".to_owned())?;
+    let right = u32::try_from(X)
+        .ok()
+        .and_then(|x| x.checked_add(WIDTH))
+        .ok_or_else(|| "front-panel placement overflowed".to_owned())?;
+    let lower = y
+        .checked_add(HEIGHT)
+        .ok_or_else(|| "front-panel placement overflowed".to_owned())?;
+    if right > component.limits().maximum_panel_coordinate
+        || lower > component.limits().maximum_panel_coordinate
+    {
+        return Err("front-panel has no bounded space for another default item".to_owned());
+    }
+    Ok(GraphFrontPanelRect::new(
+        X,
+        i32::try_from(y).map_err(|_| "front-panel y coordinate exceeds i32".to_owned())?,
+        WIDTH,
+        HEIGHT,
+    ))
 }
 
 fn paint_analog_trace_series(
@@ -6040,12 +14021,159 @@ fn short_kind(kind: &str) -> &str {
     kind.strip_prefix("control.").unwrap_or(kind)
 }
 
-const fn domain_label(domain: ExecutionDomain) -> &'static str {
-    match domain {
-        ExecutionDomain::HostExact => "HostExact",
-        ExecutionDomain::Service { .. } => "Service",
-        ExecutionDomain::Realtime { .. } => "Realtime",
+fn show_node_identity_editors(
+    ui: &mut egui::Ui,
+    node: &NodeDefinition,
+    domain_choices: &[ExecutionDomain],
+    maximum_label_bytes: usize,
+    label_text: &mut String,
+) -> (Option<String>, Option<ExecutionDomain>) {
+    let mut label_request = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.monospace("label:");
+        let response = ui.add(
+            egui::TextEdit::singleline(label_text)
+                .desired_width(260.0)
+                .char_limit(maximum_label_bytes),
+        );
+        let apply = ui.small_button("apply label").clicked()
+            || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+        if ui.small_button("reset label").clicked() {
+            node.label().clone_into(label_text);
+        }
+        ui.weak(format!(
+            "canonical metadata · {} / {maximum_label_bytes} UTF-8 bytes · never behavior identity",
+            label_text.len()
+        ));
+        if apply {
+            label_request = Some(label_text.clone());
+        }
+    });
+
+    let mut selected_domain = node.domain();
+    ui.horizontal_wrapped(|ui| {
+        ui.monospace("execution placement:");
+        egui::ComboBox::from_id_salt(("node_execution_domain", node.id().get()))
+            .selected_text(domain_choice_label(selected_domain))
+            .show_ui(ui, |ui| {
+                for choice in domain_choices {
+                    ui.selectable_value(
+                        &mut selected_domain,
+                        *choice,
+                        domain_choice_label(*choice),
+                    );
+                }
+            });
+        ui.weak(format!(
+            "{} audited concrete choice(s) · device identities come only from graph clocks/placements",
+            domain_choices.len()
+        ));
+    });
+    let domain_request = (selected_domain != node.domain()).then_some(selected_domain);
+    (label_request, domain_request)
+}
+
+fn show_node_parameter_editors(
+    ui: &mut egui::Ui,
+    document: &GraphDocument,
+    node: &NodeDefinition,
+    drafts: &mut BTreeMap<(GraphNodeId, u32), String>,
+) -> Option<(u32, String)> {
+    if !node.parameters().is_empty() {
+        ui.weak(
+            "Exact literal text: quoted strings · hex\"bytes\" · [arrays] · {field:value} · some/none · ok/error",
+        );
     }
+    let mut request = None;
+    for parameter in node.parameters() {
+        let Some(initial) = parameter_edit_text(document, parameter.value()) else {
+            ui.monospace(format!(
+                "{} = {} · read-only literal shape",
+                parameter.name(),
+                typed_value_text(document, parameter.value())
+            ));
+            continue;
+        };
+        let maximum = parameter_text_limit(document, parameter.value().value_type());
+        let draft = drafts.entry((node.id(), parameter.id())).or_insert(initial);
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(format!("{}:", parameter.name()));
+            let response = ui.add(
+                egui::TextEdit::singleline(draft)
+                    .desired_width(180.0)
+                    .char_limit(maximum),
+            );
+            let apply = ui.small_button("apply exact").clicked()
+                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            ui.weak(typed_value_text(document, parameter.value()));
+            if apply {
+                request = Some((parameter.id(), draft.clone()));
+            }
+        });
+    }
+    request
+}
+
+fn domain_choice_label(domain: ExecutionDomain) -> String {
+    match domain {
+        ExecutionDomain::HostExact => "HostExact".to_owned(),
+        ExecutionDomain::Service { device_id } => {
+            format!("Service · device {}…", digest_prefix16(device_id.0))
+        }
+        ExecutionDomain::Realtime { device_id } => {
+            format!("Realtime · device {}…", digest_prefix16(device_id.0))
+        }
+    }
+}
+
+fn audited_domain_choices(
+    document: &GraphDocument,
+    allowed: ExecutionDomainSet,
+) -> Vec<ExecutionDomain> {
+    let mut devices = Vec::new();
+    for clock in document.clocks() {
+        if let ClockKind::DeviceCycle { device_id, .. } = clock.kind()
+            && !devices.contains(&device_id)
+        {
+            devices.push(device_id);
+        }
+    }
+    for node in document.nodes() {
+        let device_id = match node.domain() {
+            ExecutionDomain::HostExact => None,
+            ExecutionDomain::Service { device_id } | ExecutionDomain::Realtime { device_id } => {
+                Some(device_id)
+            }
+        };
+        if let Some(device_id) = device_id
+            && !devices.contains(&device_id)
+        {
+            devices.push(device_id);
+        }
+    }
+    devices.sort_unstable_by_key(|device| device.0);
+
+    let mut choices = Vec::new();
+    if allowed.allows_host_exact() {
+        choices.push(ExecutionDomain::HostExact);
+    }
+    if allowed.allows_service() {
+        choices.extend(
+            devices
+                .iter()
+                .copied()
+                .map(|device_id| ExecutionDomain::Service { device_id }),
+        );
+    }
+    if allowed.allows_realtime() {
+        choices.extend(
+            devices
+                .iter()
+                .copied()
+                .map(|device_id| ExecutionDomain::Realtime { device_id }),
+        );
+    }
+    choices
 }
 
 fn digest_prefix(digest: [u8; 32]) -> String {
@@ -6082,11 +14210,244 @@ fn digest_prefix16(identity: [u8; 16]) -> String {
 mod tests {
     use super::*;
     use alumina_interface_core::graph::{
-        BaseDimensions, GraphLimits, GraphPortId, JobGraphHandle, NodeKind, RecordField,
-        RecordFieldId, RecordValueField, ResourceGraphHandle, TypeDefinition, UnitDefinition,
-        UnitId, replay_graph_component, replay_graph_hierarchy, replay_graph_probes,
-        replay_graph_workspace,
+        BaseDimensions, GraphComponentInputId, GraphLimits, GraphPortId, JobGraphHandle, NodeKind,
+        RecordField, RecordFieldId, RecordValueField, ResourceGraphHandle, TypeDefinition,
+        UnitDefinition, UnitId, replay_graph_component, replay_graph_hierarchy,
+        replay_graph_probes, replay_graph_workspace,
     };
+
+    struct AlgsHierarchyOffsets {
+        selected_component: std::ops::Range<usize>,
+        hierarchy: std::ops::Range<usize>,
+        source_map: std::ops::Range<usize>,
+    }
+
+    fn persisted_algs(bytes: &[u8]) -> String {
+        let mut persisted = String::with_capacity(
+            PERSISTED_AUTHORING_SESSION_PREFIX.len() + bytes.len().saturating_mul(2),
+        );
+        persisted.push_str(PERSISTED_AUTHORING_SESSION_PREFIX);
+        append_lower_hex(&mut persisted, bytes);
+        persisted
+    }
+
+    fn replace_exact_embedded_bytes(session: &mut [u8], current: &[u8], replacement: &[u8]) {
+        assert_eq!(current.len(), replacement.len());
+        let positions = session
+            .windows(current.len())
+            .enumerate()
+            .filter_map(|(index, candidate)| (candidate == current).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(positions.len(), 1);
+        session[positions[0]..positions[0] + current.len()].copy_from_slice(replacement);
+    }
+
+    fn algs_hierarchy_offsets(bytes: &[u8]) -> AlgsHierarchyOffsets {
+        const FIXED_HEADER: usize = 4 + 2 + 2 + 6 * 8;
+
+        fn take_length(bytes: &[u8], cursor: &mut usize) -> usize {
+            let end = *cursor + 4;
+            let length =
+                usize::try_from(u32::from_le_bytes(bytes[*cursor..end].try_into().unwrap()))
+                    .unwrap();
+            *cursor = end;
+            length
+        }
+
+        let mut cursor = FIXED_HEADER;
+        for _ in 0..3 {
+            let length = take_length(bytes, &mut cursor);
+            cursor += length;
+        }
+        assert_eq!(bytes[cursor], 1);
+        cursor += 1;
+        let selected_component = cursor..cursor + 32;
+        cursor = selected_component.end;
+        let hierarchy_length = take_length(bytes, &mut cursor);
+        let hierarchy = cursor..cursor + hierarchy_length;
+        cursor = hierarchy.end;
+        let source_map_length = take_length(bytes, &mut cursor);
+        let source_map = cursor..cursor + source_map_length;
+        cursor = source_map.end;
+        assert_eq!(cursor, bytes.len());
+        AlgsHierarchyOffsets {
+            selected_component,
+            hierarchy,
+            source_map,
+        }
+    }
+
+    fn assert_exact_component_package_equal(
+        actual: &ComponentPackage,
+        expected: &ComponentPackage,
+    ) {
+        assert_eq!(actual.document, expected.document);
+        assert_eq!(actual.encoding, expected.encoding);
+        assert_eq!(actual.hierarchy.document, expected.hierarchy.document);
+        assert_eq!(actual.hierarchy.encoding, expected.hierarchy.encoding);
+        assert_eq!(actual.hierarchy.flattening, expected.hierarchy.flattening);
+        assert_eq!(actual.hierarchy.source_map, expected.hierarchy.source_map);
+    }
+
+    fn root_input_component(
+        base: &GraphComponentDocument,
+    ) -> (GraphComponentDocument, CanonicalGraphComponentEncoding) {
+        let mut workspace = base.workspace().clone();
+        workspace.disconnect(GraphWireId::new(6)).unwrap();
+        let document = GraphComponentDocument::try_new(
+            base.limits(),
+            base.revision(),
+            base.component_version(),
+            "control.root_wired_pid",
+            2,
+            base.next_output_id(),
+            base.next_panel_item_id(),
+            workspace,
+            vec![GraphComponentInput::new(
+                GraphComponentInputId::new(1),
+                "error_samples",
+                WireEndpoint {
+                    node: GraphNodeId::new(8),
+                    port: GraphPortId::new(1),
+                },
+            )],
+            base.outputs().to_vec(),
+            base.panel_items().to_vec(),
+        )
+        .unwrap();
+        let encoding = encode_graph_component(&document).unwrap();
+        (document, encoding)
+    }
+
+    #[test]
+    fn cached_job_proof_starts_from_complete_reconciled_participant_set() {
+        let workspace = ExactControlWorkspace::try_new().unwrap();
+        let proof = &workspace.cached_jobs;
+        assert_eq!(proof.catalog.entries().len(), 2);
+        assert_eq!(proof.workspace.graph().nodes().len(), 1);
+        assert_eq!(proof.selected_node, Some(GraphNodeId::new(1)));
+        assert_eq!(proof.selected_slot, 0);
+        assert!(proof.status.contains("cache reconciliation"));
+        validate_cached_job_workspace(&proof.catalog, &proof.registry, &proof.workspace).unwrap();
+        for slot in CACHED_JOB_REFERENCE_SLOTS {
+            assert_eq!(
+                cached_job_handle_at_path(
+                    proof.workspace.graph().nodes().first().unwrap(),
+                    proof.registry.context_schema(),
+                    slot.path,
+                ),
+                Some(proof.catalog.entries()[0].handle())
+            );
+        }
+        let replay = replay_graph_workspace(
+            proof.encoding.bytes(),
+            proof.workspace.limits(),
+            proof.workspace.graph().schema().limits(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &proof.workspace);
+        assert_eq!(replay.encoding(), &proof.encoding);
+    }
+
+    #[test]
+    fn cached_job_ui_rebind_add_and_unified_session_history_stay_catalog_bound() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let node = workspace.cached_jobs.selected_node.unwrap();
+        let placement = workspace.cached_jobs.workspace.placement(node);
+        let initial = workspace.cached_jobs.encoding.clone();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+
+        workspace.cached_jobs.selected_entry = 1;
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        assert_ne!(workspace.cached_jobs.encoding, initial);
+        assert_eq!(workspace.cached_jobs.workspace.placement(node), placement);
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert_eq!(workspace.history.redo_len(), 0);
+        assert_eq!(
+            cached_job_handle_at_path(
+                workspace.cached_jobs.workspace.graph().node(node).unwrap(),
+                workspace.cached_jobs.registry.context_schema(),
+                CACHED_JOB_REFERENCE_SLOTS[0].path,
+            ),
+            Some(workspace.cached_jobs.catalog.entries()[1].handle())
+        );
+        for selected_slot in 1..CACHED_JOB_REFERENCE_SLOTS.len() {
+            workspace.cached_jobs.selected_slot = selected_slot;
+            workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        }
+        assert_eq!(workspace.history.undo_len(), 3);
+        for slot in CACHED_JOB_REFERENCE_SLOTS {
+            assert_eq!(
+                cached_job_handle_at_path(
+                    workspace.cached_jobs.workspace.graph().node(node).unwrap(),
+                    workspace.cached_jobs.registry.context_schema(),
+                    slot.path,
+                ),
+                Some(workspace.cached_jobs.catalog.entries()[1].handle())
+            );
+        }
+
+        workspace.apply_cached_job_action(CachedJobGraphAction::Add);
+        assert_eq!(workspace.cached_jobs.workspace.graph().nodes().len(), 2);
+        assert_eq!(workspace.history.undo_len(), 4);
+        let edited = workspace.cached_jobs.encoding.clone();
+        let edited_session = workspace.authoring_session_encoding().unwrap();
+        let replay = replay_graph_workspace(
+            edited.bytes(),
+            workspace.cached_jobs.workspace.limits(),
+            workspace.cached_jobs.workspace.graph().schema().limits(),
+        )
+        .unwrap();
+        validate_cached_job_workspace(
+            &workspace.cached_jobs.catalog,
+            &workspace.cached_jobs.registry,
+            replay.document(),
+        )
+        .unwrap();
+        assert_eq!(replay.encoding(), &edited);
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.cached_jobs.workspace.graph().nodes().len(), 1);
+        assert_eq!(workspace.history.redo_len(), 1);
+        workspace.navigate_history(true);
+        assert_eq!(workspace.cached_jobs.encoding, edited);
+        assert_eq!(workspace.cached_jobs.workspace.graph().nodes().len(), 2);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+
+        for _ in 0..4 {
+            workspace.navigate_history(false);
+        }
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+
+        let proof = &workspace.cached_jobs;
+        let mut raw = proof.workspace.clone();
+        let raw_node = raw.graph().nodes()[0].id();
+        let raw_handle = JobGraphHandle {
+            global_job_digest: Digest([0x9a; 32]),
+            ..proof.catalog.entries()[0].handle()
+        };
+        let parameter = raw.graph().node(raw_node).unwrap().parameters()[0]
+            .value()
+            .replacing_value_at_path(
+                proof.registry.context_schema(),
+                CACHED_JOB_FALLBACK_PATH.as_slice(),
+                GraphValue::JobHandle(raw_handle),
+            )
+            .unwrap();
+        raw.set_parameter(raw_node, CACHED_JOB_PARAMETER, parameter)
+            .unwrap();
+        assert!(
+            validate_cached_job_workspace(&proof.catalog, &proof.registry, &raw)
+                .unwrap_err()
+                .contains("raw, stale, or foreign")
+        );
+    }
 
     #[test]
     fn representative_layout_is_bounded_acyclic_and_keeps_feedback_visible() {
@@ -6155,7 +14516,7 @@ mod tests {
         assert_eq!(trigger.trigger_tick(), 3);
         assert_eq!((trigger.first_tick(), trigger.last_tick()), (1, 5));
         assert_eq!(workspace.cursor_root_tick, Rational::from(30));
-        assert_eq!(workspace.palette.len(), 13);
+        assert_eq!(workspace.palette.len(), 18);
         assert!(workspace.palette.iter().all(|entry| {
             workspace
                 .fixture
@@ -6251,35 +14612,210 @@ mod tests {
     }
 
     #[test]
-    fn tinybee_reference_catalog_creates_only_four_concrete_resource_nodes() {
+    fn tinybee_catalog_builds_one_executable_pair_and_exact_offline_package() {
         let mut proof = tinybee_resource_proof().unwrap();
         assert_eq!(proof.catalog.advertised_resource_count(), 4);
         assert_eq!(proof.catalog.entries().len(), 4);
-        assert!(proof.workspace.graph().nodes().is_empty());
-        for index in 0..proof.catalog.entries().len() {
-            proof.catalog_index = index;
-            assert!(!proof.selected_is_present());
-            proof.add_selected();
-            assert!(proof.selected_is_present());
+        assert_eq!(proof.workspace.graph().nodes().len(), 2);
+        assert_eq!(proof.workspace.graph().wires().len(), 1);
+        assert_eq!(proof.pair_node, GraphNodeId::new(1));
+        for (slot, entry) in [0, 1].into_iter().enumerate() {
+            proof.reference_slot = slot;
+            assert_eq!(proof.selected_reference_entry(), Some(entry));
         }
-        assert_eq!(proof.workspace.graph().nodes().len(), 4);
-        let retained = proof.encoding.clone();
-        proof.add_selected();
-        assert_eq!(proof.encoding, retained);
-        assert!(proof.status.contains("already"));
-        assert!(proof.workspace.graph().nodes().iter().all(|node| {
-            node.domain()
-                == ExecutionDomain::Realtime {
-                    device_id: DeviceId([0x54; 16]),
-                }
-                && matches!(
-                    node.parameters()[0].value().value(),
-                    GraphValue::ResourceHandle(_)
-                )
-        }));
+        assert_eq!(proof.catalog_index, 3);
+        assert!(!proof.selected_is_present());
+        assert_eq!(proof.deployment.package_bytes, 4_096);
+        assert_eq!(proof.deployment.first, ResourceId::Gpio(22));
+        assert_eq!(proof.deployment.second, ResourceId::Gpio(32));
+        assert_eq!(proof.deployment.realtime_period_cycles, 240_000);
+        assert_eq!(proof.deployment.realtime_wcet_cycles, 160);
+        assert_eq!(
+            proof.deployment.actor_replay.truth_table,
+            [false, false, false, true]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.ordered_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(32)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.fault_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(32)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.terminal_fault,
+            GraphExecutionFault::ResourceUnavailable
+        );
+        assert_ne!(
+            proof.deployment.actor_replay.success_evidence.digest(),
+            proof.deployment.actor_replay.fault_evidence.digest()
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.success_evidence.digest()),
+            "4fb86d723322ef8193256e9b8cdd53f79bc75505eb7bc373ba52954666acc297"
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.fault_evidence.digest()),
+            "eb92f438eae3a9bfab1550375124323f7a3a5ea9963a5557ff06f34fc3cf628c"
+        );
+        assert_eq!(
+            proof
+                .workspace
+                .graph()
+                .node(proof.pair_node)
+                .unwrap()
+                .domain(),
+            ExecutionDomain::Realtime {
+                device_id: DeviceId([0x54; 16]),
+            }
+        );
+        let initial_encoding = proof.encoding.clone();
+        let initial_deployment = proof.deployment.clone();
         proof.reset();
-        assert!(proof.workspace.graph().nodes().is_empty());
-        assert_eq!(proof.workspace.next_node_id(), 1);
+        assert_eq!(proof.workspace.graph().nodes().len(), 2);
+        assert_eq!(proof.workspace.graph().wires().len(), 1);
+        assert_eq!(proof.pair_node, GraphNodeId::new(1));
+        assert_eq!(proof.workspace.next_node_id(), 3);
+        assert_eq!(proof.workspace.next_wire_id(), 2);
+        assert_eq!(proof.catalog_index, 3);
+        assert_eq!(proof.reference_slot, 0);
+        assert_eq!(proof.encoding, initial_encoding);
+        assert_eq!(proof.deployment, initial_deployment);
+    }
+
+    #[test]
+    fn tinybee_replay_files_require_the_current_artifact_and_never_mutate_the_draft() {
+        let proof = tinybee_resource_proof().unwrap();
+        let retained = proof.deployment.clone();
+        let success = &proof.deployment.actor_replay.success_evidence;
+        let fault = &proof.deployment.actor_replay.fault_evidence;
+
+        assert_eq!(success.encoded().len(), 528);
+        assert_eq!(fault.encoded().len(), 278);
+        assert!(
+            target_replay_file_event_status(
+                BoundedFileEvent::Import(Ok(success.encoded().to_vec())),
+                "success",
+                success,
+                &proof.deployment.report,
+                proof.catalog.target(),
+            )
+            .contains("after fresh fixed-memory firmware-actor replay")
+        );
+        assert!(
+            target_replay_file_event_status(
+                BoundedFileEvent::Import(Ok(fault.encoded().to_vec())),
+                "fault",
+                fault,
+                &proof.deployment.report,
+                proof.catalog.target(),
+            )
+            .contains("after fresh fixed-memory firmware-actor replay")
+        );
+
+        let mut tampered = success.encoded().to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(
+            target_replay_file_event_status(
+                BoundedFileEvent::Import(Ok(tampered)),
+                "success",
+                success,
+                &proof.deployment.report,
+                proof.catalog.target(),
+            )
+            .contains("digest does not match its bytes")
+        );
+        assert_eq!(proof.deployment, retained);
+    }
+
+    #[test]
+    fn tinybee_executable_pair_selector_preserves_sibling_and_relowers_atomically() {
+        let mut proof = tinybee_resource_proof().unwrap();
+        let node = GraphNodeId::new(1);
+        proof.reference_slot = 1;
+        assert_eq!(proof.selected_reference_entry(), Some(1));
+        proof.catalog_index = 3;
+        let before_encoding = proof.encoding.clone();
+        let before_deployment = proof.deployment.clone();
+        let before_node_cursor = proof.workspace.next_node_id();
+        let before_wire_cursor = proof.workspace.next_wire_id();
+        let before_placement = proof.workspace.placement(node);
+
+        assert!(!proof.selected_is_present());
+        proof.rebind_reference();
+        assert!(
+            proof
+                .status
+                .contains("resources.interlock from GPIO 32 to GPIO 35")
+        );
+        assert_ne!(proof.encoding, before_encoding);
+        assert_ne!(
+            proof.deployment.package_digest,
+            before_deployment.package_digest
+        );
+        assert_ne!(
+            proof.deployment.implementation_digest,
+            before_deployment.implementation_digest
+        );
+        assert_ne!(
+            proof.deployment.actor_replay.success_evidence.digest(),
+            before_deployment.actor_replay.success_evidence.digest()
+        );
+        assert_ne!(
+            proof.deployment.actor_replay.fault_evidence.digest(),
+            before_deployment.actor_replay.fault_evidence.digest()
+        );
+        assert_eq!(proof.deployment.first, ResourceId::Gpio(22));
+        assert_eq!(proof.deployment.second, ResourceId::Gpio(35));
+        assert_eq!(
+            proof.deployment.actor_replay.truth_table,
+            [false, false, false, true]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.ordered_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(35)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.fault_reads,
+            [ResourceId::Gpio(22), ResourceId::Gpio(35)]
+        );
+        assert_eq!(
+            proof.deployment.actor_replay.terminal_fault,
+            GraphExecutionFault::ResourceUnavailable
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.success_evidence.digest()),
+            "9c0460a3f982c1bcaac2c50ee3e9f9fd96276e1ad677bbb8163576c3ae6aa2b6"
+        );
+        assert_eq!(
+            digest_hex(proof.deployment.actor_replay.fault_evidence.digest()),
+            "0434b39e2c5eb06d207ffcfaba2e7ecd12a41ef46884a06802cacb9ad7938634"
+        );
+        assert_eq!(proof.workspace.next_node_id(), before_node_cursor);
+        assert_eq!(proof.workspace.next_wire_id(), before_wire_cursor);
+        assert_eq!(proof.workspace.placement(node), before_placement);
+        assert!(proof.selected_is_present());
+        assert_eq!(proof.selected_reference_entry(), Some(3));
+        for (slot, entry) in [(0, 0), (1, 3)] {
+            proof.reference_slot = slot;
+            assert_eq!(proof.selected_reference_entry(), Some(entry));
+        }
+
+        let retained_encoding = proof.encoding.clone();
+        let retained_deployment = proof.deployment.clone();
+        proof.catalog_index = 3;
+        proof.reference_slot = 0;
+        proof.rebind_reference();
+        assert_eq!(proof.encoding, retained_encoding);
+        assert_eq!(proof.deployment, retained_deployment);
+        assert!(proof.status.contains("already carried"));
+        proof.reference_slot = 0;
+        assert_eq!(
+            proof.selected_reference_entry(),
+            Some(0),
+            "duplicate rejection changed the selected composite sibling"
+        );
     }
 
     #[test]
@@ -6418,52 +14954,81 @@ mod tests {
         assert!(!workspace.probes.as_ref().unwrap().document.observes(source));
     }
 
-    #[test]
-    fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
-        let mut workspace = ExactControlWorkspace::try_new().unwrap();
-        let initial = workspace.component.as_ref().unwrap();
-        assert_eq!(initial.encoding.bytes().len(), 4_815);
+    fn assert_hierarchy_source_map(initial: &ComponentPackage) {
+        assert_eq!(initial.hierarchy.flattening.node_provenance().len(), 21);
+        assert_eq!(initial.hierarchy.flattening.wire_provenance().len(), 25);
         assert_eq!(
-            initial.encoding.digest().0,
+            hierarchy_node_correlation(initial, GraphNodeId::new(8)).as_deref(),
+            Some("[1/1]:n8 → flat n10")
+        );
+        assert_eq!(
+            hierarchy_endpoint_correlation(
+                initial,
+                WireEndpoint {
+                    node: GraphNodeId::new(8),
+                    port: GraphPortId::new(1),
+                },
+            )
+            .as_deref(),
+            Some("[1/1]:n8.p1 → flat n10.p1")
+        );
+        assert_eq!(initial.hierarchy.source_map.bytes().len(), 2_550);
+        assert_eq!(
+            initial.hierarchy.source_map.digest().0,
             [
-                0x10, 0xe6, 0x49, 0x8e, 0xc3, 0x6a, 0xfc, 0x37, 0x7f, 0x13, 0x8c, 0xac, 0xb5, 0xc6,
-                0xaf, 0xe2, 0x09, 0x1c, 0x40, 0x74, 0x9e, 0xa3, 0xc9, 0xe9, 0xd4, 0xbb, 0xa8, 0x92,
-                0x5a, 0x4f, 0x02, 0x28,
+                0xcf, 0xdd, 0x57, 0x94, 0x9b, 0xda, 0x80, 0x53, 0x87, 0x36, 0xb4, 0xad, 0xa6, 0xf2,
+                0x30, 0x62, 0x85, 0x4e, 0xe9, 0xc6, 0xee, 0x8d, 0x82, 0x90, 0x35, 0xd3, 0x16, 0xf7,
+                0xa2, 0x41, 0xcd, 0x43,
             ]
         );
-        assert!(initial.document.inputs().is_empty());
-        assert_eq!(initial.document.outputs().len(), 7);
-        assert_eq!(initial.document.panel_items().len(), 15);
-        assert_eq!(
-            initial.document.workspace_digest(),
-            workspace.workspace_encoding.digest()
-        );
-        let replay = replay_graph_component(
-            initial.encoding.bytes(),
-            GraphComponentLimits::interactive(),
-            GraphWorkspaceLimits::interactive(),
-            GraphLimits::interactive(),
+        let replay = replay_graph_hierarchy_source_map(
+            initial.hierarchy.source_map.bytes(),
+            &initial.hierarchy.document,
+            GraphHierarchySourceMapLimits::interactive(),
         )
         .unwrap();
-        assert_eq!(replay.document(), &initial.document);
-        assert_eq!(replay.encoding(), &initial.encoding);
-        assert_eq!(initial.hierarchy.document.instances().len(), 1);
-        assert_eq!(initial.hierarchy.encoding.bytes().len(), 5_814);
+        assert_eq!(replay.encoding(), &initial.hierarchy.source_map);
+        assert_eq!(replay.flattening(), &initial.hierarchy.flattening);
+    }
+
+    fn assert_recursive_hierarchy_package(initial: &ComponentPackage) {
+        assert_eq!(initial.hierarchy.document.dependencies().len(), 2);
+        assert_eq!(initial.hierarchy.document.instances().len(), 2);
+        assert_eq!(initial.hierarchy.document.flattened_instance_count(), 2);
+        assert_eq!(initial.hierarchy.flattening.instances().len(), 2);
+        assert_eq!(
+            initial.hierarchy.flattening.instances()[0].source_path(),
+            [GraphNodeId::new(1)]
+        );
+        assert!(
+            initial.hierarchy.flattening.instances()[0]
+                .nodes()
+                .is_empty()
+        );
+        assert_eq!(
+            initial.hierarchy.flattening.instances()[1].source_path(),
+            [GraphNodeId::new(1), GraphNodeId::new(1)]
+        );
+        assert_eq!(
+            initial.hierarchy.flattening.instances()[1].nodes().len(),
+            21
+        );
+        assert_eq!(initial.hierarchy.encoding.bytes().len(), 8_104);
         assert_eq!(
             initial.hierarchy.encoding.digest().0,
             [
-                0x23, 0x26, 0x03, 0xde, 0x0d, 0x4a, 0x17, 0xff, 0x45, 0xb7, 0xbd, 0xa1, 0xc3, 0x63,
-                0x74, 0x5b, 0x31, 0x64, 0x05, 0xc9, 0x9f, 0xbd, 0xbd, 0xc4, 0x43, 0x47, 0xfa, 0x12,
-                0xbd, 0x00, 0xe0, 0xc8,
+                0xec, 0xd9, 0xab, 0x11, 0x55, 0x7b, 0xf6, 0xc3, 0xa5, 0x65, 0xaf, 0x45, 0x63, 0xcb,
+                0x14, 0x5b, 0xb6, 0xf1, 0xe2, 0x8e, 0xfc, 0x73, 0xd9, 0x9c, 0xcc, 0x74, 0xf7, 0x35,
+                0x47, 0x55, 0xf1, 0x98,
             ]
         );
         assert_eq!(initial.hierarchy.flattening.encoding().bytes().len(), 3_755);
         assert_eq!(
             initial.hierarchy.flattening.encoding().digest().0,
             [
-                0xe3, 0x9c, 0x53, 0x96, 0x53, 0x96, 0x89, 0xb8, 0xb5, 0x63, 0xa7, 0x22, 0x0e, 0x11,
-                0x80, 0xd7, 0x71, 0x7e, 0x70, 0x89, 0x3b, 0x71, 0x58, 0x0e, 0xbb, 0xe5, 0x18, 0x73,
-                0xfa, 0x13, 0xb6, 0x8f,
+                0x68, 0x04, 0xb9, 0x64, 0x53, 0x5d, 0x08, 0xb9, 0xce, 0xea, 0xd3, 0xd4, 0x38, 0x91,
+                0xc3, 0xae, 0x4c, 0x5a, 0xa5, 0xce, 0x38, 0xb0, 0x15, 0xc3, 0x4b, 0x4b, 0x38, 0x5b,
+                0xfa, 0x32, 0x57, 0xd4,
             ]
         );
         assert_eq!(initial.hierarchy.document.flattened_node_count(), 21);
@@ -6498,6 +15063,303 @@ mod tests {
         .unwrap();
         assert_eq!(hierarchy_replay.document(), &initial.hierarchy.document);
         assert_eq!(hierarchy_replay.encoding(), &initial.hierarchy.encoding);
+        assert_hierarchy_source_map(initial);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exact node/wire source-navigation lifecycle proves occurrence resolution, transient selection, rejection retention, history isolation, and persistence isolation"
+    )]
+    fn flattened_source_browser_opens_exact_nodes_and_wires_without_authoring_mutation() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        workspace.reconcile_hierarchy_source_browser();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let authoritative = retained_component.encoding.digest();
+        let wrapper = retained_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        let node_mapping = retained_component.hierarchy.flattening.node_provenance()[7].clone();
+        let node_origin = node_mapping.origin().clone();
+        let GraphHierarchyNodeOrigin::Component {
+            source_path,
+            component,
+            node,
+        } = &node_origin
+        else {
+            panic!("reference final node did not retain a component origin");
+        };
+        let expected_node = *node;
+        assert_eq!(source_path, &[GraphNodeId::new(1), GraphNodeId::new(1)]);
+        assert_eq!(*component, authoritative);
+
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_hierarchy_selection(None);
+        workspace.selected_node = None;
+        let node_selection = HierarchySourceSelection::Node {
+            flattened: node_mapping.flattened_node(),
+            origin: node_origin,
+        };
+        workspace.open_hierarchy_source(node_selection.clone());
+
+        assert_eq!(workspace.selected_hierarchy_component, Some(authoritative));
+        assert_eq!(
+            workspace.selected_hierarchy_instance,
+            Some(GraphNodeId::new(1))
+        );
+        assert_eq!(workspace.selected_node, Some(expected_node));
+        assert_eq!(workspace.opened_component_wire(authoritative), None);
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(node_selection)
+        );
+        assert!(workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("exact occurrence [1/1]")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        let wire_mapping = retained_component.hierarchy.flattening.wire_provenance()[0].clone();
+        let wire_origin = wire_mapping.origin().clone();
+        let GraphHierarchyWireOrigin::Component {
+            source_path,
+            component,
+            wire,
+        } = &wire_origin
+        else {
+            panic!("reference final wire did not retain a component origin");
+        };
+        let expected_wire = *wire;
+        assert_eq!(source_path, &[GraphNodeId::new(1), GraphNodeId::new(1)]);
+        assert_eq!(*component, authoritative);
+        let authoritative_workspace = retained_component
+            .hierarchy
+            .document
+            .dependency(*component)
+            .unwrap()
+            .document()
+            .workspace();
+        let exact_wire = authoritative_workspace
+            .graph()
+            .wires()
+            .iter()
+            .find(|candidate| candidate.id() == *wire)
+            .unwrap()
+            .to_owned();
+        let expected_target = exact_wire.target().node;
+        let wire_selection = HierarchySourceSelection::Wire {
+            flattened: wire_mapping.flattened_wire(),
+            origin: wire_origin,
+        };
+        workspace.open_hierarchy_source(wire_selection.clone());
+
+        assert_eq!(workspace.selected_node, Some(expected_target));
+        assert_eq!(
+            workspace.opened_component_wire(authoritative),
+            Some(expected_wire)
+        );
+        assert_eq!(
+            graph_wire_stroke(
+                authoritative_workspace.graph(),
+                workspace.selected_node,
+                workspace.opened_component_wire(authoritative),
+                &exact_wire,
+            ),
+            egui::Stroke::new(3.6_f32, egui::Color32::LIGHT_GREEN)
+        );
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(wire_selection.clone())
+        );
+        assert!(workspace.hierarchy_source_browser.status.contains("wire"));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.open_hierarchy_source(HierarchySourceSelection::Node {
+            flattened: node_mapping.flattened_node(),
+            origin: GraphHierarchyNodeOrigin::Root(GraphNodeId::new(99)),
+        });
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(wire_selection)
+        );
+        assert_eq!(
+            workspace.opened_component_wire(authoritative),
+            Some(expected_wire)
+        );
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("rejected without authoring mutation")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+    }
+
+    #[test]
+    fn flattened_source_browser_opens_private_definition_and_clears_stale_origin() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.palette_index = 0;
+        workspace.add_component_definition_node(wrapper);
+        let private_scope = workspace.component_definition.scope.unwrap();
+        let private_node = GraphNodeId::new(2);
+        let mapping = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .flattening
+            .node_provenance()
+            .iter()
+            .find(|mapping| {
+                matches!(
+                    mapping.origin(),
+                    GraphHierarchyNodeOrigin::Component {
+                        source_path,
+                        component,
+                        node,
+                    } if source_path == &[GraphNodeId::new(1)]
+                        && *component == private_scope
+                        && *node == private_node
+                )
+            })
+            .unwrap()
+            .clone();
+        let selection = HierarchySourceSelection::Node {
+            flattened: mapping.flattened_node(),
+            origin: mapping.origin().clone(),
+        };
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_hierarchy_selection(None);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.selected_node = None;
+        workspace.open_hierarchy_source(selection.clone());
+
+        assert_eq!(workspace.selected_hierarchy_component, Some(private_scope));
+        assert_eq!(
+            workspace.selected_hierarchy_instance,
+            Some(GraphNodeId::new(1))
+        );
+        assert_eq!(workspace.component_definition.scope, Some(private_scope));
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(private_node)
+        );
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(selection)
+        );
+        assert!(workspace.hierarchy_source_browser.scroll_pending);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.commit_component_definition_node_label(
+            private_scope,
+            private_node,
+            "source_navigation_remap",
+        );
+        assert_eq!(workspace.hierarchy_source_browser.last_opened, None);
+        assert!(!workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("absent from the current exact hierarchy")
+        );
+    }
+
+    #[test]
+    fn canonical_component_panel_tracks_exact_edits_and_detaches_transactionally() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap();
+        assert_eq!(initial.encoding.bytes().len(), 4_815);
+        assert_eq!(
+            initial.encoding.digest().0,
+            [
+                0x10, 0xe6, 0x49, 0x8e, 0xc3, 0x6a, 0xfc, 0x37, 0x7f, 0x13, 0x8c, 0xac, 0xb5, 0xc6,
+                0xaf, 0xe2, 0x09, 0x1c, 0x40, 0x74, 0x9e, 0xa3, 0xc9, 0xe9, 0xd4, 0xbb, 0xa8, 0x92,
+                0x5a, 0x4f, 0x02, 0x28,
+            ]
+        );
+        assert!(initial.document.inputs().is_empty());
+        assert_eq!(initial.document.outputs().len(), 7);
+        assert_eq!(initial.document.panel_items().len(), 15);
+        assert_eq!(
+            initial.document.workspace_digest(),
+            workspace.workspace_encoding.digest()
+        );
+        let replay = replay_graph_component(
+            initial.encoding.bytes(),
+            GraphComponentLimits::interactive(),
+            GraphWorkspaceLimits::interactive(),
+            GraphLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &initial.document);
+        assert_eq!(replay.encoding(), &initial.encoding);
+        assert_recursive_hierarchy_package(initial);
 
         let initial_digest = initial.encoding.digest();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "201");
@@ -6525,6 +15387,3329 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one panel lifecycle proves monotonic identity, recursive component replacement, complete-session isolation/history, workspace-edit retention, and persistence"
+    )]
+    fn front_panel_authoring_is_exact_historical_monotonic_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_flattened = initial_component.hierarchy.flattening.encoding().clone();
+        let removed_item = GraphFrontPanelItemId::new(15);
+        let binding = GraphFrontPanelBinding::OutputIndicator(GraphComponentOutputId::new(7));
+
+        workspace.apply_panel_action(PanelUiAction::Remove(removed_item));
+        let removed_session = workspace.authoring_session_encoding().unwrap();
+        let removed = workspace.component.as_ref().unwrap();
+        assert_ne!(removed_session, initial_session);
+        assert_eq!(removed.document.panel_items().len(), 14);
+        assert_eq!(removed.document.next_panel_item_id(), 16);
+        assert_eq!(removed.document.workspace(), &initial_workspace);
+        assert_eq!(
+            removed.hierarchy.document.root(),
+            initial_component.hierarchy.document.root()
+        );
+        assert_eq!(removed.hierarchy.flattening.encoding(), &initial_flattened);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+
+        workspace.apply_panel_action(PanelUiAction::Add {
+            name: "external_permit_live".to_owned(),
+            binding,
+            rect: GraphFrontPanelRect::new(20, 480, 220, 54),
+        });
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_item = GraphFrontPanelItemId::new(16);
+        let added = workspace.component.as_ref().unwrap();
+        assert_ne!(added_session, removed_session);
+        assert_eq!(added.document.next_panel_item_id(), 17);
+        assert_eq!(workspace.selected_panel_item, Some(added_item));
+        assert_eq!(
+            added.document.panel_item(added_item).unwrap().binding(),
+            binding
+        );
+        assert_eq!(added.hierarchy.flattening.encoding(), &initial_flattened);
+
+        let edited_draft = PanelItemDraft {
+            name: "external_permit_scope".to_owned(),
+            binding,
+            x: 57,
+            y: 511,
+            width: 260,
+            height: 64,
+        };
+        workspace.apply_panel_action(PanelUiAction::Update {
+            item: added_item,
+            draft: edited_draft.clone(),
+        });
+        let edited_session = workspace.authoring_session_encoding().unwrap();
+        let edited = workspace.component.as_ref().unwrap();
+        let item = edited.document.panel_item(added_item).unwrap();
+        assert_eq!(item.name(), "external_permit_scope");
+        assert_eq!(item.rect(), edited_draft.rect());
+        assert_eq!(edited.document.next_panel_item_id(), 17);
+        assert_eq!(edited.hierarchy.flattening.encoding(), &initial_flattened);
+
+        let history_lengths = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.apply_panel_action(PanelUiAction::Update {
+            item: added_item,
+            draft: edited_draft.clone(),
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+
+        let retained_status = workspace.component_status.clone();
+        let invalid = PanelItemDraft {
+            binding: GraphFrontPanelBinding::OutputIndicator(GraphComponentOutputId::new(1)),
+            ..edited_draft.clone()
+        };
+        workspace.apply_panel_action(PanelUiAction::Update {
+            item: added_item,
+            draft: invalid,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+        assert_ne!(workspace.component_status, retained_status);
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.apply_panel_action(PanelUiAction::Remove(added_item));
+        let removed_again_session = workspace.authoring_session_encoding().unwrap();
+        workspace.apply_panel_action(PanelUiAction::Add {
+            name: "external_permit_final".to_owned(),
+            binding,
+            rect: GraphFrontPanelRect::new(64, 520, 260, 64),
+        });
+        let final_item = GraphFrontPanelItemId::new(17);
+        let panel_session = workspace.authoring_session_encoding().unwrap();
+        let panel_component = workspace.component.as_ref().unwrap();
+        assert_eq!(panel_component.document.next_panel_item_id(), 18);
+        assert!(panel_component.document.panel_item(added_item).is_none());
+        assert_eq!(workspace.selected_panel_item, Some(final_item));
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            removed_again_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            panel_session
+        );
+        assert_eq!(
+            workspace.selected_panel_item,
+            Some(GraphFrontPanelItemId::new(1))
+        );
+
+        let mut moved_workspace = workspace.workspace.clone();
+        let placement = moved_workspace.placement(GraphNodeId::new(1)).unwrap();
+        moved_workspace
+            .move_node(
+                placement.node(),
+                placement.x().checked_add(1).unwrap(),
+                placement.y(),
+            )
+            .unwrap();
+        assert!(workspace.commit_candidate(
+            moved_workspace,
+            "moved control node while retaining authored front panel"
+        ));
+        let moved_session = workspace.authoring_session_encoding().unwrap();
+        let moved_component = workspace.component.as_ref().unwrap();
+        let retained_item = moved_component.document.panel_item(final_item).unwrap();
+        assert_eq!(retained_item.name(), "external_permit_final");
+        assert_eq!(
+            retained_item.rect(),
+            GraphFrontPanelRect::new(64, 520, 260, 64)
+        );
+        assert_eq!(moved_component.document.next_panel_item_id(), 18);
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            moved_session
+        );
+        assert_eq!(
+            restored
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .panel_item(final_item)
+                .unwrap()
+                .name(),
+            "external_permit_final"
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one connector lifecycle proves both directions, recursive stable-ID remapping, exact no-ops/rejections, history, and persistence"
+    )]
+    fn component_connector_authoring_is_recursive_monotonic_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        let first_source =
+            component_output_endpoint_choices(&initial_component.document, None)[0].0;
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddOutput {
+            name: "setpoint_diagnostic".to_owned(),
+            source: first_source,
+        });
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_output = GraphComponentOutputId::new(8);
+        let added = workspace.component.as_ref().unwrap();
+        assert_ne!(added_session, initial_session);
+        assert_eq!(added.document.next_output_id(), 9);
+        assert_eq!(
+            added.document.output(added_output).unwrap().source(),
+            first_source
+        );
+        assert_eq!(
+            workspace.selected_component_connector,
+            Some(ComponentConnectorSelection::Output(added_output))
+        );
+        assert_eq!(added.hierarchy.document.root(), &initial_root);
+        assert!(
+            added
+                .hierarchy
+                .document
+                .dependency(initial_component.encoding.digest())
+                .is_none()
+        );
+        assert!(
+            added
+                .hierarchy
+                .document
+                .dependency(initial_wrapper)
+                .is_none()
+        );
+        let refreshed_wrapper = added
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        assert!(added.hierarchy.document.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(
+                    refreshed_wrapper,
+                    GraphNodeId::new(1),
+                    added.encoding.digest(),
+                )
+        }));
+        assert!(added.hierarchy.document.instances().iter().any(|instance| {
+            *instance == GraphComponentInstance::root(GraphNodeId::new(1), refreshed_wrapper)
+        }));
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+
+        let second_source = component_output_endpoint_choices(&added.document, Some(added_output))
+            .into_iter()
+            .map(|(endpoint, _)| endpoint)
+            .find(|endpoint| *endpoint != first_source)
+            .unwrap();
+        let updated_draft = ComponentConnectorDraft {
+            name: "measurement_diagnostic".to_owned(),
+            endpoint: second_source,
+        };
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: added_output,
+            draft: updated_draft.clone(),
+        });
+        let updated_session = workspace.authoring_session_encoding().unwrap();
+        let updated = workspace.component.as_ref().unwrap();
+        let output = updated.document.output(added_output).unwrap();
+        assert_eq!(output.name(), "measurement_diagnostic");
+        assert_eq!(output.source(), second_source);
+        assert_eq!(updated.document.next_output_id(), 9);
+
+        let history_lengths = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: added_output,
+            draft: updated_draft,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+
+        let retained_history = workspace.history.clone();
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::RemoveOutput(
+            GraphComponentOutputId::new(1),
+        ));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::RemoveOutput(
+            added_output,
+        ));
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .next_output_id(),
+            9
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddOutput {
+            name: "diagnostic_final".to_owned(),
+            source: first_source,
+        });
+        let final_output = GraphComponentOutputId::new(9);
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .output(final_output)
+                .is_some()
+        );
+
+        let mut disconnected = workspace.workspace.clone();
+        let wire = disconnected.graph().wires()[0];
+        let input_target = wire.target();
+        disconnected.disconnect(wire.id()).unwrap();
+        assert!(workspace.commit_candidate(
+            disconnected,
+            "disconnected one exact input for public connector authoring"
+        ));
+        assert!(
+            component_input_endpoint_choices(
+                &workspace.component.as_ref().unwrap().document,
+                None,
+            )
+            .iter()
+            .any(|(endpoint, _)| *endpoint == input_target)
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddInput {
+            name: "setpoint_command".to_owned(),
+            target: input_target,
+        });
+        let first_input = GraphComponentInputId::new(1);
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .next_input_id(),
+            2
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateInput {
+            input: first_input,
+            draft: ComponentConnectorDraft {
+                name: "setpoint_exact".to_owned(),
+                endpoint: input_target,
+            },
+        });
+        workspace
+            .apply_component_connector_action(ComponentConnectorUiAction::RemoveInput(first_input));
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddInput {
+            name: "setpoint_final".to_owned(),
+            target: input_target,
+        });
+        let final_input = GraphComponentInputId::new(2);
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        assert_eq!(final_component.document.next_input_id(), 3);
+        assert_eq!(
+            final_component.document.input(final_input).unwrap().name(),
+            "setpoint_final"
+        );
+        assert_eq!(final_component.document.next_output_id(), 10);
+        assert!(final_component.document.output(final_output).is_some());
+
+        workspace.navigate_history(false);
+        assert_ne!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .document
+                .input(final_input)
+                .is_none()
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        let restored_component = &restored.component.as_ref().unwrap().document;
+        assert_eq!(restored_component.next_input_id(), 3);
+        assert_eq!(restored_component.next_output_id(), 10);
+        assert_eq!(
+            restored_component.input(final_input).unwrap().target(),
+            input_target
+        );
+        assert_eq!(
+            restored_component.output(final_output).unwrap().source(),
+            first_source
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one selected-library lifecycle proves recursive root refresh, control-authority isolation, stable connector identity, exact history, and persistence together"
+    )]
+    fn selected_library_connector_authoring_preserves_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_root_instance = workspace.selected_hierarchy_instance;
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let initial_wrapper_digest = initial_wrapper.digest();
+        let retained_source = initial_wrapper
+            .document()
+            .output(GraphComponentOutputId::new(7))
+            .unwrap()
+            .source();
+
+        workspace.selected_hierarchy_component = Some(initial_wrapper_digest);
+        workspace.reconcile_component_connector_selection(None);
+        assert_eq!(
+            workspace.component_connector_scope,
+            Some(initial_wrapper_digest)
+        );
+        assert_eq!(
+            workspace.selected_component_connector,
+            Some(ComponentConnectorSelection::Output(
+                GraphComponentOutputId::new(1)
+            ))
+        );
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: GraphComponentOutputId::new(1),
+            draft: ComponentConnectorDraft {
+                name: "wrapped_error_exact".to_owned(),
+                endpoint: initial_wrapper
+                    .document()
+                    .output(GraphComponentOutputId::new(1))
+                    .unwrap()
+                    .source(),
+            },
+        });
+        let renamed_session = workspace.authoring_session_encoding().unwrap();
+        let renamed = workspace.component.as_ref().unwrap();
+        assert_ne!(renamed_session, initial_session);
+        assert_eq!(renamed.document, initial_component.document);
+        assert_eq!(renamed.encoding, initial_component.encoding);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+        assert_eq!(workspace.selected_hierarchy_instance, initial_root_instance);
+        assert!(
+            renamed
+                .hierarchy
+                .document
+                .dependency(initial_wrapper_digest)
+                .is_none()
+        );
+        let renamed_wrapper = renamed
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let renamed_wrapper_digest = renamed_wrapper.digest();
+        assert_ne!(renamed_wrapper_digest, initial_wrapper_digest);
+        assert_eq!(
+            renamed_wrapper
+                .document()
+                .output(GraphComponentOutputId::new(1))
+                .unwrap()
+                .name(),
+            "wrapped_error_exact"
+        );
+        assert_eq!(
+            workspace.selected_hierarchy_component,
+            Some(renamed_wrapper_digest)
+        );
+        assert_eq!(
+            workspace.component_connector_scope,
+            Some(renamed_wrapper_digest)
+        );
+        assert_eq!(
+            renamed
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .find(|instance| instance.scope() == GraphInstanceScope::Root)
+                .unwrap()
+                .component(),
+            renamed_wrapper_digest
+        );
+        let renamed_root = renamed.hierarchy.document.root();
+        assert_ne!(renamed_root, &initial_root);
+        assert_eq!(renamed_root.placements(), initial_root.placements());
+        assert_eq!(renamed_root.next_node_id(), initial_root.next_node_id());
+        assert_eq!(renamed_root.next_wire_id(), initial_root.next_wire_id());
+        assert_eq!(renamed_root.graph().wires(), initial_root.graph().wires());
+        assert_eq!(
+            renamed_root
+                .graph()
+                .node(GraphNodeId::new(1))
+                .unwrap()
+                .outputs()[0]
+                .name(),
+            "wrapped_error_exact"
+        );
+        assert_eq!(
+            workspace
+                .authoring_session_document()
+                .unwrap()
+                .hierarchy()
+                .unwrap()
+                .selected_component(),
+            authoritative
+        );
+
+        let history_lengths = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: GraphComponentOutputId::new(1),
+            draft: ComponentConnectorDraft {
+                name: "wrapped_error_exact".to_owned(),
+                endpoint: renamed_wrapper
+                    .document()
+                    .output(GraphComponentOutputId::new(1))
+                    .unwrap()
+                    .source(),
+            },
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            renamed_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history_lengths
+        );
+
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::RemoveOutput(
+            GraphComponentOutputId::new(7),
+        ));
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependency(workspace.component_connector_scope.unwrap())
+                .unwrap()
+                .document()
+                .next_output_id(),
+            8
+        );
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddOutput {
+            name: "wrapped_permitted_output_final".to_owned(),
+            source: retained_source,
+        });
+        let final_output = GraphComponentOutputId::new(8);
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        let final_wrapper_digest = workspace.component_connector_scope.unwrap();
+        let final_wrapper = final_component
+            .hierarchy
+            .document
+            .dependency(final_wrapper_digest)
+            .unwrap()
+            .document();
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(final_wrapper.next_output_id(), 9);
+        assert!(
+            final_wrapper
+                .output(GraphComponentOutputId::new(7))
+                .is_none()
+        );
+        assert_eq!(
+            final_wrapper.output(final_output).unwrap().name(),
+            "wrapped_permitted_output_final"
+        );
+        assert_eq!(
+            workspace.selected_component_connector,
+            Some(ComponentConnectorSelection::Output(final_output))
+        );
+
+        workspace.navigate_history(false);
+        assert_ne!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_eq!(restored_component.document, initial_component.document);
+        assert_eq!(restored_component.encoding, initial_component.encoding);
+        let restored_wrapper = restored_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .document();
+        assert_eq!(restored_wrapper.next_output_id(), 9);
+        assert!(
+            restored_wrapper
+                .output(GraphComponentOutputId::new(7))
+                .is_none()
+        );
+        assert_eq!(
+            restored_wrapper.output(final_output).unwrap().source(),
+            retained_source
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn library_connector_edit_cannot_indirectly_rewrite_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap().clone();
+        let leaf = initial.encoding.digest();
+        let wrapper = initial
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let wrapper_document = wrapper.document().clone();
+        let wrapper_encoding = wrapper.encoding().clone();
+        workspace.workspace = wrapper_document.workspace().clone();
+        workspace.workspace_encoding = encode_graph_workspace(&workspace.workspace).unwrap();
+        workspace.probes = Some(empty_probes(&workspace.workspace).unwrap());
+        workspace.component = Some(ComponentPackage {
+            document: wrapper_document,
+            encoding: wrapper_encoding,
+            hierarchy: initial.hierarchy,
+        });
+        workspace.selected_hierarchy_component = Some(leaf);
+        workspace.component_connector_scope = Some(leaf);
+        workspace.selected_panel_item = None;
+        workspace.reconcile_component_connector_selection(None);
+
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let source = retained_component
+            .hierarchy
+            .document
+            .dependency(leaf)
+            .unwrap()
+            .document()
+            .output(GraphComponentOutputId::new(1))
+            .unwrap()
+            .source();
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::UpdateOutput {
+            output: GraphComponentOutputId::new(1),
+            draft: ComponentConnectorDraft {
+                name: "would_rewrite_selected_wrapper".to_owned(),
+                endpoint: source,
+            },
+        });
+
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(
+            workspace
+                .component_status
+                .contains("would recursively rewrite the complete-session control ALGC")
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one definition lifecycle proves recursive identity refresh, exact control isolation, scoped selection, no-op behavior, history, and persistence together"
+    )]
+    fn selected_library_definition_canvas_preserves_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_control_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_job = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_source_map = initial_component.hierarchy.source_map.clone();
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let initial_wrapper_digest = initial_wrapper.digest();
+        assert_eq!(initial_wrapper.document().workspace().next_node_id(), 2);
+
+        workspace.selected_hierarchy_component = Some(initial_wrapper_digest);
+        workspace.reconcile_component_definition_editor();
+        assert_eq!(
+            workspace.component_definition.scope,
+            Some(initial_wrapper_digest)
+        );
+        workspace.component_definition.palette_index = 0;
+        workspace.add_component_definition_node(initial_wrapper_digest);
+
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_scope = workspace.component_definition.scope.unwrap();
+        let added_component = workspace.component.as_ref().unwrap();
+        let added_wrapper = added_component
+            .hierarchy
+            .document
+            .dependency(added_scope)
+            .unwrap();
+        let added_node = GraphNodeId::new(2);
+        assert_ne!(added_session, initial_session);
+        assert_ne!(added_scope, initial_wrapper_digest);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(added_node)
+        );
+        assert_eq!(added_wrapper.document().workspace().next_node_id(), 3);
+        assert!(
+            added_wrapper
+                .document()
+                .workspace()
+                .graph()
+                .node(added_node)
+                .is_some()
+        );
+        assert_eq!(added_component.document, initial_component.document);
+        assert_eq!(added_component.encoding, initial_component.encoding);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+        assert_eq!(added_component.hierarchy.document.root(), &initial_root);
+        assert_eq!(
+            added_component.hierarchy.document.flattened_node_count(),
+            initial_component.hierarchy.document.flattened_node_count() + 1
+        );
+        assert_ne!(added_component.hierarchy.source_map, initial_source_map);
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::root(GraphNodeId::new(1), added_scope)
+                })
+        );
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(
+                            added_scope,
+                            GraphNodeId::new(1),
+                            authoritative,
+                        )
+                })
+        );
+
+        workspace.commit_component_definition_node_label(
+            added_scope,
+            added_node,
+            "nested_setpoint_exact",
+        );
+        let renamed_session = workspace.authoring_session_encoding().unwrap();
+        let renamed_scope = workspace.component_definition.scope.unwrap();
+        assert_ne!(renamed_session, added_session);
+        assert_ne!(renamed_scope, added_scope);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(added_node)
+        );
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependency(renamed_scope)
+                .unwrap()
+                .document()
+                .workspace()
+                .graph()
+                .node(added_node)
+                .unwrap()
+                .label(),
+            "nested_setpoint_exact"
+        );
+
+        let no_op_history = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.commit_component_definition_node_label(
+            renamed_scope,
+            added_node,
+            "nested_setpoint_exact",
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            renamed_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            no_op_history
+        );
+
+        let origin = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(renamed_scope)
+            .unwrap()
+            .document()
+            .workspace()
+            .placement(added_node)
+            .unwrap();
+        assert!(workspace.commit_component_definition_node_drag(
+            renamed_scope,
+            NodeDrag {
+                node: added_node,
+                origin,
+                delta: egui::Vec2::ZERO,
+            },
+            egui::vec2(61.0, 37.0),
+        ));
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_scope = workspace.component_definition.scope.unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        let final_wrapper = final_component
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap();
+        let final_placement = final_wrapper
+            .document()
+            .workspace()
+            .placement(added_node)
+            .unwrap();
+        assert_eq!(final_placement.x(), origin.x() + 61);
+        assert_eq!(final_placement.y(), origin.y() + 37);
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_job);
+        assert_eq!(final_component.hierarchy.document.root(), &initial_root);
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            renamed_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(restored.workspace, initial_control_workspace);
+        assert_eq!(restored.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(restored.cached_jobs.encoding, initial_cached_job);
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_eq!(restored_component.document, initial_component.document);
+        assert_eq!(restored_component.encoding, initial_component.encoding);
+        let restored_wrapper = restored_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .document();
+        assert_eq!(
+            restored_wrapper
+                .workspace()
+                .graph()
+                .node(added_node)
+                .unwrap()
+                .label(),
+            "nested_setpoint_exact"
+        );
+        assert_eq!(
+            restored_wrapper.workspace().placement(added_node),
+            Some(final_placement)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scoped child lifecycle proves atomic hierarchy binding, recursive identity refresh, monotonic allocation, exact history, and persistence together"
+    )]
+    fn selected_definition_child_occurrence_is_exact_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_control_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial_component.encoding.digest();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_root_digest = initial_component.hierarchy.document.root_digest();
+        let initial_instances = initial_component
+            .hierarchy
+            .document
+            .flattened_instance_count();
+        let initial_nodes = initial_component.hierarchy.document.flattened_node_count();
+        let child_nodes = initial_component
+            .hierarchy
+            .document
+            .dependency(authoritative)
+            .unwrap()
+            .document()
+            .workspace()
+            .graph()
+            .nodes()
+            .len();
+        let initial_wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+
+        workspace.selected_hierarchy_component = Some(initial_wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.child_component = Some(authoritative);
+        workspace.add_component_definition_child(initial_wrapper, authoritative);
+
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_scope = workspace.component_definition.scope.unwrap();
+        let added_component = workspace.component.as_ref().unwrap();
+        let added_node = GraphNodeId::new(2);
+        let added_wrapper = added_component
+            .hierarchy
+            .document
+            .dependency(added_scope)
+            .unwrap()
+            .document();
+        assert_ne!(added_session, initial_session);
+        assert_ne!(added_scope, initial_wrapper);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(added_node)
+        );
+        assert_eq!(
+            workspace.component_definition.child_component,
+            Some(authoritative)
+        );
+        assert_eq!(added_wrapper.workspace().next_node_id(), 3);
+        assert!(added_wrapper.workspace().graph().node(added_node).is_some());
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(added_scope, added_node, authoritative)
+                })
+        );
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::root(GraphNodeId::new(1), added_scope)
+                })
+        );
+        assert_eq!(
+            added_component
+                .hierarchy
+                .document
+                .flattened_instance_count(),
+            initial_instances + 1
+        );
+        assert_eq!(
+            added_component.hierarchy.document.flattened_node_count(),
+            initial_nodes + child_nodes
+        );
+        assert_eq!(added_component.document, initial_component.document);
+        assert_eq!(added_component.encoding, initial_component.encoding);
+        assert_eq!(added_component.hierarchy.document.root(), &initial_root);
+        assert_eq!(
+            added_component.hierarchy.document.root_digest(),
+            initial_root_digest
+        );
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+
+        workspace.remove_component_definition_child(added_scope, added_node);
+
+        let removed_session = workspace.authoring_session_encoding().unwrap();
+        let removed_scope = workspace.component_definition.scope.unwrap();
+        let removed_component = workspace.component.as_ref().unwrap();
+        let removed_wrapper = removed_component
+            .hierarchy
+            .document
+            .dependency(removed_scope)
+            .unwrap()
+            .document();
+        assert_ne!(removed_session, added_session);
+        assert_ne!(removed_scope, added_scope);
+        assert_eq!(workspace.component_definition.selected_node, None);
+        assert_eq!(removed_wrapper.workspace().next_node_id(), 3);
+        assert!(
+            removed_wrapper
+                .workspace()
+                .graph()
+                .node(added_node)
+                .is_none()
+        );
+        assert!(
+            !removed_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(removed_scope)
+                        && instance.node() == added_node
+                })
+        );
+        assert_eq!(
+            removed_component
+                .hierarchy
+                .document
+                .flattened_instance_count(),
+            initial_instances
+        );
+        assert_eq!(
+            removed_component.hierarchy.document.flattened_node_count(),
+            initial_nodes
+        );
+        assert_eq!(removed_component.document, initial_component.document);
+        assert_eq!(removed_component.encoding, initial_component.encoding);
+        assert_eq!(removed_component.hierarchy.document.root(), &initial_root);
+
+        workspace.add_component_definition_child(removed_scope, authoritative);
+
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_scope = workspace.component_definition.scope.unwrap();
+        let final_component = workspace.component.as_ref().unwrap().clone();
+        let final_node = GraphNodeId::new(3);
+        let final_wrapper = final_component
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap()
+            .document();
+        assert_ne!(final_session, removed_session);
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(final_node)
+        );
+        assert_eq!(final_wrapper.workspace().next_node_id(), 4);
+        assert!(final_wrapper.workspace().graph().node(added_node).is_none());
+        assert!(final_wrapper.workspace().graph().node(final_node).is_some());
+        assert!(
+            final_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(final_scope, final_node, authoritative)
+                })
+        );
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(final_component.hierarchy.document.root(), &initial_root);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            removed_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(restored.workspace, initial_control_workspace);
+        assert_eq!(restored.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(restored.cached_jobs.encoding, initial_cached_jobs);
+        assert_exact_component_package_equal(
+            restored.component.as_ref().unwrap(),
+            &final_component,
+        );
+        let restored_wrapper = restored
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap()
+            .document();
+        assert_eq!(restored_wrapper.workspace().next_node_id(), 4);
+        assert!(
+            restored_wrapper
+                .workspace()
+                .graph()
+                .node(final_node)
+                .is_some()
+        );
+        assert!(
+            restored
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(final_scope, final_node, authoritative)
+                })
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one child-rebinding lifecycle proves binding-only replacement, exact authority isolation, source regeneration, no-op, history, and persistence together"
+    )]
+    fn selected_definition_child_rebinding_is_exact_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let reference = workspace.component.as_ref().unwrap().clone();
+        let authoritative = reference.encoding.digest();
+        let mut alias = reference.document.clone();
+        alias
+            .update_identity_metadata("control.reference_pid_alias", 1)
+            .unwrap();
+        let alias_encoding = encode_graph_component(&alias).unwrap();
+        let alias_digest = alias_encoding.digest();
+        assert!(
+            workspace
+                .import_component_dependency(alias_encoding.bytes())
+                .unwrap()
+        );
+        let baseline = workspace.component.as_ref().unwrap().clone();
+        let baseline_session = workspace.authoring_session_encoding().unwrap();
+        let baseline_history = workspace.history.clone();
+        let baseline_source_map = baseline.hierarchy.source_map.clone();
+        let wrapper = baseline
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let wrapper_digest = wrapper.digest();
+        let wrapper_encoding = wrapper.encoding().clone();
+        let baseline_root = baseline.hierarchy.document.root().clone();
+        let baseline_flattened = baseline.hierarchy.flattening.workspace().clone();
+        let baseline_revision = baseline.hierarchy.document.revision();
+        let node = GraphNodeId::new(1);
+
+        workspace.selected_hierarchy_component = Some(wrapper_digest);
+        workspace.reconcile_component_definition_editor();
+        workspace.component_definition.child_component = Some(alias_digest);
+        workspace.component_definition.selected_node = Some(node);
+        workspace.component_definition.pending_source = Some(WireEndpoint {
+            node,
+            port: GraphPortId::new(1),
+        });
+        workspace.mark_persisted();
+        workspace.rebind_component_definition_child(wrapper_digest, node, alias_digest);
+
+        let rebound_session = workspace.authoring_session_encoding().unwrap();
+        let rebound = workspace.component.as_ref().unwrap();
+        assert_ne!(rebound_session, baseline_session);
+        assert_eq!(rebound.document, baseline.document);
+        assert_eq!(rebound.encoding, baseline.encoding);
+        assert_eq!(rebound.hierarchy.document.revision(), baseline_revision + 1);
+        assert_eq!(rebound.hierarchy.document.root(), &baseline_root);
+        assert_eq!(
+            rebound.hierarchy.flattening.workspace(),
+            &baseline_flattened
+        );
+        assert_ne!(rebound.hierarchy.source_map, baseline_source_map);
+        assert_eq!(
+            rebound
+                .hierarchy
+                .document
+                .dependency(wrapper_digest)
+                .unwrap()
+                .encoding(),
+            &wrapper_encoding
+        );
+        assert!(
+            rebound
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::nested(wrapper_digest, node, alias_digest)
+                })
+        );
+        assert!(
+            !rebound
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::nested(wrapper_digest, node, authoritative)
+                })
+        );
+        assert_eq!(workspace.component_definition.scope, Some(wrapper_digest));
+        assert_eq!(
+            workspace.component_definition.child_component,
+            Some(alias_digest)
+        );
+        assert_eq!(workspace.component_definition.selected_node, Some(node));
+        assert_eq!(
+            workspace.component_definition.pending_source,
+            Some(WireEndpoint {
+                node,
+                port: GraphPortId::new(1),
+            })
+        );
+        assert_eq!(
+            workspace.history.undo_len(),
+            baseline_history.undo_len() + 1
+        );
+        assert!(workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("across 0 recursive identity remap(s)")
+        );
+
+        workspace.mark_persisted();
+        let rebound_history = workspace.history.clone();
+        workspace.rebind_component_definition_child(wrapper_digest, node, alias_digest);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            rebound_session
+        );
+        assert_eq!(workspace.history, rebound_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("already matched"));
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            baseline_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            rebound_session
+        );
+
+        workspace.mark_persisted();
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            rebound_session
+        );
+        let restored_component = restored.component.as_ref().unwrap();
+        assert!(
+            restored_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance == GraphComponentInstance::nested(wrapper_digest, node, alias_digest)
+                })
+        );
+        assert_eq!(restored_component.document, baseline.document);
+        assert_eq!(restored_component.encoding, baseline.encoding);
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn selected_definition_child_rebinding_rejects_incompatible_cycles_and_unknowns() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let empty =
+            empty_library_component("user.empty_rebind_target", &workspace.workspace).unwrap();
+        let empty_encoding = encode_graph_component(&empty).unwrap();
+        let empty_digest = empty_encoding.digest();
+        assert!(
+            workspace
+                .import_component_dependency(empty_encoding.bytes())
+                .unwrap()
+        );
+        let baseline = workspace.component.as_ref().unwrap().clone();
+        let baseline_session = workspace.authoring_session_encoding().unwrap();
+        let baseline_history = workspace.history.clone();
+        let authoritative = baseline.encoding.digest();
+        let wrapper = baseline
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        let node = GraphNodeId::new(1);
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.mark_persisted();
+
+        for (target, selected_node) in [
+            (empty_digest, node),
+            (wrapper, node),
+            (Digest([0x91; 32]), node),
+            (authoritative, GraphNodeId::new(99)),
+        ] {
+            workspace.rebind_component_definition_child(wrapper, selected_node, target);
+            assert_eq!(
+                workspace.authoring_session_encoding().unwrap(),
+                baseline_session
+            );
+            assert_exact_component_package_equal(workspace.component.as_ref().unwrap(), &baseline);
+            assert_eq!(workspace.history, baseline_history);
+            assert!(!workspace.persistence_pending());
+            assert!(
+                workspace
+                    .component_definition
+                    .status
+                    .contains("rejected without mutation")
+            );
+        }
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_component_definition_editor();
+        workspace.rebind_component_definition_child(authoritative, node, wrapper);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            baseline_session
+        );
+        assert_exact_component_package_equal(workspace.component.as_ref().unwrap(), &baseline);
+        assert_eq!(workspace.history, baseline_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("must be edited on the main canvas")
+        );
+    }
+
+    #[test]
+    fn selected_definition_canvas_rejects_placeholder_and_control_authority_edits() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_history = workspace.history.clone();
+        let authoritative = initial_component.encoding.digest();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.delete_component_definition_node(wrapper, GraphNodeId::new(1));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("ALGH owns component-instance placeholders")
+        );
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_component_definition_editor();
+        workspace.add_component_definition_node(authoritative);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("must be edited on the main canvas")
+        );
+    }
+
+    #[test]
+    fn selected_definition_child_occurrence_rejects_bindings_cycles_and_control_authority() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_history = workspace.history.clone();
+        let authoritative = initial_component.encoding.digest();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+        workspace.remove_component_definition_child(wrapper, GraphNodeId::new(1));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("rejected without mutation")
+        );
+
+        workspace.add_component_definition_child(wrapper, wrapper);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("dependency cycle")
+        );
+
+        workspace.selected_hierarchy_component = Some(authoritative);
+        workspace.reconcile_component_definition_editor();
+        workspace.add_component_definition_child(authoritative, wrapper);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &initial_component,
+        );
+        assert_eq!(workspace.history, initial_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_definition
+                .status
+                .contains("must be edited on the main canvas")
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one typed-wire lifecycle proves duplicate rejection, disconnect, monotonic reconnection, exact source focus, and stale-focus reconciliation under recursive definition replacement"
+    )]
+    fn selected_library_definition_typed_wires_retain_monotonic_identity() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_control = workspace.workspace.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let wrapper = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        workspace.selected_hierarchy_component = Some(wrapper);
+        workspace.reconcile_component_definition_editor();
+
+        workspace.component_definition.palette_index = workspace
+            .palette
+            .iter()
+            .position(|entry| entry.prototype.kind().name() == "control.source.value")
+            .unwrap();
+        workspace.add_component_definition_node(wrapper);
+        let source_scope = workspace.component_definition.scope.unwrap();
+        let source_node = GraphNodeId::new(2);
+        workspace.component_definition.palette_index = workspace
+            .palette
+            .iter()
+            .position(|entry| entry.prototype.kind().name() == "control.rate.value")
+            .unwrap();
+        workspace.add_component_definition_node(source_scope);
+        let rate_scope = workspace.component_definition.scope.unwrap();
+        let rate_node = GraphNodeId::new(3);
+        let source = WireEndpoint {
+            node: source_node,
+            port: GraphPortId::new(1),
+        };
+        let target = WireEndpoint {
+            node: rate_node,
+            port: GraphPortId::new(1),
+        };
+
+        assert!(
+            !workspace
+                .handle_component_definition_port_edit(rate_scope, PortEdit::SelectOutput(source),)
+        );
+        assert!(
+            workspace
+                .handle_component_definition_port_edit(rate_scope, PortEdit::ConnectInput(target),)
+        );
+        let connected_scope = workspace.component_definition.scope.unwrap();
+        let connected_session = workspace.authoring_session_encoding().unwrap();
+        let connected_workspace = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(connected_scope)
+            .unwrap()
+            .document()
+            .workspace();
+        assert_eq!(connected_workspace.next_node_id(), 4);
+        assert_eq!(connected_workspace.next_wire_id(), 2);
+        assert_eq!(
+            connected_workspace.graph().wires(),
+            &[alumina_interface_core::graph::WireDefinition::new(
+                GraphWireId::new(1),
+                source,
+                target,
+            )]
+        );
+
+        let history = (workspace.history.undo_len(), workspace.history.redo_len());
+        workspace.component_definition.pending_source = Some(source);
+        assert!(!workspace.handle_component_definition_port_edit(
+            connected_scope,
+            PortEdit::ConnectInput(target),
+        ));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            connected_session
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            history
+        );
+
+        assert!(workspace.handle_component_definition_port_edit(
+            connected_scope,
+            PortEdit::DisconnectInput(target),
+        ));
+        let disconnected_scope = workspace.component_definition.scope.unwrap();
+        let disconnected_workspace = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(disconnected_scope)
+            .unwrap()
+            .document()
+            .workspace();
+        assert!(disconnected_workspace.graph().wires().is_empty());
+        assert_eq!(disconnected_workspace.next_wire_id(), 2);
+
+        workspace.component_definition.pending_source = Some(source);
+        assert!(workspace.handle_component_definition_port_edit(
+            disconnected_scope,
+            PortEdit::ConnectInput(target),
+        ));
+        let final_scope = workspace.component_definition.scope.unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        let final_workspace = final_component
+            .hierarchy
+            .document
+            .dependency(final_scope)
+            .unwrap()
+            .document()
+            .workspace();
+        assert_eq!(final_workspace.next_wire_id(), 3);
+        assert_eq!(
+            final_workspace.graph().wires(),
+            &[alumina_interface_core::graph::WireDefinition::new(
+                GraphWireId::new(2),
+                source,
+                target,
+            )]
+        );
+        let wire_mapping = final_component
+            .hierarchy
+            .flattening
+            .wire_provenance()
+            .iter()
+            .find(|mapping| {
+                matches!(
+                    mapping.origin(),
+                    GraphHierarchyWireOrigin::Component {
+                        source_path,
+                        component,
+                        wire,
+                    } if source_path == &[GraphNodeId::new(1)]
+                        && *component == final_scope
+                        && *wire == GraphWireId::new(2)
+                )
+            })
+            .unwrap()
+            .clone();
+        assert_eq!(workspace.workspace, initial_control);
+        assert_eq!(final_component.document, initial_component.document);
+        assert_eq!(final_component.encoding, initial_component.encoding);
+        assert_eq!(final_component.hierarchy.document.root(), &initial_root);
+
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let selection = HierarchySourceSelection::Wire {
+            flattened: wire_mapping.flattened_wire(),
+            origin: wire_mapping.origin().clone(),
+        };
+        workspace.open_hierarchy_source(selection.clone());
+        assert_eq!(workspace.selected_hierarchy_component, Some(final_scope));
+        assert_eq!(workspace.component_definition.scope, Some(final_scope));
+        assert_eq!(
+            workspace.component_definition.selected_node,
+            Some(rate_node)
+        );
+        assert_eq!(
+            workspace.opened_component_wire(final_scope),
+            Some(GraphWireId::new(2))
+        );
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(selection)
+        );
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("selected and highlighted")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.commit_component_definition_node_label(
+            final_scope,
+            rate_node,
+            "wire_focus_digest_remap",
+        );
+        let remapped_scope = workspace.component_definition.scope.unwrap();
+        assert_ne!(remapped_scope, final_scope);
+        assert_eq!(workspace.hierarchy_source_browser.last_opened, None);
+        assert_eq!(workspace.opened_component_wire(final_scope), None);
+        assert_eq!(workspace.opened_component_wire(remapped_scope), None);
+        assert!(!workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("absent from the current exact hierarchy")
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one lifecycle test proves cross-branch isolation, exact history, monotonic identity, and persistence together"
+    )]
+    fn root_instance_authoring_is_exact_historical_monotonic_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let component = initial_component.encoding.digest();
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(component));
+
+        let added_session = workspace.authoring_session_encoding().unwrap();
+        let added_component = workspace.component.as_ref().unwrap();
+        let added = GraphNodeId::new(2);
+        assert_ne!(added_session, initial_session);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(added_component.document, initial_component.document);
+        assert_eq!(added_component.encoding, initial_component.encoding);
+        assert_ne!(
+            added_component.hierarchy.encoding,
+            initial_component.hierarchy.encoding
+        );
+        assert_ne!(
+            added_component.hierarchy.source_map,
+            initial_component.hierarchy.source_map
+        );
+        assert_eq!(added_component.hierarchy.document.root().next_node_id(), 3);
+        assert_eq!(
+            added_component
+                .hierarchy
+                .document
+                .flattened_instance_count(),
+            3
+        );
+        assert_eq!(
+            added_component.hierarchy.document.flattened_node_count(),
+            42
+        );
+        assert_eq!(
+            added_component.hierarchy.document.flattened_wire_count(),
+            50
+        );
+        assert!(
+            added_component
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == added
+                        && instance.component() == component
+                })
+        );
+        assert_eq!(workspace.selected_hierarchy_instance, Some(added));
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            added_session
+        );
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveRoot(added));
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root()
+                .next_node_id(),
+            3
+        );
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(component));
+        let monotonic = workspace.component.as_ref().unwrap();
+        assert!(
+            monotonic
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(3)
+                        && instance.component() == component
+                })
+        );
+        assert_eq!(monotonic.hierarchy.document.root().next_node_id(), 4);
+
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one root-canvas lifecycle proves exact placement, typed wiring, monotonic identity, history, branch isolation, and persistence"
+    )]
+    fn root_canvas_placement_and_typed_wiring_are_exact_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_control_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root_digest = initial_component.hierarchy.document.root().graph_digest();
+        let initial_revision = initial_component.hierarchy.document.revision();
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::MoveRoot {
+            node: GraphNodeId::new(1),
+            x: 173,
+            y: -42,
+        });
+        let moved_session = workspace.authoring_session_encoding().unwrap();
+        let moved = workspace.component.as_ref().unwrap();
+        assert_ne!(moved_session, initial_session);
+        assert_eq!(
+            moved
+                .hierarchy
+                .document
+                .root()
+                .placement(GraphNodeId::new(1)),
+            Some(GraphNodePlacement::new(GraphNodeId::new(1), 173, -42))
+        );
+        assert_eq!(
+            moved.hierarchy.document.root().graph_digest(),
+            initial_root_digest
+        );
+        assert_eq!(moved.hierarchy.document.revision(), initial_revision + 1);
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(moved.document, initial_component.document);
+        assert_eq!(moved.encoding, initial_component.encoding);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.mark_persisted();
+        let moved_history = workspace.history.clone();
+        workspace.apply_hierarchy_action(HierarchyUiAction::MoveRoot {
+            node: GraphNodeId::new(1),
+            x: 173,
+            y: -42,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            moved_session
+        );
+        assert_eq!(workspace.history, moved_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            moved_session
+        );
+
+        let (_, input_encoding) = root_input_component(&initial_component.document);
+        let input_digest = input_encoding.digest();
+        assert!(
+            workspace
+                .import_component_dependency(input_encoding.bytes())
+                .unwrap()
+        );
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(input_digest));
+        let source = WireEndpoint {
+            node: GraphNodeId::new(1),
+            port: GraphPortId::new(1),
+        };
+        let target = WireEndpoint {
+            node: GraphNodeId::new(2),
+            port: GraphPortId::new(1),
+        };
+        workspace.pending_hierarchy_source = Some(source);
+        workspace.apply_hierarchy_action(HierarchyUiAction::ConnectRoot { source, target });
+        let connected_session = workspace.authoring_session_encoding().unwrap();
+        let connected = workspace.component.as_ref().unwrap();
+        assert_eq!(workspace.pending_hierarchy_source, None);
+        assert_eq!(connected.hierarchy.document.root().next_wire_id(), 2);
+        assert!(
+            connected
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .any(|wire| wire.id() == GraphWireId::new(1)
+                    && wire.source() == source
+                    && wire.target() == target)
+        );
+        assert_eq!(workspace.workspace, initial_control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(connected.document, initial_component.document);
+        assert_eq!(connected.encoding, initial_component.encoding);
+        assert_eq!(workspace.history.undo_len(), 4);
+
+        workspace.navigate_history(false);
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .is_empty()
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            connected_session
+        );
+
+        workspace.pending_hierarchy_source = Some(source);
+        workspace.apply_hierarchy_action(HierarchyUiAction::DisconnectRoot(GraphWireId::new(1)));
+        let disconnected = workspace.component.as_ref().unwrap();
+        assert_eq!(workspace.pending_hierarchy_source, None);
+        assert!(
+            disconnected
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .is_empty()
+        );
+        assert_eq!(disconnected.hierarchy.document.root().next_wire_id(), 2);
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::ConnectRoot { source, target });
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        let final_component = workspace.component.as_ref().unwrap();
+        assert!(
+            final_component
+                .hierarchy
+                .document
+                .root()
+                .graph()
+                .wires()
+                .iter()
+                .any(|wire| wire.id() == GraphWireId::new(2)
+                    && wire.source() == source
+                    && wire.target() == target)
+        );
+        assert_eq!(final_component.hierarchy.document.root().next_wire_id(), 3);
+
+        workspace.mark_persisted();
+        let retained_history = workspace.history.clone();
+        workspace.pending_hierarchy_source = Some(source);
+        workspace.apply_hierarchy_action(HierarchyUiAction::ConnectRoot { source, target });
+        workspace.apply_hierarchy_action(HierarchyUiAction::DisconnectRoot(GraphWireId::new(99)));
+        workspace.apply_hierarchy_action(HierarchyUiAction::MoveRoot {
+            node: GraphNodeId::new(99),
+            x: 0,
+            y: 0,
+        });
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert_eq!(workspace.pending_hierarchy_source, Some(source));
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps the pre-edit hierarchy and every remapped binding visible in one exact preservation proof"
+    )]
+    fn control_edits_remap_selected_component_without_losing_root_authoring() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let original_component = workspace.component.as_ref().unwrap().encoding.digest();
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(original_component));
+        let authored_session = workspace.authoring_session_encoding().unwrap();
+        let authored_hierarchy = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .clone();
+        let wrapper = authored_hierarchy
+            .instances()
+            .iter()
+            .find(|instance| {
+                instance.scope() == GraphInstanceScope::Root
+                    && instance.node() == GraphNodeId::new(1)
+            })
+            .unwrap()
+            .component();
+        let wrapper_encoding = authored_hierarchy
+            .dependency(wrapper)
+            .unwrap()
+            .encoding()
+            .clone();
+
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "23/11");
+
+        let updated = workspace.component.as_ref().unwrap();
+        let replacement = updated.encoding.digest();
+        assert_ne!(replacement, original_component);
+        let updated_root = updated.hierarchy.document.root().clone();
+        assert_ne!(&updated_root, authored_hierarchy.root());
+        assert_eq!(
+            updated_root.placements(),
+            authored_hierarchy.root().placements()
+        );
+        assert_eq!(
+            updated_root.next_node_id(),
+            authored_hierarchy.root().next_node_id()
+        );
+        assert_eq!(
+            updated_root.next_wire_id(),
+            authored_hierarchy.root().next_wire_id()
+        );
+        assert_eq!(
+            updated_root.graph().wires(),
+            authored_hierarchy.root().graph().wires()
+        );
+        let refreshed_wrapper = updated
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let refreshed_wrapper_digest = refreshed_wrapper.digest();
+        assert_ne!(refreshed_wrapper_digest, wrapper);
+        assert_ne!(refreshed_wrapper.encoding(), &wrapper_encoding);
+        assert!(updated.hierarchy.document.dependency(wrapper).is_none());
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .dependency(original_component)
+                .is_none()
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(2)
+                        && instance.component() == replacement
+                })
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(1)
+                        && instance.component() == refreshed_wrapper_digest
+                })
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(refreshed_wrapper_digest)
+                        && instance.component() == replacement
+                })
+        );
+        let updated_default = updated
+            .document
+            .workspace()
+            .graph()
+            .node(GraphNodeId::new(8))
+            .unwrap()
+            .parameters()[0]
+            .value();
+        for node in [GraphNodeId::new(1), GraphNodeId::new(2)] {
+            assert_eq!(
+                updated_root.graph().node(node).unwrap().parameters()[0].value(),
+                updated_default
+            );
+        }
+        assert_eq!(workspace.selected_hierarchy_component, Some(replacement));
+        assert_eq!(workspace.history.undo_len(), 2);
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            authored_session
+        );
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(2)
+                        && instance.component() == original_component
+                })
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root(),
+            &updated_root
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one promoted-parameter lifecycle proves two occurrence-local values, recursive flattening, atomic rejection, history, and persistence"
+    )]
+    fn root_occurrence_parameter_overrides_are_exact_promoted_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.component.as_ref().unwrap().clone();
+        let authority = initial.encoding.clone();
+        let control_workspace = workspace.workspace_encoding.clone();
+        let probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let cached_jobs = workspace.cached_jobs.encoding.clone();
+        let wrapper = initial
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap()
+            .digest();
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(wrapper));
+        let second = workspace.selected_hierarchy_instance.unwrap();
+        assert_eq!(second, GraphNodeId::new(2));
+        let baseline = workspace.authoring_session_encoding().unwrap();
+        let baseline_revision = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .revision();
+
+        workspace.commit_root_instance_parameter_text(GraphNodeId::new(1), 1, "7/3");
+        let first = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(first, baseline);
+        assert_eq!(workspace.history.undo_len(), 2);
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .revision(),
+            baseline_revision + 1
+        );
+        workspace.commit_root_instance_parameter_text(second, 1, "11/5");
+        let final_session = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(final_session, first);
+        assert_eq!(workspace.history.undo_len(), 3);
+
+        let component = workspace.component.as_ref().unwrap();
+        assert_eq!(component.encoding, authority);
+        assert_eq!(workspace.workspace_encoding, control_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, probes);
+        assert_eq!(workspace.cached_jobs.encoding, cached_jobs);
+        let root = component.hierarchy.document.root();
+        let exact_parameter = |node: GraphNodeId| match root
+            .graph()
+            .node(node)
+            .unwrap()
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.id() == 1)
+            .unwrap()
+            .value()
+            .value()
+        {
+            GraphValue::ExactRational(value) => value.clone(),
+            _ => panic!("promoted parameter is not exact-rational"),
+        };
+        assert_eq!(
+            exact_parameter(GraphNodeId::new(1)),
+            Rational::from(7) / Rational::from(3)
+        );
+        assert_eq!(
+            exact_parameter(second),
+            Rational::from(11) / Rational::from(5)
+        );
+        let flattened_parameter = |path: &[GraphNodeId]| {
+            let occurrence = component
+                .hierarchy
+                .flattening
+                .instances()
+                .iter()
+                .find(|occurrence| {
+                    occurrence.component() == authority.digest() && occurrence.source_path() == path
+                })
+                .unwrap();
+            let flattened = occurrence
+                .nodes()
+                .iter()
+                .find(|mapping| mapping.component_node() == GraphNodeId::new(8))
+                .unwrap()
+                .flattened_node();
+            match component
+                .hierarchy
+                .flattening
+                .workspace()
+                .graph()
+                .node(flattened)
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value()
+            {
+                GraphValue::ExactRational(value) => value.clone(),
+                _ => panic!("flattened promoted parameter is not exact-rational"),
+            }
+        };
+        assert_eq!(
+            flattened_parameter(&[GraphNodeId::new(1), GraphNodeId::new(1)]),
+            Rational::from(7) / Rational::from(3)
+        );
+        assert_eq!(
+            flattened_parameter(&[second, GraphNodeId::new(1)]),
+            Rational::from(11) / Rational::from(5)
+        );
+
+        let retained_history = workspace.history.clone();
+        workspace.mark_persisted();
+        workspace.commit_root_instance_parameter_text(second, 1, "11/5");
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        workspace.commit_root_instance_parameter_text(second, 1, "1/0");
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), first);
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            final_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn invalid_hierarchy_selections_fail_without_session_mutation() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(Digest([0xa7; 32])));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveRoot(GraphNodeId::new(99)));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("rejected without mutation")
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one component-identity lifecycle proves monotonic metadata, authoritative replacement, source reconciliation, history, persistence, and atomic invalid drafts"
+    )]
+    fn component_identity_metadata_is_exact_monotonic_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial = workspace.component.as_ref().unwrap().clone();
+        let authoritative = initial.encoding.digest();
+        let wrapper = initial
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "control.reference_pid_wrapper")
+            .unwrap();
+        let wrapper_digest = wrapper.digest();
+        let wrapper_encoding = wrapper.encoding().clone();
+        let wire_mapping = initial.hierarchy.flattening.wire_provenance()[0].clone();
+        let selection = HierarchySourceSelection::Wire {
+            flattened: wire_mapping.flattened_wire(),
+            origin: wire_mapping.origin().clone(),
+        };
+        assert!(matches!(
+            selection,
+            HierarchySourceSelection::Wire {
+                origin: GraphHierarchyWireOrigin::Component { component, .. },
+                ..
+            } if component == authoritative
+        ));
+        workspace.open_hierarchy_source(selection.clone());
+        assert_eq!(
+            workspace.hierarchy_source_browser.last_opened,
+            Some(selection)
+        );
+        assert_eq!(workspace.component_definition.scope, Some(authoritative));
+
+        workspace.mark_persisted();
+        workspace.apply_component_identity_draft(
+            authoritative,
+            &ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "2".to_owned(),
+            },
+        );
+
+        let updated_session = workspace.authoring_session_encoding().unwrap();
+        let updated = workspace.component.as_ref().unwrap();
+        let replacement = updated.encoding.digest();
+        assert_ne!(updated_session, initial_session);
+        assert_ne!(replacement, authoritative);
+        let mut expected_document = initial.document.clone();
+        expected_document
+            .update_identity_metadata("control.reference_pid_v2", 2)
+            .unwrap();
+        let expected_encoding = encode_graph_component(&expected_document).unwrap();
+        assert_eq!(updated.document, expected_document);
+        assert_eq!(updated.encoding, expected_encoding);
+        assert_eq!(updated.document.revision(), initial.document.revision() + 1);
+        assert_eq!(updated.document.component_version(), 2);
+        assert_eq!(updated.document.name(), "control.reference_pid_v2");
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(
+            updated.hierarchy.document.root(),
+            initial.hierarchy.document.root()
+        );
+        assert_eq!(
+            updated.hierarchy.flattening.workspace(),
+            initial.hierarchy.flattening.workspace()
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .dependency(authoritative)
+                .is_none()
+        );
+        assert_eq!(
+            updated
+                .hierarchy
+                .document
+                .dependency(replacement)
+                .unwrap()
+                .encoding(),
+            &expected_encoding
+        );
+        assert_eq!(
+            updated
+                .hierarchy
+                .document
+                .dependency(wrapper_digest)
+                .unwrap()
+                .encoding(),
+            &wrapper_encoding
+        );
+        assert!(
+            updated
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Component(wrapper_digest)
+                        && instance.component() == replacement
+                })
+        );
+        assert_eq!(
+            workspace
+                .authoring_session_document()
+                .unwrap()
+                .hierarchy()
+                .unwrap()
+                .selected_component(),
+            replacement
+        );
+        assert_eq!(workspace.selected_hierarchy_component, Some(replacement));
+        assert_eq!(workspace.component_definition.scope, Some(replacement));
+        assert_eq!(workspace.component_connector_scope, Some(replacement));
+        assert!(
+            !workspace
+                .component_identity_drafts
+                .contains_key(&authoritative)
+        );
+        assert_eq!(workspace.hierarchy_source_browser.last_opened, None);
+        assert!(!workspace.hierarchy_source_browser.scroll_pending);
+        assert!(
+            workspace
+                .hierarchy_source_browser
+                .status
+                .contains("absent from the current exact hierarchy")
+        );
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert!(workspace.persistence_pending());
+
+        workspace.mark_persisted();
+        let retained_history = workspace.history.clone();
+        workspace.apply_component_identity_draft(
+            replacement,
+            &ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "2".to_owned(),
+            },
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("already matched"));
+
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        for draft in [
+            ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "1".to_owned(),
+            },
+            ComponentIdentityDraft {
+                name: "control.reference_pid_v2".to_owned(),
+                component_version: "02".to_owned(),
+            },
+            ComponentIdentityDraft {
+                name: "control.reference_pid_wrapper".to_owned(),
+                component_version: "2".to_owned(),
+            },
+            ComponentIdentityDraft {
+                name: "invalid component name".to_owned(),
+                component_version: "2".to_owned(),
+            },
+        ] {
+            workspace.apply_component_identity_draft(replacement, &draft);
+            assert_eq!(
+                workspace.authoring_session_encoding().unwrap(),
+                updated_session
+            );
+            assert_exact_component_package_equal(
+                workspace.component.as_ref().unwrap(),
+                &retained_component,
+            );
+            assert_eq!(workspace.history, retained_history);
+            assert!(!workspace.persistence_pending());
+            assert!(
+                workspace
+                    .component_status
+                    .contains("rejected without mutation")
+            );
+        }
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+
+        workspace.mark_persisted();
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            updated_session
+        );
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_eq!(restored_component.encoding, expected_encoding);
+        assert_eq!(restored_component.document, expected_document);
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn component_behavior_version_text_is_canonical_nonzero_u32() {
+        assert_eq!(parse_component_behavior_version("1"), Ok(1));
+        assert_eq!(parse_component_behavior_version("4294967295"), Ok(u32::MAX));
+        for invalid in [
+            "",
+            "0",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1.0",
+            "4294967296",
+            "18446744073709551615",
+        ] {
+            assert!(
+                parse_component_behavior_version(invalid).is_err(),
+                "noncanonical behavior version {invalid:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one empty-component lifecycle proves deterministic construction, exact no-op selection, subsequent definition authoring, history, persistence, and authority isolation"
+    )]
+    fn empty_library_component_creation_is_exact_editable_historical_and_persistent() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let initial_dependencies = initial_component
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .map(|dependency| dependency.encoding().clone())
+            .collect::<Vec<_>>();
+
+        workspace.mark_persisted();
+        workspace.new_library_component_name = "user.logic_cell".to_owned();
+        workspace.apply_hierarchy_action(HierarchyUiAction::CreateComponent);
+
+        let created_session = workspace.authoring_session_encoding().unwrap();
+        let created = workspace.component.as_ref().unwrap();
+        let dependency = created
+            .hierarchy
+            .document
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.document().name() == "user.logic_cell")
+            .unwrap();
+        let created_digest = dependency.digest();
+        let document = dependency.document();
+        assert_ne!(created_session, initial_session);
+        assert_eq!(workspace.new_library_component_name, "");
+        assert_eq!(document.revision(), 1);
+        assert_eq!(document.component_version(), 1);
+        assert_eq!(document.next_input_id(), 1);
+        assert_eq!(document.next_output_id(), 1);
+        assert_eq!(document.next_panel_item_id(), 1);
+        assert!(document.inputs().is_empty());
+        assert!(document.outputs().is_empty());
+        assert!(document.panel_items().is_empty());
+        assert_eq!(document.workspace().revision(), 1);
+        assert_eq!(document.workspace().next_node_id(), 1);
+        assert_eq!(document.workspace().next_wire_id(), 1);
+        assert!(document.workspace().graph().nodes().is_empty());
+        assert!(document.workspace().graph().wires().is_empty());
+        assert_eq!(
+            document.workspace().graph().schema(),
+            initial_workspace.graph().schema()
+        );
+        assert_eq!(
+            document.workspace().graph().clocks(),
+            initial_workspace.graph().clocks()
+        );
+        assert_eq!(created.document, initial_component.document);
+        assert_eq!(created.encoding, initial_component.encoding);
+        assert_eq!(created.hierarchy.document.root(), &initial_root);
+        for encoding in &initial_dependencies {
+            assert!(
+                created
+                    .hierarchy
+                    .document
+                    .dependency(encoding.digest())
+                    .is_some_and(|dependency| dependency.encoding() == encoding)
+            );
+        }
+        assert_eq!(created.hierarchy.document.dependencies().len(), 3);
+        assert_eq!(created.hierarchy.document.flattened_instance_count(), 2);
+        assert_eq!(created.hierarchy.document.flattened_node_count(), 21);
+        assert_eq!(created.hierarchy.document.flattened_wire_count(), 25);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(workspace.selected_hierarchy_component, Some(created_digest));
+        assert_eq!(workspace.component_definition.scope, Some(created_digest));
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert!(workspace.persistence_pending());
+        assert!(
+            workspace
+                .component_status
+                .contains("created deterministic empty")
+        );
+
+        workspace.mark_persisted();
+        let created_history = workspace.history.clone();
+        workspace.new_library_component_name = "user.logic_cell".to_owned();
+        workspace.apply_hierarchy_action(HierarchyUiAction::CreateComponent);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            created_session
+        );
+        assert_eq!(workspace.history, created_history);
+        assert!(!workspace.persistence_pending());
+        assert_eq!(workspace.new_library_component_name, "");
+        assert_eq!(workspace.selected_hierarchy_component, Some(created_digest));
+        assert!(workspace.component_status.contains("selected existing"));
+        assert!(workspace.component_status.contains("already matched"));
+
+        workspace.component_definition.palette_index = 0;
+        workspace.add_component_definition_node(created_digest);
+        let edited_session = workspace.authoring_session_encoding().unwrap();
+        let edited_scope = workspace.component_definition.scope.unwrap();
+        let edited = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .hierarchy
+            .document
+            .dependency(edited_scope)
+            .unwrap()
+            .document();
+        assert_ne!(edited_scope, created_digest);
+        assert_eq!(edited.name(), "user.logic_cell");
+        assert_eq!(edited.workspace().graph().nodes().len(), 1);
+        assert_eq!(edited.workspace().next_node_id(), 2);
+        assert_eq!(workspace.history.undo_len(), 2);
+        assert!(workspace.persistence_pending());
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(
+            workspace.component.as_ref().unwrap().document,
+            initial_component.document
+        );
+        assert_eq!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .root(),
+            &initial_root
+        );
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            created_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            edited_session
+        );
+        assert!(
+            restored
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependencies()
+                .iter()
+                .any(|dependency| {
+                    dependency.document().name() == "user.logic_cell"
+                        && dependency.document().workspace().graph().nodes().len() == 1
+                })
+        );
+    }
+
+    #[test]
+    fn invalid_or_ambiguous_empty_component_names_are_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        let invalid_names = [
+            String::new(),
+            "bad component name".to_owned(),
+            "x".repeat(65),
+            "control.reference_pid".to_owned(),
+        ];
+
+        for name in invalid_names {
+            workspace.new_library_component_name.clone_from(&name);
+            workspace.apply_hierarchy_action(HierarchyUiAction::CreateComponent);
+            assert_eq!(
+                workspace.authoring_session_encoding().unwrap(),
+                retained_session
+            );
+            assert_exact_component_package_equal(
+                workspace.component.as_ref().unwrap(),
+                &retained_component,
+            );
+            assert_eq!(workspace.history, retained_history);
+            assert!(!workspace.persistence_pending());
+            assert_eq!(workspace.new_library_component_name, name);
+            assert!(
+                workspace
+                    .component_status
+                    .contains("rejected without mutation")
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exact library lifecycle proves import isolation, no-op behavior, in-use rejection, removal, history, and persistence"
+    )]
+    fn component_library_import_remove_history_and_persistence_are_exact() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+        let mut imported = initial_component.document.clone();
+        let mut imported_workspace = imported.workspace().clone();
+        let node = imported_workspace.graph().nodes()[0].id();
+        let placement = imported_workspace.placement(node).unwrap();
+        imported_workspace
+            .move_node(node, placement.x() + 19, placement.y() + 23)
+            .unwrap();
+        imported.replace_workspace(imported_workspace).unwrap();
+        let imported_encoding = encode_graph_component(&imported).unwrap();
+        let imported_digest = imported_encoding.digest();
+
+        workspace.mark_persisted();
+        assert!(
+            workspace
+                .import_component_dependency(imported_encoding.bytes())
+                .unwrap()
+        );
+        let imported_session = workspace.authoring_session_encoding().unwrap();
+        let component = workspace.component.as_ref().unwrap();
+        assert_ne!(imported_session, initial_session);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(component.document, initial_component.document);
+        assert_eq!(component.encoding, initial_component.encoding);
+        assert_eq!(component.hierarchy.document.root(), &initial_root);
+        assert_eq!(component.hierarchy.document.dependencies().len(), 3);
+        assert_eq!(
+            component
+                .hierarchy
+                .document
+                .dependency(imported_digest)
+                .unwrap()
+                .encoding(),
+            &imported_encoding
+        );
+        assert_eq!(component.hierarchy.document.flattened_instance_count(), 2);
+        assert_eq!(component.hierarchy.document.flattened_node_count(), 21);
+        assert_eq!(
+            workspace.selected_hierarchy_component,
+            Some(imported_digest)
+        );
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (1, 0)
+        );
+        assert!(workspace.persistence_pending());
+
+        workspace.mark_persisted();
+        let imported_history = workspace.history.clone();
+        assert!(
+            !workspace
+                .import_component_dependency(imported_encoding.bytes())
+                .unwrap()
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        assert_eq!(workspace.history, imported_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("already matched"));
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::AddRoot(imported_digest));
+        let referenced_session = workspace.authoring_session_encoding().unwrap();
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    instance.scope() == GraphInstanceScope::Root
+                        && instance.node() == GraphNodeId::new(2)
+                        && instance.component() == imported_digest
+                })
+        );
+        assert_eq!(workspace.history.undo_len(), 2);
+
+        workspace.mark_persisted();
+        let referenced_history = workspace.history.clone();
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveComponent(imported_digest));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            referenced_session
+        );
+        assert_eq!(workspace.history, referenced_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("still referenced"));
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveRoot(GraphNodeId::new(2)));
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveComponent(imported_digest));
+        let removed_session = workspace.authoring_session_encoding().unwrap();
+        let component = workspace.component.as_ref().unwrap();
+        assert!(
+            component
+                .hierarchy
+                .document
+                .dependency(imported_digest)
+                .is_none()
+        );
+        assert_eq!(component.hierarchy.document.root().next_node_id(), 3);
+        assert_eq!(
+            workspace.selected_hierarchy_component,
+            Some(component.encoding.digest())
+        );
+        assert_eq!(workspace.history.undo_len(), 4);
+
+        workspace.navigate_history(false);
+        assert!(
+            workspace
+                .component
+                .as_ref()
+                .unwrap()
+                .hierarchy
+                .document
+                .dependency(imported_digest)
+                .is_some()
+        );
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            referenced_session
+        );
+        workspace.navigate_history(true);
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            removed_session
+        );
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            removed_session
+        );
+        assert_eq!(
+            (restored.history.undo_len(), restored.history.redo_len()),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one nested-package lifecycle proves closure admission, exact duplicate no-op behavior, conflict atomicity, complete-session history, and persistence"
+    )]
+    fn nested_component_package_import_is_exact_historical_and_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial_session = workspace.authoring_session_encoding().unwrap();
+        let initial_workspace = workspace.workspace.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().encoding.clone();
+        let initial_cached_jobs = workspace.cached_jobs.encoding.clone();
+        let initial_component = workspace.component.as_ref().unwrap().clone();
+        let initial_root = initial_component.hierarchy.document.root().clone();
+
+        let leaf = empty_library_component("user.package_leaf", &workspace.workspace).unwrap();
+        let leaf_digest = encode_graph_component(&leaf).unwrap().digest();
+        let (mut wrapper, _) = representative_wrapper_component(&leaf).unwrap();
+        wrapper
+            .update_identity_metadata("user.package_wrapper", 1)
+            .unwrap();
+        let wrapper_digest = encode_graph_component(&wrapper).unwrap().digest();
+        let package = alumina_interface_core::graph::GraphComponentPackageDocument::try_new(
+            GraphComponentPackageLimits::interactive(),
+            wrapper_digest,
+            vec![leaf.clone(), wrapper.clone()],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                leaf_digest,
+            )],
+        )
+        .unwrap();
+        let package_encoding = encode_graph_component_package(&package).unwrap();
+
+        workspace.mark_persisted();
+        assert!(
+            workspace
+                .import_component_package_dependency(package_encoding.bytes())
+                .unwrap()
+        );
+        let imported_session = workspace.authoring_session_encoding().unwrap();
+        let imported = workspace.component.as_ref().unwrap();
+        assert_ne!(imported_session, initial_session);
+        assert_eq!(workspace.workspace, initial_workspace);
+        assert_eq!(workspace.probes.as_ref().unwrap().encoding, initial_probes);
+        assert_eq!(workspace.cached_jobs.encoding, initial_cached_jobs);
+        assert_eq!(imported.document, initial_component.document);
+        assert_eq!(imported.encoding, initial_component.encoding);
+        assert_eq!(imported.hierarchy.document.root(), &initial_root);
+        assert_eq!(imported.hierarchy.document.dependencies().len(), 4);
+        assert_eq!(
+            imported
+                .hierarchy
+                .document
+                .dependency(leaf_digest)
+                .unwrap()
+                .document(),
+            &leaf
+        );
+        assert_eq!(
+            imported
+                .hierarchy
+                .document
+                .dependency(wrapper_digest)
+                .unwrap()
+                .document(),
+            &wrapper
+        );
+        assert!(
+            imported
+                .hierarchy
+                .document
+                .instances()
+                .iter()
+                .any(|instance| {
+                    *instance
+                        == GraphComponentInstance::nested(
+                            wrapper_digest,
+                            GraphNodeId::new(1),
+                            leaf_digest,
+                        )
+                })
+        );
+        assert_eq!(workspace.selected_hierarchy_component, Some(wrapper_digest));
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert!(workspace.persistence_pending());
+        assert!(workspace.component_status.contains("2 of 2 components"));
+        assert!(
+            workspace
+                .component_status
+                .contains("1 of 1 scoped bindings")
+        );
+
+        workspace.mark_persisted();
+        let imported_history = workspace.history.clone();
+        assert!(
+            !workspace
+                .import_component_package_dependency(package_encoding.bytes())
+                .unwrap()
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        assert_eq!(workspace.history, imported_history);
+        assert!(!workspace.persistence_pending());
+        assert_eq!(workspace.selected_hierarchy_component, Some(wrapper_digest));
+        assert!(workspace.component_status.contains("exact duplicate"));
+        assert!(workspace.component_status.contains("already matched"));
+
+        let alternate_leaf =
+            empty_library_component("user.package_alternate_leaf", &workspace.workspace).unwrap();
+        let alternate_leaf_digest = encode_graph_component(&alternate_leaf).unwrap().digest();
+        let (mut exact_wrapper, _) = representative_wrapper_component(&alternate_leaf).unwrap();
+        exact_wrapper
+            .update_identity_metadata("user.package_wrapper", 1)
+            .unwrap();
+        assert_eq!(
+            encode_graph_component(&exact_wrapper).unwrap().digest(),
+            wrapper_digest,
+            "same-shape child identity leaked into parent ALGC"
+        );
+        let conflict = alumina_interface_core::graph::GraphComponentPackageDocument::try_new(
+            GraphComponentPackageLimits::interactive(),
+            wrapper_digest,
+            vec![alternate_leaf, exact_wrapper],
+            vec![GraphComponentInstance::nested(
+                wrapper_digest,
+                GraphNodeId::new(1),
+                alternate_leaf_digest,
+            )],
+        )
+        .unwrap();
+        let conflict_encoding = encode_graph_component_package(&conflict).unwrap();
+        let retained_component = workspace.component.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        assert!(
+            workspace
+                .import_component_package_dependency(conflict_encoding.bytes())
+                .unwrap_err()
+                .contains("already bound")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        assert_exact_component_package_equal(
+            workspace.component.as_ref().unwrap(),
+            &retained_component,
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.navigate_history(false);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            initial_session
+        );
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(
+            restored.authoring_session_encoding().unwrap(),
+            imported_session
+        );
+        let restored_hierarchy = &restored.component.as_ref().unwrap().hierarchy.document;
+        assert!(restored_hierarchy.dependency(leaf_digest).is_some());
+        assert!(restored_hierarchy.dependency(wrapper_digest).is_some());
+        assert!(restored_hierarchy.instances().iter().any(|instance| {
+            *instance
+                == GraphComponentInstance::nested(wrapper_digest, GraphNodeId::new(1), leaf_digest)
+        }));
+        assert!(!restored.persistence_pending());
+    }
+
+    #[test]
+    fn invalid_or_authoritative_component_library_edits_are_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+        let authoritative = workspace.component.as_ref().unwrap().encoding.digest();
+
+        let mut corrupt = workspace
+            .component
+            .as_ref()
+            .unwrap()
+            .encoding
+            .bytes()
+            .to_vec();
+        corrupt[0] ^= 0xff;
+        assert!(workspace.import_component_dependency(&corrupt).is_err());
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        let mut unreviewed = workspace.component.as_ref().unwrap().document.clone();
+        let mut unreviewed_workspace = unreviewed.workspace().clone();
+        let exemplar = unreviewed_workspace.graph().nodes()[0].clone();
+        unreviewed_workspace
+            .create_node(
+                GraphNodePrototype::new(
+                    NodeKind::new("control.unreviewed-component", 1),
+                    "Unreviewed component behavior",
+                    exemplar.domain(),
+                    exemplar.inputs().to_vec(),
+                    exemplar.outputs().to_vec(),
+                    exemplar.parameters().to_vec(),
+                ),
+                9_000,
+                100,
+            )
+            .unwrap();
+        unreviewed.replace_workspace(unreviewed_workspace).unwrap();
+        let unreviewed = encode_graph_component(&unreviewed).unwrap();
+        assert!(
+            workspace
+                .import_component_dependency(unreviewed.bytes())
+                .unwrap_err()
+                .contains("semantics rejected")
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+
+        workspace.apply_hierarchy_action(HierarchyUiAction::RemoveComponent(authoritative));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.component_status.contains("control authority"));
+    }
+
+    #[test]
     fn moves_and_port_edits_are_transactional_and_detach_bound_trace() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let graph_digest = workspace.workspace.graph_digest();
@@ -6534,6 +18719,7 @@ mod tests {
             NodeDrag {
                 node: GraphNodeId::new(1),
                 origin,
+                delta: egui::Vec2::ZERO,
             },
             egui::vec2(17.4, -9.6),
         );
@@ -6640,6 +18826,84 @@ mod tests {
     }
 
     #[test]
+    fn typed_case_and_state_palette_defaults_are_explicit_and_transactional() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let expected = [
+            ("control.bool.constant", 0, 1, 1),
+            ("control.bool.case", 3, 1, 0),
+            ("control.bool.delay", 1, 1, 1),
+            ("control.exact.constant", 0, 1, 1),
+            ("control.exact.case", 3, 1, 0),
+        ];
+        for (offset, (kind, inputs, outputs, parameters)) in expected.into_iter().enumerate() {
+            workspace.palette_index = workspace
+                .palette
+                .iter()
+                .position(|entry| entry.prototype.kind().name() == kind)
+                .unwrap();
+            let prototype = &workspace.palette[workspace.palette_index].prototype;
+            assert_eq!(prototype.domain(), ExecutionDomain::HostExact);
+            assert_eq!(prototype.inputs().len(), inputs);
+            assert_eq!(prototype.outputs().len(), outputs);
+            assert_eq!(prototype.parameters().len(), parameters);
+            if let Some(parameter) = prototype.parameters().first() {
+                let expected = if kind == "control.exact.constant" {
+                    GraphValue::ExactRational(Rational::zero())
+                } else {
+                    GraphValue::Boolean(false)
+                };
+                assert_eq!(parameter.value().value(), &expected);
+            }
+
+            workspace.add_palette_node();
+            let created = GraphNodeId::new(22 + u32::try_from(offset).unwrap());
+            assert_eq!(workspace.selected_node, Some(created));
+            assert_eq!(
+                workspace
+                    .workspace
+                    .graph()
+                    .node(created)
+                    .unwrap()
+                    .kind()
+                    .name(),
+                kind
+            );
+        }
+        assert_eq!(workspace.workspace.graph().nodes().len(), 26);
+        assert_eq!(workspace.workspace.next_node_id(), 27);
+
+        workspace.commit_parameter_text(GraphNodeId::new(22), 1, "true");
+        assert_eq!(
+            workspace
+                .workspace
+                .graph()
+                .node(GraphNodeId::new(22))
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value(),
+            &GraphValue::Boolean(true)
+        );
+        let retained = workspace.workspace.clone();
+        workspace.commit_parameter_text(GraphNodeId::new(22), 1, "1");
+        assert_eq!(workspace.workspace, retained);
+        assert!(workspace.edit_status.contains("rejected without mutation"));
+
+        workspace.commit_parameter_text(GraphNodeId::new(25), 1, "13/7");
+        assert_eq!(
+            workspace
+                .workspace
+                .graph()
+                .node(GraphNodeId::new(25))
+                .unwrap()
+                .parameters()[0]
+                .value()
+                .value(),
+            &GraphValue::ExactRational(Rational::fraction(13, 7).unwrap())
+        );
+    }
+
+    #[test]
     fn empty_draft_remains_renderable_and_can_accept_a_palette_node() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let mut candidate = workspace.workspace.clone();
@@ -6680,6 +18944,7 @@ mod tests {
             NodeDrag {
                 node: GraphNodeId::new(1),
                 origin,
+                delta: egui::Vec2::ZERO,
             },
             egui::vec2(20.0, 30.0),
         );
@@ -6710,6 +18975,7 @@ mod tests {
             NodeDrag {
                 node: GraphNodeId::new(2),
                 origin: second_origin,
+                delta: egui::Vec2::ZERO,
             },
             egui::vec2(-11.0, 7.0),
         );
@@ -6718,29 +18984,279 @@ mod tests {
     }
 
     #[test]
-    fn persistence_round_trips_the_exact_current_workspace_probe_pair() {
+    fn unified_authoring_history_interleaves_graph_probe_cached_job_and_hierarchy_exactly() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let initial = workspace.authoring_session_encoding().unwrap();
+
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "17/9");
+        let graph_edit = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(graph_edit, initial);
+        assert!(workspace.component.is_some());
+
+        workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
+        let probe_edit = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(probe_edit, graph_edit);
+
+        workspace.cached_jobs.selected_entry = 1;
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        let cached_job_edit = workspace.authoring_session_encoding().unwrap();
+        assert_ne!(cached_job_edit, probe_edit);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (3, 0)
+        );
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), probe_edit);
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), graph_edit);
+        workspace.navigate_history(false);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), initial);
+        assert_eq!(
+            (workspace.history.undo_len(), workspace.history.redo_len()),
+            (0, 3)
+        );
+
+        workspace.navigate_history(true);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), graph_edit);
+        workspace.navigate_history(true);
+        assert_eq!(workspace.authoring_session_encoding().unwrap(), probe_edit);
+        workspace.navigate_history(true);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            cached_job_edit
+        );
+
+        workspace.navigate_history(false);
+        workspace.commit_node_label(GraphNodeId::new(8), "branched exact gain");
+        assert_eq!(workspace.history.redo_len(), 0);
+        assert_ne!(
+            workspace.authoring_session_encoding().unwrap(),
+            cached_job_edit
+        );
+    }
+
+    #[test]
+    fn cached_job_noop_does_not_dirty_or_extend_unified_history() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.mark_persisted();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.cached_jobs.status.contains("already matched"));
+    }
+
+    #[test]
+    fn node_label_edits_are_bounded_session_historical_and_noop_aware() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let node = GraphNodeId::new(8);
+        let initial = workspace.workspace.clone();
+        let initial_encoding = workspace.workspace_encoding.clone();
+        let initial_probes = workspace.probes.as_ref().unwrap().clone();
+        let initial_placement = workspace.workspace.placement(node);
+        let initial_node_cursor = workspace.workspace.next_node_id();
+        let initial_wire_cursor = workspace.workspace.next_wire_id();
+
+        workspace.mark_persisted();
+        workspace.commit_node_label(node, "Exact gain stage α");
+        assert_eq!(
+            workspace.workspace.graph().node(node).unwrap().label(),
+            "Exact gain stage α"
+        );
+        assert_ne!(workspace.workspace_encoding, initial_encoding);
+        assert_ne!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert_eq!(workspace.workspace.placement(node), initial_placement);
+        assert_eq!(workspace.workspace.next_node_id(), initial_node_cursor);
+        assert_eq!(workspace.workspace.next_wire_id(), initial_wire_cursor);
+        assert_eq!(workspace.history.undo_len(), 1);
+        assert_eq!(workspace.history.redo_len(), 0);
+        assert!(workspace.persistence_pending());
+        assert!(!workspace.reference_trace_is_current());
+        assert_eq!(
+            workspace.node_label_drafts.get(&node).map(String::as_str),
+            Some("Exact gain stage α")
+        );
+
+        workspace.mark_persisted();
+        let edited = workspace.workspace.clone();
+        let edited_encoding = workspace.workspace_encoding.clone();
+        let edited_probes = workspace.probes.as_ref().unwrap().clone();
+        let retained_history = workspace.history.clone();
+        workspace.commit_node_label(node, "Exact gain stage α");
+        assert_eq!(workspace.workspace, edited);
+        assert_eq!(workspace.workspace_encoding, edited_encoding);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.edit_status.contains("already matched"));
+
+        for invalid in [
+            String::new(),
+            "control\ncharacter".to_owned(),
+            "x".repeat(
+                workspace
+                    .workspace
+                    .graph()
+                    .schema()
+                    .limits()
+                    .maximum_label_bytes
+                    + 1,
+            ),
+        ] {
+            workspace.commit_node_label(node, &invalid);
+            assert_eq!(workspace.workspace, edited);
+            assert_eq!(workspace.workspace_encoding, edited_encoding);
+            assert_eq!(workspace.history, retained_history);
+            assert!(!workspace.persistence_pending());
+            assert!(workspace.edit_status.contains("rejected without mutation"));
+        }
+
+        workspace.navigate_history(false);
+        assert_eq!(workspace.workspace, initial);
+        assert_eq!(workspace.workspace_encoding, initial_encoding);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            initial_probes.encoding
+        );
+        assert!(workspace.node_label_drafts.is_empty());
+        workspace.navigate_history(true);
+        assert_eq!(workspace.workspace, edited);
+        assert_eq!(workspace.workspace_encoding, edited_encoding);
+        assert_eq!(
+            workspace.probes.as_ref().unwrap().encoding,
+            edited_probes.encoding
+        );
+        assert!(workspace.node_label_drafts.is_empty());
+
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
+        assert_eq!(restored.workspace, workspace.workspace);
+        assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
+        assert_eq!(
+            restored.probes.as_ref().unwrap().encoding,
+            workspace.probes.as_ref().unwrap().encoding
+        );
+    }
+
+    #[test]
+    fn execution_domain_choices_use_audited_families_and_known_device_identities() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let node = GraphNodeId::new(8);
+        let schema = workspace
+            .fixture
+            .registry()
+            .semantic_registry()
+            .schema(workspace.workspace.graph().node(node).unwrap().kind())
+            .unwrap();
+        assert_eq!(
+            audited_domain_choices(workspace.workspace.graph(), schema.allowed_domains()),
+            vec![ExecutionDomain::HostExact]
+        );
+
+        workspace.mark_persisted();
+        let retained_workspace = workspace.workspace.clone();
+        let retained_encoding = workspace.workspace_encoding.clone();
+        let retained_history = workspace.history.clone();
+        workspace.commit_node_domain(node, ExecutionDomain::HostExact);
+        assert_eq!(workspace.workspace, retained_workspace);
+        assert_eq!(workspace.workspace_encoding, retained_encoding);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.edit_status.contains("already matched"));
+
+        workspace.commit_node_domain(
+            node,
+            ExecutionDomain::Service {
+                device_id: DeviceId([0x42; 16]),
+            },
+        );
+        assert_eq!(workspace.workspace, retained_workspace);
+        assert_eq!(workspace.workspace_encoding, retained_encoding);
+        assert_eq!(workspace.history, retained_history);
+        assert!(!workspace.persistence_pending());
+        assert!(workspace.edit_status.contains("audited semantics rejected"));
+
+        workspace.commit_node_domain(GraphNodeId::new(99), ExecutionDomain::HostExact);
+        assert_eq!(workspace.workspace, retained_workspace);
+        assert_eq!(workspace.history, retained_history);
+        assert!(workspace.edit_status.contains("node 99 is unavailable"));
+
+        let proof = tinybee_resource_proof().unwrap();
+        let known_device = DeviceId([0x54; 16]);
+        assert_eq!(
+            audited_domain_choices(proof.workspace.graph(), ExecutionDomainSet::ALL),
+            vec![
+                ExecutionDomain::HostExact,
+                ExecutionDomain::Service {
+                    device_id: known_device,
+                },
+                ExecutionDomain::Realtime {
+                    device_id: known_device,
+                },
+            ]
+        );
+        assert_eq!(
+            audited_domain_choices(proof.workspace.graph(), ExecutionDomainSet::REALTIME),
+            vec![ExecutionDomain::Realtime {
+                device_id: known_device,
+            }]
+        );
+        assert_eq!(
+            domain_choice_label(ExecutionDomain::Realtime {
+                device_id: known_device,
+            }),
+            "Realtime · device 5454545454545454…"
+        );
+    }
+
+    #[test]
+    fn persistence_round_trips_one_complete_exact_authoring_session() {
         let canonical = ExactControlWorkspace::try_new().unwrap();
-        let canonical_persisted = canonical.persisted_workspace_pair().unwrap();
+        let canonical_encoding = canonical.authoring_session_encoding().unwrap();
+        let canonical_persisted = canonical.persisted_authoring_session().unwrap();
+        assert_eq!(
+            decode_persisted_authoring_session(&canonical_persisted).unwrap(),
+            canonical_encoding.bytes()
+        );
         let canonical_restored =
             ExactControlWorkspace::try_new_with_persisted(Some(&canonical_persisted)).unwrap();
         assert_eq!(
             canonical_restored.probes.as_ref().unwrap().encoding,
             canonical.probes.as_ref().unwrap().encoding
         );
+        assert_eq!(
+            canonical_restored.cached_jobs.encoding,
+            canonical.cached_jobs.encoding
+        );
+        let canonical_component = canonical.component.as_ref().unwrap();
+        let restored_component = canonical_restored.component.as_ref().unwrap();
+        assert_exact_component_package_equal(restored_component, canonical_component);
 
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         workspace.commit_parameter_text(GraphNodeId::new(8), 1, "7/3");
         workspace.set_probe_trigger(GraphProbeId::new(5), GraphProbeEdge::Rising);
-        assert_eq!(workspace.history.undo_len(), 2);
-        let persisted = workspace.persisted_workspace_pair().unwrap();
-        assert!(persisted.starts_with(PERSISTED_WORKSPACE_PAIR_PREFIX));
-        let (workspace_hex, probe_hex) = persisted[PERSISTED_WORKSPACE_PAIR_PREFIX.len()..]
-            .split_once(':')
-            .unwrap();
-        assert!([workspace_hex, probe_hex].into_iter().all(|hex| {
-            hex.bytes()
+        workspace.cached_jobs.selected_entry = 1;
+        workspace.apply_cached_job_action(CachedJobGraphAction::Rebind);
+        assert_eq!(workspace.history.undo_len(), 3);
+        let persisted = workspace.persisted_authoring_session().unwrap();
+        assert!(persisted.starts_with(PERSISTED_AUTHORING_SESSION_PREFIX));
+        let payload = &persisted[PERSISTED_AUTHORING_SESSION_PREFIX.len()..];
+        assert!(!payload.contains(':'));
+        assert!(
+            payload
+                .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        }));
+        );
 
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace, workspace.workspace);
@@ -6753,41 +19269,145 @@ mod tests {
             restored.probes.as_ref().unwrap().encoding,
             workspace.probes.as_ref().unwrap().encoding
         );
+        assert_eq!(
+            restored.cached_jobs.workspace,
+            workspace.cached_jobs.workspace
+        );
+        assert_eq!(
+            restored.cached_jobs.encoding,
+            workspace.cached_jobs.encoding
+        );
         assert_eq!(restored.history.undo_len(), 0);
         assert_eq!(restored.history.redo_len(), 0);
         assert!(!restored.persistence_pending());
+        let component = workspace.component.as_ref().unwrap();
+        let restored_component = restored.component.as_ref().unwrap();
+        assert_exact_component_package_equal(restored_component, component);
 
         let mut uppercase = persisted.clone();
-        let offset = workspace_hex
+        let offset = payload
             .bytes()
             .position(|byte| (b'a'..=b'f').contains(&byte))
             .unwrap();
-        let persisted_offset = PERSISTED_WORKSPACE_PAIR_PREFIX.len() + offset;
+        let persisted_offset = PERSISTED_AUTHORING_SESSION_PREFIX.len() + offset;
         uppercase.replace_range(
             persisted_offset..=persisted_offset,
-            &workspace_hex[offset..=offset].to_ascii_uppercase(),
+            &payload[offset..=offset].to_ascii_uppercase(),
         );
         assert!(
-            decode_persisted_workspace_pair(
-                &uppercase,
-                GraphWorkspaceLimits::interactive(),
-                GraphProbeLimits::interactive(),
-            )
-            .unwrap_err()
-            .contains("lowercase hex")
+            decode_persisted_authoring_session(&uppercase)
+                .unwrap_err()
+                .contains("lowercase hex")
         );
         assert!(
-            decode_persisted_workspace_pair(
-                "algwp1:0000:00",
-                GraphWorkspaceLimits {
-                    maximum_workspace_bytes: 1,
-                    ..GraphWorkspaceLimits::interactive()
-                },
-                GraphProbeLimits::interactive(),
-            )
-            .unwrap_err()
-            .contains("admission limit")
+            decode_persisted_authoring_session("algwb1:0000:00:00")
+                .unwrap_err()
+                .contains("prefix/version is unsupported")
         );
+    }
+
+    #[test]
+    fn absent_authoring_hierarchy_stays_absent_after_restore() {
+        let mut detached = ExactControlWorkspace::try_new().unwrap();
+        detached.component = None;
+        let detached_persisted = detached.persisted_authoring_session().unwrap();
+        let detached_restored =
+            ExactControlWorkspace::try_new_with_persisted(Some(&detached_persisted)).unwrap();
+        assert!(detached_restored.component.is_none());
+        assert!(detached_restored.component_status.contains("no selected"));
+    }
+
+    #[test]
+    fn hierarchy_identity_and_nested_artifact_corruption_reject_atomically() {
+        let source = ExactControlWorkspace::try_new().unwrap();
+        let canonical = source.authoring_session_encoding().unwrap();
+        let offsets = algs_hierarchy_offsets(canonical.bytes());
+        let mut target = ExactControlWorkspace::try_new().unwrap();
+        target.commit_parameter_text(GraphNodeId::new(8), 1, "11/5");
+        let retained = target.authoring_session_encoding().unwrap();
+
+        let mut selected_substitution = canonical.bytes().to_vec();
+        selected_substitution[offsets.selected_component.clone()].fill(0xa7);
+        assert!(
+            target
+                .restore_authoring_session_bytes(&selected_substitution)
+                .unwrap_err()
+                .contains("selected component")
+        );
+        assert_eq!(
+            target.authoring_session_encoding().unwrap().bytes(),
+            retained.bytes()
+        );
+
+        let mut corrupt_hierarchy = canonical.bytes().to_vec();
+        corrupt_hierarchy[offsets.hierarchy.start] ^= 0xff;
+        assert!(
+            target
+                .restore_authoring_session_bytes(&corrupt_hierarchy)
+                .unwrap_err()
+                .contains("hierarchy")
+        );
+        assert_eq!(
+            target.authoring_session_encoding().unwrap().bytes(),
+            retained.bytes()
+        );
+
+        let mut corrupt_source_map = canonical.bytes().to_vec();
+        corrupt_source_map[offsets.source_map.start] ^= 0xff;
+        assert!(
+            target
+                .restore_authoring_session_bytes(&corrupt_source_map)
+                .unwrap_err()
+                .contains("source map")
+        );
+        assert_eq!(
+            target.authoring_session_encoding().unwrap().bytes(),
+            retained.bytes()
+        );
+    }
+
+    #[test]
+    fn history_target_failing_cached_job_catalog_admission_is_atomic() {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.commit_parameter_text(GraphNodeId::new(8), 1, "13/7");
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+
+        let mut foreign_cached_job = workspace.cached_jobs.workspace.clone();
+        let node = foreign_cached_job.graph().nodes()[0].id();
+        let foreign_handle = JobGraphHandle {
+            global_job_digest: Digest([0x6d; 32]),
+            ..workspace.cached_jobs.catalog.entries()[0].handle()
+        };
+        let parameter = foreign_cached_job.graph().node(node).unwrap().parameters()[0]
+            .value()
+            .replacing_value_at_path(
+                workspace.cached_jobs.registry.context_schema(),
+                &CACHED_JOB_MIRROR_PATH,
+                GraphValue::JobHandle(foreign_handle),
+            )
+            .unwrap();
+        foreign_cached_job
+            .set_parameter(node, CACHED_JOB_PARAMETER, parameter)
+            .unwrap();
+        let foreign_session = ExactControlWorkspace::authoring_session_document_from_parts(
+            &workspace.workspace,
+            &workspace.probes.as_ref().unwrap().document,
+            &foreign_cached_job,
+            workspace.component.as_ref(),
+        )
+        .unwrap();
+        let foreign_encoding = encode_graph_authoring_session(&foreign_session).unwrap();
+        workspace.history.record(foreign_encoding).unwrap();
+        let retained_history = workspace.history.clone();
+
+        workspace.navigate_history(false);
+
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(workspace.edit_status.contains("UI/catalog admission"));
     }
 
     #[test]
@@ -6822,7 +19442,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_metadata_edits_are_pair_historical_bounded_and_noop_aware() {
+    fn probe_metadata_edits_are_session_historical_bounded_and_noop_aware() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
         let id = GraphProbeId::new(2);
         let trigger_id = GraphProbeId::new(5);
@@ -7452,6 +20072,71 @@ mod tests {
     }
 
     #[test]
+    fn composite_parameter_notation_is_bounded_and_handles_require_selectors() {
+        let schema = state_trace_schema();
+        let document = GraphDocument::try_new(
+            1,
+            schema,
+            vec![ClockDefinition::new(
+                GraphClockId::new(1),
+                "host",
+                ClockKind::HostMonotonic {
+                    ticks_per_second: 1_000,
+                },
+            )],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let value = TypedGraphValue::try_new(
+            document.schema(),
+            STATE_RECORD,
+            GraphValue::Record(vec![
+                RecordValueField {
+                    field: RecordFieldId::new(1),
+                    value: GraphValue::Boolean(true),
+                },
+                RecordValueField {
+                    field: RecordFieldId::new(2),
+                    value: GraphValue::Text("ready\nμ".to_owned()),
+                },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            parameter_edit_text(&document, &value).as_deref(),
+            Some("{ready:true,message:\"ready\\nμ\"}")
+        );
+        assert_eq!(
+            parse_parameter_text(
+                &document,
+                STATE_RECORD,
+                " { ready : true , message : \"ready\\nμ\" } ",
+            )
+            .unwrap(),
+            value
+        );
+
+        let resource = TypedGraphValue::try_new(
+            document.schema(),
+            STATE_RESOURCE,
+            GraphValue::ResourceHandle(ResourceGraphHandle {
+                device_id: DeviceId([1; 16]),
+                board_package_digest: Digest([2; 32]),
+                class: ResourceClassId::new(7),
+                resource_selector: 33,
+            }),
+        )
+        .unwrap();
+        assert_eq!(parameter_edit_text(&document, &resource), None);
+        assert!(
+            parse_parameter_text(&document, STATE_RESOURCE, "anything")
+                .unwrap_err()
+                .contains("requires an authenticated selector")
+        );
+    }
+
+    #[test]
     fn non_scalar_trace_values_become_bounded_canonical_state_events() {
         let schema = state_trace_schema();
         let text = state_trace_value(
@@ -7736,7 +20421,7 @@ mod tests {
             workspace.probes.as_ref().unwrap().encoding,
             edited_probes.encoding
         );
-        let persisted = workspace.persisted_workspace_pair().unwrap();
+        let persisted = workspace.persisted_authoring_session().unwrap();
         let restored = ExactControlWorkspace::try_new_with_persisted(Some(&persisted)).unwrap();
         assert_eq!(restored.workspace_encoding, workspace.workspace_encoding);
         assert_eq!(
@@ -7746,7 +20431,7 @@ mod tests {
     }
 
     #[test]
-    fn algp_import_is_pair_historical_and_wrong_binding_fails_closed() {
+    fn algp_import_is_session_historical_and_wrong_binding_fails_closed() {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
@@ -7795,7 +20480,7 @@ mod tests {
         assert!(
             fallback
                 .edit_status
-                .contains("persisted ALGW/ALGP pair rejected")
+                .contains("persisted ALGS authoring session rejected")
         );
         assert!(fallback.persistence_pending());
         assert!(fallback.reference_trace_is_current());
@@ -7803,11 +20488,14 @@ mod tests {
         let reference = ExactControlWorkspace::try_new().unwrap();
         let mut source = ExactControlWorkspace::try_new().unwrap();
         source.commit_parameter_text(GraphNodeId::new(8), 1, "9/4");
-        let mismatched_pair = encode_persisted_workspace_pair(
-            &source.workspace_encoding,
-            &reference.probes.as_ref().unwrap().encoding,
-        )
-        .unwrap();
+        let source_session = source.authoring_session_encoding().unwrap();
+        let mut mismatched_pair = source_session.bytes().to_vec();
+        replace_exact_embedded_bytes(
+            &mut mismatched_pair,
+            source.probes.as_ref().unwrap().encoding.bytes(),
+            reference.probes.as_ref().unwrap().encoding.bytes(),
+        );
+        let mismatched_pair = persisted_algs(&mismatched_pair);
         let pair_fallback =
             ExactControlWorkspace::try_new_with_persisted(Some(&mismatched_pair)).unwrap();
         assert_eq!(pair_fallback.workspace, reference.workspace);
@@ -7878,8 +20566,389 @@ mod tests {
     }
 
     #[test]
+    fn persisted_raw_or_foreign_cached_job_identity_rejects_the_whole_session() {
+        let reference = ExactControlWorkspace::try_new().unwrap();
+        let mut foreign_job_workspace = reference.cached_jobs.workspace.clone();
+        let foreign_node = foreign_job_workspace.graph().nodes()[0].id();
+        let foreign_handle = JobGraphHandle {
+            global_job_digest: Digest([0x91; 32]),
+            ..reference.cached_jobs.catalog.entries()[0].handle()
+        };
+        let foreign_parameter = foreign_job_workspace
+            .graph()
+            .node(foreign_node)
+            .unwrap()
+            .parameters()[0]
+            .value()
+            .replacing_value_at_path(
+                reference.cached_jobs.registry.context_schema(),
+                &CACHED_JOB_MIRROR_PATH,
+                GraphValue::JobHandle(foreign_handle),
+            )
+            .unwrap();
+        foreign_job_workspace
+            .set_parameter(foreign_node, CACHED_JOB_PARAMETER, foreign_parameter)
+            .unwrap();
+        let foreign_job_encoding = encode_graph_workspace(&foreign_job_workspace).unwrap();
+        let reference_session = reference.authoring_session_encoding().unwrap();
+        let mut foreign_bundle = reference_session.bytes().to_vec();
+        replace_exact_embedded_bytes(
+            &mut foreign_bundle,
+            reference.cached_jobs.encoding.bytes(),
+            foreign_job_encoding.bytes(),
+        );
+        let foreign_bundle = persisted_algs(&foreign_bundle);
+
+        let fallback =
+            ExactControlWorkspace::try_new_with_persisted(Some(&foreign_bundle)).unwrap();
+        assert_eq!(fallback.workspace, reference.workspace);
+        assert_eq!(
+            fallback.cached_jobs.workspace,
+            reference.cached_jobs.workspace
+        );
+        assert!(fallback.edit_status.contains("rejected atomically"));
+        assert!(fallback.persistence_pending());
+    }
+
+    fn workspace_with_runtime_input_control() -> (
+        ExactControlWorkspace,
+        ComponentPackage,
+        GraphFrontPanelInputAuthority,
+    ) {
+        let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        let wire = workspace
+            .workspace
+            .graph()
+            .wires()
+            .iter()
+            .find(|wire| wire.id() == GraphWireId::new(1))
+            .copied()
+            .unwrap();
+        let target = wire.target();
+        let mut disconnected = workspace.workspace.clone();
+        disconnected.disconnect(wire.id()).unwrap();
+        assert!(workspace.commit_candidate(
+            disconnected,
+            "exposed one exact Stream input for front-panel execution",
+        ));
+        workspace.apply_component_connector_action(ComponentConnectorUiAction::AddInput {
+            name: "setpoint_runtime".to_owned(),
+            target,
+        });
+        let input = GraphComponentInputId::new(1);
+        workspace.apply_panel_action(PanelUiAction::Add {
+            name: "setpoint_runtime_control".to_owned(),
+            binding: GraphFrontPanelBinding::InputControl(input),
+            rect: GraphFrontPanelRect::new(20, 480, 240, 54),
+        });
+
+        let component = workspace.component.as_ref().unwrap().clone();
+        let authorities = resolve_graph_front_panel_inputs(
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            GraphFrontPanelRuntimeLimits::interactive(),
+        )
+        .unwrap();
+        let authority = authorities
+            .into_iter()
+            .find(|authority| {
+                authority.component() == component.encoding.digest()
+                    && authority.input() == input
+                    && authority.is_active()
+            })
+            .unwrap();
+        assert_eq!(authority.sample_type(), GraphTypeId::new(2));
+        (workspace, component, authority)
+    }
+
+    #[test]
+    fn authored_input_control_executes_exact_alfr_in_the_ui_layer() {
+        let (mut workspace, component, authority) = workspace_with_runtime_input_control();
+        workspace.front_panel_schedule_drafts.insert(
+            authority.key().clone(),
+            FrontPanelScheduleDraft::constant("7/2"),
+        );
+        workspace.rebuild_front_panel_runtime();
+
+        let runtime = workspace.front_panel_runtime.as_ref().unwrap();
+        assert_eq!(
+            runtime.document.hierarchy_digest(),
+            component.hierarchy.encoding.digest()
+        );
+        assert_eq!(
+            runtime.document.workspace_digest(),
+            component.hierarchy.flattening.encoding().digest()
+        );
+        assert!(runtime.execution.injected_sample_count() > 0);
+        assert!(
+            runtime
+                .execution
+                .simulation()
+                .entries()
+                .iter()
+                .any(|entry| entry.kind() == GraphTraceEntryKind::InjectedInput)
+        );
+        let replay = alumina_interface_core::graph::replay_graph_front_panel_run(
+            runtime.encoding.bytes(),
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            workspace.fixture.registry(),
+            GraphFrontPanelRuntimeLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &runtime.document);
+        assert_eq!(replay.encoding(), &runtime.encoding);
+        assert!(
+            workspace
+                .front_panel_runtime_output_text(&component, GraphComponentOutputId::new(1))
+                .is_some_and(|text| text.contains("ALFR"))
+        );
+        assert!(workspace.front_panel_runtime_status.contains("executed"));
+    }
+
+    #[test]
+    fn front_panel_output_cursor_is_exact_transient_and_runtime_bound() {
+        let (mut workspace, component, authority) = workspace_with_runtime_input_control();
+        workspace.front_panel_schedule_drafts.insert(
+            authority.key().clone(),
+            FrontPanelScheduleDraft::constant("7/2"),
+        );
+        workspace.rebuild_front_panel_runtime();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+        let retained_run = workspace
+            .front_panel_runtime
+            .as_ref()
+            .unwrap()
+            .encoding
+            .clone();
+        let retained_trace = workspace
+            .front_panel_runtime
+            .as_ref()
+            .unwrap()
+            .execution
+            .trace()
+            .clone();
+        let retained_cursor = workspace.cursor_root_tick.clone();
+        let horizon = workspace
+            .front_panel_runtime
+            .as_ref()
+            .unwrap()
+            .document
+            .horizon()
+            .inclusive_root_tick();
+
+        workspace.front_panel_cursor_draft = "02".to_owned();
+        assert!(!workspace.commit_front_panel_cursor_draft(horizon, true));
+        assert_eq!(workspace.cursor_root_tick, retained_cursor);
+        assert!(workspace.front_panel_cursor_status.contains("rejected"));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+
+        let cursor = Rational::fraction(3, 2).unwrap();
+        workspace.front_panel_cursor_draft = front_panel_root_cursor_text(&cursor);
+        assert!(workspace.commit_front_panel_cursor_draft(horizon, true));
+        assert_eq!(workspace.cursor_root_tick, cursor);
+        let text = workspace
+            .front_panel_runtime_output_text(&component, GraphComponentOutputId::new(1))
+            .unwrap();
+        assert!(text.contains(&format!("cursor {cursor}")));
+        assert!(text.contains("root "));
+        assert!(text.contains("ALFR"));
+        assert_eq!(
+            workspace.front_panel_runtime.as_ref().unwrap().encoding,
+            retained_run
+        );
+        assert_eq!(
+            workspace
+                .front_panel_runtime
+                .as_ref()
+                .unwrap()
+                .execution
+                .trace(),
+            &retained_trace
+        );
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+
+        workspace.front_panel_cursor_draft =
+            front_panel_root_cursor_text(&Rational::from(horizon + 1));
+        assert!(!workspace.commit_front_panel_cursor_draft(horizon, true));
+        assert_eq!(workspace.cursor_root_tick, cursor);
+
+        let context = egui::Context::default();
+        let frame = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_280.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    workspace.show_front_panel(ui);
+                });
+            },
+        );
+        assert!(!frame.shapes.is_empty());
+        assert!(workspace.front_panel_runtime.is_some());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression keeps draft rejection, canonical execution, replay, identity, history, and rendered-timeline evidence together"
+    )]
+    fn multi_change_front_panel_timeline_is_exact_transient_and_replayable() {
+        let (mut workspace, component, authority) = workspace_with_runtime_input_control();
+        let retained_session = workspace.authoring_session_encoding().unwrap();
+        let retained_history = workspace.history.clone();
+        let key = authority.key().clone();
+
+        workspace.front_panel_schedule_drafts.insert(
+            key.clone(),
+            FrontPanelScheduleDraft {
+                changes: vec![
+                    FrontPanelChangeDraft {
+                        tick: "0".to_owned(),
+                        value: "0".to_owned(),
+                    },
+                    FrontPanelChangeDraft {
+                        tick: "02".to_owned(),
+                        value: "7/2".to_owned(),
+                    },
+                ],
+            },
+        );
+        workspace.rebuild_front_panel_runtime();
+        assert!(workspace.front_panel_runtime.is_none());
+        assert!(workspace.front_panel_runtime_status.contains("canonical"));
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+
+        workspace.front_panel_schedule_drafts.insert(
+            key,
+            FrontPanelScheduleDraft {
+                changes: vec![
+                    FrontPanelChangeDraft {
+                        tick: "0".to_owned(),
+                        value: "0".to_owned(),
+                    },
+                    FrontPanelChangeDraft {
+                        tick: "2".to_owned(),
+                        value: "7/2".to_owned(),
+                    },
+                    FrontPanelChangeDraft {
+                        tick: "4".to_owned(),
+                        value: "-1".to_owned(),
+                    },
+                ],
+            },
+        );
+        workspace.rebuild_front_panel_runtime();
+        let runtime = workspace.front_panel_runtime.as_ref().unwrap();
+        assert_eq!(runtime.encoding.bytes().len(), 277);
+        assert_eq!(
+            digest_hex(runtime.encoding.digest()),
+            "2199f64b09be5dfecf1f05f3f0cc72e8e307483c2453b08e125485066b899ff7"
+        );
+        assert_eq!(runtime.execution.trace().bytes().len(), 9_549);
+        assert_eq!(
+            digest_hex(runtime.execution.trace().digest()),
+            "a0c00fa14a2209130e8db10e7163bfd8f4e0007cbd6d742c920b385a2cbeb422"
+        );
+        assert_eq!(runtime.document.schedules().len(), 1);
+        assert_eq!(
+            runtime.document.schedules()[0]
+                .changes()
+                .iter()
+                .map(GraphFrontPanelChange::clock_tick)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        let injected = runtime
+            .execution
+            .simulation()
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry.kind() == GraphTraceEntryKind::InjectedInput
+                    && entry.endpoint() == authority.flattened_input()
+            })
+            .map(|entry| {
+                let GraphValue::ExactRational(value) = entry.value().value() else {
+                    panic!("timeline emitted a non-rational sample");
+                };
+                (entry.clock_tick(), value.clone())
+            })
+            .collect::<Vec<_>>();
+        assert!(injected.len() >= 5);
+        let seven_halves = "7/2".parse::<Rational>().unwrap();
+        assert!(injected.iter().all(|(tick, value)| match *tick {
+            0 | 1 => value == &Rational::from(0),
+            2 | 3 => value == &seven_halves,
+            _ => value == &Rational::from(-1),
+        }));
+        let replay = alumina_interface_core::graph::replay_graph_front_panel_run(
+            runtime.encoding.bytes(),
+            &component.hierarchy.document,
+            &component.hierarchy.flattening,
+            workspace.fixture.registry(),
+            GraphFrontPanelRuntimeLimits::interactive(),
+        )
+        .unwrap();
+        assert_eq!(replay.document(), &runtime.document);
+        assert_eq!(
+            workspace.authoring_session_encoding().unwrap(),
+            retained_session
+        );
+        assert_eq!(workspace.history, retained_history);
+        assert!(
+            workspace
+                .front_panel_runtime_status
+                .contains("3 exact changes")
+        );
+
+        workspace.selected_panel_item = Some(authority.key().item());
+        let context = egui::Context::default();
+        let frame = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_280.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    workspace.show_front_panel(ui);
+                });
+            },
+        );
+        assert!(!frame.shapes.is_empty());
+        assert_eq!(
+            workspace.front_panel_schedule_drafts[authority.key()]
+                .changes
+                .len(),
+            3
+        );
+        assert!(workspace.front_panel_runtime.is_some());
+    }
+
+    #[test]
     fn headless_exact_control_workspace_produces_a_complete_egui_frame() {
         let mut workspace = ExactControlWorkspace::try_new().unwrap();
+        workspace.selected_node = Some(GraphNodeId::new(8));
         let context = egui::Context::default();
         let output = context.run(
             egui::RawInput {
@@ -7895,6 +20964,13 @@ mod tests {
         );
         assert!(!output.shapes.is_empty());
         assert!(!output.textures_delta.set.is_empty());
+        assert_eq!(
+            workspace
+                .node_label_drafts
+                .get(&GraphNodeId::new(8))
+                .map(String::as_str),
+            Some("Proportional term")
+        );
 
         for id in 1..=4 {
             workspace.remove_probe(GraphProbeId::new(id));

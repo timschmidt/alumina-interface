@@ -163,11 +163,16 @@ prototype.
   retains independently validated queue/stack evidence and health-specific
   failures, retry-safe bounded board-capability acquisition, capability-selected
   live telemetry, bounded retained waveform capture, and capability-bound
-  immutable visual acquisition. Strict schema-v13
+  immutable visual acquisition. It now also owns authenticated WLAN
+  status/scan/join/leave/recovery with generation+BSSID-bound selection;
+  credential-bearing ambiguity reconciles through status and never blindly
+  retransmits a secret. Strict schema-v15
   snapshots expose only redacted progress and immutable identity; complete
   canonical capability, telemetry, and capture documents cross to the UI only
-  after independent validation. The UI can add, probe, disconnect, and request
-  passive input capture without receiving credentials or raw-pin authority.
+  after independent validation. The UI keeps network provisioning at the top of
+  each live-device panel and can add, scan/join/leave/recover, probe, disconnect,
+  and request passive input capture without receiving worker credentials or
+  raw-pin authority.
 - That worker exchanges production-format authenticated heartbeat traffic with
   the deterministic host MCU fixture and recovers from response loss, a finite
   outage, and reboot while conservatively rejecting excessive delay.
@@ -201,12 +206,14 @@ prototype.
   transition. Exact clock resolution proves a shared tick-zero root, the
   smallest rational schedule pattern, minimum input capacity, and separately
   bounded held-sample state; implicit or independent-root transitions reject.
-- A separate implementation registry admits eleven reviewed `HostExact`
-  simulation behaviors: external Stream source, audited latest-at-or-before
-  transition, Stream sink, exact add/subtract/scale/clamp, explicit
-  inclusive-range predicates, Boolean conjunction, read-before-write unit
-  delay, and a fail-safe Boolean permit gate. A visible
-  multi-rate discrete PID/interlock fixture composes those primitives without
+- A separate implementation registry admits thirteen reviewed `HostExact`
+  simulation behaviors across eighteen fixed kind/version bindings: external
+  Stream source, audited latest-at-or-before transition, Stream sink, exact
+  add/subtract/scale/clamp, explicit inclusive-range predicates, Boolean
+  conjunction, schema-generic typed constants and same-clock cases with Boolean
+  and exact-rational bindings, read-before-write typed unit delay, and a
+  fail-safe Boolean permit gate. A visible multi-rate discrete PID/interlock
+  fixture composes those primitives without
   hidden controller state. The bounded simulator uses exact rational clock
   time and unit scales, orders every coincident source tick first, and produces
   the same canonical result regardless of caller sample order.
@@ -215,12 +222,32 @@ prototype.
   feedback routes, typed ports, exact parameters/state, and seven mixed-signal
   control traces: four exact-rational signals and three Boolean interlock lanes.
   Canonical `ALGW` V1 embeds the unchanged `ALGR` plus integer canvas positions
-  and monotonic ID cursors. Its 13-entry fixed-schema palette supports
+  and monotonic ID cursors. Its 18-entry fixed-schema palette supports
   monotonic node creation, atomic node/incident-wire deletion, node moves,
-  typed wire edits, and bounded exact scalar parameter editing. Every edit is
+  typed wire edits, and bounded schema-directed exact scalar/composite literal
+  editing. The node inspector also edits bounded canonical UTF-8 labels and
+  concrete execution placement: domain families come from the audited node
+  schema, while device identities come only from clocks or placements already
+  present in the graph. There is no raw device-ID field, and complete audited
+  analysis runs before commit. Deterministic quoted text, hexadecimal bytes,
+  arrays, records,
+  options, and results round-trip through the window-free core; resource/job
+  handles remain selector-bound rather than text-authorized. A separate
+  [cache-derived job catalog](docs/GRAPH-CACHED-JOB-CATALOG-V1.md) joins the
+  canonical global CAM manifest to exact partition-plus-manifest cache-ready
+  observations, retains the precision-relevant participant record, and offers
+  only those inert participant-local references in an offline graph selector.
+  Its bounded value paths address stable record fields, existing option/result
+  branches, and retained array elements, so the visible proof can rebind exact
+  primary, optional fallback, or mirror leaves inside one composite parameter.
+  Raw/stale/foreign identities, absent branches, and malformed paths reject;
+  duplicate immutable references remain legal data and grant no prepare/start
+  authority. Every edit is
   transactional; any graph edit detaches the graph-bound reference trace.
-  Canonical replay-backed undo/redo retains bounded complete `ALGW`/`ALGP` pair
-  snapshots across graph, probe, trigger, and sidecar-import edits. Per-probe
+  Canonical replay-backed undo/redo retains bounded complete `ALGS` session
+  snapshots across graph, probe, trigger, sidecar-import, cached-job,
+  component, hierarchy, and source-map state. Every navigation target reruns
+  complete core replay plus UI semantic/catalog admission. Per-probe
   canonical name, retained-sample, and decimation-stride editors preserve
   stable source/type identity and reject any capture policy that cannot hold
   its active trigger window. A shared aggregate-bounded replay projection now
@@ -234,25 +261,127 @@ prototype.
   whitelist. Physical scalars with the same registered type share one scale;
   distinct types receive deterministic separate panes with their canonical type
   name and unit while retaining the shared exact-time axis and cursor. Browser
-  local storage atomically preserves only the exact current pair, and
-  native/browser `.algw` plus `.algp` exchange imports only after bounded full
-  replay, exact sidecar binding, and audited UI admission.
+  local storage atomically preserves one canonical
+  [`ALGS` V1 authoring session](docs/GRAPH-AUTHORING-SESSION-V1.md): the control
+  `ALGW`, bound `ALGP`, catalog-bound composite cached-job `ALGW`, selected
+  `ALGC`, complete `ALGH`, and freshly replayed `ALGM`. The `algs1:` wrapper has
+  one lowercase-hex payload; the retired `algwb1:` format is unsupported.
+  Native/browser `.algs`, `.algw`, `.algp`, `.algc`, and `.algm` exchange
+  imports only after the artifact's bounded full replay plus every applicable
+  identity, catalog, hierarchy-context, and audited UI admission check.
   A separate canonical `ALGC` V1 authoring package now embeds that unchanged
   workspace, validates typed public connector mappings, and binds a bounded
   integer front panel to exact parameters and public outputs. The visible
   reference component supplies eight exact PID/interlock controls and seven
   exact replay indicators (four rational and three Boolean); invalidating a
-  binding detaches the panel without
-  weakening or rejecting the underlying workspace draft.
-  Canonical `ALGH` V1 then binds a collapsed authoring instance to that exact
-  component digest and deterministically flattens it to an ordinary audited
-  21-node/25-wire workspace with fresh monotonic identities. V1 rejects nested
-  instances outright until recursive depth/cycle authority is explicit.
+  binding detaches the panel without weakening or rejecting the underlying
+  workspace draft. A canonical panel editor now adds any unowned exact
+  input/parameter/output binding with a fresh monotonic identity, edits stable
+  name/binding/integer rectangle metadata, removes items without rewinding the
+  cursor, and drags headers with one cumulative exact-coordinate commit. Every
+  accepted change replaces `ALGC` through complete `ALGH`/`ALGM`/`ALGS`
+  admission and unified history while retaining the embedded workspace,
+  connector pane, root hierarchy, probes, and cached-job workspace.
+  Canonical `ALGH` V3 binds scoped root/component placeholders to exact
+  component digests, rejects recursive definition cycles, bounds depth and
+  expanded occurrences, and derives each placeholder's exact parameter surface
+  from stable `ParameterControl` panel-item IDs. Parent panels can promote those
+  parameters recursively; every root occurrence retains its own typed value,
+  and flattening applies that value only to the corresponding source path. The
+  visible two-level wrapper/PID hierarchy therefore becomes an ordinary audited
+  21-node/25-wire workspace with fresh monotonic identities and no opaque
+  component execution. Canonical `ALGM` V1 then maps every final node
+  and wire back to one exact root or component-occurrence origin. Its import
+  path freshly flattens the complete `ALGH` and regenerates every byte before
+  the selected-node inspector or exact trace cursor displays source-path/final
+  endpoint correlation; it grants no execution or firmware authority. A
+  visible flattened-source browser enumerates every final node and wire from
+  that fresh map. Opening one rechecks its exact final-to-origin mapping and
+  resolves every component occurrence path through the current `ALGH` before
+  scrolling to the root canvas, selected library definition, or authoritative
+  control canvas. Root items are highlighted directly; component nodes select
+  their local node, while component wires select and distinctly highlight the
+  exact local wire and retain its target node in the existing inspector. These
+  focus, scroll, and selection facts are transient: canonical `ALGS`, history,
+  and persistence remain byte-identical, and stale provenance rejects without
+  retaining a false destination.
+  The component-library panel lists exact dependencies already admitted by
+  that `ALGH`, exchanges the selected dependency as canonical `.algc`, imports
+  a bounded standalone leaf only after exact replay and audited graph
+  admission, and constructs a named version-1 empty `ALGC` directly from the
+  current exact schema/clocks with all monotonic cursors at one. A conflicting
+  stable name rejects; recreating byte-identical empty content is a
+  selection-only no-op. The panel removes only an unreferenced
+  non-authoritative dependency and can add or delete root occurrences directly.
+  The same panel edits the selected dependency's stable name and declared
+  behavior version as one canonical metadata transaction. Versions are
+  canonical nonzero decimal `u32` values and may stay unchanged or increase,
+  never regress; a name already owned by another dependency rejects, and an
+  identical name/version pair is an exact no-op. Accepted edits recursively
+  replace every affected parent and binding by digest, regenerate `ALGH` and
+  `ALGM`, and reconcile transient selections and source focus without aliases.
+  Each accepted action edits a cloned
+  hierarchy, retains monotonic identities, regenerates and admits the complete
+  `ALGH`/flattened `ALGW`/`ALGM` branch, and records the prior complete `ALGS`
+  before committing. A structural root canvas renders the canonical root
+  `ALGW` without assigning behavior to placeholders. Bound component headers
+  drag onto the exact integer presentation lattice; selecting an output and a
+  type-compatible input creates one monotonic root wire, while secondary-click
+  disconnects an owned input without rewinding the wire cursor. The selected
+  occurrence exposes schema-directed exact editors for its promoted parameters;
+  distinct occurrences of one definition retain distinct values, invalid text
+  is atomic, and exact no-ops create no revision or history entry. Placement,
+  wiring, and parameter candidates pass the same complete
+  flatten/source-map/semantic/session transaction, and exact duplicate imports
+  or placements are selection-only no-ops.
+  A separate selected-definition canvas follows the exact non-authoritative
+  dependency chosen in that library panel. It reuses the audited palette,
+  stable node and wire allocators, schema-directed metadata editors, and exact
+  integer dragging against the dependency's embedded `ALGW`. An existing
+  library dependency can be added as a child through one transaction that
+  creates its fresh monotonic placeholder and scoped `ALGH` binding together.
+  The same selector can rebind one selected child placeholder to another exact
+  library dependency. Stable child connector IDs preserve every compatible
+  parent-local wire and public endpoint while the placeholder node, label,
+  placement, and allocation cursors remain exact. A same-shape replacement
+  changes only the scoped binding at the parent-definition boundary; a changed
+  public shape recursively replaces affected parent identities. Both paths
+  freshly flatten and regenerate `ALGM` before one complete-session commit.
+  Missing or incompatible live connectors, cycles, limits, and indirect
+  control-authority replacement reject atomically, while selecting the already
+  bound child is an exact no-op.
+  `ALGH`-owned child placeholders remain visible and wireable; the dedicated
+  inspector action removes a placeholder, its incident wires, and its scoped
+  binding together, while an ordinary node deletion remains invalid and live
+  public connector or panel bindings veto removal. Accepted edits replace the
+  selected `ALGC`, retain logical selection through every recursive digest
+  remap, and commit regenerated `ALGH`/`ALGM` in complete `ALGS` history while
+  preserving control, probe, cached-job, and unchanged-root authority exactly.
+  Compatible control edits replace the selected `ALGC` dependency and remap
+  every exact binding while preserving the authored root workspace and stable
+  library entries; invalid imports, removals, replacements, or selections
+  leave the prior session unchanged.
+  Selected dependencies now also export and import canonical `ALCP` V1
+  packages. Each package contains exactly one selected root component, its
+  transitive `ALGC` closure, and the component-scoped bindings that standalone
+  `ALGC` cannot represent. Import never replaces an existing identity or
+  binding: exact duplicates are selection-only no-ops, while stable-name or
+  parent/node child conflicts reject atomically. A changing merge advances
+  `ALGH` once, regenerates flattened `ALGW`/`ALGM`, passes complete library and
+  session admission, and enters unified undo/redo/persistence as one edit.
   A separate capability-derived target palette now intersects authenticated
   firmware opcode/resource facts with the reviewed deployment registry. The
   visible TinyBee reference admits only GPIO22/32/33/35 stable Boolean reads
-  into a separate Realtime draft; no broader pin/peripheral inventory is
-  inferred. A distinct board-name-independent explorer now decodes the complete
+  into a separate Realtime draft. Its executable paired-input node initially
+  binds GPIO22 permit and GPIO32 interlock fields and feeds a required sink.
+  Every bounded schema-aware rebind to an unused exact catalog entry preserves
+  its sibling and stable node/placement identity, reruns complete semantic and
+  capability admission, and independently decodes a fresh fixed 4 KiB firmware
+  package before committing either ALGW or ALGR identity.
+  Current membership in the exact catalog is a prerequisite, so raw handles,
+  labels, and numeric GPIO text grant no authority. No broader pin/peripheral
+  inventory is inferred. A distinct
+  board-name-independent explorer now decodes the complete
   bounded capability ledger into 62 TinyBee resources, 51 aliases, ownership,
   safe/hazard facts and supporting-section counts while retaining that four-item
   graph access set as a visibly narrower authority. Search and filters separate
@@ -288,17 +417,35 @@ prototype.
   The component/front-panel boundary is in
   [`docs/GRAPH-COMPONENT-V1.md`](docs/GRAPH-COMPONENT-V1.md).
   The component-instance/flattening boundary is in
-  [`docs/GRAPH-HIERARCHY-V1.md`](docs/GRAPH-HIERARCHY-V1.md).
+  [`docs/GRAPH-HIERARCHY-V3.md`](docs/GRAPH-HIERARCHY-V3.md).
+  The hierarchy-derived executable input-control boundary is in
+  [`docs/GRAPH-FRONT-PANEL-RUN-V1.md`](docs/GRAPH-FRONT-PANEL-RUN-V1.md).
+  The reusable nested component exchange boundary is in
+  [`docs/GRAPH-COMPONENT-PACKAGE-V1.md`](docs/GRAPH-COMPONENT-PACKAGE-V1.md).
+  The canonical total hierarchy source-map boundary is in
+  [`docs/GRAPH-HIERARCHY-SOURCE-MAP-V1.md`](docs/GRAPH-HIERARCHY-SOURCE-MAP-V1.md).
   The authenticated resource-palette boundary is in
   [`docs/GRAPH-CAPABILITY-CATALOG-V1.md`](docs/GRAPH-CAPABILITY-CATALOG-V1.md).
   The descriptive-versus-operational board boundary is in
   [`docs/BOARD-EXPLORER-V1.md`](docs/BOARD-EXPLORER-V1.md).
   The diagnostic-probe sidecar is in
   [`docs/GRAPH-PROBE-V2.md`](docs/GRAPH-PROBE-V2.md).
-- Canonical `ALGT` V1 traces bind the graph digest, semantic/implementation
+- Canonical `ALGT` V2 traces bind the graph digest, semantic/implementation
   registry digest, and inclusive root-clock horizon. Replay decodes only the
-  external authority, reruns the fixed simulator, and requires every regenerated
-  byte to match; it grants no firmware or deployment authority.
+  external-source and hierarchy-authorized injected-input records, reruns the
+  fixed simulator, and requires every regenerated byte to match; it grants no
+  firmware or deployment authority. Canonical `ALFR` V1 programs bind one
+  exact `ALGH`, flattened `ALGW`, registry, horizon, and bounded set of exact
+  sample-and-hold changes. The browser UI exposes a bounded per-control
+  timeline with a mandatory tick-zero value, canonical local-clock ticks,
+  schema-directed exact values, and add/remove/reset/run actions. Draft edits
+  immediately invalidate prior run evidence but never mutate `ALGS` or
+  undo/redo. Successful runs execute against unowned Stream inputs and report
+  the resulting independently replayable `ALGT` identity. Public Stream outputs
+  resolve recursively through the exact hierarchy and project their latest
+  exact sample at or before one shared canonical rational root-time cursor.
+  Cursor inspection is transient and cannot mutate `ALFR`, `ALGT`, `ALGS`,
+  persistence, or history.
 - A separate deployment registry lowers one fixed Boolean Stream subset into
   the sibling firmware's canonical 4 KiB `ALGRIR02` package. Production limits
   are derived from the complete authenticated target capability document, not
@@ -317,6 +464,17 @@ prototype.
   types. GPIO34 and a mismatched target capability digest fail before package
   authority; runtime admission rechecks the same exact opcode/class/access/
   selector palette. This is host functional evidence, not physical input HIL.
+- A paired-resource fixture lowers ordered TinyBee GPIO22/GPIO35 handles into
+  one Realtime conjunction opcode and required sink. The permanent firmware
+  actor types read both resources in order on every release—even when the first
+  is false—and emit only after both are present. Duplicate or unadvertised
+  selectors reject before execution. Canonical bounded `ALGRREP1` artifacts
+  retain the exact input frames, actual provider-call order, completion/fault
+  reports, run identity, target tuple, implementation, and package. Imports
+  rebuild fresh firmware actors and must reproduce every byte; the TinyBee UI
+  exports both its four-case success transcript and unavailable-input fault
+  transcript without acquiring device authority. See
+  [`docs/GRAPH-DEPLOYMENT-REPLAY-V1.md`](docs/GRAPH-DEPLOYMENT-REPLAY-V1.md).
 - The headless and WASM clients publish that fixed package, reconcile independent
   dual-core installation, and drive exact future start/stop epochs. Running is
   reported only after both permanent actors and the shared bridge agree; the
@@ -342,7 +500,11 @@ The authenticated browser/cache boundary is in
 The dedicated control-worker boundary is in
 [`docs/LIVE-CONTROL-WORKER.md`](docs/LIVE-CONTROL-WORKER.md).
 The first typed graph and canonical replay boundary is in
-[`docs/TYPED-GRAPH-V1.md`](docs/TYPED-GRAPH-V1.md).
+[`docs/TYPED-GRAPH-V1.md`](docs/TYPED-GRAPH-V1.md). The first exact Boolean
+case and visible reset-dominant state composition is specified in
+[`docs/BOOLEAN-CASE-STATE-V1.md`](docs/BOOLEAN-CASE-STATE-V1.md).
+The schema-generic typed case extension and exact-rational register composition
+are specified in [`docs/TYPED-CASE-STATE-V1.md`](docs/TYPED-CASE-STATE-V1.md).
 The exact-CAM development evidence is in
 [`docs/CHECKPOINT-EXACT-CAM.md`](docs/CHECKPOINT-EXACT-CAM.md).
 
@@ -444,13 +606,14 @@ assets suitable for later embedding in `alumina-firmware`.
 The next interface milestones add native/tighter broader-curve metric carriers,
 certified nonzero-radius blends, direction-aware and broader-axis kinematics,
 complete public device/security/machine-membership discovery,
-physical-browser/radio qualification, crash-durable cached-job history and
+physical-browser/radio qualification, crash-durable authoring journals and
 nonterminal owner recovery,
 annotated board photography, higher-rate/triggered oscilloscope and
-logic-analyzer acquisition, analog telemetry, groups, nested component
-dependency/cycle handling, editable instance
-and library workflows, front-panel editing/execution, composite/identity-bearing parameter editing,
-label/domain editing, conflict-aware shared workspace persistence,
+logic-analyzer acquisition, analog telemetry, groups, child-occurrence
+rebinding,
+connector-shape authoring/remapping, responsive/grouped panel layout,
+executable composite physical-resource consumers, prepare/start job nodes,
+conflict-aware shared workspace persistence,
 broader deterministic host graph behaviors, and fixed-memory authenticated
 Service/Realtime upload/core transfer and task
 composition, additional resource opcodes and capability-generated graph nodes,

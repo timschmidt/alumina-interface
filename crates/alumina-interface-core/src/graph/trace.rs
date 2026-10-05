@@ -7,7 +7,7 @@ use alumina_storage::sha256;
 
 use super::simulation::{
     ExternalStreamSample, GraphSimulation, GraphSimulationError, GraphSimulationLimits,
-    GraphSimulationRegistry, GraphTraceEntryKind, simulate_graph,
+    GraphSimulationRegistry, GraphTraceEntryKind, InjectedInputSample, simulate_graph_with_inputs,
 };
 use super::wire::{decode_typed_value_bytes, encode_typed_value_bytes};
 use super::{
@@ -19,7 +19,7 @@ use super::{
 pub const GRAPH_TRACE_MAGIC: [u8; 4] = *b"ALGT";
 
 /// Exact canonical graph-trace format implemented by this source tree.
-pub const GRAPH_TRACE_VERSION: u16 = 1;
+pub const GRAPH_TRACE_VERSION: u16 = 2;
 
 const GRAPH_TRACE_FLAGS: u16 = 0;
 
@@ -89,7 +89,7 @@ pub enum GraphTraceError {
     RegistryDigestMismatch,
     /// Exact typed-value encoding or graph identity failed.
     Graph(GraphWireError),
-    /// Deterministic simulation rejected the decoded external inputs.
+    /// Deterministic simulation rejected decoded caller-owned source/input samples.
     Simulation(GraphSimulationError),
     /// Independent simulation did not reproduce every canonical trace byte.
     ReplayDiverged,
@@ -167,8 +167,9 @@ pub fn encode_graph_trace(
     encoder.count(simulation.entries().len(), "entry count")?;
     for entry in simulation.entries() {
         encoder.u8(match entry.kind() {
-            GraphTraceEntryKind::ExternalInput => 0,
-            GraphTraceEntryKind::NodeOutput => 1,
+            GraphTraceEntryKind::ExternalSource => 0,
+            GraphTraceEntryKind::InjectedInput => 1,
+            GraphTraceEntryKind::NodeOutput => 2,
         });
         encoder.u32(entry.endpoint().node.get());
         encoder.u32(entry.endpoint().port.get());
@@ -189,7 +190,7 @@ pub fn encode_graph_trace(
     })
 }
 
-/// Decode external inputs, rerun the fixed simulator, and require exact bytes.
+/// Decode caller-owned source/input samples, rerun simulation, and require exact bytes.
 pub fn replay_graph_trace(
     bytes: &[u8],
     document: &GraphDocument,
@@ -224,10 +225,12 @@ pub fn replay_graph_trace(
         super::GraphSimulationHorizon::new(GraphClockId::new(decoder.u32()?), decoder.u64()?);
     let count = decoder.count(limits.maximum_trace_entries, "entry count")?;
     let mut external = Vec::new();
+    let mut injected = Vec::new();
     for _ in 0..count {
         let kind = match decoder.u8()? {
-            0 => GraphTraceEntryKind::ExternalInput,
-            1 => GraphTraceEntryKind::NodeOutput,
+            0 => GraphTraceEntryKind::ExternalSource,
+            1 => GraphTraceEntryKind::InjectedInput,
+            2 => GraphTraceEntryKind::NodeOutput,
             tag => return Err(GraphTraceError::InvalidEntryTag(tag)),
         };
         let endpoint = WireEndpoint {
@@ -240,16 +243,21 @@ pub fn replay_graph_trace(
         let value_bytes =
             decoder.bounded_bytes(limits.maximum_trace_bytes, "typed value length")?;
         let value = decode_typed_value_bytes(document.schema(), value_bytes)?;
-        if kind == GraphTraceEntryKind::ExternalInput {
-            external.push(ExternalStreamSample::new(
+        match kind {
+            GraphTraceEntryKind::ExternalSource => external.push(ExternalStreamSample::new(
                 endpoint, clock_tick, sequence, value,
-            ));
+            )),
+            GraphTraceEntryKind::InjectedInput => injected.push(InjectedInputSample::new(
+                endpoint, clock_tick, sequence, value,
+            )),
+            GraphTraceEntryKind::NodeOutput => {}
         }
     }
     if !decoder.is_empty() {
         return Err(GraphTraceError::ReplayDiverged);
     }
-    let simulation = simulate_graph(document, registry, horizon, &external, limits)?;
+    let simulation =
+        simulate_graph_with_inputs(document, registry, horizon, &external, &injected, limits)?;
     let encoding = encode_graph_trace(document, &simulation, limits)?;
     if encoding.bytes() != bytes {
         return Err(GraphTraceError::ReplayDiverged);
