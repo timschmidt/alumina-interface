@@ -165,12 +165,8 @@ impl ExactScene {
         let curve_source = representative_curve_path()?;
         let max_source_chord_error =
             Real::from(hyperreal::Rational::fraction(1, 1_024).map_err(ToolpathError::from)?);
-        let flattening = BezierFlatteningOptions::try_new(
-            max_source_chord_error.clone(),
-            24,
-            &CurveContext::STRICT,
-        )
-        .map_err(ToolpathError::from)?;
+        let flattening = BezierFlatteningOptions::try_new(max_source_chord_error.clone(), 24)
+            .map_err(ToolpathError::from)?;
         let certified = curve_path_line_mesh(
             &curve_source,
             &flattening,

@@ -13,8 +13,8 @@ use std::fmt;
 use alumina_machine_ir::ExecutionSegment;
 use alumina_protocol::Digest;
 use hypercurve::{
-    BezierFlatteningOptions, CurveContext, CurveError, CurvePath2, ExactCurveError,
-    Point2 as CurvePoint2, UncertaintyReason,
+    BezierFlatteningOptions, CurveError, CurvePath2, ExactCurveError, Point2 as CurvePoint2,
+    UncertaintyReason,
 };
 use hyperlimit::{PredicatePolicy, compare_reals};
 use hyperreal::{Problem, Rational, Real};
@@ -361,7 +361,6 @@ pub fn compile_certified_chord_program(
     let options = BezierFlatteningOptions::try_new(
         maximum_source_chord_error_mm.clone(),
         policy.maximum_subdivision_depth,
-        &CurveContext::STRICT,
     )?;
     let polyline = match source.segment_certified(&options) {
         Ok(polyline) => polyline,
