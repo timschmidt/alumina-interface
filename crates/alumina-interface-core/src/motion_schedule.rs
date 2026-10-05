@@ -19,10 +19,7 @@ use std::fmt;
 use alumina_machine_ir::ExecutionSegment;
 use alumina_motion::{MotionError, StepperPreflightSummary, preflight_stepper_segments};
 use alumina_protocol::{DeviceId, Digest};
-use hypercurve::{
-    Classification, CurveContext, CurveError, CurveGeometry2, CurvePath2, ExactCurveError,
-    Point2 as CurvePoint2,
-};
+use hypercurve::{CurveError, CurveGeometry2, CurvePath2, ExactCurveError, Point2 as CurvePoint2};
 use hyperlimit::{PredicatePolicy, Sign, classify_real_sign, compare_reals};
 use hyperpath::{
     AffineSpanAxisProjection, AxisMotionLimits, FeedPathElement, JerkRampPhaseProposal,
@@ -2423,12 +2420,11 @@ fn metric_point_at_fraction(
         .ok_or(MotionScheduleError::MetricPathMismatch)?;
     match curve.geometry() {
         Some(CurveGeometry2::Line(line)) => Ok(line.point_at(fraction.clone())),
-        Some(CurveGeometry2::CircularArc(arc)) => {
-            match arc.point_at_sweep_fraction(fraction, &CurveContext::STRICT)? {
-                Classification::Decided(point) => Ok(point),
-                Classification::Uncertain(_) => Err(MotionScheduleError::MetricEvaluationUncertain),
-            }
-        }
+        Some(CurveGeometry2::CircularArc(arc)) => match arc.point_at_sweep_fraction(fraction) {
+            Ok(point) => Ok(point),
+            Err(ExactCurveError::Blocked(_)) => Err(MotionScheduleError::MetricEvaluationUncertain),
+            Err(error) => Err(error.into()),
+        },
         _ => Err(MotionScheduleError::UnsupportedMetricElement),
     }
 }
