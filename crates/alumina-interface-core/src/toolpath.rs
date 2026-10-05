@@ -1045,12 +1045,8 @@ mod tests {
     fn representative_region_retains_explicit_material_and_hole_roles() {
         let region = representative_curve_region().unwrap();
         let roles = region
-            .loop_roles(&hypercurve::CurveContext::STRICT)
-            .unwrap()
-            .into_value();
-        let hypercurve::Classification::Decided(roles) = roles else {
-            panic!("explicit region roles must remain decided");
-        };
+            .loop_roles()
+            .expect("explicit region roles must remain decided");
 
         assert_eq!(
             roles,

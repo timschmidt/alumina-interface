@@ -5,8 +5,7 @@ use std::fmt;
 
 use csgrs::solid::{self, SolidExt as _};
 use hypercurve::{
-    BezierFlatteningOptions, CurveCertainty, CurveContext, CurvePath2, CurveRegion2,
-    CurveRegionLoopRole,
+    BezierFlatteningOptions, CurveCertainty, CurvePath2, CurveRegion2, CurveRegionLoopRole,
 };
 use hypergraphics::{
     Color3, ExactMesh, Real, axes_mesh, curve_path_line_mesh, curve_region_line_mesh, grid_mesh,
@@ -170,7 +169,7 @@ impl ExactScene {
         let certified = curve_path_line_mesh(
             &curve_source,
             &flattening,
-            &CurveContext::STRICT,
+            hypercurve::PredicatePolicy::STRICT,
             Real::from(5),
             Color3::new(0.95, 0.45, 0.12)?,
         )?;
@@ -186,7 +185,7 @@ impl ExactScene {
         let certified_region = curve_region_line_mesh(
             &region_source,
             &flattening,
-            &CurveContext::STRICT,
+            hypercurve::PredicatePolicy::STRICT,
             Real::from(5),
             Color3::new(0.72, 0.25, 0.82)?,
             Color3::new(0.96, 0.76, 0.18)?,
