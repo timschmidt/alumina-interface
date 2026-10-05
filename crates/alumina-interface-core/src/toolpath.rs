@@ -401,9 +401,7 @@ pub fn representative_curve_region() -> ToolpathResult<CurveRegion2> {
         &[outer, hole],
         &[CurveRegionLoopRole::Material, CurveRegionLoopRole::Hole],
         &[FillRule::NonZero, FillRule::NonZero],
-        &hypercurve::CurveContext::STRICT,
-    )?
-    .into_value())
+    )?)
 }
 
 /// Promote supported Hypercurve source families to exact Hyperpath carriers.
