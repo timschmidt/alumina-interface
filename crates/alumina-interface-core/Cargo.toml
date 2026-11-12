@@ -23,6 +23,7 @@ alumina-storage.workspace = true
 csgrs.workspace = true
 hypercurve.workspace = true
 hypergraphics.workspace = true
+hyperinterval.workspace = true
 hyperlimit.workspace = true
 hyperpath.workspace = true
 hyperreal.workspace = true

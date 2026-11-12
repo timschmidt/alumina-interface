@@ -194,6 +194,7 @@ dependencies = [
  "csgrs",
  "hypercurve",
  "hypergraphics",
+ "hyperinterval",
  "hyperlimit",
  "hyperpath",
  "hyperreal",
@@ -1544,6 +1545,13 @@ dependencies = [
  "hyperreal",
  "hypertri",
  "nalgebra",
+]
+
+[[package]]
+name = "hyperinterval"
+version = "0.1.0"
+dependencies = [
+ "hyperreal",
 ]
 
 [[package]]

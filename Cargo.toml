@@ -38,6 +38,7 @@ serde_json = "1"
 csgrs = { path = "../csgrs", default-features = false }
 hypercurve = { path = "../csgrs/crates/hypercurve", default-features = false }
 hypergraphics = { path = "../csgrs/crates/hypergraphics" }
+hyperinterval = { path = "../csgrs/crates/hyperinterval", default-features = false, features = ["rational"] }
 hyperlimit = { path = "../csgrs/crates/hyperlimit", default-features = false }
 hyperpath = { path = "../csgrs/crates/hyperpath", default-features = false }
 hyperreal = { path = "../csgrs/crates/hyperreal", default-features = false, features = ["serde"] }

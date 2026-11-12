@@ -4,6 +4,7 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use alumina_machine_ir::{ExecutionSegment, StreamTick};
+use hyperinterval::{IntervalError, RationalInterval};
 use hyperreal::{Problem, Rational, Real};
 
 /// A compile-time physical unit carried by exact and measured values.
@@ -88,12 +89,18 @@ impl<U: Unit> BoundedMeasurement<U> {
         nominal: Rational,
         uncertainty: Rational,
     ) -> Result<Self, BoundaryError> {
-        if uncertainty.is_negative() {
-            return Err(BoundaryError::NegativeUncertainty);
-        }
+        let interval = RationalInterval::from_nominal_uncertainty(&nominal, &uncertainty).map_err(
+            |error| match error {
+                IntervalError::NegativeRadius => BoundaryError::NegativeUncertainty,
+                other => BoundaryError::Interval(other),
+            },
+        )?;
+        let (lower, upper) = interval
+            .into_bounds()
+            .expect("nonempty nominal-radius interval");
         Ok(Self {
-            lower: nominal.clone() - uncertainty.clone(),
-            upper: nominal + uncertainty,
+            lower,
+            upper,
             unit: PhantomData,
         })
     }
@@ -205,6 +212,8 @@ pub enum BoundaryError {
     ExactValue(Problem),
     /// A measurement radius cannot be negative.
     NegativeUncertainty,
+    /// An interval operation failed with its original typed diagnostic.
+    Interval(IntervalError),
     /// An exact value could not be represented as a finite display `f64`.
     DisplayProjection,
     /// A canonical segment must have a strictly positive tick duration.
@@ -216,6 +225,7 @@ impl fmt::Display for BoundaryError {
         match self {
             Self::ExactValue(error) => write!(formatter, "invalid exact value: {error}"),
             Self::NegativeUncertainty => formatter.write_str("measurement uncertainty is negative"),
+            Self::Interval(_) => formatter.write_str("measurement interval failed"),
             Self::DisplayProjection => {
                 formatter.write_str("exact value has no finite display projection")
             }
@@ -226,7 +236,14 @@ impl fmt::Display for BoundaryError {
     }
 }
 
-impl std::error::Error for BoundaryError {}
+impl std::error::Error for BoundaryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Interval(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
