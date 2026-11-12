@@ -36,12 +36,12 @@ board-mks-tinybee = { path = "../alumina-firmware/boards/mks-tinybee" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 csgrs = { path = "../csgrs", default-features = false }
-hypercurve = { path = "../hypercurve", default-features = false }
-hypergraphics = { path = "../hypergraphics" }
-hyperlimit = { path = "../hyperlimit", default-features = false }
-hyperpath = { path = "../hyperpath", default-features = false }
-hyperreal = { path = "../hyperreal", default-features = false, features = ["serde"] }
-hypersolve = { path = "../hypersolve", default-features = false }
+hypercurve = { path = "../csgrs/crates/hypercurve", default-features = false }
+hypergraphics = { path = "../csgrs/crates/hypergraphics" }
+hyperlimit = { path = "../csgrs/crates/hyperlimit", default-features = false }
+hyperpath = { path = "../csgrs/crates/hyperpath", default-features = false }
+hyperreal = { path = "../csgrs/crates/hyperreal", default-features = false, features = ["serde"] }
+hypersolve = { path = "../csgrs/crates/hypersolve", default-features = false }
 image = { version = "0.25.6", default-features = false, features = ["png"] }
 
 [package]
@@ -139,13 +139,13 @@ strip = "symbols"
 # patches also prevent transitive version requirements from resolving to older
 # published Hyper crates.
 [patch.crates-io]
-hypercurve = { path = "../hypercurve" }
-hypergraphics = { path = "../hypergraphics" }
-hyperlattice = { path = "../hyperlattice" }
-hyperlimit = { path = "../hyperlimit" }
-hypermesh = { path = "../hypermesh" }
-hyperpath = { path = "../hyperpath" }
-hyperphysics = { path = "../hyperphysics" }
-hyperreal = { path = "../hyperreal" }
-hypersolve = { path = "../hypersolve" }
-hypertri = { path = "../hypertri" }
+hypercurve = { path = "../csgrs/crates/hypercurve" }
+hypergraphics = { path = "../csgrs/crates/hypergraphics" }
+hyperlattice = { path = "../csgrs/crates/hyperlattice" }
+hyperlimit = { path = "../csgrs/crates/hyperlimit" }
+hypermesh = { path = "../csgrs/crates/hypermesh" }
+hyperpath = { path = "../csgrs/crates/hyperpath" }
+hyperphysics = { path = "../csgrs/crates/hyperphysics" }
+hyperreal = { path = "../csgrs/crates/hyperreal" }
+hypersolve = { path = "../csgrs/crates/hypersolve" }
+hypertri = { path = "../csgrs/crates/hypertri" }

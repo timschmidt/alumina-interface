@@ -17,6 +17,8 @@ use crate::toolpath::{ToolpathError, representative_curve_path, representative_c
 /// Failures while composing exact, window-free scene state.
 #[derive(Debug)]
 pub enum SceneError {
+    /// CSGRS rejected a solid constructor or transform.
+    Solid(csgrs::errors::ValidationError),
     /// Exact source geometry or path connectivity failed.
     Toolpath(ToolpathError),
     /// Hypergraphics rejected an exact presentation adapter.
@@ -26,6 +28,7 @@ pub enum SceneError {
 impl fmt::Display for SceneError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Solid(source) => write!(formatter, "exact solid scene input failed: {source}"),
             Self::Toolpath(source) => write!(formatter, "toolpath scene input failed: {source}"),
             Self::Graphics(source) => write!(formatter, "exact scene adapter failed: {source}"),
         }
@@ -35,9 +38,16 @@ impl fmt::Display for SceneError {
 impl StdError for SceneError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
+            Self::Solid(source) => Some(source),
             Self::Toolpath(source) => Some(source),
             Self::Graphics(source) => Some(source),
         }
+    }
+}
+
+impl From<csgrs::errors::ValidationError> for SceneError {
+    fn from(value: csgrs::errors::ValidationError) -> Self {
+        Self::Solid(value)
     }
 }
 
@@ -158,7 +168,7 @@ impl ExactScene {
         let grid = grid_mesh(12, Real::from(1), Color3::new(0.18, 0.21, 0.25)?)?;
         let axes = axes_mesh(Real::from(6), Real::zero())?;
         let solid =
-            solid::cube(Real::from(4)).translated(Real::from(-2), Real::from(-2), Real::zero());
+            solid::cube(Real::from(4))?.translated(Real::from(-2), Real::from(-2), Real::zero())?;
         let solid = triangle_mesh(&solid, Color3::new(0.18, 0.62, 0.82)?)?;
 
         let curve_source = representative_curve_path()?;

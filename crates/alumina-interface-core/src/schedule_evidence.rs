@@ -1363,6 +1363,7 @@ const fn curve_family_tag(family: CurveFamily2) -> u8 {
         CurveFamily2::PolynomialBSpline => 7,
         CurveFamily2::Nurbs => 8,
         CurveFamily2::AnalyticParallel => 9,
+        CurveFamily2::ImplicitPolynomial => 10,
     }
 }
 
@@ -1512,3 +1513,28 @@ impl fmt::Display for ScheduleEvidenceError {
 }
 
 impl StdError for ScheduleEvidenceError {}
+
+#[cfg(test)]
+mod curve_family_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn family_tags_preserve_existing_encoding() {
+        let families = [
+            CurveFamily2::Line,
+            CurveFamily2::CircularArc,
+            CurveFamily2::QuadraticBezier,
+            CurveFamily2::CubicBezier,
+            CurveFamily2::RationalQuadraticBezier,
+            CurveFamily2::RationalBezier,
+            CurveFamily2::PolynomialBSpline,
+            CurveFamily2::Nurbs,
+            CurveFamily2::AnalyticParallel,
+            CurveFamily2::ImplicitPolynomial,
+        ];
+        assert_eq!(
+            families.map(curve_family_tag),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+    }
+}

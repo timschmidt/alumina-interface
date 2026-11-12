@@ -793,7 +793,6 @@ dependencies = [
  "hyperreal",
  "hypertri",
  "thiserror 2.0.12",
- "uuid",
 ]
 
 [[package]]
@@ -1523,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "hypercurve"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "hyperlimit",
  "hyperreal",
@@ -1549,14 +1548,14 @@ dependencies = [
 
 [[package]]
 name = "hyperlattice"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "hyperreal",
 ]
 
 [[package]]
 name = "hyperlimit"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "hyperlattice",
  "hyperreal",
@@ -1594,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "hyperreal"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "ciborium",
  "num",
@@ -1604,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "hypersolve"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "hyperlattice",
  "hyperlimit",
@@ -1614,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "hypertri"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "hyperlimit",
  "hyperreal",
@@ -3084,16 +3083,6 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
-
-[[package]]
-name = "uuid"
-version = "1.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
-]
 
 [[package]]
 name = "version_check"
