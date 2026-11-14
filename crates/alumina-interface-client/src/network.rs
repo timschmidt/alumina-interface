@@ -70,12 +70,13 @@ pub enum NetworkClientPhase {
 }
 
 /// Accepted state transition from one authenticated response.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NetworkUpdate {
     /// A credential-free current status was retained.
     Status(NetworkStatus),
-    /// A complete bounded scan was retained.
-    Scan(NetworkScanResult),
+    /// A complete bounded scan was retained. The owned payload keeps common
+    /// status/mutation updates small; cloning this variant clones its allocation.
+    Scan(Box<NetworkScanResult>),
     /// One mutation reached a proven terminal result.
     Mutation {
         /// Exact mutation operation.
@@ -450,7 +451,7 @@ impl NetworkProvisioningMachine {
             }
         };
         self.latest_scan = Some(result);
-        Ok(NetworkUpdate::Scan(result))
+        Ok(NetworkUpdate::Scan(Box::new(result)))
     }
 
     fn accept_mutation_response(

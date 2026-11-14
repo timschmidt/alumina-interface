@@ -2599,7 +2599,7 @@ async fn drive_state_network(
             Ok(Some(NetworkUpdate::RetryRequired)) => {
                 state.record_network_success(now_ms);
             }
-            Ok(Some(_)) | Ok(None) => {
+            Ok(_) => {
                 state.record_network_success(now_ms);
                 break;
             }
@@ -3918,6 +3918,46 @@ impl MutableSupervisorView {
         self.devices.insert(snapshot.connection_id, snapshot);
     }
 
+    fn apply_capability_transfer(&mut self, capability: &WorkerCapabilityDocument) {
+        let connection_id = capability.connection_id;
+        let generation = capability.generation;
+        let matching_session = self
+            .devices
+            .get(&connection_id)
+            .is_some_and(|snapshot| snapshot.generation == generation);
+        if !matching_session {
+            self.push_diagnostic(format!(
+                "connection {connection_id}: stale capability generation {generation} ignored"
+            ));
+            return;
+        }
+        let Ok(identity) = capability.identity.identity() else {
+            self.push_diagnostic(format!(
+                "connection {connection_id}: capability identity projection failed"
+            ));
+            return;
+        };
+        match build_board_explorer_snapshot(
+            capability.document(),
+            identity,
+            BoardCapabilityLimits::interactive(),
+        ) {
+            Ok(board) => {
+                self.capabilities.insert(
+                    connection_id,
+                    ConnectedCapabilityView {
+                        connection_id,
+                        generation,
+                        board,
+                    },
+                );
+            }
+            Err(error) => self.push_diagnostic(format!(
+                "connection {connection_id}: capability explorer rejected: {error}"
+            )),
+        }
+    }
+
     fn apply(&mut self, envelope: WorkerEventEnvelope) {
         if let Err(error) = envelope.validate() {
             if envelope.schema_version == WORKER_SCHEMA_VERSION {
@@ -3950,43 +3990,7 @@ impl MutableSupervisorView {
             }
             WorkerEvent::JobSnapshot { snapshot } => self.job = Some(*snapshot),
             WorkerEvent::CapabilityDocument { capability } => {
-                let connection_id = capability.connection_id;
-                let generation = capability.generation;
-                let matching_session = self
-                    .devices
-                    .get(&connection_id)
-                    .is_some_and(|snapshot| snapshot.generation == generation);
-                if !matching_session {
-                    self.push_diagnostic(format!(
-                        "connection {connection_id}: stale capability generation {generation} ignored"
-                    ));
-                    return;
-                }
-                let Ok(identity) = capability.identity.identity() else {
-                    self.push_diagnostic(format!(
-                        "connection {connection_id}: capability identity projection failed"
-                    ));
-                    return;
-                };
-                match build_board_explorer_snapshot(
-                    capability.document(),
-                    identity,
-                    BoardCapabilityLimits::interactive(),
-                ) {
-                    Ok(board) => {
-                        self.capabilities.insert(
-                            connection_id,
-                            ConnectedCapabilityView {
-                                connection_id,
-                                generation,
-                                board,
-                            },
-                        );
-                    }
-                    Err(error) => self.push_diagnostic(format!(
-                        "connection {connection_id}: capability explorer rejected: {error}"
-                    )),
-                }
+                self.apply_capability_transfer(capability.as_ref());
             }
             WorkerEvent::VisualAssetDocument { visual } => {
                 self.apply_visual_transfer(visual.as_ref());

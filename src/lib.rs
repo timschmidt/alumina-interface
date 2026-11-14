@@ -1579,66 +1579,7 @@ fn show_live_network_status(
     }
 
     if let Some(scan) = &network.scan {
-        ui.label(format!(
-            "scan generation {} · {} result{}{}",
-            scan.scan_generation,
-            scan.entries.len(),
-            if scan.entries.len() == 1 { "" } else { "s" },
-            if scan.truncated { " · truncated" } else { "" }
-        ));
-        let protected = scan.entries.iter().any(|entry| {
-            !matches!(
-                entry.authentication,
-                WorkerNetworkAuthenticationSnapshot::Open
-                    | WorkerNetworkAuthenticationSnapshot::Unsupported
-            )
-        });
-        if protected {
-            ui.add(
-                egui::TextEdit::singleline(passphrase)
-                    .password(true)
-                    .hint_text("WLAN passphrase (kept out of worker snapshots)"),
-            );
-        }
-        for entry in &scan.entries {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} · {:?} · ch {} · {} dBm · {}",
-                    entry.ssid,
-                    entry.authentication,
-                    entry.channel,
-                    entry.signal_dbm,
-                    encode_hex(&entry.bssid)
-                ));
-                let passphrase_valid = match entry.authentication {
-                    WorkerNetworkAuthenticationSnapshot::Open => true,
-                    WorkerNetworkAuthenticationSnapshot::Wpa2Personal
-                    | WorkerNetworkAuthenticationSnapshot::Wpa3Personal
-                    | WorkerNetworkAuthenticationSnapshot::Wpa2Wpa3Personal => {
-                        (8..=63).contains(&passphrase.len())
-                    }
-                    WorkerNetworkAuthenticationSnapshot::Unsupported => false,
-                };
-                if ui
-                    .add_enabled(idle && passphrase_valid, egui::Button::new("Join"))
-                    .clicked()
-                {
-                    let credential =
-                        if entry.authentication == WorkerNetworkAuthenticationSnapshot::Open {
-                            Vec::new()
-                        } else {
-                            passphrase.as_bytes().to_vec()
-                        };
-                    actions.push(LiveDeviceAction::NetworkJoin(WorkerNetworkJoinRequest {
-                        connection_id,
-                        scan_generation: scan.scan_generation,
-                        bssid: entry.bssid,
-                        passphrase: credential,
-                    }));
-                    erase_secret_text(passphrase);
-                }
-            });
-        }
+        show_live_network_scan(ui, connection_id, scan, idle, passphrase, actions);
     }
     if network.consecutive_failures != 0 {
         ui.label(format!(
@@ -1648,6 +1589,77 @@ fn show_live_network_status(
     }
     if let Some(error) = &network.last_error {
         ui.colored_label(egui::Color32::LIGHT_RED, error);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_live_network_scan(
+    ui: &mut egui::Ui,
+    connection_id: u64,
+    scan: &alumina_interface_client::worker::WorkerNetworkScanSnapshot,
+    idle: bool,
+    passphrase: &mut String,
+    actions: &mut Vec<LiveDeviceAction>,
+) {
+    ui.label(format!(
+        "scan generation {} · {} result{}{}",
+        scan.scan_generation,
+        scan.entries.len(),
+        if scan.entries.len() == 1 { "" } else { "s" },
+        if scan.truncated { " · truncated" } else { "" }
+    ));
+    let protected = scan.entries.iter().any(|entry| {
+        !matches!(
+            entry.authentication,
+            WorkerNetworkAuthenticationSnapshot::Open
+                | WorkerNetworkAuthenticationSnapshot::Unsupported
+        )
+    });
+    if protected {
+        ui.add(
+            egui::TextEdit::singleline(passphrase)
+                .password(true)
+                .hint_text("WLAN passphrase (kept out of worker snapshots)"),
+        );
+    }
+    for entry in &scan.entries {
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{} · {:?} · ch {} · {} dBm · {}",
+                entry.ssid,
+                entry.authentication,
+                entry.channel,
+                entry.signal_dbm,
+                encode_hex(&entry.bssid)
+            ));
+            let passphrase_valid = match entry.authentication {
+                WorkerNetworkAuthenticationSnapshot::Open => true,
+                WorkerNetworkAuthenticationSnapshot::Wpa2Personal
+                | WorkerNetworkAuthenticationSnapshot::Wpa3Personal
+                | WorkerNetworkAuthenticationSnapshot::Wpa2Wpa3Personal => {
+                    (8..=63).contains(&passphrase.len())
+                }
+                WorkerNetworkAuthenticationSnapshot::Unsupported => false,
+            };
+            if ui
+                .add_enabled(idle && passphrase_valid, egui::Button::new("Join"))
+                .clicked()
+            {
+                let credential =
+                    if entry.authentication == WorkerNetworkAuthenticationSnapshot::Open {
+                        Vec::new()
+                    } else {
+                        passphrase.as_bytes().to_vec()
+                    };
+                actions.push(LiveDeviceAction::NetworkJoin(WorkerNetworkJoinRequest {
+                    connection_id,
+                    scan_generation: scan.scan_generation,
+                    bssid: entry.bssid,
+                    passphrase: credential,
+                }));
+                erase_secret_text(passphrase);
+            }
+        });
     }
 }
 

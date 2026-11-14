@@ -1473,8 +1473,7 @@ impl ConfigurationWorkerSnapshot {
             && self.active_digest.iter().all(|byte| *byte == 0)
             && self.active_bytes == 0
             && self.summary.is_none();
-        if (!active && !inactive)
-            || (self.jobs_authorized && !active)
+        if (!inactive || self.jobs_authorized) && !active
             || (self.phase == ConfigurationPhaseSnapshot::Active && !self.jobs_authorized)
             || (self.phase == ConfigurationPhaseSnapshot::Empty && !inactive)
         {

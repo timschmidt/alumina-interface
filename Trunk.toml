@@ -18,6 +18,10 @@ wasm-opt \
   -o "$optimized_wasm"
 mv "$optimized_wasm" "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm"
 
+gzip -9 -n -c "$TRUNK_STAGING_DIR/index.html" > "$TRUNK_STAGING_DIR/index.html.gz"
+gzip -9 -n -c "$TRUNK_STAGING_DIR/alumina-interface.js" > "$TRUNK_STAGING_DIR/alumina-interface.js.gz"
+gzip -9 -n -c "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm" > "$TRUNK_STAGING_DIR/alumina-interface_bg.wasm.gz"
+
 brotli -q 11 -w 23 -n -f \
   "$TRUNK_STAGING_DIR/index.html" \
   -o "$TRUNK_STAGING_DIR/index.html.br"
