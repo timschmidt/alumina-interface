@@ -64,6 +64,7 @@ name = "alumina-clock"
 version = "0.1.0"
 dependencies = [
  "alumina-protocol",
+ "hyperinterval",
 ]
 
 [[package]]
@@ -96,6 +97,7 @@ name = "alumina-foc"
 version = "0.1.0"
 dependencies = [
  "alumina-protocol",
+ "hyperinterval",
 ]
 
 [[package]]
