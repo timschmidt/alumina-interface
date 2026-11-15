@@ -1,0 +1,40 @@
+[package]
+name = "alumina-interface-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.95"
+[package.metadata]
+cargo-fuzz = true
+[workspace]
+members = ["."]
+[features]
+fuzzing = ["dep:libfuzzer-sys"]
+[dependencies]
+libfuzzer-sys = { version = "0.4", optional = true }
+alumina-interface-core = { path = "../crates/alumina-interface-core" }
+critical-section = { version = "1.2.0", features = ["std"] }
+alumina-config = { path = "../../alumina-firmware/crates/alumina-config" }
+alumina-storage = { path = "../../alumina-firmware/crates/alumina-storage" }
+alumina-machine-ir = { path = "../../alumina-firmware/crates/alumina-machine-ir" }
+alumina-motion = { path = "../../alumina-firmware/crates/alumina-motion" }
+alumina-sim = { path = "../../alumina-firmware/crates/alumina-sim" }
+board-mks-tinybee = { path = "../../alumina-firmware/boards/mks-tinybee" }
+hyperreal = { path = "../../csgrs/crates/hyperreal", default-features = false }
+hypercurve = { path = "../../csgrs/crates/hypercurve", default-features = false }
+
+[[bin]]
+name = "machine_profile"
+path = "fuzz_targets/machine_profile.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "machine_lowering"
+path = "fuzz_targets/machine_lowering.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
