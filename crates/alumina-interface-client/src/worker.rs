@@ -3171,6 +3171,14 @@ mod tests {
     }
 
     #[test]
+    fn browser_harness_uses_current_worker_schema() {
+        let harness = include_str!("../../../tests/browser/worker-clock-harness.html");
+        assert!(harness.contains(&format!(
+            "const WORKER_SCHEMA_VERSION = {WORKER_SCHEMA_VERSION};"
+        )));
+    }
+
+    #[test]
     fn cached_job_snapshot_round_trip_revalidates_terminal_authority() {
         let event = WorkerEventEnvelope::current(WorkerEvent::JobSnapshot {
             snapshot: Box::new(complete_cached_job_snapshot()),

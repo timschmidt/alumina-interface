@@ -65,13 +65,16 @@ terminal descriptor evidence and local start cycles only with no original UI
 epoch and no new start authority. V8 and V9 add truthful completed-after-stop
 and split-after-stop terminals; V10 carries the explicit attended versus
 cached-autonomous policy. Schema V11 added each participant's reported lease,
-greatest browser-authorized lease, and the complete renewal-round count. Current
-schema V13 retains V12's reattached terminal fault with its authenticated
+greatest browser-authorized lease, and the complete renewal-round count.
+Schema V13 retains V12's reattached terminal fault with its authenticated
 reported lease while requiring the unavailable prior browser-authority ceiling,
 original UI epoch, and renewal-round history to remain absent. V13 adds
 capability-bound visual progress and independently revalidated private
-visual-document events. It does not retain a compatibility decoder for prior
-schemas.
+visual-document events. Current schema V15 additionally carries typed graph
+controls and network provisioning. The browser acceptance harness uses V15 for
+commands and strictly rejects other event versions; a client test checks its
+version against `WORKER_SCHEMA_VERSION`. There is no compatibility decoder for
+prior schemas.
 
 ## Lifecycle and recovery
 

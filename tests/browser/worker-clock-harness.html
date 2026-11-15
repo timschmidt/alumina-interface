@@ -7,6 +7,7 @@
   <body>
     <pre id="result" data-status="starting">starting</pre>
     <script type="module">
+      const WORKER_SCHEMA_VERSION = 15;
       const output = document.querySelector("#result");
       let worker;
       let configured = false;
@@ -313,7 +314,7 @@
         cachedJobStaged = true;
         worker.postMessage(
           JSON.stringify({
-            schema_version: 13,
+            schema_version: WORKER_SCHEMA_VERSION,
             command: { kind: "stage_cached_job", request: cachedJobRequest },
           }),
         );
@@ -332,7 +333,7 @@
       const requestWaveform = (durationCycles) => {
         worker.postMessage(
           JSON.stringify({
-            schema_version: 13,
+            schema_version: WORKER_SCHEMA_VERSION,
             command: {
               kind: "capture_waveform",
               request: {
@@ -382,7 +383,7 @@
           finish("failed", { error: String(error) });
           return;
         }
-        if (envelope.schema_version !== 13) {
+        if (envelope.schema_version !== WORKER_SCHEMA_VERSION) {
           clearTimeout(timeout);
           finish("failed", {
             error: "worker schema version mismatch",
@@ -427,7 +428,7 @@
           for (let index = 0; index < simulatorCount; index += 1) {
             worker.postMessage(
               JSON.stringify({
-                schema_version: 13,
+                schema_version: WORKER_SCHEMA_VERSION,
                 command: {
                   kind: "configure",
                   request: {
@@ -518,7 +519,7 @@
             cachedJobStarted = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 13,
+                schema_version: WORKER_SCHEMA_VERSION,
                 command: {
                   kind: "start_cached_job",
                   job_id: snapshot.job_id,
@@ -542,7 +543,7 @@
             cachedJobStopRequested = true;
             worker.postMessage(
               JSON.stringify({
-                schema_version: 13,
+                schema_version: WORKER_SCHEMA_VERSION,
                 command: {
                   kind: "stop_cached_job",
                   job_id: snapshot.job_id,
@@ -1121,7 +1122,7 @@
               cachedJobClearing = true;
               worker.postMessage(
                 JSON.stringify({
-                  schema_version: 13,
+                  schema_version: WORKER_SCHEMA_VERSION,
                   command: {
                     kind: "clear_cached_job",
                     job_id: snapshot.job_id,
