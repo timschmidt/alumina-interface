@@ -2088,7 +2088,7 @@ mod tests {
         let DirectMachineCamState::Ready(direct) = &workspace.artifacts.direct else {
             panic!("one stop-to-stop affine span must support direct lowering")
         };
-        assert!(!direct.program.records().is_empty());
+        assert_ne!(direct.program.records().len(), 0);
         assert_eq!(direct.replay.terminal_position, [1_600, 0]);
         assert_eq!(
             direct.replay.update_count,
@@ -2253,7 +2253,7 @@ mod tests {
                 egui::CentralPanel::default().show(context, |ui| workspace.show(ui));
             },
         );
-        assert!(!output.shapes.is_empty());
+        assert_ne!(output.shapes.len(), 0);
         assert!(!output.textures_delta.set.is_empty());
     }
 }

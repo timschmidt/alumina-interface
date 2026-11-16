@@ -1559,7 +1559,7 @@ mod tests {
         while let Some(request) = coordinator.next_request().unwrap() {
             match request.request.operation {
                 Operation::JobStatus => {
-                    assert!(request.request.body.is_empty());
+                    assert_eq!(request.request.body.len(), 0);
                     coordinator
                         .accept_response(request.device_id, &response(&JobStatusReport::default()))
                         .unwrap();
@@ -2528,7 +2528,7 @@ mod tests {
         let mut observed = 0;
         while let Some(request) = reattached.next_request().unwrap() {
             assert_eq!(request.request.operation, Operation::JobStatus);
-            assert!(request.request.body.is_empty());
+            assert_eq!(request.request.body.len(), 0);
             let authority = authorities
                 .iter()
                 .find(|authority| authority.device_id == request.device_id)

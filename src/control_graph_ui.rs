@@ -8496,7 +8496,7 @@ impl ExactControlWorkspace {
                 target_anchor,
             ]
         } else {
-            let middle_x = (source_anchor.x + target_anchor.x) * 0.5;
+            let middle_x = source_anchor.x.midpoint(target_anchor.x);
             vec![
                 source_anchor,
                 egui::pos2(middle_x, source_anchor.y),
@@ -11716,7 +11716,7 @@ fn decode_persisted_hex(
         ));
     }
     let mut bytes = Vec::with_capacity(byte_length);
-    for pair in encoded.as_bytes().chunks_exact(2) {
+    for pair in encoded.as_bytes().as_chunks::<2>().0 {
         let high = canonical_hex_nibble(pair[0])
             .ok_or_else(|| format!("persisted {artifact} is not canonical lowercase hex"))?;
         let low = canonical_hex_nibble(pair[1])
@@ -13055,7 +13055,7 @@ fn paint_hierarchy_root_wire(
         wire_color(document, source)
     };
     let stroke = egui::Stroke::new(if selected { 2.4_f32 } else { 1.5_f32 }, color);
-    let middle_x = (source_anchor.x + target_anchor.x) * 0.5;
+    let middle_x = source_anchor.x.midpoint(target_anchor.x);
     painter.add(egui::Shape::line(
         vec![
             source_anchor,
@@ -13513,7 +13513,7 @@ fn paint_analog_trace_series(
         };
         let lower = plot_y(rect, enclosure[0], minimum_value, maximum_value);
         let upper = plot_y(rect, enclosure[1], minimum_value, maximum_value);
-        let middle = (lower + upper) * 0.5;
+        let middle = lower.midpoint(upper);
         if let Some(previous) = line.last().copied() {
             line.push(egui::pos2(x, previous.y));
         }
@@ -13552,7 +13552,7 @@ fn paint_digital_trace_series(
         }
         let color = trace_signal_color(&series.signal);
         painter.text(
-            egui::pos2(rect.left() - 6.0, (lane_top + lane_bottom) * 0.5),
+            egui::pos2(rect.left() - 6.0, lane_top.midpoint(lane_bottom)),
             egui::Align2::RIGHT_CENTER,
             series.signal.label(),
             egui::FontId::monospace(9.0),
@@ -13592,7 +13592,7 @@ fn paint_state_trace_series(
         debug_assert_eq!(series.kind, TraceSeriesKind::State);
         let lane_top = rect.top() + display_index(lane) * lane_height;
         let lane_bottom = lane_top + lane_height;
-        let center = (lane_top + lane_bottom) * 0.5;
+        let center = lane_top.midpoint(lane_bottom);
         if lane > 0 {
             painter.line_segment(
                 [
@@ -14450,6 +14450,72 @@ mod tests {
     }
 
     #[test]
+    fn graph_wire_midpoints_preserve_large_finite_projected_coordinates() {
+        let workspace = ExactControlWorkspace::try_new().unwrap();
+        let document = workspace.workspace.graph();
+        let wire = document
+            .wires()
+            .iter()
+            .find(|wire| {
+                workspace.presentation.wires[&wire.id()]
+                    .feedback_lane
+                    .is_none()
+            })
+            .unwrap();
+        // Exact +/-2^127: adding two such coordinates overflows, while their
+        // midpoint is the original finite coordinate. Ordinary port offsets
+        // are smaller than one ulp here and round back to that coordinate.
+        for origin_x in [f32::from_bits(0x7f00_0000), f32::from_bits(0xff00_0000)] {
+            for hierarchy_root in [false, true] {
+                let context = egui::Context::default();
+                let frame = context.run(egui::RawInput::default(), |context| {
+                    let painter = context.layer_painter(egui::LayerId::background());
+                    let origin = egui::vec2(origin_x, 0.0);
+                    if hierarchy_root {
+                        paint_hierarchy_root_wire(
+                            &painter,
+                            origin,
+                            document,
+                            &workspace.presentation,
+                            HierarchyRootCanvasFocus::default(),
+                            wire,
+                        );
+                    } else {
+                        ExactControlWorkspace::paint_wire(
+                            &painter,
+                            origin,
+                            document,
+                            &workspace.presentation,
+                            None,
+                            None,
+                            wire,
+                        );
+                    }
+                });
+                let paths: Vec<_> = frame
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::Shape::Path(path) if !path.closed && path.points.len() == 4 => {
+                            Some(path)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(paths.len(), 1);
+                for point in &paths[0].points {
+                    assert_eq!(
+                        point.x.to_bits(),
+                        origin_x.to_bits(),
+                        "hierarchy_root={hierarchy_root}"
+                    );
+                    assert!(point.y.is_finite());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn representative_layout_is_bounded_acyclic_and_keeps_feedback_visible() {
         let workspace = ExactControlWorkspace::try_new().unwrap();
         assert_eq!(workspace.presentation.nodes.len(), 21);
@@ -15000,11 +15066,7 @@ mod tests {
             initial.hierarchy.flattening.instances()[0].source_path(),
             [GraphNodeId::new(1)]
         );
-        assert!(
-            initial.hierarchy.flattening.instances()[0]
-                .nodes()
-                .is_empty()
-        );
+        assert_eq!(initial.hierarchy.flattening.instances()[0].nodes().len(), 0);
         assert_eq!(
             initial.hierarchy.flattening.instances()[1].source_path(),
             [GraphNodeId::new(1), GraphNodeId::new(1)]
@@ -15343,7 +15405,7 @@ mod tests {
                 0x5a, 0x4f, 0x02, 0x28,
             ]
         );
-        assert!(initial.document.inputs().is_empty());
+        assert_eq!(initial.document.inputs().len(), 0);
         assert_eq!(initial.document.outputs().len(), 7);
         assert_eq!(initial.document.panel_items().len(), 15);
         assert_eq!(
@@ -17074,7 +17136,7 @@ mod tests {
             .unwrap()
             .document()
             .workspace();
-        assert!(disconnected_workspace.graph().wires().is_empty());
+        assert_eq!(disconnected_workspace.graph().wires().len(), 0);
         assert_eq!(disconnected_workspace.next_wire_id(), 2);
 
         workspace.component_definition.pending_source = Some(source);
@@ -17421,7 +17483,7 @@ mod tests {
         assert_eq!(workspace.history.undo_len(), 4);
 
         workspace.navigate_history(false);
-        assert!(
+        assert_eq!(
             workspace
                 .component
                 .as_ref()
@@ -17431,7 +17493,8 @@ mod tests {
                 .root()
                 .graph()
                 .wires()
-                .is_empty()
+                .len(),
+            0
         );
         workspace.navigate_history(true);
         assert_eq!(
@@ -17443,14 +17506,9 @@ mod tests {
         workspace.apply_hierarchy_action(HierarchyUiAction::DisconnectRoot(GraphWireId::new(1)));
         let disconnected = workspace.component.as_ref().unwrap();
         assert_eq!(workspace.pending_hierarchy_source, None);
-        assert!(
-            disconnected
-                .hierarchy
-                .document
-                .root()
-                .graph()
-                .wires()
-                .is_empty()
+        assert_eq!(
+            disconnected.hierarchy.document.root().graph().wires().len(),
+            0
         );
         assert_eq!(disconnected.hierarchy.document.root().next_wire_id(), 2);
 
@@ -18140,14 +18198,14 @@ mod tests {
         assert_eq!(document.next_input_id(), 1);
         assert_eq!(document.next_output_id(), 1);
         assert_eq!(document.next_panel_item_id(), 1);
-        assert!(document.inputs().is_empty());
-        assert!(document.outputs().is_empty());
-        assert!(document.panel_items().is_empty());
+        assert_eq!(document.inputs().len(), 0);
+        assert_eq!(document.outputs().len(), 0);
+        assert_eq!(document.panel_items().len(), 0);
         assert_eq!(document.workspace().revision(), 1);
         assert_eq!(document.workspace().next_node_id(), 1);
         assert_eq!(document.workspace().next_wire_id(), 1);
-        assert!(document.workspace().graph().nodes().is_empty());
-        assert!(document.workspace().graph().wires().is_empty());
+        assert_eq!(document.workspace().graph().nodes().len(), 0);
+        assert_eq!(document.workspace().graph().wires().len(), 0);
         assert_eq!(
             document.workspace().graph().schema(),
             initial_workspace.graph().schema()
@@ -18917,7 +18975,7 @@ mod tests {
             candidate.delete_node(id).unwrap();
         }
         assert!(workspace.commit_candidate(candidate, "deleted every draft node"));
-        assert!(workspace.workspace.graph().nodes().is_empty());
+        assert_eq!(workspace.workspace.graph().nodes().len(), 0);
         assert_eq!(workspace.presentation.nodes.len(), 0);
         assert!((workspace.presentation.size.x - EMPTY_CANVAS_WIDTH).abs() < f32::EPSILON);
 
@@ -20353,7 +20411,7 @@ mod tests {
                 });
             },
         );
-        assert!(!painted.shapes.is_empty());
+        assert_ne!(painted.shapes.len(), 0);
     }
 
     #[test]
@@ -20401,7 +20459,7 @@ mod tests {
         workspace.delete_selected_node(observed_node);
 
         let probes = workspace.probes.as_ref().unwrap();
-        assert!(probes.document.probes().is_empty());
+        assert_eq!(probes.document.probes().len(), 0);
         assert_eq!(
             probes.document.workspace_digest(),
             workspace.workspace_encoding.digest()
@@ -20797,7 +20855,7 @@ mod tests {
                 });
             },
         );
-        assert!(!frame.shapes.is_empty());
+        assert_ne!(frame.shapes.len(), 0);
         assert!(workspace.front_panel_runtime.is_some());
     }
 
@@ -20935,7 +20993,7 @@ mod tests {
                 });
             },
         );
-        assert!(!frame.shapes.is_empty());
+        assert_ne!(frame.shapes.len(), 0);
         assert_eq!(
             workspace.front_panel_schedule_drafts[authority.key()]
                 .changes
@@ -20962,7 +21020,7 @@ mod tests {
                 egui::CentralPanel::default().show(context, |ui| workspace.show(ui));
             },
         );
-        assert!(!output.shapes.is_empty());
+        assert_ne!(output.shapes.len(), 0);
         assert!(!output.textures_delta.set.is_empty());
         assert_eq!(
             workspace
@@ -20991,6 +21049,6 @@ mod tests {
                 egui::CentralPanel::default().show(context, |ui| workspace.show_trace(ui));
             },
         );
-        assert!(!digital_only.shapes.is_empty());
+        assert_ne!(digital_only.shapes.len(), 0);
     }
 }

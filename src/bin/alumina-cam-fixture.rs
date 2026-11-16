@@ -86,7 +86,7 @@ fn parse_device_id(value: &str) -> Result<DeviceId, String> {
         return Err("--device-id must contain exactly 32 hexadecimal digits".to_owned());
     }
     let mut bytes = [0_u8; 16];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = hexadecimal_nibble(pair[0])
             .ok_or_else(|| "--device-id contains a non-hexadecimal digit".to_owned())?;
         let low = hexadecimal_nibble(pair[1])

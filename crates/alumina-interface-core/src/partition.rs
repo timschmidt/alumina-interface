@@ -594,7 +594,7 @@ pub fn package_canonical_servo_program<const AXES: usize>(
         program.initial_position(),
         admission.limits,
     )?;
-    for encoded in bytes.chunks_exact(EXECUTION_BLOCK_BYTES) {
+    for encoded in bytes.as_chunks::<EXECUTION_BLOCK_BYTES>().0 {
         let mut owned = [0_u8; EXECUTION_BLOCK_BYTES];
         owned.copy_from_slice(encoded);
         validator.accept(&ExecutionBlock::decode(owned)?)?;
@@ -836,7 +836,7 @@ fn package_canonical_finite_difference_segments(
         },
         limits,
     )?;
-    for encoded in bytes.chunks_exact(EXECUTION_BLOCK_BYTES) {
+    for encoded in bytes.as_chunks::<EXECUTION_BLOCK_BYTES>().0 {
         let mut owned = [0_u8; EXECUTION_BLOCK_BYTES];
         owned.copy_from_slice(encoded);
         validator.accept(&ExecutionBlock::decode(owned)?)?;
@@ -1053,7 +1053,7 @@ fn package_canonical_segments(
         },
         policy.block_limits,
     )?;
-    for encoded in bytes.chunks_exact(EXECUTION_BLOCK_BYTES) {
+    for encoded in bytes.as_chunks::<EXECUTION_BLOCK_BYTES>().0 {
         let mut owned = [0_u8; EXECUTION_BLOCK_BYTES];
         owned.copy_from_slice(encoded);
         let block = ExecutionBlock::decode(owned)?;

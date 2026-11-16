@@ -47,3 +47,23 @@ not acceptance of the archived production extraction or a full release/HIL claim
 The cumulative account and raw evidence are maintained in CSGRS
 `docs/research/interval-size-accounts.json` and
 `docs/evidence/2026-11-16-interval-path-dynamics-current-admission`.
+
+The coordinated compiler qualification also retains fixed-size byte iteration
+and five display midpoint repairs. Wire bends at finite projected coordinates
+of positive or negative 2^127 now remain finite; a regression checks the exact
+coordinate bits. Canonical machine bytes, validation order and existing
+assertions remain unchanged. This display repair does not establish an exact
+geometry or machine-profile interval migration.
+
+Stable and Rust 1.95 workspace tests and strict native/WASM Clippy pass, as do
+the configured-release UI tests and native/WASM builds. A 2,496-sample matched
+campaign covers nine existing completed workloads without a statistically
+resolved slowdown; peak process RSS and native unwind-frame summaries agree.
+The final desktop grows 64 bytes, final WASM 17 bytes and gzip 26 bytes; the
+Brotli asset shrinks 326 bytes and leaves 688,115 bytes under its recorded
+4 MiB delivery budget. Each artifact and code section has a separate bounded
+account in CSGRS's ledger. Earlier accepted core-test growth remains charged.
+The full evidence, including original failures and explicit linker-padding
+budget revisions, is archived as
+`docs/evidence/2026-11-16-interval-interface-compiler-display` in csgrs-evidence.
+This is local qualification of the repair, not a full release or flash claim.
