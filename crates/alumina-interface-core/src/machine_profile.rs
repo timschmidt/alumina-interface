@@ -2110,6 +2110,19 @@ mod tests {
         assert_eq!(projection.acceleration_bottleneck.axis_index, 1);
         assert_eq!(projection.jerk_bottleneck.axis_index, 1);
         assert!(projection.all_satisfied());
+        // Frozen from the pre-Hyperdynamics projection implementation. The
+        // transcript binds exact axis limits, bottlenecks and solver replay.
+        let transcript =
+            crate::schedule_evidence::build_canonical_planner_digests(&schedule).unwrap();
+        assert_eq!(transcript.planner_transcript_byte_len, 41795);
+        assert_eq!(
+            transcript.planner_transcript_digest.0,
+            [
+                223, 137, 61, 248, 62, 144, 230, 181, 52, 82, 225, 133, 134, 255, 202, 162, 82, 74,
+                2, 22, 49, 163, 149, 212, 166, 82, 59, 225, 98, 99, 102, 156
+            ]
+        );
+
         assert_ne!(schedule.lookahead().corner_feeds[0], Real::zero());
         assert!(schedule.lookahead_plan().all_satisfied());
         assert!(schedule.jerk_report().all_satisfied());
