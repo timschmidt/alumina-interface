@@ -22,8 +22,9 @@ prototype.
 - The native/browser shell composes `ExactScene` and `ExactCamera` values and
   uploads them through Hypergraphics. It contains no application-owned vertex,
   normal, grid, camera-matrix, or primitive-float geometry pipeline.
-- CSGRS and every Hyper dependency resolve to sibling repositories in the
-  shared workspace. There is no crates.io CSGRS fallback.
+- CSGRS and its Hyper crates resolve from the adjacent `csgrs` checkout.
+  The board, driver and firmware crates resolve from the adjacent
+  `alumina-firmware` checkout.
 - CSGRS builds native `TriangleMesh` geometry. Hypergraphics performs checked
   mesh expansion and certified Hypercurve chord subdivision into exact scene
   vertices, and owns the only f64/f32 GPU boundary.
@@ -480,7 +481,7 @@ prototype.
   reported only after both permanent actors and the shared bridge agree; the
   first execution fault is retained while an exact stop is reconciled.
 
-The selected local revisions and any uncommitted source state are recorded in
+The original baseline revisions and their working-tree state are recorded in
 [`docs/HYPER-BASELINE.md`](docs/HYPER-BASELINE.md). A dirty local source tree is
 valid for development but cannot qualify a reproducible compiler release.
 The current curve and metric contract is in
@@ -576,13 +577,19 @@ is in [`docs/VALUE-BOUNDARIES.md`](docs/VALUE-BOUNDARIES.md).
 
 ## Build and test
 
-The normal verification path is offline once dependencies are present:
+Place the two sibling checkouts beside this repository. The coordinated checks
+use Python 3.11 or newer, ripgrep, Node.js, Rust 1.88.0 with the Cortex-M
+(`thumbv7em-none-eabihf`) and bare WASM targets, and Rust 1.95.0 with the
+bare WASM target. On a fresh checkout, run
+`scripts/audit-source-policy.sh --coordinated --fetch` to populate the locked
+dependencies. To repeat verification offline:
 
 ```sh
-cargo test --workspace --offline
-cargo clippy --workspace --all-targets --no-deps --offline -- -D warnings
-cargo check --workspace --target wasm32-unknown-unknown --offline
-scripts/audit-source-policy.sh
+cargo test --workspace --locked --offline
+cargo clippy --workspace --all-targets --no-deps --locked --offline -- -D warnings
+cargo check --workspace --target wasm32-unknown-unknown --locked --offline
+scripts/audit-source-policy.sh --coordinated
+CARGO_NET_OFFLINE=true scripts/check-interval-consumers.sh
 env -u NO_COLOR trunk build --release --locked --offline
 ```
 

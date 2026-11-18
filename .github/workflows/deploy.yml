@@ -25,17 +25,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out Hypergraphics sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypergraphics
-          path: hypergraphics
-          persist-credentials: false
-
       - name: Check out Alumina firmware protocol sibling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/alumina-firmware
+          ref: 96ac22cadef311f069d62bae4dfa5f3918cfc143
           path: alumina-firmware
           persist-credentials: false
 
@@ -43,85 +37,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/csgrs
+          ref: c1a5fdd17adb475545e403dbdcc9ed4ee6804af6
           path: csgrs
           persist-credentials: false
 
-      - name: Check out Hypercurve sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypercurve
-          path: hypercurve
-          persist-credentials: false
-
-      - name: Check out Hyperlattice sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hyperlattice
-          path: hyperlattice
-          persist-credentials: false
-
-      - name: Check out Hyperlimit sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hyperlimit
-          path: hyperlimit
-          persist-credentials: false
-
-      - name: Check out Hypermesh sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypermesh
-          path: hypermesh
-          persist-credentials: false
-
-      - name: Check out Hyperpath sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hyperpath
-          path: hyperpath
-          persist-credentials: false
-
-      - name: Check out Hyperphysics sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hyperphysics
-          path: hyperphysics
-          persist-credentials: false
-
-      - name: Check out Hyperreal sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hyperreal
-          path: hyperreal
-          persist-credentials: false
-
-      - name: Check out Hypersdf sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypersdf
-          path: hypersdf
-          persist-credentials: false
-
-      - name: Check out Hypersolve sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypersolve
-          path: hypersolve
-          persist-credentials: false
-
-      - name: Check out Hypertri sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypertri
-          path: hypertri
-          persist-credentials: false
-
-      - name: Check out Hypervoxel sibling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/hypervoxel
-          path: hypervoxel
-          persist-credentials: false
+      - name: Record interval stack revisions
+        run: |
+          for repo in alumina-interface csgrs alumina-firmware; do
+            echo "$repo $(git -C "$repo" rev-parse HEAD)"
+          done
 
       - name: Install Rust
         run: |
@@ -150,8 +74,23 @@ jobs:
         run: cargo clippy --workspace --target wasm32-unknown-unknown --no-deps --locked -- -D warnings
         working-directory: alumina-interface
 
-      - name: Audit local sources and licenses
-        run: bash scripts/audit-source-policy.sh
+      - name: Audit all interval consumer lockfiles, sibling sources and Interface licenses
+        run: |
+          python3 -B scripts/test-audit-sibling-sources.py
+          bash scripts/audit-source-policy.sh --coordinated --fetch
+        working-directory: alumina-interface
+
+      - name: Test native, embedded and linked WebAssembly consumers
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/interval-consumers
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --target wasm32-unknown-unknown,thumbv7em-none-eabihf
+          rustup toolchain install 1.95.0 --profile minimal --target wasm32-unknown-unknown
+          scripts/check-interval-consumers.sh
+          cargo clean --target-dir "$CARGO_TARGET_DIR"
         working-directory: alumina-interface
 
       - name: Build
