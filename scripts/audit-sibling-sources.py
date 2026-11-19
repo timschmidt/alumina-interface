@@ -11,6 +11,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("x86_64-unknown-linux-gnu", "wasm32-unknown-unknown")
+MEASUREMENT_PACKAGES = {"alumina-interface-core", "hyperinterval", "hyperreal"}
 # These packages must still participate in the browser graph. Other members
 # (including newly adopted Hyper crates) are checked whenever they resolve.
 REQUIRED_BROWSER = {
@@ -68,7 +69,7 @@ def local_patches(root, owners):
     return packages
 
 
-def check_graph(graph, owners, required):
+def check_graph(graph, owners, required, target_names):
     seen = set()
     for pkg in graph["packages"]:
         name = pkg["name"]
@@ -85,26 +86,24 @@ def check_graph(graph, owners, required):
                 f"({pkg['source'] or 'path'}), expected {expected_path} v{expected_version}"
             )
         seen.add(name)
-    if not required:
-        return len(seen)
-    # A disconnected workspace member cannot satisfy a consumer requirement.
-    roots = set(graph["workspace_default_members"])
-    edges = {node["id"]: node["deps"] for node in graph["resolve"]["nodes"]}
-    reachable = set()
-    pending = list(roots)
-    while pending:
-        package = pending.pop()
-        if package in reachable:
-            continue
-        reachable.add(package)
-        for dep in edges[package]:
-            if package in roots or any(k["kind"] != "dev" for k in dep["dep_kinds"]):
-                pending.append(dep["pkg"])
-    reachable_names = {p["name"] for p in graph["packages"] if p["id"] in reachable}
-    missing = required - (seen & reachable_names)
+    missing = required - (seen & target_names)
     if missing:
         raise ValueError("missing required workspace packages: " + ", ".join(sorted(missing)))
     return len(seen)
+
+
+def check_target(root, target, owners, required, features=()):
+    options = ["--features", ",".join(features)] if features else []
+    graph = metadata(root, "--filter-platform", target, *options)
+    # Metadata can unify optional features used only by tests. Ask Cargo to
+    # resolve the target's normal edges without host procedural macros.
+    tree = subprocess.check_output([
+        "cargo", "tree", "--locked", "--offline", "--color", "never",
+        "--target", target, "--edges", "normal,no-proc-macro",
+        "--prefix", "none", "--format", "{p}", *options,
+    ], cwd=root, text=True)
+    target_names = {row.split()[0] for row in tree.splitlines() if row.strip()}
+    return check_graph(graph, owners, required, target_names)
 
 
 def main():
@@ -118,34 +117,33 @@ def main():
     firmware = ROOT.parent / "alumina-firmware"
     roots = [ROOT, csgrs, firmware]
     native, wasm = TARGETS
-    checks = [(ROOT, native, set()), (ROOT, wasm, REQUIRED_BROWSER)]
+    checks = [(ROOT, native, MEASUREMENT_PACKAGES, ()),
+              (ROOT, wasm, REQUIRED_BROWSER | MEASUREMENT_PACKAGES, ())]
     if args.coordinated:
         foc = csgrs / "crates/hyperlattice-interval/conformance/alumina-foc"
         measurements = csgrs / "crates/hyperinterval/conformance/alumina-measurements"
         foc_packages = {"alumina-foc", "hyperinterval", "hyperlattice-interval"}
-        measurement_packages = {"alumina-interface-core", "hyperinterval", "hyperreal"}
         checks.extend([
-            (firmware, native, {"alumina-foc", "hyperinterval"}),
-            (ROOT / "fuzz", native, {"alumina-interface-core", "hyperinterval"}),
-            (foc, native, foc_packages),
-            (foc, "thumbv7em-none-eabihf", foc_packages),
-            (foc / "wasm", wasm, foc_packages | {"interval-foc-conformance"}),
-            (measurements, native, measurement_packages),
-            (measurements / "wasm", wasm, measurement_packages),
+            (firmware, native, {"alumina-foc", "hyperinterval"}, ()),
+            (ROOT / "fuzz", native, {"alumina-interface-core", "hyperinterval"}, ("fuzzing",)),
+            (foc, native, foc_packages, ()),
+            (foc, "thumbv7em-none-eabihf", foc_packages, ()),
+            (foc / "wasm", wasm, foc_packages | {"interval-foc-conformance"}, ()),
+            (measurements, native, MEASUREMENT_PACKAGES, ("trace",)),
+            (measurements / "wasm", wasm, MEASUREMENT_PACKAGES, ()),
         ])
         roots.extend([ROOT / "fuzz", foc, foc / "wasm", measurements, measurements / "wasm"])
     owners = workspace_packages(roots)
-    for root, target, required in checks:
+    for root, target, required, features in checks:
         if args.fetch:
             subprocess.run(["cargo", "fetch", "--locked", "--manifest-path", str(root / "Cargo.toml"),
                             "--target", target], cwd=root, check=True)
-        graph = metadata(root, "--filter-platform", target)
         try:
             # Cargo applies patches only from the resolving workspace root.
             patches = local_patches(root, owners)
             if patches.keys() & owners.keys():
                 raise ValueError("a registry patch shadows an owned workspace member")
-            count = check_graph(graph, owners | patches, required)
+            count = check_target(root, target, owners | patches, required, features)
         except ValueError as error:
             raise ValueError(f"{root} ({target}): {error}") from error
         print(f"{root.relative_to(ROOT.parent)} ({target}): "
