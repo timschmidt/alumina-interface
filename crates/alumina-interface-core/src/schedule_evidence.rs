@@ -550,6 +550,7 @@ fn push_constraint_kind(
         ConstraintKind::LessOrEqual => 1,
         ConstraintKind::GreaterOrEqual => 2,
         ConstraintKind::Soft => 3,
+        ConstraintKind::GreaterThan => 4,
     })
 }
 
