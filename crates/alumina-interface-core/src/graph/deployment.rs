@@ -1840,7 +1840,7 @@ fn compare_kind(left: &NodeKind, right: &NodeKind) -> core::cmp::Ordering {
 mod tests {
     use alumina_board::ResourceId;
     use alumina_capability::{MAX_CAPABILITY_CHUNK_BYTES, calculate_identity, read_verified_range};
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     use alumina_graph_ir::graph_ir_content_digest;
     use alumina_graph_ir::{
         BOOLEAN_STREAM_ITEM_BYTES, GraphIrChannelOwner, decode_graph_resource_pair_parameter,
@@ -2961,7 +2961,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     #[test]
     fn lowered_tinybee_input_executes_in_the_firmware_actor_types() {
         use alumina_protocol::DeviceCycle;
@@ -3038,7 +3038,7 @@ mod tests {
         assert_eq!(released.last_sink_value, Some(false));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     #[test]
     fn lowered_tinybee_pair_executes_both_reads_in_the_firmware_actor_types() {
         use alumina_protocol::DeviceCycle;
@@ -3210,7 +3210,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     #[test]
     fn lowered_package_executes_in_the_portable_split_runtime() {
         use alumina_protocol::DeviceCycle;

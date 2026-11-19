@@ -593,6 +593,18 @@ CARGO_NET_OFFLINE=true scripts/check-interval-consumers.sh
 env -u NO_COLOR trunk build --release --locked --offline
 ```
 
+To run the core suite on 32-bit WASI, including canonical machine-profile replay
+and the TinyBee firmware actor tests, use Node.js 24.22.3 and the wasm-bindgen
+CLI version from `Cargo.lock`. The runner generates bindings in a temporary
+directory for each invocation. The check compares the native test inventory with
+the cases that pass on WASI.
+
+```sh
+rustup target add wasm32-wasip1
+cargo install wasm-bindgen-cli --locked --version 0.2.122
+scripts/check-wasi-core.sh
+```
+
 Run the desktop shell with:
 
 ```sh
