@@ -15,3 +15,6 @@ node "$foc/wasm/check.mjs" "$CARGO_TARGET_DIR/$wasm/release/interval_foc_wasm_co
 cargo +1.95.0 test --locked --features trace --manifest-path "$measurement/Cargo.toml"
 cargo +1.95.0 build --locked --release --target "$wasm" --manifest-path "$measurement/wasm/Cargo.toml"
 node "$measurement/wasm/check.mjs" "$CARGO_TARGET_DIR/$wasm/release/interval_measurement_wasm.wasm"
+
+# Exercise exact machine-profile uncertainties through the cached lowering path.
+cargo +1.95.0 test --locked --manifest-path ../alumina-interface/fuzz/Cargo.toml --test reachability

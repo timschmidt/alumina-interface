@@ -55,6 +55,15 @@ Successful profiles must match an independently reduced exact command-density
 formula and a separately decoded profile, with original configuration/capability
 identity preserved. The original configuration and provenance live in fixtures/.
 
+Byte 10 varies the selected axis's travel per output turn around its nominal
+1/500 metre. Values 0–127 express a relative radius in parts per million.
+When the high bit is set, the low four bits express a radius in eighths of
+nominal travel. Radii of eight eighths or more must fail profile derivation.
+On a positive travel interval the oracle cross-multiplies each density bound
+by the opposite relative travel endpoint and checks the metre-to-millimetre
+conversion. The retained one-ppm lowering seed exercises cached execution.
+The coordinated consumer check runs these deterministic fixtures.
+
 For lowering, byte 5 selects the ordinary 1/10 mm total error request or a tiny
 request that must remain a typed rejection when insufficient. Bytes 6–7 choose
 the endpoint of one exact line from (0,0), with each coordinate in 1–4 mm.

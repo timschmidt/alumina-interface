@@ -3,6 +3,7 @@ use alumina_config::{
     ConfigurationDocumentView, ConfigurationRecord, Rational as WireRational, ScalarFact,
 };
 use alumina_interface_core::{
+    MachineProfileError,
     machine_profile::{MachineDynamicsProfile2, MachineResolutionBudget2},
     motion_schedule::{
         ScheduledLoweringLimits, certify_jerk_schedule, lower_certified_schedule_to_v1,
@@ -40,9 +41,26 @@ fn fraction(n: i64, d: u64) -> Rational {
     Rational::fraction(n, d).unwrap()
 }
 
-// The raw-byte arm is only used by the profile target. The lowering target uses
-// bounded structured parameters so accepted syntax cannot introduce huge times.
-fn configuration(data: &[u8], allow_raw: bool) -> Result<Vec<u8>, Outcome> {
+// Structured travel uncertainty as a fraction of the fixture's nominal travel.
+fn relative_travel_radius(code: u8) -> (i64, u64) {
+    if code & 128 == 0 {
+        (i64::from(code), 1_000_000)
+    } else {
+        (i64::from(code & 15), 8)
+    }
+}
+
+// Encode bounded nonnegative uncertainty in the wire format's reduced form.
+fn wire_uncertainty(numerator: i64, denominator: u64) -> WireRational {
+    let value = fraction(numerator, denominator);
+    WireRational::new(
+        i64::try_from(value.numerator()).unwrap(),
+        u64::try_from(value.denominator()).unwrap(),
+    )
+    .unwrap()
+}
+
+fn configuration(data: &[u8], allow_raw: bool) -> Result<Vec<u8>, ProfileFailure> {
     if allow_raw && byte(data, 0) & 128 != 0 {
         let mut bytes = SEED.to_vec();
         let index = usize::from(u16::from_le_bytes([byte(data, 1), byte(data, 2)])) % bytes.len();
@@ -73,31 +91,46 @@ fn configuration(data: &[u8], allow_raw: bool) -> Result<Vec<u8>, Outcome> {
             if (scalar.fact == ScalarFact::AxisMicrosteps && !calibration_mode)
                 || (scalar.fact == ScalarFact::AxisCalibrationScale && calibration_mode)
             {
-                // The wire format requires reduced fractions, including 0/1.
-                // Normalize through the owning exact-rational implementation.
                 let scale = if calibration_mode { 1_000_000 } else { 1 };
-                let uncertainty = fraction(
+                scalar.uncertainty = wire_uncertainty(
                     i64::from(byte(data, 3) % 8),
                     (1 + u64::from(byte(data, 4) % 4)) * scale,
                 );
-                scalar.uncertainty = WireRational::new(
-                    i64::try_from(uncertainty.numerator()).unwrap(),
-                    u64::try_from(uncertainty.denominator()).unwrap(),
-                )
-                .unwrap();
+            }
+            if scalar.fact == ScalarFact::AxisTravelMetresPerOutputTurn && byte(data, 10) != 0 {
+                let (units, scale) = relative_travel_radius(byte(data, 10));
+                scalar.uncertainty = wire_uncertainty(units, 500 * scale);
             }
         }
-        bytes.extend_from_slice(&record.encode().map_err(|_| Outcome::InvalidConfiguration)?);
+        bytes.extend_from_slice(&record.encode().map_err(|_| ProfileFailure::Configuration)?);
     }
     Ok(bytes)
 }
-fn profile(data: &[u8], allow_raw: bool) -> Result<MachineDynamicsProfile2, Outcome> {
+/// Failure stage of a generated profile, retaining the rejected fact when available.
+#[derive(Debug)]
+pub enum ProfileFailure {
+    Configuration,
+    Profile(MachineProfileError),
+}
+
+impl From<ProfileFailure> for Outcome {
+    fn from(failure: ProfileFailure) -> Self {
+        match failure {
+            ProfileFailure::Configuration => Self::InvalidConfiguration,
+            ProfileFailure::Profile(_) => Self::InvalidProfile,
+        }
+    }
+}
+
+/// Check the exact profile derived from a bounded fuzz input. With raw mutations
+/// enabled, the high bit of byte zero selects a single wire-byte edit.
+pub fn profile(data: &[u8], allow_raw: bool) -> Result<MachineDynamicsProfile2, ProfileFailure> {
     let bytes = configuration(data, allow_raw)?;
     let digest = sha256(&bytes).digest;
     let view = ConfigurationDocumentView::decode::<32>(&board_mks_tinybee::PACKAGE, &bytes, digest)
-        .map_err(|_| Outcome::InvalidConfiguration)?;
+        .map_err(|_| ProfileFailure::Configuration)?;
     let profile =
-        MachineDynamicsProfile2::from_configuration(view).map_err(|_| Outcome::InvalidProfile)?;
+        MachineDynamicsProfile2::from_configuration(view).map_err(ProfileFailure::Profile)?;
     let fresh =
         ConfigurationDocumentView::decode::<32>(&board_mks_tinybee::PACKAGE, &bytes, digest)
             .unwrap();
@@ -128,19 +161,38 @@ fn profile(data: &[u8], allow_raw: bool) -> Result<MachineDynamicsProfile2, Outc
             let density = p.command_density_steps_per_metre();
             let nominal = &m * Rational::from(100_000);
             assert_eq!(density.nominal(), &nominal);
-            if byte(data, 0) & 32 != 0 && axis == usize::from(byte(data, 1) & 1) {
+            let selected = axis == usize::from(byte(data, 1) & 1);
+            let (lower, upper) = if selected && byte(data, 0) & 32 != 0 {
                 let uncertainty = &u * fraction(1, 1_000_000);
-                assert_eq!(
-                    density.lower(),
-                    &(&nominal * (Rational::one() - &uncertainty))
-                );
-                assert_eq!(
-                    density.upper(),
-                    &(&nominal * (Rational::one() + &uncertainty))
-                );
+                (
+                    &nominal * (Rational::one() - &uncertainty),
+                    &nominal * (Rational::one() + &uncertainty),
+                )
             } else {
-                assert_eq!(density.lower(), &((&m - &u) * fraction(999_999, 10)));
-                assert_eq!(density.upper(), &((&m + &u) * fraction(1_000_001, 10)));
+                (
+                    (&m - &u) * fraction(999_999, 10),
+                    (&m + &u) * fraction(1_000_001, 10),
+                )
+            };
+            if selected && byte(data, 10) != 0 {
+                let (units, scale) = relative_travel_radius(byte(data, 10));
+                assert!(
+                    units < scale as i64,
+                    "travel interval must be strictly positive"
+                );
+                // Undo the reciprocal using the opposite travel endpoint.
+                // Both products must recover the independent fixed-travel expectations.
+                let radius = fraction(units, scale);
+                assert_eq!(density.lower() * (Rational::one() + &radius), lower);
+                assert_eq!(density.upper() * (Rational::one() - &radius), upper);
+                let mm = p.command_density_steps_per_millimetre();
+                let to_metres = Rational::from(1_000);
+                assert_eq!(&(mm.lower() * &to_metres), density.lower());
+                assert_eq!(&(mm.nominal() * &to_metres), density.nominal());
+                assert_eq!(&(mm.upper() * &to_metres), density.upper());
+            } else {
+                assert_eq!(density.lower(), &lower);
+                assert_eq!(density.upper(), &upper);
             }
         }
     }
@@ -153,7 +205,7 @@ pub fn machine_profile(data: &[u8]) -> Outcome {
     }
     match profile(data, true) {
         Ok(_) => Outcome::Profiled,
-        Err(outcome) => outcome,
+        Err(failure) => failure.into(),
     }
 }
 /// Exercise bounded straight paths through production lowering and cached execution.
@@ -163,7 +215,7 @@ pub fn machine_lowering(data: &[u8]) -> Outcome {
     }
     let profile = match profile(data, false) {
         Ok(p) => p,
-        Err(outcome) => return outcome,
+        Err(failure) => return failure.into(),
     };
     let requested = if byte(data, 5) & 1 == 0 {
         fraction(1, 10)
