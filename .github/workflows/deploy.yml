@@ -57,10 +57,10 @@ jobs:
         with:
           tool: trunk@0.21.14,wasm-opt,wasm-tools
 
-      - name: Install asset compressor
+      - name: Install asset compressor and audit search tool
         run: |
           sudo apt-get update
-          sudo apt-get install --yes brotli
+          sudo apt-get install --yes brotli ripgrep
 
       - name: Test exact and protocol cores
         run: cargo test --workspace --locked

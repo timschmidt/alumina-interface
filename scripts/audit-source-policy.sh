@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-command -v rg >/dev/null
+command -v rg >/dev/null || { echo "source policy: ripgrep (rg) is required" >&2; exit 1; }
 python3 scripts/audit-sibling-sources.py "$@"
 
 audit_native_inventory="$(mktemp)"
