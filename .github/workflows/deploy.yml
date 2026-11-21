@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/alumina-firmware
-          ref: 96ac22cadef311f069d62bae4dfa5f3918cfc143
+          ref: 9c874b2b8f9e10e7ab7fcbe6fe3d325add525fb7
           path: alumina-firmware
           persist-credentials: false
 
@@ -37,7 +37,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.repository_owner }}/csgrs
-          ref: c1a5fdd17adb475545e403dbdcc9ed4ee6804af6
+          ref: 20330cd30a7b0ce27713d0404d4bbc6b08473d91
           path: csgrs
           persist-credentials: false
 
